@@ -9,7 +9,7 @@ pub mod protocol;
 pub mod server;
 pub mod sync;
 
-pub use client::GameClient;
-pub use protocol::{Channel, ClientMessage, PlayerId, ServerMessage};
-pub use server::GameServer;
+pub use client::Client;
+pub use protocol::{Channel, ClientMessage, NetVec3, PlayerId, ServerMessage};
+pub use server::{DEFAULT_PORT, Host};
 pub use sync::RemotePlayer;

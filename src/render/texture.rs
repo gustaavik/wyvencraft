@@ -7,11 +7,11 @@
 
 use std::sync::Arc;
 
+use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
 use vulkano::command_buffer::{
     AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferToImageInfo,
     PrimaryCommandBufferAbstract,
 };
-use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
 use vulkano::format::Format;
 use vulkano::image::sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreateInfo};
 use vulkano::image::view::ImageView;
@@ -44,16 +44,24 @@ fn tile_color(tile: u32) -> [u8; 3] {
         10 => [200, 220, 235], // glass
         11 => [50, 50, 55],    // bedrock
         12 => [240, 245, 250], // snow
+        13 => [224, 172, 138], // player skin
+        14 => [70, 110, 180],  // player shirt/pants
         _ => [255, 0, 255],    // missing texture (magenta)
     }
 }
 
+/// Map an atlas tile index + a `[0,1]` local face UV into atlas texture
+/// coordinates. Shared by the chunk mesher and entity-model builder.
+pub fn atlas_uv(tile: u32, local_uv: [f32; 2]) -> [f32; 2] {
+    let cols = ATLAS_COLUMNS as f32;
+    let tx = (tile % ATLAS_COLUMNS) as f32;
+    let ty = (tile / ATLAS_COLUMNS) as f32;
+    [(tx + local_uv[0]) / cols, (ty + local_uv[1]) / cols]
+}
+
 /// Cheap deterministic per-pixel variation so flat colours get some texture.
 fn pixel_noise(tile: u32, x: u32, y: u32) -> i32 {
-    let mut h = tile
-        .wrapping_mul(2654435761)
-        ^ x.wrapping_mul(40503)
-        ^ y.wrapping_mul(2246822519);
+    let mut h = tile.wrapping_mul(2654435761) ^ x.wrapping_mul(40503) ^ y.wrapping_mul(2246822519);
     h ^= h >> 13;
     h = h.wrapping_mul(0x5bd1e995);
     ((h % 24) as i32) - 12

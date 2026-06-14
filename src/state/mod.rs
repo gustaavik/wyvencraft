@@ -5,14 +5,18 @@
 //! overlay. Each state handles its own update + egui UI and requests transitions;
 //! the app stays agnostic of which screen is active.
 
+pub mod connecting_state;
 pub mod ingame_state;
 pub mod loading_state;
 pub mod menu_state;
+pub mod multiplayer_menu;
 pub mod pause_menu;
 
+pub use connecting_state::ConnectingState;
 pub use ingame_state::InGameState;
 pub use loading_state::LoadingState;
 pub use menu_state::MainMenuState;
+pub use multiplayer_menu::MultiplayerMenuState;
 pub use pause_menu::PauseMenuState;
 
 use std::sync::Arc;

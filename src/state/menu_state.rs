@@ -1,6 +1,6 @@
 //! Main menu: choose singleplayer / multiplayer / quit.
 
-use super::{GameState, LoadingState, StateContext, Transition};
+use super::{GameState, LoadingState, MultiplayerMenuState, StateContext, Transition};
 
 #[derive(Default)]
 pub struct MainMenuState;
@@ -31,15 +31,17 @@ impl GameState for MainMenuState {
                 ui.add_space(48.0);
 
                 let button = |ui: &mut egui::Ui, label: &str| {
-                    ui.add_sized([220.0, 36.0], egui::Button::new(label)).clicked()
+                    ui.add_sized([220.0, 36.0], egui::Button::new(label))
+                        .clicked()
                 };
 
                 if button(ui, "Singleplayer") {
                     transition = Transition::Replace(Box::new(LoadingState::singleplayer()));
                 }
                 ui.add_space(8.0);
-                // Multiplayer menu is wired up in milestone M7.
-                let _ = button(ui, "Multiplayer");
+                if button(ui, "Multiplayer") {
+                    transition = Transition::Replace(Box::new(MultiplayerMenuState::new()));
+                }
                 ui.add_space(8.0);
                 if button(ui, "Quit") {
                     transition = Transition::Quit;

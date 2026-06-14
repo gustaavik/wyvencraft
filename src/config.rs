@@ -6,21 +6,11 @@
 use winit::keyboard::KeyCode;
 
 /// All tunable game settings.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct Settings {
     pub window: WindowSettings,
     pub render: RenderSettings,
     pub controls: ControlSettings,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            window: WindowSettings::default(),
-            render: RenderSettings::default(),
-            controls: ControlSettings::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

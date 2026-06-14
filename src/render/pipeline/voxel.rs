@@ -4,8 +4,10 @@ use std::sync::Arc;
 
 use vulkano::device::Device;
 use vulkano::format::Format;
-use vulkano::pipeline::graphics::color_blend::{ColorBlendAttachmentState, ColorBlendState};
-use vulkano::pipeline::graphics::depth_stencil::{DepthState, DepthStencilState};
+use vulkano::pipeline::graphics::color_blend::{
+    AttachmentBlend, ColorBlendAttachmentState, ColorBlendState,
+};
+use vulkano::pipeline::graphics::depth_stencil::{CompareOp, DepthState, DepthStencilState};
 use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
 use vulkano::pipeline::graphics::multisample::MultisampleState;
 use vulkano::pipeline::graphics::rasterization::{CullMode, RasterizationState};
@@ -19,11 +21,15 @@ use vulkano::pipeline::{DynamicState, PipelineLayout, PipelineShaderStageCreateI
 use crate::render::shaders;
 use crate::render::vertex::ChunkVertex;
 
-/// Build the opaque voxel pipeline targeting the given color/depth formats.
+/// Build a voxel pipeline targeting the given color/depth formats.
+///
+/// `transparent`: when true, enables alpha blending and disables depth writes
+/// (for the water/glass pass drawn after opaque geometry).
 pub fn create(
     device: Arc<Device>,
     color_format: Format,
     depth_format: Format,
+    transparent: bool,
 ) -> Arc<GraphicsPipeline> {
     let vs = shaders::voxel_vs::load(device.clone())
         .unwrap()
@@ -73,12 +79,20 @@ pub fn create(
             }),
             multisample_state: Some(MultisampleState::default()),
             depth_stencil_state: Some(DepthStencilState {
-                depth: Some(DepthState::simple()),
+                depth: Some(DepthState {
+                    // Transparent geometry tests depth but doesn't write it, so it
+                    // doesn't occlude other transparent surfaces incorrectly.
+                    write_enable: !transparent,
+                    compare_op: CompareOp::Less,
+                }),
                 ..Default::default()
             }),
             color_blend_state: Some(ColorBlendState::with_attachment_states(
                 subpass.color_attachment_formats.len() as u32,
-                ColorBlendAttachmentState::default(),
+                ColorBlendAttachmentState {
+                    blend: transparent.then(AttachmentBlend::alpha),
+                    ..Default::default()
+                },
             )),
             dynamic_state: [DynamicState::Viewport].into_iter().collect(),
             subpass: Some(subpass.into()),

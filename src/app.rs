@@ -18,11 +18,16 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::PhysicalKey;
 use winit::window::{CursorGrabMode, WindowId};
 
+use std::net::SocketAddr;
+
 use crate::config::Settings;
 use crate::core::Clock;
 use crate::input::InputState;
+use crate::net::{DEFAULT_PORT, Host};
 use crate::render::{RenderContext, Renderer};
-use crate::state::{GameState, LoadingState, MainMenuState, StateContext, StateStack};
+use crate::state::{
+    ConnectingState, GameState, InGameState, LoadingState, MainMenuState, StateContext, StateStack,
+};
 
 /// Top-level run errors.
 #[derive(Debug, thiserror::Error)]
@@ -74,9 +79,26 @@ impl App {
         log::info!("Vulkan device: {}", context.device_name());
         let render_context = RenderContext::from_vulkano(&context);
 
-        // Dev convenience: WYVEN_BOOT_INGAME=1 skips the menu and loads a world.
+        // Dev convenience env vars to skip the menus:
+        //   WYVEN_BOOT_INGAME=1   → singleplayer world
+        //   WYVEN_HOST=1          → host a session
+        //   WYVEN_JOIN=addr:port  → join a session
         let initial: Box<dyn GameState> = if std::env::var_os("WYVEN_BOOT_INGAME").is_some() {
             Box::new(LoadingState::singleplayer())
+        } else if std::env::var_os("WYVEN_HOST").is_some() {
+            let seed = 0x57_56_4E_01;
+            match Host::bind(DEFAULT_PORT, seed) {
+                Ok(host) => Box::new(InGameState::new_host(seed, host)),
+                Err(err) => {
+                    log::error!("host bind failed: {err}");
+                    Box::new(MainMenuState::new())
+                }
+            }
+        } else if let Some(join) = std::env::var_os("WYVEN_JOIN") {
+            match join.to_string_lossy().parse::<SocketAddr>() {
+                Ok(addr) => Box::new(ConnectingState::new(addr)),
+                Err(_) => Box::new(MainMenuState::new()),
+            }
         } else {
             Box::new(MainMenuState::new())
         };
@@ -255,11 +277,7 @@ impl ApplicationHandler for App {
         event: WindowEvent,
     ) {
         // Let egui see the event first; it reports whether it consumed it.
-        let consumed = self
-            .gui
-            .as_mut()
-            .map(|g| g.update(&event))
-            .unwrap_or(false);
+        let consumed = self.gui.as_mut().map(|g| g.update(&event)).unwrap_or(false);
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
@@ -299,10 +317,10 @@ impl ApplicationHandler for App {
         event: DeviceEvent,
     ) {
         // Raw mouse motion drives the camera only while the cursor is grabbed.
-        if self.cursor_grabbed {
-            if let DeviceEvent::MouseMotion { delta } = event {
-                self.input.on_mouse_motion(delta.0, delta.1);
-            }
+        if self.cursor_grabbed
+            && let DeviceEvent::MouseMotion { delta } = event
+        {
+            self.input.on_mouse_motion(delta.0, delta.1);
         }
     }
 

@@ -13,5 +13,6 @@ pub mod world;
 pub use block::{Block, BlockRegistry, RenderType};
 pub use chunk::Chunk;
 pub use generation::{NoiseGenerator, WorldGenerator};
-pub use raycast::{raycast, RaycastHit};
+pub use loader::ChunkLoader;
+pub use raycast::{RaycastHit, raycast};
 pub use world::World;

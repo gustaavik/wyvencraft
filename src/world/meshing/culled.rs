@@ -1,8 +1,8 @@
 //! Face-culling chunk mesher.
 
 use super::ChunkMeshOutput;
-use crate::core::{BlockId, BlockPos, Direction, CHUNK_HEIGHT, CHUNK_SIZE};
-use crate::render::texture::ATLAS_COLUMNS;
+use crate::core::{BlockId, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, Direction};
+use crate::render::texture::atlas_uv;
 use crate::render::vertex::ChunkVertex;
 use crate::world::block::BlockRegistry;
 use crate::world::chunk::Chunk;
@@ -60,17 +60,6 @@ fn face_geometry(dir: Direction) -> ([[f32; 3]; 4], [[f32; 2]; 4]) {
         ],
     };
     (corners, uv)
-}
-
-/// Map an atlas tile index + local UV into atlas texture coordinates.
-fn atlas_uv(tile: u32, local_uv: [f32; 2]) -> [f32; 2] {
-    let cols = ATLAS_COLUMNS as f32;
-    let tx = (tile % ATLAS_COLUMNS) as f32;
-    let ty = (tile / ATLAS_COLUMNS) as f32;
-    [
-        (tx + local_uv[0]) / cols,
-        (ty + local_uv[1]) / cols,
-    ]
 }
 
 /// Build the renderable mesh for `chunk`.

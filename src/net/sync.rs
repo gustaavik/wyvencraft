@@ -40,4 +40,9 @@ impl RemotePlayer {
     pub fn interpolated_position(&self, alpha: f32) -> Vec3 {
         self.previous.lerp(self.current, alpha.clamp(0.0, 1.0))
     }
+
+    /// Latest authoritative position.
+    pub fn position(&self) -> Vec3 {
+        self.current
+    }
 }

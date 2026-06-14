@@ -14,20 +14,25 @@ use crate::world::generation::WorldGenerator;
 
 pub struct World {
     chunks: HashMap<ChunkPos, Chunk>,
-    generator: Box<dyn WorldGenerator>,
+    generator: Arc<dyn WorldGenerator>,
     registry: Arc<BlockRegistry>,
     /// Chunks whose mesh is stale (need (re)building on the GPU).
     dirty: HashSet<ChunkPos>,
 }
 
 impl World {
-    pub fn new(generator: Box<dyn WorldGenerator>, registry: Arc<BlockRegistry>) -> Self {
+    pub fn new(generator: Arc<dyn WorldGenerator>, registry: Arc<BlockRegistry>) -> Self {
         Self {
             chunks: HashMap::new(),
             generator,
             registry,
             dirty: HashSet::new(),
         }
+    }
+
+    /// Shareable handle to the generator (for background streaming workers).
+    pub fn generator(&self) -> Arc<dyn WorldGenerator> {
+        self.generator.clone()
     }
 
     pub fn seed(&self) -> u64 {
@@ -48,6 +53,10 @@ impl World {
 
     pub fn loaded_chunks(&self) -> impl Iterator<Item = &Chunk> {
         self.chunks.values()
+    }
+
+    pub fn loaded_positions(&self) -> impl Iterator<Item = ChunkPos> + '_ {
+        self.chunks.keys().copied()
     }
 
     pub fn loaded_count(&self) -> usize {

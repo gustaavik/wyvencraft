@@ -6,15 +6,16 @@ use std::sync::Arc;
 
 use glam::Mat4;
 use vulkano::command_buffer::{
-    AutoCommandBufferBuilder, CommandBufferUsage, RenderingAttachmentInfo, RenderingInfo,
+    AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer,
+    RenderingAttachmentInfo, RenderingInfo,
 };
 use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
 use vulkano::format::{ClearValue, Format};
 use vulkano::image::view::ImageView;
 use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
 use vulkano::memory::allocator::AllocationCreateInfo;
-use vulkano::pipeline::graphics::viewport::Viewport;
 use vulkano::pipeline::graphics::GraphicsPipeline;
+use vulkano::pipeline::graphics::viewport::Viewport;
 use vulkano::pipeline::{Pipeline, PipelineBindPoint};
 use vulkano::render_pass::{AttachmentLoadOp, AttachmentStoreOp};
 use vulkano::sync::GpuFuture;
@@ -34,11 +35,13 @@ const DEPTH_FORMAT: Format = Format::D32_SFLOAT;
 pub struct SceneFrame<'a> {
     pub view_proj: Mat4,
     pub opaque: Vec<&'a GpuMesh>,
+    pub transparent: Vec<&'a GpuMesh>,
 }
 
 pub struct Renderer {
     ctx: Arc<RenderContext>,
     voxel_pipeline: Arc<GraphicsPipeline>,
+    transparent_pipeline: Arc<GraphicsPipeline>,
     atlas_set: Arc<DescriptorSet>,
     /// Cached depth buffer + the size it was created for.
     depth: Option<(Arc<ImageView>, [u32; 2])>,
@@ -48,7 +51,9 @@ pub struct Renderer {
 
 impl Renderer {
     pub fn new(ctx: Arc<RenderContext>, color_format: Format) -> Self {
-        let voxel_pipeline = voxel::create(ctx.device().clone(), color_format, DEPTH_FORMAT);
+        let voxel_pipeline = voxel::create(ctx.device().clone(), color_format, DEPTH_FORMAT, false);
+        let transparent_pipeline =
+            voxel::create(ctx.device().clone(), color_format, DEPTH_FORMAT, true);
         let atlas = TextureAtlas::create(&ctx);
 
         let set_layout = voxel_pipeline.layout().set_layouts()[0].clone();
@@ -67,18 +72,66 @@ impl Renderer {
         Self {
             ctx,
             voxel_pipeline,
+            transparent_pipeline,
             atlas_set,
             depth: None,
             atlas,
         }
     }
 
+    /// Record draws for a list of meshes with the given pipeline.
+    fn record_meshes(
+        &self,
+        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+        pipeline: &Arc<GraphicsPipeline>,
+        view_proj: Mat4,
+        meshes: &[&GpuMesh],
+    ) {
+        if meshes.is_empty() {
+            return;
+        }
+        let layout = pipeline.layout().clone();
+        builder
+            .bind_pipeline_graphics(pipeline.clone())
+            .expect("bind pipeline");
+        builder
+            .bind_descriptor_sets(
+                PipelineBindPoint::Graphics,
+                layout.clone(),
+                0,
+                self.atlas_set.clone(),
+            )
+            .expect("bind atlas set");
+        let push = shaders::voxel_vs::PushConstants {
+            view_proj: view_proj.to_cols_array_2d(),
+        };
+        builder
+            .push_constants(layout, 0, push)
+            .expect("push view_proj");
+
+        for mesh in meshes {
+            builder
+                .bind_vertex_buffers(0, mesh.vertex_buffer.clone())
+                .expect("bind vbuf");
+            builder
+                .bind_index_buffer(mesh.index_buffer.clone())
+                .expect("bind ibuf");
+            // SAFETY: pipeline, descriptor set, push constants and buffers are
+            // bound and match the shader interface.
+            unsafe {
+                builder
+                    .draw_indexed(mesh.index_count, 1, 0, 0, 0)
+                    .expect("draw mesh");
+            }
+        }
+    }
+
     /// Create or reuse a depth buffer matching `size`.
     fn ensure_depth(&mut self, size: [u32; 2]) -> Arc<ImageView> {
-        if let Some((view, cached)) = &self.depth {
-            if *cached == size {
-                return view.clone();
-            }
+        if let Some((view, cached)) = &self.depth
+            && *cached == size
+        {
+            return view.clone();
         }
         let image = Image::new(
             self.ctx.memory_allocator.clone(),
@@ -144,42 +197,21 @@ impl Renderer {
             .expect("set viewport");
 
         if let Some(scene) = scene {
-            if !scene.opaque.is_empty() {
-                let layout = self.voxel_pipeline.layout().clone();
-                builder
-                    .bind_pipeline_graphics(self.voxel_pipeline.clone())
-                    .expect("bind voxel pipeline");
-                builder
-                    .bind_descriptor_sets(
-                        PipelineBindPoint::Graphics,
-                        layout.clone(),
-                        0,
-                        self.atlas_set.clone(),
-                    )
-                    .expect("bind atlas set");
-                let push = shaders::voxel_vs::PushConstants {
-                    view_proj: scene.view_proj.to_cols_array_2d(),
-                };
-                builder
-                    .push_constants(layout, 0, push)
-                    .expect("push view_proj");
-
-                for mesh in &scene.opaque {
-                    builder
-                        .bind_vertex_buffers(0, mesh.vertex_buffer.clone())
-                        .expect("bind vbuf");
-                    builder
-                        .bind_index_buffer(mesh.index_buffer.clone())
-                        .expect("bind ibuf");
-                    // SAFETY: pipeline, descriptor set, push constants and buffers
-                    // are all bound and match the shader interface.
-                    unsafe {
-                        builder
-                            .draw_indexed(mesh.index_count, 1, 0, 0, 0)
-                            .expect("draw chunk");
-                    }
-                }
-            }
+            // Opaque first (writes depth), then transparent (blended, no depth write).
+            let voxel_pipeline = self.voxel_pipeline.clone();
+            let transparent_pipeline = self.transparent_pipeline.clone();
+            self.record_meshes(
+                &mut builder,
+                &voxel_pipeline,
+                scene.view_proj,
+                &scene.opaque,
+            );
+            self.record_meshes(
+                &mut builder,
+                &transparent_pipeline,
+                scene.view_proj,
+                &scene.transparent,
+            );
         }
 
         builder.end_rendering().expect("end rendering");

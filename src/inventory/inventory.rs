@@ -68,10 +68,10 @@ impl Inventory {
             if stack.is_empty() {
                 return 0;
             }
-            if let Some(existing) = slot {
-                if existing.item == stack.item {
-                    stack.count = existing.merge(stack, max);
-                }
+            if let Some(existing) = slot
+                && existing.item == stack.item
+            {
+                stack.count = existing.merge(stack, max);
             }
         }
         // Second pass: empty slots.
