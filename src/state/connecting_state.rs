@@ -68,10 +68,15 @@ impl GameState for ConnectingState {
         }
         let _ = client.flush();
 
-        if let Some((seed, your_id, _spawn)) = welcome {
-            log::info!("connected; world seed {seed}, player id {}", your_id.0);
+        if let Some((seed, your_id, spawn)) = welcome {
+            log::info!(
+                "connected; world seed {seed}, player id {}, spawn {spawn:?}",
+                your_id.0
+            );
             let client = self.client.take().expect("client present");
-            return Transition::Replace(Box::new(InGameState::new_client(seed, client, your_id)));
+            return Transition::Replace(Box::new(InGameState::new_client(
+                seed, client, your_id, spawn,
+            )));
         }
 
         if self.elapsed > TIMEOUT_SECS {

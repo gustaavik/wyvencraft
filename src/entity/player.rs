@@ -155,3 +155,30 @@ impl Player {
         self.perspective = self.perspective.next();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: a player spawned flush on the ground at an integer Y (as
+    /// [`find_spawn`](crate::state) produces) must come to rest instead of sinking
+    /// through the world over successive ticks.
+    #[test]
+    fn spawned_player_rests_and_does_not_fall_through() {
+        // Solid ground fills y < 65; spawn feet flush on the block top at y = 65.0.
+        let solid = |p: BlockPos| p.y < 65;
+        let mut player = Player::new(Vec3::new(0.5, 65.0, 0.5));
+        let dt = 1.0 / 60.0;
+
+        for _ in 0..240 {
+            player.update(MovementInput::default(), dt, solid);
+        }
+
+        assert!(
+            (65.0..=65.05).contains(&player.position.y),
+            "player did not rest on the ground; y = {}",
+            player.position.y
+        );
+        assert!(player.on_ground, "player should be grounded after settling");
+    }
+}

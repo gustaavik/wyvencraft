@@ -45,12 +45,7 @@ pub fn move_and_collide(
 }
 
 /// Clamp a single-axis movement so the box doesn't enter a solid block.
-fn sweep_axis(
-    aabb: Aabb,
-    amount: f32,
-    axis: usize,
-    is_solid: &impl Fn(BlockPos) -> bool,
-) -> f32 {
+fn sweep_axis(aabb: Aabb, amount: f32, axis: usize, is_solid: &impl Fn(BlockPos) -> bool) -> f32 {
     if amount == 0.0 {
         return 0.0;
     }
@@ -69,9 +64,15 @@ fn sweep_axis(
 
     // Block range along the moving axis, covering the swept volume.
     let (lo, hi) = if amount > 0.0 {
-        ((max[axis]).floor() as i32, (max[axis] + amount).floor() as i32)
+        (
+            (max[axis]).floor() as i32,
+            (max[axis] + amount).floor() as i32,
+        )
     } else {
-        ((min[axis] + amount).floor() as i32, (min[axis]).floor() as i32)
+        (
+            (min[axis] + amount).floor() as i32,
+            (min[axis]).floor() as i32,
+        )
     };
 
     let mut result = amount;
@@ -88,12 +89,12 @@ fn sweep_axis(
                 }
                 if amount > 0.0 {
                     let contact = a as f32 - max[axis] - SKIN;
-                    if contact >= 0.0 && contact < result {
+                    if contact >= -SKIN && contact < result {
                         result = contact;
                     }
                 } else {
                     let contact = (a as f32 + 1.0) - min[axis] + SKIN;
-                    if contact <= 0.0 && contact > result {
+                    if contact <= SKIN && contact > result {
                         result = contact;
                     }
                 }
@@ -101,4 +102,28 @@ fn sweep_axis(
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::Aabb;
+    use glam::Vec3;
+
+    #[test]
+    fn standing_flush_on_block_does_not_sink() {
+        // Solid ground fills y < 65; player feet flush at the integer top y = 65.0.
+        let solid = |p: BlockPos| p.y < 65;
+        let aabb = Aabb::new(Vec3::new(0.2, 65.0, 0.2), Vec3::new(0.8, 66.8, 0.8));
+        let r = move_and_collide(aabb, Vec3::new(0.0, -0.07, 0.0), solid);
+        assert!(
+            r.delta.y > -SKIN,
+            "player sank into the block: {}",
+            r.delta.y
+        );
+        assert!(
+            r.on_ground,
+            "player should be grounded when flush on a block"
+        );
+    }
 }

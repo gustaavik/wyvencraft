@@ -5,5 +5,5 @@
 pub mod inventory;
 pub mod item;
 
-pub use inventory::{Inventory, HOTBAR_SIZE, INVENTORY_SIZE};
+pub use inventory::{HOTBAR_SIZE, INVENTORY_SIZE, Inventory};
 pub use item::{Item, ItemId, ItemRegistry, ItemStack};

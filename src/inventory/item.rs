@@ -7,8 +7,7 @@ use crate::core::BlockId;
 use crate::world::block::BlockRegistry;
 
 /// Identifier of an item type; index into the [`ItemRegistry`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ItemId(pub u16);
 
 /// Static description of an item type.
@@ -21,8 +20,7 @@ pub struct Item {
 }
 
 /// A stack of identical items in one slot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ItemStack {
     pub item: ItemId,
     pub count: u8,

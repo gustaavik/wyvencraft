@@ -12,7 +12,9 @@ use super::{GameState, PauseMenuState, StateContext, Transition};
 use crate::core::{Aabb, BlockId, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, ChunkPos};
 use crate::entity::{HumanoidModel, Perspective, Player};
 use crate::inventory::{Inventory, ItemRegistry, ItemStack};
-use crate::net::{Channel, Client, ClientMessage, Host, PlayerId, RemotePlayer, ServerMessage};
+use crate::net::{
+    Channel, Client, ClientMessage, Host, NetVec3, PlayerId, RemotePlayer, ServerMessage,
+};
 use crate::render::{Camera, GpuMesh, RenderContext, SceneFrame};
 use crate::ui::hud;
 use crate::world::block::blocks;
@@ -75,20 +77,28 @@ pub struct InGameState {
 impl InGameState {
     /// Singleplayer world.
     pub fn new(seed: u64) -> Self {
-        Self::build(seed, NetRole::Singleplayer)
+        Self::build(seed, NetRole::Singleplayer, None)
     }
 
     /// Host a multiplayer session (the host also plays locally).
     pub fn new_host(seed: u64, host: Host) -> Self {
-        Self::build(seed, NetRole::Host(host))
+        Self::build(seed, NetRole::Host(host), None)
     }
 
     /// Join a multiplayer session as a client (world built from the host's seed).
-    pub fn new_client(seed: u64, client: Client, local_id: PlayerId) -> Self {
-        Self::build(seed, NetRole::Client { client, local_id })
+    /// `spawn` is the position the host assigned us in its `Welcome`.
+    pub fn new_client(seed: u64, client: Client, local_id: PlayerId, spawn: NetVec3) -> Self {
+        Self::build(
+            seed,
+            NetRole::Client { client, local_id },
+            Some(Vec3::from_array(spawn)),
+        )
     }
 
-    fn build(seed: u64, net: NetRole) -> Self {
+    /// Build the in-game state. `spawn_override` (clients) places the player at the
+    /// host-provided position and anchors synchronous generation there; otherwise the
+    /// spawn is found over the origin column.
+    fn build(seed: u64, net: NetRole, spawn_override: Option<Vec3>) -> Self {
         let blocks = Arc::new(BlockRegistry::with_builtins());
         let items = ItemRegistry::from_blocks(&blocks);
 
@@ -102,13 +112,17 @@ impl InGameState {
         let loader = ChunkLoader::new(generator, workers);
 
         // Synchronously generate the immediate spawn area so the player lands on
-        // solid ground; the rest streams in via the loader.
+        // solid ground; the rest streams in via the loader. Anchor on the override
+        // (the host-assigned spawn for clients) so there's ground under the player.
+        let center = spawn_override
+            .map(|p| BlockPos::from_world(p).chunk())
+            .unwrap_or_else(|| ChunkPos::new(0, 0));
         for dx in -SPAWN_RADIUS..=SPAWN_RADIUS {
             for dz in -SPAWN_RADIUS..=SPAWN_RADIUS {
-                world.ensure_chunk(ChunkPos::new(dx, dz));
+                world.ensure_chunk(ChunkPos::new(center.x + dx, center.z + dz));
             }
         }
-        let spawn = find_spawn(&world);
+        let spawn = spawn_override.unwrap_or_else(|| find_spawn(&world));
 
         // Creative-style starter hotbar so placing blocks works immediately.
         let mut inventory = Inventory::new();
@@ -605,7 +619,8 @@ impl GameState for InGameState {
             // Movement + physics.
             let movement = ctx.input.movement(&kb);
             let dt = ctx.dt.min(0.05);
-            self.player.update(movement, dt, |p| self.world.is_solid(p));
+            self.player
+                .update(movement, dt, |p| self.world.is_solid_for_collision(p));
 
             // Block interaction.
             if ctx.input.mouse_just_pressed(MouseButton::Left) {

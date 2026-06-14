@@ -3,9 +3,9 @@
 
 use std::sync::Arc;
 
+use vulkano::Validated;
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
-use vulkano::Validated;
 
 use super::vertex::ChunkVertex;
 
@@ -29,14 +29,8 @@ impl CpuMesh {
     pub fn push_quad(&mut self, verts: [ChunkVertex; 4]) {
         let base = self.vertices.len() as u32;
         self.vertices.extend_from_slice(&verts);
-        self.indices.extend_from_slice(&[
-            base,
-            base + 1,
-            base + 2,
-            base + 2,
-            base + 3,
-            base,
-        ]);
+        self.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 3, base]);
     }
 }
 

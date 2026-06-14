@@ -1,9 +1,9 @@
 //! The default noise-based [`WorldGenerator`].
 
-use super::biome::Biome;
-use super::noise::{TerrainNoise, SEA_LEVEL};
 use super::WorldGenerator;
-use crate::core::{BlockPos, ChunkPos, LocalPos, CHUNK_HEIGHT, CHUNK_SIZE};
+use super::biome::Biome;
+use super::noise::{SEA_LEVEL, TerrainNoise};
+use crate::core::{BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, ChunkPos, LocalPos};
 use crate::world::block::blocks;
 use crate::world::chunk::Chunk;
 
@@ -37,10 +37,7 @@ impl WorldGenerator for NoiseGenerator {
                 let wx = origin.x + lx;
                 let wz = origin.z + lz;
 
-                let height = self
-                    .noise
-                    .surface_height(wx, wz)
-                    .clamp(1, CHUNK_HEIGHT - 1);
+                let height = self.noise.surface_height(wx, wz).clamp(1, CHUNK_HEIGHT - 1);
                 let biome = Biome::from_temperature(self.noise.temperature(wx, wz));
 
                 for y in 0..CHUNK_HEIGHT {
@@ -61,8 +58,7 @@ impl WorldGenerator for NoiseGenerator {
                         }
                     } else {
                         // Carve caves below the surface (never breach the top layer).
-                        let carve = y < height - 1
-                            && self.noise.cave_density(wx, y, wz) > 0.55;
+                        let carve = y < height - 1 && self.noise.cave_density(wx, y, wz) > 0.55;
                         if carve {
                             blocks::AIR
                         } else if y == height {

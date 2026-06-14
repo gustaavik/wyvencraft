@@ -42,8 +42,13 @@ pub enum ServerMessage {
         your_id: PlayerId,
         spawn: NetVec3,
     },
-    PlayerJoined { id: PlayerId, name: String },
-    PlayerLeft { id: PlayerId },
+    PlayerJoined {
+        id: PlayerId,
+        name: String,
+    },
+    PlayerLeft {
+        id: PlayerId,
+    },
     /// Authoritative position snapshot for a (remote) player.
     PlayerState {
         id: PlayerId,
@@ -52,7 +57,10 @@ pub enum ServerMessage {
         pitch: f32,
     },
     /// A single authoritative block edit to apply.
-    BlockChanged { pos: BlockPos, block: BlockId },
+    BlockChanged {
+        pos: BlockPos,
+        block: BlockId,
+    },
 }
 
 /// Logical network channels, mapped to renet channel ids.

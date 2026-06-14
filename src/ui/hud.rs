@@ -3,7 +3,7 @@
 
 use egui::{Align2, Color32, Context, Stroke};
 
-use crate::inventory::{Inventory, ItemRegistry, HOTBAR_SIZE};
+use crate::inventory::{HOTBAR_SIZE, Inventory, ItemRegistry};
 
 /// Draw a simple crosshair at the screen centre.
 pub fn draw_crosshair(ctx: &Context) {
@@ -32,10 +32,8 @@ pub fn draw_hotbar(ctx: &Context, inventory: &Inventory, items: &ItemRegistry) {
     egui::Area::new(egui::Id::new("hotbar"))
         .anchor(Align2::CENTER_BOTTOM, egui::vec2(0.0, -8.0))
         .show(ctx, |ui| {
-            let (rect, _) = ui.allocate_exact_size(
-                egui::vec2(width, slot + 2.0 * pad),
-                egui::Sense::hover(),
-            );
+            let (rect, _) =
+                ui.allocate_exact_size(egui::vec2(width, slot + 2.0 * pad), egui::Sense::hover());
             let painter = ui.painter();
             painter.rect_filled(rect, 4.0, Color32::from_black_alpha(120));
 

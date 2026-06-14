@@ -51,7 +51,8 @@ impl GameState for PauseMenuState {
             .show(egui_ctx, |ui| {
                 ui.vertical_centered(|ui| {
                     let button = |ui: &mut egui::Ui, label: &str| {
-                        ui.add_sized([200.0, 32.0], egui::Button::new(label)).clicked()
+                        ui.add_sized([200.0, 32.0], egui::Button::new(label))
+                            .clicked()
                     };
                     if button(ui, "Resume") {
                         transition = Transition::Pop;

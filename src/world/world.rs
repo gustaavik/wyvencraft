@@ -101,6 +101,19 @@ impl World {
         self.registry.get(self.block_at(pos)).solid
     }
 
+    /// Like [`is_solid`](Self::is_solid), but treats *unloaded* chunks as solid so
+    /// entities can't fall/pass through terrain that hasn't streamed in yet. Positions
+    /// outside the vertical range stay open (sky above / void below).
+    pub fn is_solid_for_collision(&self, pos: BlockPos) -> bool {
+        let Some(local) = pos.to_local() else {
+            return false;
+        };
+        match self.chunks.get(&pos.chunk()) {
+            Some(chunk) => self.registry.get(chunk.get(local)).solid,
+            None => true,
+        }
+    }
+
     /// Place/replace a block. Returns the previous block, or `None` if the chunk
     /// isn't loaded. Marks affected chunk meshes dirty.
     pub fn set_block(&mut self, pos: BlockPos, block: BlockId) -> Option<BlockId> {

@@ -90,17 +90,29 @@ pub fn raycast(
             block.x += step[0];
             traveled = t_max.x;
             t_max.x += t_delta.x;
-            face = if step[0] > 0 { Direction::NegX } else { Direction::PosX };
+            face = if step[0] > 0 {
+                Direction::NegX
+            } else {
+                Direction::PosX
+            };
         } else if t_max.y < t_max.z {
             block.y += step[1];
             traveled = t_max.y;
             t_max.y += t_delta.y;
-            face = if step[1] > 0 { Direction::NegY } else { Direction::PosY };
+            face = if step[1] > 0 {
+                Direction::NegY
+            } else {
+                Direction::PosY
+            };
         } else {
             block.z += step[2];
             traveled = t_max.z;
             t_max.z += t_delta.z;
-            face = if step[2] > 0 { Direction::NegZ } else { Direction::PosZ };
+            face = if step[2] > 0 {
+                Direction::NegZ
+            } else {
+                Direction::PosZ
+            };
         }
     }
 

@@ -122,9 +122,21 @@ impl Frustum {
             let normal = p.truncate();
             // The box corner furthest along the plane normal ("positive vertex").
             let positive = Vec3::new(
-                if normal.x >= 0.0 { aabb.max.x } else { aabb.min.x },
-                if normal.y >= 0.0 { aabb.max.y } else { aabb.min.y },
-                if normal.z >= 0.0 { aabb.max.z } else { aabb.min.z },
+                if normal.x >= 0.0 {
+                    aabb.max.x
+                } else {
+                    aabb.min.x
+                },
+                if normal.y >= 0.0 {
+                    aabb.max.y
+                } else {
+                    aabb.min.y
+                },
+                if normal.z >= 0.0 {
+                    aabb.max.z
+                } else {
+                    aabb.min.z
+                },
             );
             if normal.dot(positive) + p.w < 0.0 {
                 return false;

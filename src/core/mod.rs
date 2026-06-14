@@ -8,5 +8,5 @@ pub mod types;
 pub use math::{Aabb, Frustum, Ray};
 pub use time::Clock;
 pub use types::{
-    BlockId, BlockPos, ChunkPos, Direction, LocalPos, CHUNK_HEIGHT, CHUNK_SIZE, CHUNK_VOLUME,
+    BlockId, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, CHUNK_VOLUME, ChunkPos, Direction, LocalPos,
 };

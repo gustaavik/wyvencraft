@@ -15,8 +15,9 @@ pub const CHUNK_VOLUME: usize = (CHUNK_SIZE * CHUNK_SIZE * CHUNK_HEIGHT) as usiz
 
 /// Identifier of a block *type* (e.g. air, stone, grass). Index into the
 /// [`crate::world::block::BlockRegistry`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub struct BlockId(pub u16);
 
 impl BlockId {
@@ -31,8 +32,9 @@ impl BlockId {
 
 /// Position of a chunk in the chunk grid (one unit = one chunk = [`CHUNK_SIZE`]
 /// blocks on X/Z).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub struct ChunkPos {
     pub x: i32,
     pub z: i32,
@@ -56,8 +58,9 @@ impl ChunkPos {
 }
 
 /// Absolute position of a block in the world, in block units.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub struct BlockPos {
     pub x: i32,
     pub y: i32,
@@ -95,16 +98,16 @@ impl BlockPos {
 
     /// Center of the block in world space (used by physics/raycasting).
     pub fn center(self) -> Vec3 {
-        Vec3::new(self.x as f32 + 0.5, self.y as f32 + 0.5, self.z as f32 + 0.5)
+        Vec3::new(
+            self.x as f32 + 0.5,
+            self.y as f32 + 0.5,
+            self.z as f32 + 0.5,
+        )
     }
 
     /// Convert a floating world position to the block that contains it.
     pub fn from_world(p: Vec3) -> BlockPos {
-        BlockPos::new(
-            p.x.floor() as i32,
-            p.y.floor() as i32,
-            p.z.floor() as i32,
-        )
+        BlockPos::new(p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32)
     }
 }
 
