@@ -1,0 +1,12 @@
+# Local build/run environment for the Vulkan toolchain installed via Homebrew.
+# Applied by cargo to build scripts and to the launched binary (`cargo run`).
+#
+# - SHADERC_LIB_DIR: link the prebuilt libshaderc_combined.a so `vulkano-shaders`
+#   does NOT rebuild shaderc from source (much faster builds).
+# - VK_ICD_FILENAMES / VK_DRIVER_FILES: tell the Vulkan loader to use MoltenVK
+#   (Vulkan-on-Metal) on macOS. The loader dylib itself is symlinked into
+#   /usr/local/lib, which is already on the default dyld fallback path.
+[env]
+SHADERC_LIB_DIR = "/usr/local/opt/shaderc/lib"
+VK_ICD_FILENAMES = "/usr/local/etc/vulkan/icd.d/MoltenVK_icd.json"
+VK_DRIVER_FILES = "/usr/local/etc/vulkan/icd.d/MoltenVK_icd.json"

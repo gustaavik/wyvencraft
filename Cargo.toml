@@ -2,5 +2,48 @@
 name = "wyvencraft"
 version = "0.1.0"
 edition = "2024"
+description = "A Minecraft-style voxel sandbox written in Rust with Vulkan (vulkano)."
 
 [dependencies]
+# --- Rendering (Vulkan) ---
+vulkano = "0.35"
+vulkano-shaders = "0.35"
+vulkano-util = "0.35"
+
+# --- Windowing & UI ---
+winit = { version = "0.30", features = ["serde"] }
+egui = "0.31"
+egui_winit_vulkano = "0.28"
+
+# --- Math ---
+glam = { version = "0.29", features = ["bytemuck"] }
+
+# --- World generation ---
+noise = "0.9"
+
+# --- Networking ---
+renet = "2.0"
+renet_netcode = "2.0"
+
+# --- Concurrency ---
+rayon = "1"
+crossbeam-channel = "0.5"
+parking_lot = "0.12"
+
+# --- Serialization ---
+serde = { version = "1", features = ["derive"] }
+bincode = { version = "2", features = ["serde"] }
+bytemuck = { version = "1", features = ["derive"] }
+
+# --- Errors & logging ---
+thiserror = "2"
+log = "0.4"
+env_logger = "0.11"
+
+[profile.dev]
+# Voxel meshing/generation is painfully slow in a fully-unoptimized debug build.
+# Lightly optimize our own code while keeping debug info; optimize deps fully.
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
