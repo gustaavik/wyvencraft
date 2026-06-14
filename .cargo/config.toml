@@ -10,6 +10,7 @@
 SHADERC_LIB_DIR = "/opt/homebrew/opt/shaderc/lib"
 VK_ICD_FILENAMES = "/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json"
 VK_DRIVER_FILES = "/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json"
+DYLD_LIBRARY_PATH = "/opt/homebrew/lib"
 # SHADERC_LIB_DIR = "/usr/local/opt/shaderc/lib"
 # VK_ICD_FILENAMES = "/usr/local/etc/vulkan/icd.d/MoltenVK_icd.json"
 # VK_DRIVER_FILES = "/usr/local/etc/vulkan/icd.d/MoltenVK_icd.json"
