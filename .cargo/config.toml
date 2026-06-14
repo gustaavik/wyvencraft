@@ -7,6 +7,9 @@
 #   (Vulkan-on-Metal) on macOS. The loader dylib itself is symlinked into
 #   /usr/local/lib, which is already on the default dyld fallback path.
 [env]
-SHADERC_LIB_DIR = "/usr/local/opt/shaderc/lib"
-VK_ICD_FILENAMES = "/usr/local/etc/vulkan/icd.d/MoltenVK_icd.json"
-VK_DRIVER_FILES = "/usr/local/etc/vulkan/icd.d/MoltenVK_icd.json"
+SHADERC_LIB_DIR = "/opt/homebrew/opt/shaderc/lib"
+VK_ICD_FILENAMES = "/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json"
+VK_DRIVER_FILES = "/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json"
+# SHADERC_LIB_DIR = "/usr/local/opt/shaderc/lib"
+# VK_ICD_FILENAMES = "/usr/local/etc/vulkan/icd.d/MoltenVK_icd.json"
+# VK_DRIVER_FILES = "/usr/local/etc/vulkan/icd.d/MoltenVK_icd.json"

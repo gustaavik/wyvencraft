@@ -8,7 +8,7 @@ description = "A Minecraft-style voxel sandbox written in Rust with Vulkan (vulk
 # --- Rendering (Vulkan) ---
 vulkano = "0.35"
 vulkano-shaders = "0.35"
-vulkano-util = "0.35"
+vulkano-util = "0.35" 
 
 # --- Windowing & UI ---
 winit = { version = "0.30", features = ["serde"] }
