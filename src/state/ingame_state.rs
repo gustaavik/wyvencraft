@@ -10,7 +10,7 @@ use winit::event::MouseButton;
 
 use super::{GameState, PauseMenuState, StateContext, Transition};
 use crate::core::{Aabb, BlockId, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, ChunkPos};
-use crate::entity::{HumanoidModel, Perspective, Player};
+use crate::entity::{AnimationState, HumanoidModel, Perspective, Player};
 use crate::inventory::{Inventory, ItemRegistry, ItemStack};
 use crate::net::{
     Channel, Client, ClientMessage, Host, NetVec3, PlayerId, RemotePlayer, ServerMessage,
@@ -43,6 +43,9 @@ const REQUEST_BUDGET: usize = 64;
 const MESH_BUDGET: usize = 8;
 /// Camera distance behind/in front of the player in third-person view.
 const THIRD_PERSON_DISTANCE: f32 = 4.0;
+/// Upper bound on a remote player's derived speed, so a teleport or first snapshot
+/// can't drive an absurd walk cadence.
+const REMOTE_MAX_SPEED: f32 = 12.0;
 
 pub struct InGameState {
     pub world: World,
@@ -63,6 +66,8 @@ pub struct InGameState {
     /// Local player model + its GPU mesh (only built in third person).
     player_model: HumanoidModel,
     player_mesh: Option<GpuMesh>,
+    /// Procedural animation state for the local player's model.
+    player_anim: AnimationState,
     fov_degrees: f32,
     /// Inventory screen state.
     inventory_open: bool,
@@ -72,6 +77,15 @@ pub struct InGameState {
     net: NetRole,
     remote_players: HashMap<PlayerId, RemotePlayer>,
     remote_meshes: Vec<GpuMesh>,
+    /// Per-remote-player animation, keyed by id. Speed is derived from the change in
+    /// their rendered position each frame (no extra protocol data needed).
+    remote_anims: HashMap<PlayerId, RemoteAnim>,
+}
+
+/// Animation state for a remote player plus the position used to derive their speed.
+struct RemoteAnim {
+    anim: AnimationState,
+    last_pos: Vec3,
 }
 
 impl InGameState {
@@ -157,12 +171,14 @@ impl InGameState {
             queued: HashSet::new(),
             player_model: HumanoidModel::player(),
             player_mesh: None,
+            player_anim: AnimationState::new(),
             fov_degrees: 70.0,
             inventory_open: false,
             held: None,
             net,
             remote_players: HashMap::new(),
             remote_meshes: Vec::new(),
+            remote_anims: HashMap::new(),
         }
     }
 
@@ -214,9 +230,10 @@ impl InGameState {
             self.player_mesh = None;
             return;
         }
+        let pose = self.player_anim.pose(self.player.pitch);
         let mesh = self
             .player_model
-            .build_mesh(self.player.position, self.player.yaw);
+            .build_mesh(self.player.position, self.player.yaw, &pose);
         self.player_mesh = GpuMesh::upload(&ctx.memory_allocator, &mesh).ok().flatten();
     }
 
@@ -499,15 +516,37 @@ impl InGameState {
         }
     }
 
-    /// Rebuild GPU meshes for remote players.
-    fn update_remote_meshes(&mut self, ctx: &Arc<RenderContext>) {
+    /// Rebuild GPU meshes for remote players, advancing each one's animation from the
+    /// movement observed since the previous frame.
+    fn update_remote_meshes(&mut self, ctx: &Arc<RenderContext>, dt: f32) {
         self.remote_meshes.clear();
-        for rp in self.remote_players.values() {
-            let mesh = self.player_model.build_mesh(rp.position(), rp.yaw);
+        // Snapshot the render-relevant fields first so we can mutate `remote_anims`
+        // and read `player_model` without holding a borrow on `remote_players`.
+        let snapshots: Vec<(PlayerId, Vec3, f32, f32)> = self
+            .remote_players
+            .values()
+            .map(|rp| (rp.id, rp.position(), rp.yaw, rp.pitch))
+            .collect();
+        for (id, pos, yaw, pitch) in snapshots {
+            let state = self.remote_anims.entry(id).or_insert_with(|| RemoteAnim {
+                anim: AnimationState::new(),
+                last_pos: pos,
+            });
+            let delta = pos - state.last_pos;
+            let speed =
+                (Vec3::new(delta.x, 0.0, delta.z).length() / dt.max(1e-4)).min(REMOTE_MAX_SPEED);
+            state.anim.advance(speed, dt);
+            state.last_pos = pos;
+            let pose = state.anim.pose(pitch);
+
+            let mesh = self.player_model.build_mesh(pos, yaw, &pose);
             if let Ok(Some(gpu)) = GpuMesh::upload(&ctx.memory_allocator, &mesh) {
                 self.remote_meshes.push(gpu);
             }
         }
+        // Drop animation state for players that have left.
+        self.remote_anims
+            .retain(|id, _| self.remote_players.contains_key(id));
     }
 
     fn net_status(&self) -> String {
@@ -562,6 +601,7 @@ impl InGameState {
         if self.world.set_block(target, block).is_some() {
             self.inventory.consume_selected(1);
             self.broadcast_local_edit(target, block);
+            self.player_anim.trigger_swing();
         }
     }
 }
@@ -622,8 +662,10 @@ impl GameState for InGameState {
             self.player
                 .update(movement, dt, |p| self.world.is_solid_for_collision(p));
 
-            // Block interaction.
+            // Block interaction. The main-hand swing fires on every left click,
+            // even when punching air (no block hit).
             if ctx.input.mouse_just_pressed(MouseButton::Left) {
+                self.player_anim.trigger_swing();
                 self.try_break_block();
             }
             if ctx.input.mouse_just_pressed(MouseButton::Right) {
@@ -636,8 +678,19 @@ impl GameState for InGameState {
         self.update_streaming(ctx.settings.render.render_distance);
         self.enqueue_dirty();
         self.process_mesh_budget(ctx.render);
+
+        // Advance + rebuild animated player models. The local player settles to idle
+        // while the inventory is open (movement is frozen).
+        let anim_dt = ctx.dt.min(0.05);
+        let local_speed = if self.inventory_open {
+            0.0
+        } else {
+            let v = self.player.velocity;
+            Vec3::new(v.x, 0.0, v.z).length()
+        };
+        self.player_anim.advance(local_speed, anim_dt);
         self.update_player_mesh(ctx.render);
-        self.update_remote_meshes(ctx.render);
+        self.update_remote_meshes(ctx.render, anim_dt);
         Transition::None
     }
 

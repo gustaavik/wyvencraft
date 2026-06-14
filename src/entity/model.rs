@@ -23,6 +23,19 @@ pub struct ModelBox {
     pub size: Vec3,
 }
 
+/// Per-part articulation applied (around each joint pivot) before the global
+/// yaw/translate. All angles are rotations about the model-local X axis, in radians.
+/// `Pose::default()` is the rest pose, identical to the original static model.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Pose {
+    /// Head tilt (look up/down), rotated about the neck.
+    pub head_pitch: f32,
+    pub left_arm: f32,
+    pub right_arm: f32,
+    pub left_leg: f32,
+    pub right_leg: f32,
+}
+
 /// Static layout of the humanoid model parts.
 pub struct HumanoidModel {
     pub head: ModelBox,
@@ -82,29 +95,73 @@ impl HumanoidModel {
         ]
     }
 
-    /// Build a renderable mesh for this model at `position` (feet) facing `yaw`.
-    /// Uses the skin tile for the head and the shirt tile for the rest.
-    pub fn build_mesh(&self, position: Vec3, yaw: f32) -> CpuMesh {
+    /// Build a renderable mesh for this model at `position` (feet) facing `yaw`,
+    /// articulated by `pose`. Uses the skin tile for the head and the shirt tile for
+    /// the rest. With `Pose::default()` the output matches the original static model.
+    pub fn build_mesh(&self, position: Vec3, yaw: f32, pose: &Pose) -> CpuMesh {
         let mut mesh = CpuMesh::new();
-        let tiles = [
-            PLAYER_SKIN_TILE,  // head
-            PLAYER_SHIRT_TILE, // body
-            PLAYER_SHIRT_TILE, // left arm
-            PLAYER_SHIRT_TILE, // right arm
-            PLAYER_SHIRT_TILE, // left leg
-            PLAYER_SHIRT_TILE, // right leg
+        // (part, tile, joint pivot, rotation about local X). Limbs swing about their
+        // top (shoulder/hip); the head tilts about its bottom (neck); the body is fixed.
+        let parts: [(ModelBox, u32, Vec3, f32); 6] = [
+            (
+                self.head,
+                PLAYER_SKIN_TILE,
+                bottom_pivot(self.head),
+                pose.head_pitch,
+            ),
+            (self.body, PLAYER_SHIRT_TILE, self.body.center, 0.0),
+            (
+                self.left_arm,
+                PLAYER_SHIRT_TILE,
+                top_pivot(self.left_arm),
+                pose.left_arm,
+            ),
+            (
+                self.right_arm,
+                PLAYER_SHIRT_TILE,
+                top_pivot(self.right_arm),
+                pose.right_arm,
+            ),
+            (
+                self.left_leg,
+                PLAYER_SHIRT_TILE,
+                top_pivot(self.left_leg),
+                pose.left_leg,
+            ),
+            (
+                self.right_leg,
+                PLAYER_SHIRT_TILE,
+                top_pivot(self.right_leg),
+                pose.right_leg,
+            ),
         ];
-        for (part, tile) in self.parts().iter().zip(tiles) {
-            push_box(&mut mesh, *part, tile, position, yaw);
+        for (part, tile, pivot, rot) in parts {
+            push_box(&mut mesh, part, tile, position, yaw, pivot, rot);
         }
         mesh
     }
+}
+
+/// Joint pivot at the top centre of a box (shoulder / hip).
+fn top_pivot(b: ModelBox) -> Vec3 {
+    b.center + Vec3::new(0.0, b.size.y * 0.5, 0.0)
+}
+
+/// Joint pivot at the bottom centre of a box (neck).
+fn bottom_pivot(b: ModelBox) -> Vec3 {
+    b.center - Vec3::new(0.0, b.size.y * 0.5, 0.0)
 }
 
 /// Rotate a point around the Y axis (matches `Player::look_direction`).
 fn rot_y(p: Vec3, yaw: f32) -> Vec3 {
     let (s, c) = yaw.sin_cos();
     Vec3::new(p.x * c - p.z * s, p.y, p.x * s + p.z * c)
+}
+
+/// Rotate a point around the X axis (limb swing / head tilt).
+fn rot_x(p: Vec3, a: f32) -> Vec3 {
+    let (s, c) = a.sin_cos();
+    Vec3::new(p.x, p.y * c - p.z * s, p.y * s + p.z * c)
 }
 
 fn face_shade(dir: Direction) -> f32 {
@@ -116,9 +173,17 @@ fn face_shade(dir: Direction) -> f32 {
     }
 }
 
-/// Emit the 6 faces of one model box into `mesh`, rotated by `yaw` and offset by
-/// `origin`.
-fn push_box(mesh: &mut CpuMesh, part: ModelBox, tile: u32, origin: Vec3, yaw: f32) {
+/// Emit the 6 faces of one model box into `mesh`. Each vertex is rotated about
+/// `pivot` by `rot` (the joint articulation), then by `yaw`, then offset by `origin`.
+fn push_box(
+    mesh: &mut CpuMesh,
+    part: ModelBox,
+    tile: u32,
+    origin: Vec3,
+    yaw: f32,
+    pivot: Vec3,
+    rot: f32,
+) {
     let half = part.size * 0.5;
     let lo = part.center - half;
     let hi = part.center + half;
@@ -126,10 +191,11 @@ fn push_box(mesh: &mut CpuMesh, part: ModelBox, tile: u32, origin: Vec3, yaw: f3
 
     for dir in Direction::ALL {
         let corners = box_face_corners(dir, lo, hi);
-        let normal = rot_y(dir.normal(), yaw).to_array();
+        let normal = rot_y(rot_x(dir.normal(), rot), yaw).to_array();
         let ao = face_shade(dir);
         let quad = std::array::from_fn(|i| {
-            let world = rot_y(corners[i], yaw) + origin;
+            let local = rot_x(corners[i] - pivot, rot) + pivot;
+            let world = rot_y(local, yaw) + origin;
             ChunkVertex {
                 position: world.to_array(),
                 normal,
@@ -180,5 +246,56 @@ fn box_face_corners(dir: Direction, lo: Vec3, hi: Vec3) -> [Vec3; 4] {
             Vec3::new(hi.x, hi.y, lo.z),
             Vec3::new(lo.x, hi.y, lo.z),
         ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::f32::consts::FRAC_PI_2;
+
+    #[test]
+    fn rot_x_rotates_up_to_forward() {
+        // +Y rotated by +90° about X lands on +Z.
+        let r = rot_x(Vec3::Y, FRAC_PI_2);
+        assert!((r - Vec3::Z).length() < 1e-6, "got {r:?}");
+    }
+
+    #[test]
+    fn rest_pose_matches_static_layout() {
+        let model = HumanoidModel::player();
+        let mesh = model.build_mesh(Vec3::ZERO, 0.0, &Pose::default());
+        // 6 parts × 6 faces × 4 vertices.
+        assert_eq!(mesh.vertices.len(), 144);
+        // At origin with zero yaw and a rest pose the geometry is untransformed: the
+        // head top sits at 32px = 2.0 units and the feet at 0.
+        let (min_y, max_y) = mesh
+            .vertices
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(lo, hi), v| {
+                (lo.min(v.position[1]), hi.max(v.position[1]))
+            });
+        assert!((min_y - 0.0).abs() < 1e-6, "min_y={min_y}");
+        assert!((max_y - 2.0).abs() < 1e-6, "max_y={max_y}");
+    }
+
+    #[test]
+    fn limb_rotates_about_top_pivot() {
+        let leg = HumanoidModel::player().right_leg;
+        let pivot = top_pivot(leg);
+        let half = leg.size * 0.5;
+        let top = leg.center + Vec3::new(0.0, half.y, 0.0); // hip == pivot
+        let foot = leg.center - Vec3::new(0.0, half.y, 0.0);
+
+        let angle = 0.6;
+        let rot_top = rot_x(top - pivot, angle) + pivot;
+        let rot_foot = rot_x(foot - pivot, angle) + pivot;
+
+        // The hip stays anchored at the pivot; the foot swings out along Z.
+        assert!((rot_top - top).length() < 1e-6, "hip moved to {rot_top:?}");
+        assert!(
+            (rot_foot.z - foot.z).abs() > 0.1,
+            "foot z barely moved: {rot_foot:?}"
+        );
     }
 }
