@@ -19,6 +19,19 @@ pub enum RenderType {
     Transparent,
 }
 
+/// What a block is made of — selects which tool mines it fastest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockMaterial {
+    Stone,
+    Dirt,
+    Sand,
+    Wood,
+    Plant,
+    Glass,
+    /// No preferred tool (bedrock, misc).
+    Other,
+}
+
 /// Per-face atlas tile indices, ordered by [`Direction`] (`-X,+X,-Y,+Y,-Z,+Z`).
 #[derive(Debug, Clone, Copy)]
 pub struct FaceTextures(pub [u32; 6]);
@@ -49,6 +62,10 @@ pub struct Block {
     /// Whether entities collide with this block.
     pub solid: bool,
     pub textures: FaceTextures,
+    /// Relative mining time; `f32::INFINITY` means unbreakable (e.g. bedrock).
+    pub hardness: f32,
+    /// What the block is made of, for tool matching.
+    pub material: BlockMaterial,
 }
 
 impl Block {
@@ -65,6 +82,12 @@ impl Block {
     #[inline]
     pub fn is_transparent(&self) -> bool {
         matches!(self.render, RenderType::Transparent)
+    }
+
+    /// Whether the block can ever be mined (finite hardness).
+    #[inline]
+    pub fn is_breakable(&self) -> bool {
+        self.hardness.is_finite()
     }
 }
 
@@ -101,66 +124,88 @@ impl BlockRegistry {
             render: RenderType::Invisible,
             solid: false,
             textures: FaceTextures::uniform(0),
+            hardness: 0.0,
+            material: BlockMaterial::Other,
         });
         reg.register(Block {
             name: "stone",
             render: RenderType::Opaque,
             solid: true,
             textures: FaceTextures::uniform(1),
+            hardness: 1.5,
+            material: BlockMaterial::Stone,
         });
         reg.register(Block {
             name: "dirt",
             render: RenderType::Opaque,
             solid: true,
             textures: FaceTextures::uniform(2),
+            hardness: 0.5,
+            material: BlockMaterial::Dirt,
         });
         reg.register(Block {
             name: "grass",
             render: RenderType::Opaque,
             solid: true,
             textures: FaceTextures::column(3, 2, 4), // top=grass, bottom=dirt, side=grass_side
+            hardness: 0.6,
+            material: BlockMaterial::Dirt,
         });
         reg.register(Block {
             name: "sand",
             render: RenderType::Opaque,
             solid: true,
             textures: FaceTextures::uniform(5),
+            hardness: 0.5,
+            material: BlockMaterial::Sand,
         });
         reg.register(Block {
             name: "water",
             render: RenderType::Transparent,
             solid: false,
             textures: FaceTextures::uniform(6),
+            hardness: f32::INFINITY,
+            material: BlockMaterial::Other,
         });
         reg.register(Block {
             name: "wood",
             render: RenderType::Opaque,
             solid: true,
             textures: FaceTextures::column(8, 8, 7), // top/bottom=rings, side=bark
+            hardness: 2.0,
+            material: BlockMaterial::Wood,
         });
         reg.register(Block {
             name: "leaves",
             render: RenderType::Transparent,
             solid: true,
             textures: FaceTextures::uniform(9),
+            hardness: 0.2,
+            material: BlockMaterial::Plant,
         });
         reg.register(Block {
             name: "glass",
             render: RenderType::Transparent,
             solid: true,
             textures: FaceTextures::uniform(10),
+            hardness: 0.3,
+            material: BlockMaterial::Glass,
         });
         reg.register(Block {
             name: "bedrock",
             render: RenderType::Opaque,
             solid: true,
             textures: FaceTextures::uniform(11),
+            hardness: f32::INFINITY,
+            material: BlockMaterial::Other,
         });
         reg.register(Block {
             name: "snow",
             render: RenderType::Opaque,
             solid: true,
             textures: FaceTextures::uniform(12),
+            hardness: 0.2,
+            material: BlockMaterial::Dirt,
         });
         reg
     }

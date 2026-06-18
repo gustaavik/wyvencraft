@@ -2,11 +2,13 @@
 //! voxel coordinate types, math/geometry helpers, and frame timing.
 
 pub mod day_cycle;
+pub mod gamemode;
 pub mod math;
 pub mod time;
 pub mod types;
 
 pub use day_cycle::{Atmosphere, DayCycle};
+pub use gamemode::GameMode;
 pub use math::{Aabb, Frustum, Ray};
 pub use time::Clock;
 pub use types::{

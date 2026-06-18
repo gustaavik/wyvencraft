@@ -21,7 +21,7 @@ use winit::window::{CursorGrabMode, WindowId};
 use std::net::SocketAddr;
 
 use crate::config::Settings;
-use crate::core::Clock;
+use crate::core::{Clock, GameMode};
 use crate::input::InputState;
 use crate::net::{DEFAULT_PORT, Host};
 use crate::render::{RenderContext, Renderer};
@@ -80,15 +80,20 @@ impl App {
         let render_context = RenderContext::from_vulkano(&context);
 
         // Dev convenience env vars to skip the menus:
-        //   WYVEN_BOOT_INGAME=1   → singleplayer world
-        //   WYVEN_HOST=1          → host a session
-        //   WYVEN_JOIN=addr:port  → join a session
+        //   WYVEN_BOOT_INGAME=1     → singleplayer world
+        //   WYVEN_HOST=1            → host a session
+        //   WYVEN_JOIN=addr:port    → join a session
+        //   WYVEN_MODE=creative     → start in creative (default: survival)
+        let boot_mode = match std::env::var("WYVEN_MODE").as_deref() {
+            Ok("creative") | Ok("Creative") => GameMode::Creative,
+            _ => GameMode::Survival,
+        };
         let initial: Box<dyn GameState> = if std::env::var_os("WYVEN_BOOT_INGAME").is_some() {
-            Box::new(LoadingState::singleplayer())
+            Box::new(LoadingState::singleplayer(boot_mode))
         } else if std::env::var_os("WYVEN_HOST").is_some() {
             let seed = 0x57_56_4E_01;
             match Host::bind(DEFAULT_PORT, seed) {
-                Ok(host) => Box::new(InGameState::new_host(seed, host)),
+                Ok(host) => Box::new(InGameState::new_host(seed, host, boot_mode)),
                 Err(err) => {
                     log::error!("host bind failed: {err}");
                     Box::new(MainMenuState::new())

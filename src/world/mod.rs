@@ -10,7 +10,7 @@ pub mod raycast;
 #[allow(clippy::module_inception)]
 pub mod world;
 
-pub use block::{Block, BlockRegistry, RenderType};
+pub use block::{Block, BlockMaterial, BlockRegistry, RenderType};
 pub use chunk::Chunk;
 pub use generation::{NoiseGenerator, WorldGenerator};
 pub use loader::ChunkLoader;

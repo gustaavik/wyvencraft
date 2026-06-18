@@ -2,19 +2,21 @@
 //! to finish generating; for now it hands straight off to the in-game state.
 
 use super::{GameState, InGameState, StateContext, Transition};
+use crate::core::GameMode;
 
 pub struct LoadingState {
     seed: u64,
+    mode: GameMode,
 }
 
 impl LoadingState {
-    pub fn with_seed(seed: u64) -> Self {
-        Self { seed }
+    pub fn with_seed(seed: u64, mode: GameMode) -> Self {
+        Self { seed, mode }
     }
 
     /// A fresh singleplayer world with a time-derived seed.
-    pub fn singleplayer() -> Self {
-        Self::with_seed(random_seed())
+    pub fn singleplayer(mode: GameMode) -> Self {
+        Self::with_seed(random_seed(), mode)
     }
 }
 
@@ -26,7 +28,7 @@ impl GameState for LoadingState {
     fn update(&mut self, _ctx: &mut StateContext) -> Transition {
         // M3: poll the chunk loader and only transition once spawn-area chunks
         // are ready. For now, enter the world immediately.
-        Transition::Replace(Box::new(InGameState::new(self.seed)))
+        Transition::Replace(Box::new(InGameState::new(self.seed, self.mode)))
     }
 
     fn ui(&mut self, egui_ctx: &egui::Context, _ctx: &mut StateContext) -> Transition {

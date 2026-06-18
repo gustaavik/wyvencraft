@@ -102,6 +102,24 @@ impl Inventory {
         taken
     }
 
+    /// Wear down the selected tool by one point; clears the slot when it breaks.
+    /// No-op for items without durability. Returns `true` if the tool broke.
+    pub fn damage_selected_tool(&mut self) -> bool {
+        let Some(stack) = self.slots[self.selected].as_mut() else {
+            return false;
+        };
+        let Some(remaining) = stack.durability.as_mut() else {
+            return false;
+        };
+        *remaining = remaining.saturating_sub(1);
+        if *remaining == 0 {
+            self.slots[self.selected] = None;
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn item_in_selected(&self) -> Option<ItemId> {
         self.selected_stack().map(|s| s.item)
     }
@@ -110,5 +128,20 @@ impl Inventory {
 impl Default for Inventory {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_breaks_after_durability_depletes() {
+        let mut inv = Inventory::new();
+        inv.set_slot(0, Some(ItemStack::with_durability(ItemId(0), 2)));
+        inv.set_selected(0);
+        assert!(!inv.damage_selected_tool(), "first use just wears the tool");
+        assert!(inv.damage_selected_tool(), "second use breaks the tool");
+        assert!(inv.slot(0).is_none(), "broken tool leaves an empty slot");
     }
 }

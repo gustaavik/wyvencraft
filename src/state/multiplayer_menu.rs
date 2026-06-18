@@ -4,11 +4,14 @@ use std::net::{SocketAddr, ToSocketAddrs};
 
 use super::connecting_state::ConnectingState;
 use super::{GameState, InGameState, MainMenuState, StateContext, Transition};
+use crate::core::GameMode;
 use crate::net::{DEFAULT_PORT, Host};
 
 pub struct MultiplayerMenuState {
     address: String,
     error: Option<String>,
+    /// Game mode for a hosted session.
+    mode: GameMode,
 }
 
 impl Default for MultiplayerMenuState {
@@ -16,6 +19,7 @@ impl Default for MultiplayerMenuState {
         Self {
             address: format!("127.0.0.1:{DEFAULT_PORT}"),
             error: None,
+            mode: GameMode::Survival,
         }
     }
 }
@@ -44,6 +48,14 @@ impl GameState for MultiplayerMenuState {
                 ui.heading("Multiplayer");
                 ui.add_space(24.0);
 
+                ui.label("Session mode:");
+                ui.horizontal(|ui| {
+                    ui.add_space((ui.available_width() - 240.0).max(0.0) * 0.5);
+                    ui.selectable_value(&mut self.mode, GameMode::Survival, "Survival");
+                    ui.selectable_value(&mut self.mode, GameMode::Creative, "Creative");
+                });
+                ui.add_space(8.0);
+
                 if ui
                     .add_sized([220.0, 36.0], egui::Button::new("Host Game"))
                     .clicked()
@@ -51,8 +63,9 @@ impl GameState for MultiplayerMenuState {
                     let seed = random_seed();
                     match Host::bind(DEFAULT_PORT, seed) {
                         Ok(host) => {
-                            transition =
-                                Transition::Replace(Box::new(InGameState::new_host(seed, host)));
+                            transition = Transition::Replace(Box::new(InGameState::new_host(
+                                seed, host, self.mode,
+                            )));
                         }
                         Err(err) => self.error = Some(format!("Host failed: {err}")),
                     }

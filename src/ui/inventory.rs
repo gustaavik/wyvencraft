@@ -1,14 +1,24 @@
-//! The inventory screen: a 9x4 slot grid (main + hotbar) drawn with egui.
+//! The inventory screen: a 9x4 slot grid (main + hotbar) drawn with egui, plus a
+//! creative item palette when in creative mode.
 //!
 //! Interaction is click-to-move (Minecraft-style): the caller owns a "held"
-//! stack; this view just reports which slot was clicked and renders the grid +
-//! held label. The move logic lives with the inventory owner.
+//! stack; this view reports the slot clicked (or palette item picked) and renders
+//! the grid + held label. The move logic lives with the inventory owner.
 
 use egui::{Color32, Context};
 
-use crate::inventory::{HOTBAR_SIZE, INVENTORY_SIZE, Inventory, ItemRegistry, ItemStack};
+use crate::core::GameMode;
+use crate::inventory::{HOTBAR_SIZE, INVENTORY_SIZE, Inventory, ItemId, ItemRegistry, ItemStack};
 
 const SLOT: f32 = 44.0;
+
+/// What the player did in the inventory screen this frame.
+pub enum InvAction {
+    /// Clicked an inventory slot (pick up / place / merge / swap).
+    Slot(usize),
+    /// Picked an item from the creative palette (grab a full stack).
+    Pick(ItemId),
+}
 
 fn slot_label(stack: Option<ItemStack>, items: &ItemRegistry) -> String {
     match stack {
@@ -20,21 +30,41 @@ fn slot_label(stack: Option<ItemStack>, items: &ItemRegistry) -> String {
     }
 }
 
-/// Draw the inventory window. Returns the slot index that was clicked this frame,
-/// if any.
+/// Draw the inventory window. Returns the action taken this frame, if any.
 pub fn draw_inventory(
     ctx: &Context,
     inventory: &Inventory,
     items: &ItemRegistry,
     held: Option<ItemStack>,
-) -> Option<usize> {
-    let mut clicked = None;
+    mode: GameMode,
+) -> Option<InvAction> {
+    let mut action = None;
 
     egui::Window::new("Inventory")
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| {
+            // Creative palette: every item, click to grab a full stack.
+            if mode.is_creative() {
+                ui.label(egui::RichText::new("Creative palette").strong());
+                egui::ScrollArea::vertical()
+                    .max_height(170.0)
+                    .show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            for (id, item) in items.iter() {
+                                let label: String = item.name.chars().take(3).collect();
+                                let button =
+                                    egui::Button::new(label).min_size(egui::vec2(SLOT, SLOT));
+                                if ui.add(button).on_hover_text(&item.name).clicked() {
+                                    action = Some(InvAction::Pick(id));
+                                }
+                            }
+                        });
+                    });
+                ui.separator();
+            }
+
             let mut slot_button = |ui: &mut egui::Ui, index: usize| {
                 let label = slot_label(inventory.slot(index), items);
                 let selected = index < HOTBAR_SIZE && index == inventory.selected_index();
@@ -43,7 +73,7 @@ pub fn draw_inventory(
                     button = button.stroke(egui::Stroke::new(2.0, Color32::WHITE));
                 }
                 if ui.add(button).clicked() {
-                    clicked = Some(index);
+                    action = Some(InvAction::Slot(index));
                 }
             };
 
@@ -82,5 +112,5 @@ pub fn draw_inventory(
             );
         });
 
-    clicked
+    action
 }

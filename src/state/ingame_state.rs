@@ -9,15 +9,16 @@ use glam::Vec3;
 use winit::event::MouseButton;
 
 use super::{GameState, PauseMenuState, StateContext, Transition};
-use crate::core::{Aabb, BlockId, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, ChunkPos, DayCycle};
+use crate::core::{
+    Aabb, BlockId, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, ChunkPos, DayCycle, GameMode,
+};
 use crate::entity::{AnimationState, HumanoidModel, Perspective, Player};
-use crate::inventory::{Inventory, ItemRegistry, ItemStack};
+use crate::inventory::{Inventory, ItemId, ItemRegistry, ItemStack};
 use crate::net::{
     Channel, Client, ClientMessage, Host, NetVec3, PlayerId, RemotePlayer, ServerMessage,
 };
 use crate::render::{Camera, GpuMesh, LightParams, RenderContext, SceneFrame, SkyParams};
 use crate::ui::hud;
-use crate::world::block::blocks;
 use crate::world::meshing::mesh_chunk;
 use crate::world::{BlockRegistry, ChunkLoader, NoiseGenerator, World, WorldGenerator};
 
@@ -46,6 +47,17 @@ const THIRD_PERSON_DISTANCE: f32 = 4.0;
 /// Upper bound on a remote player's derived speed, so a teleport or first snapshot
 /// can't drive an absurd walk cadence.
 const REMOTE_MAX_SPEED: f32 = 12.0;
+/// Max gap (s) between two jump presses to count as a double-tap (creative fly).
+const DOUBLE_TAP_WINDOW: f32 = 0.3;
+/// How often (s) a client reports its survival stats to the host.
+const STATS_INTERVAL: f32 = 0.25;
+
+/// Progressive break state for survival timed mining.
+struct BreakState {
+    block: BlockPos,
+    /// Accumulated progress in `[0, 1)`; the block breaks at `>= 1.0`.
+    progress: f32,
+}
 
 pub struct InGameState {
     pub world: World,
@@ -75,6 +87,16 @@ pub struct InGameState {
     inventory_open: bool,
     /// Stack currently "held" by the cursor in the inventory screen.
     held: Option<ItemStack>,
+    /// Where the player (re)spawns on death.
+    spawn: Vec3,
+    /// Progressive block-break state for survival timed mining.
+    breaking: Option<BreakState>,
+    /// True while the player is dead and awaiting respawn (control frozen).
+    dead: bool,
+    /// Time (s) since the last jump press, for creative double-tap-to-fly.
+    jump_tap_timer: f32,
+    /// Throttle accumulator for sending stats over the network.
+    stats_timer: f32,
     /// Networking role + remote players.
     net: NetRole,
     remote_players: HashMap<PlayerId, RemotePlayer>,
@@ -92,37 +114,46 @@ struct RemoteAnim {
 
 impl InGameState {
     /// Singleplayer world.
-    pub fn new(seed: u64) -> Self {
-        Self::build(seed, NetRole::Singleplayer, None, DayCycle::default())
+    pub fn new(seed: u64, mode: GameMode) -> Self {
+        Self::build(seed, NetRole::Singleplayer, None, DayCycle::default(), mode)
     }
 
     /// Host a multiplayer session (the host also plays locally).
-    pub fn new_host(seed: u64, host: Host) -> Self {
-        Self::build(seed, NetRole::Host(host), None, DayCycle::default())
+    pub fn new_host(seed: u64, host: Host, mode: GameMode) -> Self {
+        Self::build(seed, NetRole::Host(host), None, DayCycle::default(), mode)
     }
 
     /// Join a multiplayer session as a client (world built from the host's seed).
     /// `spawn` is the position the host assigned us in its `Welcome`; `time_of_day`
-    /// seeds our day/night clock to the host's so skies match on join.
+    /// seeds our day/night clock to the host's so skies match on join; `mode` is the
+    /// session's game mode as told by the host.
     pub fn new_client(
         seed: u64,
         client: Client,
         local_id: PlayerId,
         spawn: NetVec3,
         time_of_day: f32,
+        mode: GameMode,
     ) -> Self {
         Self::build(
             seed,
             NetRole::Client { client, local_id },
             Some(Vec3::from_array(spawn)),
             DayCycle::new(time_of_day),
+            mode,
         )
     }
 
     /// Build the in-game state. `spawn_override` (clients) places the player at the
     /// host-provided position and anchors synchronous generation there; otherwise the
     /// spawn is found over the origin column.
-    fn build(seed: u64, net: NetRole, spawn_override: Option<Vec3>, day_cycle: DayCycle) -> Self {
+    fn build(
+        seed: u64,
+        net: NetRole,
+        spawn_override: Option<Vec3>,
+        day_cycle: DayCycle,
+        mode: GameMode,
+    ) -> Self {
         let blocks = Arc::new(BlockRegistry::with_builtins());
         let items = ItemRegistry::from_blocks(&blocks);
 
@@ -148,28 +179,20 @@ impl InGameState {
         }
         let spawn = spawn_override.unwrap_or_else(|| find_spawn(&world));
 
-        // Creative-style starter hotbar so placing blocks works immediately.
+        // Creative starts empty (items come from the palette); survival gets a small
+        // starter kit so mining, durability, and eating are usable without crafting.
         let mut inventory = Inventory::new();
-        let starter = [
-            blocks::STONE,
-            blocks::DIRT,
-            blocks::GRASS,
-            blocks::SAND,
-            blocks::WOOD,
-            blocks::LEAVES,
-            blocks::GLASS,
-            blocks::SNOW,
-            blocks::BEDROCK,
-        ];
-        for (slot, block) in starter.iter().enumerate() {
-            if let Some(item) = items.item_for_block(*block) {
-                inventory.set_slot(slot, Some(ItemStack::new(item, 64)));
-            }
+        if !mode.is_creative() {
+            inventory.set_slot(0, Some(items.full_stack(items.wooden_pickaxe)));
+            inventory.set_slot(1, Some(items.full_stack(items.wooden_axe)));
+            inventory.set_slot(2, Some(items.full_stack(items.wooden_shovel)));
+            inventory.set_slot(3, Some(ItemStack::new(items.apple, 5)));
+            inventory.set_slot(4, Some(ItemStack::new(items.bread, 3)));
         }
 
         Self {
             world,
-            player: Player::new(spawn),
+            player: Player::new(spawn, mode),
             blocks,
             items,
             inventory,
@@ -186,11 +209,23 @@ impl InGameState {
             day_cycle,
             inventory_open: false,
             held: None,
+            spawn,
+            breaking: None,
+            dead: false,
+            jump_tap_timer: DOUBLE_TAP_WINDOW * 2.0,
+            stats_timer: 0.0,
             net,
             remote_players: HashMap::new(),
             remote_meshes: Vec::new(),
             remote_anims: HashMap::new(),
         }
+    }
+
+    /// Reset the player at the world spawn after death.
+    fn respawn(&mut self) {
+        self.player.respawn_at(self.spawn);
+        self.dead = false;
+        self.breaking = None;
     }
 
     /// Open/close the inventory screen; returns a held stack to storage on close.
@@ -355,6 +390,16 @@ impl InGameState {
         let position = self.player.position.to_array();
         let yaw = self.player.yaw;
         let pitch = self.player.pitch;
+        let mode = self.player.mode;
+        let health = self.player.health;
+        let hunger = self.player.hunger;
+
+        // Survival stats are low-frequency; throttle them to keep the wire quiet.
+        self.stats_timer += dt;
+        let send_stats = self.stats_timer >= STATS_INTERVAL;
+        if send_stats {
+            self.stats_timer = 0.0;
+        }
 
         match &mut self.net {
             NetRole::Singleplayer => {}
@@ -373,6 +418,7 @@ impl InGameState {
                                 your_id: pid,
                                 spawn: position,
                                 time_of_day,
+                                game_mode: mode,
                             },
                             Channel::Reliable,
                         );
@@ -424,6 +470,17 @@ impl InGameState {
                                 );
                             }
                         }
+                        ClientMessage::Stats { health, hunger } => {
+                            if let Some(rp) = self.remote_players.get_mut(&pid) {
+                                rp.health = health;
+                                rp.hunger = hunger;
+                            }
+                        }
+                        ClientMessage::SetMode(m) => {
+                            if let Some(rp) = self.remote_players.get_mut(&pid) {
+                                rp.mode = m;
+                            }
+                        }
                         ClientMessage::Chat(_) => {}
                     }
                 }
@@ -454,6 +511,35 @@ impl InGameState {
                         Channel::Unreliable,
                     );
                 }
+
+                // Periodic authoritative vitals for the host and every remote player.
+                if send_stats {
+                    host.broadcast(
+                        &ServerMessage::PlayerStats {
+                            id: HOST_PLAYER_ID,
+                            health,
+                            hunger,
+                            mode,
+                        },
+                        Channel::Reliable,
+                    );
+                    let stats: Vec<_> = self
+                        .remote_players
+                        .values()
+                        .map(|rp| (rp.id, rp.health, rp.hunger, rp.mode))
+                        .collect();
+                    for (id, health, hunger, mode) in stats {
+                        host.broadcast(
+                            &ServerMessage::PlayerStats {
+                                id,
+                                health,
+                                hunger,
+                                mode,
+                            },
+                            Channel::Reliable,
+                        );
+                    }
+                }
                 host.flush();
             }
             NetRole::Client { client, local_id } => {
@@ -469,6 +555,9 @@ impl InGameState {
                     },
                     Channel::Unreliable,
                 );
+                if send_stats {
+                    client.send(&ClientMessage::Stats { health, hunger }, Channel::Reliable);
+                }
                 for msg in client.receive() {
                     match msg {
                         ServerMessage::Welcome { .. } => {}
@@ -500,6 +589,19 @@ impl InGameState {
                         ServerMessage::BlockChanged { pos, block } => {
                             self.world.set_block(pos, block);
                         }
+                        ServerMessage::PlayerStats {
+                            id,
+                            health,
+                            hunger,
+                            mode,
+                        } if id != local_id => {
+                            self.remote_players
+                                .entry(id)
+                                .or_insert_with(|| {
+                                    RemotePlayer::new(id, format!("Player {}", id.0), Vec3::ZERO)
+                                })
+                                .set_stats(health, hunger, mode);
+                        }
                         _ => {}
                     }
                 }
@@ -526,6 +628,15 @@ impl InGameState {
                 };
                 client.send(&msg, Channel::Reliable);
             }
+        }
+    }
+
+    /// Tell the host the local player's game mode changed (no-op for host /
+    /// singleplayer — the host advertises its mode via `PlayerStats`/`Welcome`).
+    fn broadcast_mode_change(&mut self) {
+        let mode = self.player.mode;
+        if let NetRole::Client { client, .. } = &mut self.net {
+            client.send(&ClientMessage::SetMode(mode), Channel::Reliable);
         }
     }
 
@@ -570,38 +681,101 @@ impl InGameState {
         }
     }
 
-    /// Break the block the player is looking at; drop it into the inventory.
-    fn try_break_block(&mut self) {
-        let hit = crate::world::raycast(
+    /// The block the player is currently looking at within reach, if any.
+    fn targeted_block(&self) -> Option<crate::world::RaycastHit> {
+        crate::world::raycast(
             self.player.eye_position(),
             self.player.look_direction(),
             REACH,
             |p| self.world.is_solid(p),
-        );
-        if let Some(hit) = hit
-            && let Some(prev) = self.world.set_block(hit.block, BlockId::AIR)
-            && !prev.is_air()
+        )
+    }
+
+    /// Remove the block at `pos`. In survival the block drops into the inventory;
+    /// in creative it just disappears. Broadcasts the edit. Returns `true` on a hit.
+    fn break_block_at(&mut self, pos: BlockPos) -> bool {
+        let Some(prev) = self.world.set_block(pos, BlockId::AIR) else {
+            return false;
+        };
+        if prev.is_air() {
+            return false;
+        }
+        if self.player.mode.consumes_blocks()
+            && let Some(item) = self.items.item_for_block(prev)
         {
-            if let Some(item) = self.items.item_for_block(prev) {
-                self.inventory.add(ItemStack::single(item), &self.items);
+            self.inventory.add(ItemStack::single(item), &self.items);
+        }
+        self.broadcast_local_edit(pos, BlockId::AIR);
+        true
+    }
+
+    /// Survival timed mining: accumulate break progress on the targeted block
+    /// while the dig button is held, breaking it once progress reaches 1.0.
+    fn update_mining(&mut self, digging: bool, dt: f32) {
+        if !digging {
+            self.breaking = None;
+            return;
+        }
+        let Some(hit) = self.targeted_block() else {
+            self.breaking = None;
+            return;
+        };
+        let block = self.blocks.get(self.world.block_at(hit.block));
+        if !block.is_breakable() {
+            self.breaking = None;
+            return;
+        }
+        // Effective tool: the held item, if it's a tool.
+        let tool = self
+            .inventory
+            .item_in_selected()
+            .and_then(|id| self.items.tool(id).map(|k| (k, self.items.dig_speed(id))));
+        let seconds = crate::inventory::break_seconds(block.hardness, block.material, tool);
+
+        // Reset progress when the targeted block changes.
+        let prior = match &self.breaking {
+            Some(b) if b.block == hit.block => b.progress,
+            _ => 0.0,
+        };
+        let progress = prior + dt / seconds.max(1.0e-3);
+        if progress >= 1.0 {
+            self.player_anim.trigger_swing();
+            if self.break_block_at(hit.block) {
+                self.inventory.damage_selected_tool();
             }
-            self.broadcast_local_edit(hit.block, BlockId::AIR);
+            self.breaking = None;
+        } else {
+            self.breaking = Some(BreakState {
+                block: hit.block,
+                progress,
+            });
         }
     }
 
-    /// Place the currently selected block against the targeted face.
-    fn try_place_block(&mut self) {
-        let hit = crate::world::raycast(
-            self.player.eye_position(),
-            self.player.look_direction(),
-            REACH,
-            |p| self.world.is_solid(p),
-        );
-        let Some(hit) = hit else { return };
+    /// Right-click: eat the held food when hungry, otherwise place its block.
+    fn use_selected(&mut self) {
         let Some(item_id) = self.inventory.item_in_selected() else {
             return;
         };
+        if let Some(food) = self.items.food(item_id)
+            && self.player.mode.takes_damage()
+            && self.player.is_hungry()
+        {
+            self.player.feed(food.hunger, food.saturation);
+            self.inventory.consume_selected(1);
+            self.player_anim.trigger_swing();
+            return;
+        }
+        self.place_block(item_id);
+    }
+
+    /// Place the selected item's block against the targeted face. Consumes from
+    /// the inventory only in survival (creative has infinite blocks).
+    fn place_block(&mut self, item_id: ItemId) {
         let Some(block) = self.items.get(item_id).place_block else {
+            return;
+        };
+        let Some(hit) = self.targeted_block() else {
             return;
         };
         let target = hit.place_position();
@@ -612,7 +786,9 @@ impl InGameState {
             return;
         }
         if self.world.set_block(target, block).is_some() {
-            self.inventory.consume_selected(1);
+            if self.player.mode.consumes_blocks() {
+                self.inventory.consume_selected(1);
+            }
             self.broadcast_local_edit(target, block);
             self.player_anim.trigger_swing();
         }
@@ -627,7 +803,7 @@ impl GameState for InGameState {
     fn update(&mut self, ctx: &mut StateContext) -> Transition {
         let kb = ctx.settings.controls.keybinds.clone();
 
-        if ctx.input.just_pressed(kb.inventory) {
+        if !self.dead && ctx.input.just_pressed(kb.inventory) {
             self.toggle_inventory();
         }
         // Esc closes the inventory if open, otherwise opens the pause overlay.
@@ -639,8 +815,8 @@ impl GameState for InGameState {
             }
         }
 
-        if self.inventory_open {
-            // Inventory screen: free cursor, freeze player control.
+        if self.inventory_open || self.dead {
+            // Inventory screen / death screen: free cursor, freeze player control.
             ctx.grab_cursor = false;
         } else {
             ctx.grab_cursor = true;
@@ -650,6 +826,22 @@ impl GameState for InGameState {
             }
             if ctx.input.just_pressed(kb.toggle_debug) {
                 self.show_debug = !self.show_debug;
+            }
+
+            // Live game-mode toggle (F4).
+            if ctx.input.just_pressed(kb.toggle_gamemode) {
+                self.player.set_mode(self.player.mode.toggled());
+                self.breaking = None;
+                self.broadcast_mode_change();
+            }
+
+            // Creative flight: double-tap the jump key within the window.
+            self.jump_tap_timer += ctx.dt;
+            if ctx.input.just_pressed(kb.jump) {
+                if self.player.mode.can_fly() && self.jump_tap_timer < DOUBLE_TAP_WINDOW {
+                    self.player.flying = !self.player.flying;
+                }
+                self.jump_tap_timer = 0.0;
             }
 
             // Mouse look.
@@ -675,14 +867,35 @@ impl GameState for InGameState {
             self.player
                 .update(movement, dt, |p| self.world.is_solid_for_collision(p));
 
+            // Survival vitals: hunger drain, regen, starvation.
+            if self.player.mode.takes_damage() {
+                self.player.tick_survival(dt, movement.sprint);
+                if self.player.is_dead() {
+                    self.dead = true;
+                    self.breaking = None;
+                }
+            }
+
             // Block interaction. The main-hand swing fires on every left click,
             // even when punching air (no block hit).
             if ctx.input.mouse_just_pressed(MouseButton::Left) {
                 self.player_anim.trigger_swing();
-                self.try_break_block();
+            }
+            if self.player.mode.instant_break() {
+                // Creative: instant break on click.
+                self.breaking = None;
+                if ctx.input.mouse_just_pressed(MouseButton::Left)
+                    && let Some(hit) = self.targeted_block()
+                {
+                    self.break_block_at(hit.block);
+                }
+            } else {
+                // Survival: progressive mining while the dig button is held.
+                let digging = ctx.input.mouse_held(MouseButton::Left);
+                self.update_mining(digging, dt);
             }
             if ctx.input.mouse_just_pressed(MouseButton::Right) {
-                self.try_place_block();
+                self.use_selected();
             }
         }
 
@@ -709,20 +922,68 @@ impl GameState for InGameState {
     }
 
     fn ui(&mut self, egui_ctx: &egui::Context, ctx: &mut StateContext) -> Transition {
+        use crate::ui::inventory::InvAction;
+
+        // Death screen takes over everything else.
+        if self.dead {
+            let mut respawn = false;
+            egui::Area::new(egui::Id::new("death_screen"))
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(egui_ctx, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            egui::RichText::new("You died")
+                                .size(40.0)
+                                .color(egui::Color32::from_rgb(220, 40, 40)),
+                        );
+                        ui.add_space(12.0);
+                        if ui
+                            .add_sized([180.0, 40.0], egui::Button::new("Respawn"))
+                            .clicked()
+                        {
+                            respawn = true;
+                        }
+                    });
+                });
+            if respawn {
+                self.respawn();
+            }
+            return Transition::None;
+        }
+
         if self.inventory_open {
-            if let Some(index) = crate::ui::inventory::draw_inventory(
+            if let Some(action) = crate::ui::inventory::draw_inventory(
                 egui_ctx,
                 &self.inventory,
                 &self.items,
                 self.held,
+                self.player.mode,
             ) {
-                self.handle_slot_click(index);
+                match action {
+                    InvAction::Slot(index) => self.handle_slot_click(index),
+                    InvAction::Pick(id) => self.held = Some(self.items.full_stack(id)),
+                }
             }
             return Transition::None;
         }
 
         hud::draw_crosshair(egui_ctx);
         hud::draw_hotbar(egui_ctx, &self.inventory, &self.items);
+        hud::draw_mode_indicator(egui_ctx, self.player.mode.label());
+
+        // Survival HUD: vitals and break progress.
+        if self.player.mode.takes_damage() {
+            hud::draw_vitals(
+                egui_ctx,
+                self.player.health,
+                crate::entity::player::MAX_HEALTH,
+                self.player.hunger,
+                crate::entity::player::MAX_HUNGER,
+            );
+        }
+        if let Some(breaking) = &self.breaking {
+            hud::draw_break_progress(egui_ctx, breaking.progress);
+        }
 
         if self.show_debug {
             let fps = if ctx.dt > 0.0 { 1.0 / ctx.dt } else { 0.0 };

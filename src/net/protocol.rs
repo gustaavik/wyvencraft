@@ -7,7 +7,7 @@
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::core::{BlockId, BlockPos};
+use crate::core::{BlockId, BlockPos, GameMode};
 
 /// 3D vector as it appears on the wire.
 pub type NetVec3 = [f32; 3];
@@ -29,6 +29,10 @@ pub enum ClientMessage {
     Break { pos: BlockPos },
     /// Request to place `block` at `pos`.
     Place { pos: BlockPos, block: BlockId },
+    /// Report the client's current survival vitals to the host.
+    Stats { health: f32, hunger: f32 },
+    /// Notify the host the client switched game mode.
+    SetMode(GameMode),
     /// Chat message.
     Chat(String),
 }
@@ -37,12 +41,14 @@ pub enum ClientMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ServerMessage {
     /// First message on join: world seed + identity + spawn point + the host's
-    /// current time-of-day (so the joining client's sky matches).
+    /// current time-of-day (so the joining client's sky matches) + the session's
+    /// game mode.
     Welcome {
         seed: u64,
         your_id: PlayerId,
         spawn: NetVec3,
         time_of_day: f32,
+        game_mode: GameMode,
     },
     PlayerJoined {
         id: PlayerId,
@@ -62,6 +68,13 @@ pub enum ServerMessage {
     BlockChanged {
         pos: BlockPos,
         block: BlockId,
+    },
+    /// Authoritative survival vitals + mode for a (remote) player.
+    PlayerStats {
+        id: PlayerId,
+        health: f32,
+        hunger: f32,
+        mode: GameMode,
     },
 }
 
@@ -113,6 +126,48 @@ mod tests {
             ClientMessage::Place {
                 pos: BlockPos { x: 1, y: 2, z: 3 },
                 block: BlockId(7)
+            }
+        ));
+    }
+
+    #[test]
+    fn welcome_carries_game_mode() {
+        let msg = ServerMessage::Welcome {
+            seed: 42,
+            your_id: PlayerId(1),
+            spawn: [0.5, 80.0, 0.5],
+            time_of_day: 0.25,
+            game_mode: GameMode::Creative,
+        };
+        let back: ServerMessage = decode(&encode(&msg)).unwrap();
+        assert!(matches!(
+            back,
+            ServerMessage::Welcome {
+                game_mode: GameMode::Creative,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn set_mode_and_stats_roundtrip() {
+        let set =
+            decode::<ClientMessage>(&encode(&ClientMessage::SetMode(GameMode::Survival))).unwrap();
+        assert!(matches!(set, ClientMessage::SetMode(GameMode::Survival)));
+
+        let stats = decode::<ServerMessage>(&encode(&ServerMessage::PlayerStats {
+            id: PlayerId(2),
+            health: 15.0,
+            hunger: 8.0,
+            mode: GameMode::Survival,
+        }))
+        .unwrap();
+        assert!(matches!(
+            stats,
+            ServerMessage::PlayerStats {
+                id: PlayerId(2),
+                mode: GameMode::Survival,
+                ..
             }
         ));
     }

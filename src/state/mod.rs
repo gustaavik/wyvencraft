@@ -11,6 +11,7 @@ pub mod loading_state;
 pub mod menu_state;
 pub mod multiplayer_menu;
 pub mod pause_menu;
+pub mod singleplayer_menu;
 
 pub use connecting_state::ConnectingState;
 pub use ingame_state::InGameState;
@@ -18,6 +19,7 @@ pub use loading_state::LoadingState;
 pub use menu_state::MainMenuState;
 pub use multiplayer_menu::MultiplayerMenuState;
 pub use pause_menu::PauseMenuState;
+pub use singleplayer_menu::SingleplayerMenuState;
 
 use std::sync::Arc;
 

@@ -2,7 +2,7 @@
 
 use glam::Vec3;
 
-use crate::core::{Aabb, BlockPos};
+use crate::core::{Aabb, BlockPos, GameMode};
 use crate::entity::physics::{self};
 
 /// Player collision box dimensions.
@@ -16,6 +16,22 @@ const WALK_SPEED: f32 = 4.3;
 const SPRINT_SPEED: f32 = 6.5;
 const FLY_SPEED: f32 = 12.0;
 const TERMINAL_VELOCITY: f32 = -60.0;
+
+/// Full health/hunger (Minecraft-style: 20 = 10 hearts / 10 food shanks).
+pub const MAX_HEALTH: f32 = 20.0;
+pub const MAX_HUNGER: f32 = 20.0;
+/// Falls shorter than this many blocks deal no damage.
+const SAFE_FALL: f32 = 3.0;
+/// Health lost per block fallen beyond [`SAFE_FALL`].
+const FALL_DMG_PER_BLOCK: f32 = 1.0;
+/// Hunger drained per second while idle / while sprinting (added).
+const HUNGER_DRAIN_BASE: f32 = 0.05;
+const HUNGER_DRAIN_SPRINT: f32 = 0.15;
+/// At/above this hunger the player naturally regenerates health.
+const REGEN_HUNGER_THRESHOLD: f32 = 18.0;
+const REGEN_RATE: f32 = 1.0;
+/// Health lost per second while at zero hunger (starvation).
+const STARVE_RATE: f32 = 1.0;
 
 /// Which camera the player is using.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,10 +78,18 @@ pub struct Player {
     pub on_ground: bool,
     pub flying: bool,
     pub perspective: Perspective,
+    /// Which gameplay rules apply (survival vs. creative).
+    pub mode: GameMode,
+    /// Survival vitals (ignored in creative, where the player is invulnerable).
+    pub health: f32,
+    pub hunger: f32,
+    pub saturation: f32,
+    /// Highest Y reached since last leaving the ground; drives fall-damage.
+    fall_peak_y: f32,
 }
 
 impl Player {
-    pub fn new(position: Vec3) -> Self {
+    pub fn new(position: Vec3, mode: GameMode) -> Self {
         Self {
             position,
             velocity: Vec3::ZERO,
@@ -74,6 +98,11 @@ impl Player {
             on_ground: false,
             flying: false,
             perspective: Perspective::First,
+            mode,
+            health: MAX_HEALTH,
+            hunger: MAX_HUNGER,
+            saturation: MAX_HUNGER,
+            fall_peak_y: position.y,
         }
     }
 
@@ -116,7 +145,10 @@ impl Player {
             wish = wish.normalize();
         }
 
-        let speed = if self.flying {
+        // Flight only takes effect in a mode that permits it.
+        let flying = self.flying && self.mode.can_fly();
+
+        let speed = if flying {
             FLY_SPEED
         } else if input.sprint {
             SPRINT_SPEED
@@ -127,7 +159,7 @@ impl Player {
         self.velocity.x = wish.x * speed;
         self.velocity.z = wish.z * speed;
 
-        if self.flying {
+        if flying {
             let vertical = (input.jump as i32 - input.sneak as i32) as f32;
             self.velocity.y = vertical * FLY_SPEED;
         } else {
@@ -137,18 +169,110 @@ impl Player {
             }
         }
 
+        let was_on_ground = self.on_ground;
         let result = physics::move_and_collide(self.aabb(), self.velocity * dt, is_solid);
         self.position += result.delta;
         self.on_ground = result.on_ground;
 
+        // Fall-damage bookkeeping: track the peak height of an airborne arc and,
+        // on landing, hurt the player for the distance fallen beyond the safe margin.
+        if flying {
+            self.fall_peak_y = self.position.y;
+        } else if self.on_ground {
+            if !was_on_ground {
+                let dist = self.fall_peak_y - self.position.y;
+                if self.mode.takes_damage() && dist > SAFE_FALL {
+                    self.damage((dist - SAFE_FALL) * FALL_DMG_PER_BLOCK);
+                }
+            }
+            self.fall_peak_y = self.position.y;
+        } else {
+            self.fall_peak_y = self.fall_peak_y.max(self.position.y);
+        }
+
         // Zero out velocity components that were blocked.
-        if !self.flying {
+        if !flying {
             if result.on_ground && self.velocity.y < 0.0 {
                 self.velocity.y = 0.0;
             }
         } else {
             self.velocity = Vec3::ZERO;
         }
+    }
+
+    /// Advance survival vitals one step (no-op semantics in creative — callers
+    /// should only invoke this in survival). `sprinting` raises hunger drain.
+    pub fn tick_survival(&mut self, dt: f32, sprinting: bool) {
+        // Exertion drains the saturation buffer first, then hunger itself.
+        let drain = (HUNGER_DRAIN_BASE + if sprinting { HUNGER_DRAIN_SPRINT } else { 0.0 }) * dt;
+        if self.saturation > 0.0 {
+            self.saturation = (self.saturation - drain).max(0.0);
+        } else {
+            self.hunger = (self.hunger - drain).max(0.0);
+        }
+
+        // Natural regeneration while well-fed.
+        if self.hunger >= REGEN_HUNGER_THRESHOLD && self.health < MAX_HEALTH {
+            self.health = (self.health + REGEN_RATE * dt).min(MAX_HEALTH);
+            self.saturation = (self.saturation - drain).max(0.0);
+        }
+
+        // Starvation once hunger is fully depleted.
+        if self.hunger <= 0.0 {
+            self.health = (self.health - STARVE_RATE * dt).max(0.0);
+        }
+    }
+
+    /// Switch game mode, applying the rule changes that follow from it.
+    pub fn set_mode(&mut self, mode: GameMode) {
+        self.mode = mode;
+        if !mode.can_fly() {
+            self.flying = false;
+        }
+        if mode.is_creative() {
+            // Creative is invulnerable; restore vitals so you can't die there.
+            self.health = MAX_HEALTH;
+            self.hunger = MAX_HUNGER;
+            self.saturation = MAX_HUNGER;
+        }
+    }
+
+    /// Apply damage (clamped, and only in a mode that takes damage).
+    pub fn damage(&mut self, amount: f32) {
+        if self.mode.takes_damage() {
+            self.health = (self.health - amount).max(0.0);
+        }
+    }
+
+    /// Restore health up to the maximum.
+    pub fn heal(&mut self, amount: f32) {
+        self.health = (self.health + amount).min(MAX_HEALTH);
+    }
+
+    /// Eat: restore hunger, and saturation up to the new hunger level.
+    pub fn feed(&mut self, hunger: f32, saturation: f32) {
+        self.hunger = (self.hunger + hunger).min(MAX_HUNGER);
+        self.saturation = (self.saturation + saturation).min(self.hunger);
+    }
+
+    pub fn is_dead(&self) -> bool {
+        self.mode.takes_damage() && self.health <= 0.0
+    }
+
+    /// Whether the player has room to eat (hunger below the maximum).
+    pub fn is_hungry(&self) -> bool {
+        self.hunger < MAX_HUNGER
+    }
+
+    /// Reset vitals and motion for a respawn at `position`.
+    pub fn respawn_at(&mut self, position: Vec3) {
+        self.position = position;
+        self.velocity = Vec3::ZERO;
+        self.health = MAX_HEALTH;
+        self.hunger = MAX_HUNGER;
+        self.saturation = MAX_HUNGER;
+        self.fall_peak_y = position.y;
+        self.on_ground = false;
     }
 
     pub fn toggle_perspective(&mut self) {
@@ -167,7 +291,7 @@ mod tests {
     fn spawned_player_rests_and_does_not_fall_through() {
         // Solid ground fills y < 65; spawn feet flush on the block top at y = 65.0.
         let solid = |p: BlockPos| p.y < 65;
-        let mut player = Player::new(Vec3::new(0.5, 65.0, 0.5));
+        let mut player = Player::new(Vec3::new(0.5, 65.0, 0.5), GameMode::Survival);
         let dt = 1.0 / 60.0;
 
         for _ in 0..240 {
@@ -180,5 +304,83 @@ mod tests {
             player.position.y
         );
         assert!(player.on_ground, "player should be grounded after settling");
+    }
+
+    /// Drop the player from well above the ground and let it settle; in survival
+    /// it should lose health proportional to the (large) fall distance.
+    #[test]
+    fn long_fall_damages_in_survival() {
+        let solid = |p: BlockPos| p.y < 65;
+        let mut player = Player::new(Vec3::new(0.5, 85.0, 0.5), GameMode::Survival);
+        let dt = 1.0 / 60.0;
+        for _ in 0..600 {
+            player.update(MovementInput::default(), dt, solid);
+        }
+        assert!(player.on_ground, "player should land");
+        assert!(
+            player.health < MAX_HEALTH,
+            "a ~20-block fall should deal damage; health = {}",
+            player.health
+        );
+    }
+
+    /// A short fall (below the safe margin) deals no damage.
+    #[test]
+    fn short_fall_is_harmless() {
+        let solid = |p: BlockPos| p.y < 65;
+        let mut player = Player::new(Vec3::new(0.5, 67.0, 0.5), GameMode::Survival);
+        let dt = 1.0 / 60.0;
+        for _ in 0..240 {
+            player.update(MovementInput::default(), dt, solid);
+        }
+        assert_eq!(player.health, MAX_HEALTH, "a 2-block fall should be safe");
+    }
+
+    /// The same long fall in creative deals no damage (invulnerable).
+    #[test]
+    fn long_fall_is_harmless_in_creative() {
+        let solid = |p: BlockPos| p.y < 65;
+        let mut player = Player::new(Vec3::new(0.5, 85.0, 0.5), GameMode::Creative);
+        let dt = 1.0 / 60.0;
+        for _ in 0..600 {
+            player.update(MovementInput::default(), dt, solid);
+        }
+        assert_eq!(player.health, MAX_HEALTH, "creative takes no fall damage");
+    }
+
+    #[test]
+    fn starvation_drains_health_and_eating_restores_hunger() {
+        let mut player = Player::new(Vec3::new(0.5, 65.0, 0.5), GameMode::Survival);
+        player.hunger = 0.0;
+        player.saturation = 0.0;
+        player.tick_survival(1.0, false);
+        assert!(player.health < MAX_HEALTH, "starvation should hurt");
+
+        player.feed(8.0, 4.0);
+        assert!((player.hunger - 8.0).abs() < 1e-3);
+        assert!(player.saturation <= player.hunger);
+    }
+
+    #[test]
+    fn regen_when_well_fed() {
+        let mut player = Player::new(Vec3::new(0.5, 65.0, 0.5), GameMode::Survival);
+        player.health = 10.0;
+        player.hunger = MAX_HUNGER;
+        player.saturation = MAX_HUNGER;
+        player.tick_survival(1.0, false);
+        assert!(player.health > 10.0, "well-fed players regenerate health");
+    }
+
+    #[test]
+    fn switching_to_creative_clears_flight_rules_and_heals() {
+        let mut player = Player::new(Vec3::new(0.5, 65.0, 0.5), GameMode::Survival);
+        player.health = 3.0;
+        player.set_mode(GameMode::Creative);
+        assert!(player.mode.can_fly());
+        assert_eq!(player.health, MAX_HEALTH);
+
+        player.flying = true;
+        player.set_mode(GameMode::Survival);
+        assert!(!player.flying, "leaving creative disables flight");
     }
 }

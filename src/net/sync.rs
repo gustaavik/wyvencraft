@@ -3,6 +3,7 @@
 
 use glam::Vec3;
 
+use crate::core::GameMode;
 use crate::net::protocol::PlayerId;
 
 /// A non-local player as seen by this client.
@@ -14,6 +15,10 @@ pub struct RemotePlayer {
     current: Vec3,
     pub yaw: f32,
     pub pitch: f32,
+    /// Latest synced survival vitals + mode (for overhead UI / future use).
+    pub health: f32,
+    pub hunger: f32,
+    pub mode: GameMode,
 }
 
 impl RemotePlayer {
@@ -25,6 +30,9 @@ impl RemotePlayer {
             current: position,
             yaw: 0.0,
             pitch: 0.0,
+            health: crate::entity::player::MAX_HEALTH,
+            hunger: crate::entity::player::MAX_HUNGER,
+            mode: GameMode::Survival,
         }
     }
 
@@ -34,6 +42,13 @@ impl RemotePlayer {
         self.current = position;
         self.yaw = yaw;
         self.pitch = pitch;
+    }
+
+    /// Record synced survival vitals from a `PlayerStats` message.
+    pub fn set_stats(&mut self, health: f32, hunger: f32, mode: GameMode) {
+        self.health = health;
+        self.hunger = hunger;
+        self.mode = mode;
     }
 
     /// Smoothed render position; `alpha` in `[0,1]` between the last two snapshots.

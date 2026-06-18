@@ -1,6 +1,6 @@
 //! Main menu: choose singleplayer / multiplayer / quit.
 
-use super::{GameState, LoadingState, MultiplayerMenuState, StateContext, Transition};
+use super::{GameState, MultiplayerMenuState, SingleplayerMenuState, StateContext, Transition};
 
 #[derive(Default)]
 pub struct MainMenuState;
@@ -36,7 +36,7 @@ impl GameState for MainMenuState {
                 };
 
                 if button(ui, "Singleplayer") {
-                    transition = Transition::Replace(Box::new(LoadingState::singleplayer()));
+                    transition = Transition::Replace(Box::new(SingleplayerMenuState::new()));
                 }
                 ui.add_space(8.0);
                 if button(ui, "Multiplayer") {

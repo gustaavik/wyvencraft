@@ -81,6 +81,7 @@ pub struct Keybinds {
     pub inventory: KeyCode,
     pub toggle_perspective: KeyCode,
     pub toggle_debug: KeyCode,
+    pub toggle_gamemode: KeyCode,
     pub pause: KeyCode,
 }
 
@@ -97,6 +98,7 @@ impl Default for Keybinds {
             inventory: KeyCode::KeyE,
             toggle_perspective: KeyCode::F5,
             toggle_debug: KeyCode::F3,
+            toggle_gamemode: KeyCode::F4,
             pause: KeyCode::Escape,
         }
     }

@@ -73,8 +73,149 @@ pub fn draw_hotbar(ctx: &Context, inventory: &Inventory, items: &ItemRegistry) {
                             Color32::YELLOW,
                         );
                     }
+                    // Tool durability bar along the bottom of the cell.
+                    if let (Some(dur), Some(max)) =
+                        (stack.durability, items.max_durability(stack.item))
+                        && max > 0
+                        && dur < max
+                    {
+                        let ratio = dur as f32 / max as f32;
+                        let bar_w = slot - 8.0;
+                        let track = egui::Rect::from_min_size(
+                            egui::pos2(cell.left() + 4.0, cell.bottom() - 7.0),
+                            egui::vec2(bar_w, 4.0),
+                        );
+                        painter.rect_filled(track, 1.0, Color32::from_black_alpha(160));
+                        let fill =
+                            egui::Rect::from_min_size(track.min, egui::vec2(bar_w * ratio, 4.0));
+                        painter.rect_filled(fill, 1.0, durability_color(ratio));
+                    }
                 }
             }
+        });
+}
+
+/// Green→red colour for a tool's remaining-durability ratio.
+fn durability_color(ratio: f32) -> Color32 {
+    let r = ((1.0 - ratio) * 255.0) as u8;
+    let g = (ratio * 220.0) as u8;
+    Color32::from_rgb(r.max(40), g, 40)
+}
+
+/// Draw a heart icon (two lobes + a point) centred at `c`, sized `s`.
+fn heart(painter: &egui::Painter, c: egui::Pos2, s: f32, color: Color32) {
+    let r = s * 0.27;
+    let lobe = r * 0.45;
+    painter.circle_filled(c + egui::vec2(-r * 0.55, -lobe), r * 0.62, color);
+    painter.circle_filled(c + egui::vec2(r * 0.55, -lobe), r * 0.62, color);
+    let left = c + egui::vec2(-r * 1.1, -lobe * 0.2);
+    let right = c + egui::vec2(r * 1.1, -lobe * 0.2);
+    let tip = c + egui::vec2(0.0, s * 0.5);
+    painter.add(egui::Shape::convex_polygon(
+        vec![left, right, tip],
+        color,
+        egui::Stroke::NONE,
+    ));
+}
+
+/// Draw a row of `count` value-pips (e.g. hearts/food), each worth 2 units, with
+/// half-resolution by over-painting the right half of a half-full icon.
+fn draw_pips(
+    painter: &egui::Painter,
+    origin: egui::Pos2,
+    rtl: bool,
+    count: usize,
+    value: f32,
+    full: Color32,
+    empty: Color32,
+) {
+    let size = 16.0;
+    let step = size + 2.0;
+    for i in 0..count {
+        let dx = if rtl {
+            -(i as f32) * step
+        } else {
+            i as f32 * step
+        };
+        let center = origin + egui::vec2(dx, 0.0);
+        let remaining = value - i as f32 * 2.0;
+        heart(painter, center, size, empty);
+        if remaining >= 0.5 {
+            heart(painter, center, size, full);
+            if remaining < 1.5 {
+                // Over-paint the right half to render a half-pip.
+                let half = egui::Rect::from_min_size(
+                    egui::pos2(center.x, center.y - size * 0.6),
+                    egui::vec2(size * 0.7, size * 1.2),
+                );
+                painter.rect_filled(half, 0.0, empty);
+            }
+        }
+    }
+}
+
+/// Draw the survival vitals: a hearts row (health) and a food row (hunger),
+/// stacked just above the hotbar.
+pub fn draw_vitals(ctx: &Context, health: f32, max_health: f32, hunger: f32, max_hunger: f32) {
+    let hearts = (max_health / 2.0).round() as usize;
+    let shanks = (max_hunger / 2.0).round() as usize;
+    egui::Area::new(egui::Id::new("vitals"))
+        .anchor(Align2::CENTER_BOTTOM, egui::vec2(0.0, -70.0))
+        .show(ctx, |ui| {
+            let width = 240.0;
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 22.0), egui::Sense::hover());
+            let painter = ui.painter();
+            let row_y = rect.center().y;
+            // Health hearts grow left→right from the left edge.
+            draw_pips(
+                painter,
+                egui::pos2(rect.left() + 10.0, row_y),
+                false,
+                hearts,
+                health,
+                Color32::from_rgb(220, 40, 40),
+                Color32::from_rgb(60, 20, 20),
+            );
+            // Hunger pips grow right→left from the right edge.
+            draw_pips(
+                painter,
+                egui::pos2(rect.right() - 10.0, row_y),
+                true,
+                shanks,
+                hunger,
+                Color32::from_rgb(190, 130, 50),
+                Color32::from_rgb(55, 40, 20),
+            );
+        });
+}
+
+/// Draw a small break-progress bar just below the crosshair.
+pub fn draw_break_progress(ctx: &Context, progress: f32) {
+    let screen = ctx.screen_rect();
+    let center = screen.center();
+    let w = 40.0;
+    let h = 5.0;
+    let painter = ctx.layer_painter(egui::LayerId::background());
+    let track = egui::Rect::from_min_size(
+        egui::pos2(center.x - w * 0.5, center.y + 16.0),
+        egui::vec2(w, h),
+    );
+    painter.rect_filled(track, 1.0, Color32::from_black_alpha(160));
+    let fill = egui::Rect::from_min_size(track.min, egui::vec2(w * progress.clamp(0.0, 1.0), h));
+    painter.rect_filled(fill, 1.0, Color32::from_white_alpha(220));
+}
+
+/// Draw the current game-mode label in the top-right corner.
+pub fn draw_mode_indicator(ctx: &Context, label: &str) {
+    egui::Area::new(egui::Id::new("mode_indicator"))
+        .anchor(Align2::RIGHT_TOP, egui::vec2(-8.0, 8.0))
+        .show(ctx, |ui| {
+            ui.label(
+                egui::RichText::new(label)
+                    .monospace()
+                    .color(Color32::WHITE)
+                    .background_color(Color32::from_black_alpha(120)),
+            );
         });
 }
 

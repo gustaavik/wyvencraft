@@ -54,7 +54,7 @@ impl GameState for ConnectingState {
             return Transition::Replace(Box::new(MultiplayerMenuState::new()));
         }
 
-        // Wait for the Welcome message carrying the world seed + our id.
+        // Wait for the Welcome message carrying the world seed + our id + mode.
         let mut welcome = None;
         for msg in client.receive() {
             if let ServerMessage::Welcome {
@@ -62,17 +62,19 @@ impl GameState for ConnectingState {
                 your_id,
                 spawn,
                 time_of_day,
+                game_mode,
             } = msg
             {
-                welcome = Some((seed, your_id, spawn, time_of_day));
+                welcome = Some((seed, your_id, spawn, time_of_day, game_mode));
             }
         }
         let _ = client.flush();
 
-        if let Some((seed, your_id, spawn, time_of_day)) = welcome {
+        if let Some((seed, your_id, spawn, time_of_day, game_mode)) = welcome {
             log::info!(
-                "connected; world seed {seed}, player id {}, spawn {spawn:?}, time {time_of_day:.3}",
-                your_id.0
+                "connected; world seed {seed}, player id {}, spawn {spawn:?}, time {time_of_day:.3}, game_mode {}",
+                your_id.0,
+                game_mode.label()
             );
             let client = self.client.take().expect("client present");
             return Transition::Replace(Box::new(InGameState::new_client(
@@ -81,6 +83,7 @@ impl GameState for ConnectingState {
                 your_id,
                 spawn,
                 time_of_day,
+                game_mode,
             )));
         }
 
