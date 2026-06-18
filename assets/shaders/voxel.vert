@@ -6,8 +6,11 @@ layout(location = 1) in vec3 normal;
 layout(location = 2) in vec2 uv;
 layout(location = 3) in float ao;
 
+// Shared with voxel.frag — layout must stay identical across both stages.
 layout(push_constant) uniform PushConstants {
     mat4 view_proj;
+    vec4 sun_dir;     // xyz: direction toward the light, w: unused
+    vec4 light_color; // rgb: directional light tint, w: ambient floor
 } pc;
 
 layout(location = 0) out vec2 v_uv;

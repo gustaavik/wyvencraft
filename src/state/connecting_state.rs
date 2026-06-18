@@ -61,21 +61,26 @@ impl GameState for ConnectingState {
                 seed,
                 your_id,
                 spawn,
+                time_of_day,
             } = msg
             {
-                welcome = Some((seed, your_id, spawn));
+                welcome = Some((seed, your_id, spawn, time_of_day));
             }
         }
         let _ = client.flush();
 
-        if let Some((seed, your_id, spawn)) = welcome {
+        if let Some((seed, your_id, spawn, time_of_day)) = welcome {
             log::info!(
-                "connected; world seed {seed}, player id {}, spawn {spawn:?}",
+                "connected; world seed {seed}, player id {}, spawn {spawn:?}, time {time_of_day:.3}",
                 your_id.0
             );
             let client = self.client.take().expect("client present");
             return Transition::Replace(Box::new(InGameState::new_client(
-                seed, client, your_id, spawn,
+                seed,
+                client,
+                your_id,
+                spawn,
+                time_of_day,
             )));
         }
 

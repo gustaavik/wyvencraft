@@ -9,13 +9,13 @@ use glam::Vec3;
 use winit::event::MouseButton;
 
 use super::{GameState, PauseMenuState, StateContext, Transition};
-use crate::core::{Aabb, BlockId, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, ChunkPos};
+use crate::core::{Aabb, BlockId, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, ChunkPos, DayCycle};
 use crate::entity::{AnimationState, HumanoidModel, Perspective, Player};
 use crate::inventory::{Inventory, ItemRegistry, ItemStack};
 use crate::net::{
     Channel, Client, ClientMessage, Host, NetVec3, PlayerId, RemotePlayer, ServerMessage,
 };
-use crate::render::{Camera, GpuMesh, RenderContext, SceneFrame};
+use crate::render::{Camera, GpuMesh, LightParams, RenderContext, SceneFrame, SkyParams};
 use crate::ui::hud;
 use crate::world::block::blocks;
 use crate::world::meshing::mesh_chunk;
@@ -69,6 +69,8 @@ pub struct InGameState {
     /// Procedural animation state for the local player's model.
     player_anim: AnimationState,
     fov_degrees: f32,
+    /// Time-of-day clock driving the sky and world lighting.
+    day_cycle: DayCycle,
     /// Inventory screen state.
     inventory_open: bool,
     /// Stack currently "held" by the cursor in the inventory screen.
@@ -91,28 +93,36 @@ struct RemoteAnim {
 impl InGameState {
     /// Singleplayer world.
     pub fn new(seed: u64) -> Self {
-        Self::build(seed, NetRole::Singleplayer, None)
+        Self::build(seed, NetRole::Singleplayer, None, DayCycle::default())
     }
 
     /// Host a multiplayer session (the host also plays locally).
     pub fn new_host(seed: u64, host: Host) -> Self {
-        Self::build(seed, NetRole::Host(host), None)
+        Self::build(seed, NetRole::Host(host), None, DayCycle::default())
     }
 
     /// Join a multiplayer session as a client (world built from the host's seed).
-    /// `spawn` is the position the host assigned us in its `Welcome`.
-    pub fn new_client(seed: u64, client: Client, local_id: PlayerId, spawn: NetVec3) -> Self {
+    /// `spawn` is the position the host assigned us in its `Welcome`; `time_of_day`
+    /// seeds our day/night clock to the host's so skies match on join.
+    pub fn new_client(
+        seed: u64,
+        client: Client,
+        local_id: PlayerId,
+        spawn: NetVec3,
+        time_of_day: f32,
+    ) -> Self {
         Self::build(
             seed,
             NetRole::Client { client, local_id },
             Some(Vec3::from_array(spawn)),
+            DayCycle::new(time_of_day),
         )
     }
 
     /// Build the in-game state. `spawn_override` (clients) places the player at the
     /// host-provided position and anchors synchronous generation there; otherwise the
     /// spawn is found over the origin column.
-    fn build(seed: u64, net: NetRole, spawn_override: Option<Vec3>) -> Self {
+    fn build(seed: u64, net: NetRole, spawn_override: Option<Vec3>, day_cycle: DayCycle) -> Self {
         let blocks = Arc::new(BlockRegistry::with_builtins());
         let items = ItemRegistry::from_blocks(&blocks);
 
@@ -173,6 +183,7 @@ impl InGameState {
             player_mesh: None,
             player_anim: AnimationState::new(),
             fov_degrees: 70.0,
+            day_cycle,
             inventory_open: false,
             held: None,
             net,
@@ -350,6 +361,7 @@ impl InGameState {
             NetRole::Host(host) => {
                 host.pump(duration);
                 let seed = self.world.seed();
+                let time_of_day = self.day_cycle.time_of_day();
 
                 for cid in host.take_joined() {
                     if let Some(pid) = host.player_id(cid) {
@@ -360,6 +372,7 @@ impl InGameState {
                                 seed,
                                 your_id: pid,
                                 spawn: position,
+                                time_of_day,
                             },
                             Channel::Reliable,
                         );
@@ -674,6 +687,7 @@ impl GameState for InGameState {
         }
 
         self.fov_degrees = ctx.settings.render.fov_degrees;
+        self.day_cycle.advance(ctx.dt);
         self.pump_network(ctx.dt);
         self.update_streaming(ctx.settings.render.render_distance);
         self.enqueue_dirty();
@@ -727,6 +741,7 @@ impl GameState for InGameState {
                 ),
                 format!("on_ground: {}", self.player.on_ground),
                 format!("net: {}", self.net_status()),
+                format!("time: {}", format_time_of_day(self.day_cycle.time_of_day())),
             ];
             hud::draw_debug(egui_ctx, &lines);
         }
@@ -788,12 +803,36 @@ impl GameState for InGameState {
             opaque.push(mesh);
         }
 
+        let atmo = self.day_cycle.atmosphere();
+        let sky = SkyParams {
+            inv_view_proj: camera.sky_inv_view_proj(),
+            sun_dir: atmo.sun_dir,
+            zenith_color: atmo.zenith_color,
+            horizon_color: atmo.horizon_color,
+            sun_color: atmo.sun_color,
+            star_intensity: atmo.star_intensity,
+            moon_intensity: atmo.moon_intensity,
+        };
+        let light = LightParams {
+            light_dir: atmo.light_dir,
+            light_color: atmo.light_color,
+            ambient: atmo.ambient,
+        };
+
         Some(SceneFrame {
             view_proj: camera.view_projection(),
+            sky,
+            light,
             opaque,
             transparent,
         })
     }
+}
+
+/// Format a normalized time-of-day `[0,1)` (0.0 = midnight) as a 24-hour clock.
+fn format_time_of_day(t: f32) -> String {
+    let minutes = (t.rem_euclid(1.0) * 24.0 * 60.0) as u32;
+    format!("{:02}:{:02}", (minutes / 60) % 24, minutes % 60)
 }
 
 /// Find a safe spawn (top solid block at the origin column + 1).

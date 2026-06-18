@@ -16,6 +16,20 @@ pub mod voxel_fs {
     }
 }
 
+pub mod sky_vs {
+    vulkano_shaders::shader! {
+        ty: "vertex",
+        path: "assets/shaders/sky.vert",
+    }
+}
+
+pub mod sky_fs {
+    vulkano_shaders::shader! {
+        ty: "fragment",
+        path: "assets/shaders/sky.frag",
+    }
+}
+
 pub mod line_vs {
     vulkano_shaders::shader! {
         ty: "vertex",

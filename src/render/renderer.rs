@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use glam::Mat4;
+use glam::{Mat4, Vec3};
 use vulkano::command_buffer::{
     AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer,
     RenderingAttachmentInfo, RenderingInfo,
@@ -22,24 +22,51 @@ use vulkano::sync::GpuFuture;
 
 use super::context::RenderContext;
 use super::mesh::GpuMesh;
-use super::pipeline::voxel;
+use super::pipeline::{sky, voxel};
 use super::shaders;
 use super::texture::TextureAtlas;
 
-/// Sky/clear colour for the world pass.
+/// Fallback clear colour used as the menu background (when there is no scene to
+/// draw the procedural sky behind).
 const SKY_COLOR: [f32; 4] = [0.52, 0.70, 0.96, 1.0];
 const DEPTH_FORMAT: Format = Format::D32_SFLOAT;
+
+/// Parameters for the procedural sky pass, derived from the day/night cycle.
+#[derive(Clone, Copy)]
+pub struct SkyParams {
+    /// Inverse of (projection * translation-free view) — unprojects to a view ray.
+    pub inv_view_proj: Mat4,
+    /// Direction toward the sun (world space).
+    pub sun_dir: Vec3,
+    pub zenith_color: Vec3,
+    pub horizon_color: Vec3,
+    pub sun_color: Vec3,
+    pub star_intensity: f32,
+    pub moon_intensity: f32,
+}
+
+/// World directional-lighting parameters, derived from the day/night cycle.
+#[derive(Clone, Copy)]
+pub struct LightParams {
+    /// Direction toward the dominant light (sun by day, moon at night).
+    pub light_dir: Vec3,
+    pub light_color: Vec3,
+    pub ambient: f32,
+}
 
 /// Everything the renderer needs to draw one frame of the 3D scene. Holds
 /// borrowed GPU meshes owned by the active game state.
 pub struct SceneFrame<'a> {
     pub view_proj: Mat4,
+    pub sky: SkyParams,
+    pub light: LightParams,
     pub opaque: Vec<&'a GpuMesh>,
     pub transparent: Vec<&'a GpuMesh>,
 }
 
 pub struct Renderer {
     ctx: Arc<RenderContext>,
+    sky_pipeline: Arc<GraphicsPipeline>,
     voxel_pipeline: Arc<GraphicsPipeline>,
     transparent_pipeline: Arc<GraphicsPipeline>,
     atlas_set: Arc<DescriptorSet>,
@@ -51,6 +78,7 @@ pub struct Renderer {
 
 impl Renderer {
     pub fn new(ctx: Arc<RenderContext>, color_format: Format) -> Self {
+        let sky_pipeline = sky::create(ctx.device().clone(), color_format, DEPTH_FORMAT);
         let voxel_pipeline = voxel::create(ctx.device().clone(), color_format, DEPTH_FORMAT, false);
         let transparent_pipeline =
             voxel::create(ctx.device().clone(), color_format, DEPTH_FORMAT, true);
@@ -71,11 +99,54 @@ impl Renderer {
 
         Self {
             ctx,
+            sky_pipeline,
             voxel_pipeline,
             transparent_pipeline,
             atlas_set,
             depth: None,
             atlas,
+        }
+    }
+
+    /// Record the fullscreen procedural sky pass (drawn before world geometry).
+    fn record_sky(
+        &self,
+        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+        sky: &SkyParams,
+    ) {
+        let layout = self.sky_pipeline.layout().clone();
+        builder
+            .bind_pipeline_graphics(self.sky_pipeline.clone())
+            .expect("bind sky pipeline");
+        let push = shaders::sky_fs::PushConstants {
+            inv_view_proj: sky.inv_view_proj.to_cols_array_2d(),
+            sun_dir: [
+                sky.sun_dir.x,
+                sky.sun_dir.y,
+                sky.sun_dir.z,
+                sky.star_intensity,
+            ],
+            zenith_color: [
+                sky.zenith_color.x,
+                sky.zenith_color.y,
+                sky.zenith_color.z,
+                0.0,
+            ],
+            horizon_color: [
+                sky.horizon_color.x,
+                sky.horizon_color.y,
+                sky.horizon_color.z,
+                sky.moon_intensity,
+            ],
+            sun_color: [sky.sun_color.x, sky.sun_color.y, sky.sun_color.z, 0.0],
+        };
+        builder
+            .push_constants(layout, 0, push)
+            .expect("push sky constants");
+        // SAFETY: pipeline and push constants are bound; the fullscreen triangle
+        // is generated from gl_VertexIndex, so no vertex/index buffers are needed.
+        unsafe {
+            builder.draw(3, 1, 0, 0).expect("draw sky");
         }
     }
 
@@ -85,6 +156,7 @@ impl Renderer {
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
         pipeline: &Arc<GraphicsPipeline>,
         view_proj: Mat4,
+        light: &LightParams,
         meshes: &[&GpuMesh],
     ) {
         if meshes.is_empty() {
@@ -104,6 +176,13 @@ impl Renderer {
             .expect("bind atlas set");
         let push = shaders::voxel_vs::PushConstants {
             view_proj: view_proj.to_cols_array_2d(),
+            sun_dir: [light.light_dir.x, light.light_dir.y, light.light_dir.z, 0.0],
+            light_color: [
+                light.light_color.x,
+                light.light_color.y,
+                light.light_color.z,
+                light.ambient,
+            ],
         };
         builder
             .push_constants(layout, 0, push)
@@ -197,19 +276,23 @@ impl Renderer {
             .expect("set viewport");
 
         if let Some(scene) = scene {
-            // Opaque first (writes depth), then transparent (blended, no depth write).
+            // Sky first (fills the background, no depth write), then opaque
+            // (writes depth), then transparent (blended, no depth write).
+            self.record_sky(&mut builder, &scene.sky);
             let voxel_pipeline = self.voxel_pipeline.clone();
             let transparent_pipeline = self.transparent_pipeline.clone();
             self.record_meshes(
                 &mut builder,
                 &voxel_pipeline,
                 scene.view_proj,
+                &scene.light,
                 &scene.opaque,
             );
             self.record_meshes(
                 &mut builder,
                 &transparent_pipeline,
                 scene.view_proj,
+                &scene.light,
                 &scene.transparent,
             );
         }

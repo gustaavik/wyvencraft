@@ -48,6 +48,16 @@ impl Camera {
         self.projection_matrix() * self.view_matrix()
     }
 
+    /// Inverse of the projection times a *translation-free* view, for the sky
+    /// pass. Unprojecting a clip-space point with this yields a pure world-space
+    /// ray direction (independent of camera position), and it uses the same
+    /// flipped projection as [`Self::view_projection`] so the sun aligns with the
+    /// world geometry.
+    pub fn sky_inv_view_proj(&self) -> Mat4 {
+        let view_rotation = Mat4::look_to_rh(Vec3::ZERO, self.forward, Vec3::Y);
+        (self.projection_matrix() * view_rotation).inverse()
+    }
+
     /// Frustum for culling. Built from the *unflipped* view-proj so plane math
     /// stays in conventional world orientation.
     pub fn frustum(&self) -> Frustum {

@@ -17,6 +17,6 @@ pub mod vertex;
 pub use camera::Camera;
 pub use context::RenderContext;
 pub use mesh::{CpuMesh, GpuMesh};
-pub use renderer::{Renderer, SceneFrame};
+pub use renderer::{LightParams, Renderer, SceneFrame, SkyParams};
 pub use texture::TextureAtlas;
 pub use vertex::{ChunkVertex, EntityVertex, LineVertex};

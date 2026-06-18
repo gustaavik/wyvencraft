@@ -36,11 +36,13 @@ pub enum ClientMessage {
 /// Messages the host sends to clients.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ServerMessage {
-    /// First message on join: world seed + identity + spawn point.
+    /// First message on join: world seed + identity + spawn point + the host's
+    /// current time-of-day (so the joining client's sky matches).
     Welcome {
         seed: u64,
         your_id: PlayerId,
         spawn: NetVec3,
+        time_of_day: f32,
     },
     PlayerJoined {
         id: PlayerId,
