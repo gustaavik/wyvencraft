@@ -35,6 +35,11 @@ pub enum ClientMessage {
     SetMode(GameMode),
     /// Chat message.
     Chat(String),
+    /// Sent once after entering the world: "I'm in-game, send me the current world
+    /// state." The host replies with the accumulated block edits as [`ServerMessage::WorldEdits`].
+    /// Pull-based (rather than pushed on join) so it can't be lost to the connecting
+    /// state draining channels before the in-game state exists.
+    RequestWorldState,
 }
 
 /// Messages the host sends to clients.
@@ -68,6 +73,13 @@ pub enum ServerMessage {
     BlockChanged {
         pos: BlockPos,
         block: BlockId,
+    },
+    /// A batch of authoritative edits replayed to a joining client so it sees the
+    /// world's modifications (blocks broken/placed before it joined). Sent in
+    /// response to [`ClientMessage::RequestWorldState`], possibly across several
+    /// messages for large worlds.
+    WorldEdits {
+        edits: Vec<(BlockPos, BlockId)>,
     },
     /// Authoritative survival vitals + mode for a (remote) player.
     PlayerStats {
@@ -147,6 +159,31 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn request_world_state_roundtrips() {
+        let back = decode::<ClientMessage>(&encode(&ClientMessage::RequestWorldState)).unwrap();
+        assert!(matches!(back, ClientMessage::RequestWorldState));
+    }
+
+    #[test]
+    fn world_edits_roundtrips() {
+        let msg = ServerMessage::WorldEdits {
+            edits: vec![
+                (BlockPos::new(1, 2, 3), BlockId::AIR),
+                (BlockPos::new(-4, 70, 9), BlockId(7)),
+            ],
+        };
+        let back: ServerMessage = decode(&encode(&msg)).unwrap();
+        match back {
+            ServerMessage::WorldEdits { edits } => {
+                assert_eq!(edits.len(), 2);
+                assert_eq!(edits[0], (BlockPos::new(1, 2, 3), BlockId::AIR));
+                assert_eq!(edits[1], (BlockPos::new(-4, 70, 9), BlockId(7)));
+            }
+            _ => panic!("expected WorldEdits"),
+        }
     }
 
     #[test]

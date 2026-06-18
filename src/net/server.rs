@@ -129,6 +129,21 @@ impl Host {
             .send_message(client, channel.id(), protocol::encode(msg));
     }
 
+    /// Send a message to the single client owning `pid` (no-op if they've left).
+    pub fn send_to_player(&mut self, pid: PlayerId, msg: &ServerMessage, channel: Channel) {
+        let mut target = None;
+        for (&cid, &p) in &self.players {
+            if p == pid {
+                target = Some(cid);
+                break;
+            }
+        }
+        if let Some(cid) = target {
+            self.server
+                .send_message(cid, channel.id(), protocol::encode(msg));
+        }
+    }
+
     pub fn broadcast(&mut self, msg: &ServerMessage, channel: Channel) {
         self.server
             .broadcast_message(channel.id(), protocol::encode(msg));

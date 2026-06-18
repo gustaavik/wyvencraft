@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::core::{BlockId, BlockPos, ChunkPos};
+use crate::core::{BlockId, BlockPos, ChunkPos, LocalPos};
 use crate::world::block::BlockRegistry;
 use crate::world::chunk::Chunk;
 use crate::world::generation::WorldGenerator;
@@ -18,6 +18,11 @@ pub struct World {
     registry: Arc<BlockRegistry>,
     /// Chunks whose mesh is stale (need (re)building on the GPU).
     dirty: HashSet<ChunkPos>,
+    /// Persistent record of every edit that diverges from generated terrain,
+    /// keyed by chunk then local position. Survives chunk unload/reload (it is
+    /// re-applied in [`World::insert_chunk`]) and is the authoritative set a host
+    /// replays to joining peers. Independent of which chunks are currently loaded.
+    edits: HashMap<ChunkPos, HashMap<LocalPos, BlockId>>,
 }
 
 impl World {
@@ -27,6 +32,7 @@ impl World {
             generator,
             registry,
             dirty: HashSet::new(),
+            edits: HashMap::new(),
         }
     }
 
@@ -64,8 +70,16 @@ impl World {
     }
 
     /// Insert an already-built chunk (from a generator thread or the network).
-    pub fn insert_chunk(&mut self, chunk: Chunk) {
+    /// Re-applies any recorded edits for this position so edits survive a chunk
+    /// being unloaded and regenerated (and apply to chunks that streamed in after
+    /// the edit was received).
+    pub fn insert_chunk(&mut self, mut chunk: Chunk) {
         let pos = chunk.pos;
+        if let Some(overlay) = self.edits.get(&pos) {
+            for (&local, &block) in overlay {
+                chunk.set(local, block);
+            }
+        }
         self.chunks.insert(pos, chunk);
         self.mark_dirty_with_neighbors(pos);
     }
@@ -115,15 +129,60 @@ impl World {
     }
 
     /// Place/replace a block. Returns the previous block, or `None` if the chunk
-    /// isn't loaded. Marks affected chunk meshes dirty.
+    /// isn't loaded. Marks affected chunk meshes dirty and records the edit in the
+    /// persistent overlay so it survives unload/reload and can be replayed to peers.
     pub fn set_block(&mut self, pos: BlockPos, block: BlockId) -> Option<BlockId> {
         let local = pos.to_local()?;
         let chunk_pos = pos.chunk();
         let prev = self.chunks.get_mut(&chunk_pos)?.set(local, block);
         if prev != block {
+            self.edits
+                .entry(chunk_pos)
+                .or_default()
+                .insert(local, block);
             self.mark_dirty_with_neighbors(chunk_pos);
         }
         Some(prev)
+    }
+
+    /// Apply an authoritative edit received from the network. Unlike
+    /// [`set_block`](Self::set_block), this records the edit in the overlay *even if
+    /// the chunk isn't loaded yet* — when that chunk later streams in,
+    /// [`insert_chunk`](Self::insert_chunk) re-applies it. Applies to the loaded
+    /// chunk and marks it dirty when present.
+    pub fn apply_edit(&mut self, pos: BlockPos, block: BlockId) {
+        let Some(local) = pos.to_local() else {
+            return;
+        };
+        let chunk_pos = pos.chunk();
+        self.edits
+            .entry(chunk_pos)
+            .or_default()
+            .insert(local, block);
+        if let Some(chunk) = self.chunks.get_mut(&chunk_pos) {
+            let prev = chunk.set(local, block);
+            if prev != block {
+                self.mark_dirty_with_neighbors(chunk_pos);
+            }
+        }
+    }
+
+    /// Flatten the persistent edit overlay to absolute `(BlockPos, BlockId)` pairs.
+    /// Used by the host to replay the world's modifications to a joining client.
+    pub fn collect_edits(&self) -> Vec<(BlockPos, BlockId)> {
+        let mut out = Vec::new();
+        for (chunk_pos, overlay) in &self.edits {
+            let origin = chunk_pos.origin();
+            for (local, block) in overlay {
+                let pos = BlockPos::new(
+                    origin.x + local.x as i32,
+                    local.y as i32,
+                    origin.z + local.z as i32,
+                );
+                out.push((pos, *block));
+            }
+        }
+        out
     }
 
     /// Mark a chunk and its 4 horizontal neighbours dirty (a border edit changes
@@ -142,5 +201,70 @@ impl World {
     /// is responsible for rebuilding their meshes.
     pub fn take_dirty(&mut self) -> Vec<ChunkPos> {
         self.dirty.drain().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::world::generation::NoiseGenerator;
+
+    /// A test world over a deterministic generator.
+    fn test_world() -> World {
+        let generator: Arc<dyn WorldGenerator> = Arc::new(NoiseGenerator::new(42));
+        let registry = Arc::new(BlockRegistry::with_builtins());
+        World::new(generator, registry)
+    }
+
+    /// A non-air block sufficiently high up to land on baseline air, so the edit is
+    /// a genuine divergence from generated terrain.
+    const EDIT_POS: BlockPos = BlockPos::new(3, 200, 5);
+    const EDIT_BLOCK: BlockId = BlockId(1);
+
+    #[test]
+    fn edit_survives_unload_and_regeneration() {
+        let mut world = test_world();
+        world.ensure_chunk(EDIT_POS.chunk());
+
+        assert!(world.set_block(EDIT_POS, EDIT_BLOCK).is_some());
+        assert_eq!(world.block_at(EDIT_POS), EDIT_BLOCK);
+
+        // Unload then regenerate the chunk: the overlay must be re-applied.
+        world.unload_chunk(EDIT_POS.chunk());
+        assert_eq!(world.block_at(EDIT_POS), BlockId::AIR, "chunk is unloaded");
+
+        world.ensure_chunk(EDIT_POS.chunk());
+        assert_eq!(
+            world.block_at(EDIT_POS),
+            EDIT_BLOCK,
+            "edit should be restored after regeneration"
+        );
+    }
+
+    #[test]
+    fn apply_edit_buffers_until_chunk_loads() {
+        let mut world = test_world();
+
+        // The chunk isn't loaded yet — apply_edit only records into the overlay.
+        world.apply_edit(EDIT_POS, EDIT_BLOCK);
+        assert_eq!(
+            world.block_at(EDIT_POS),
+            BlockId::AIR,
+            "chunk not loaded yet"
+        );
+
+        // Once the chunk streams in (here via synchronous generation), it applies.
+        world.ensure_chunk(EDIT_POS.chunk());
+        assert_eq!(world.block_at(EDIT_POS), EDIT_BLOCK);
+    }
+
+    #[test]
+    fn collect_edits_returns_recorded_edits() {
+        let mut world = test_world();
+        world.ensure_chunk(EDIT_POS.chunk());
+        world.set_block(EDIT_POS, EDIT_BLOCK);
+
+        let edits = world.collect_edits();
+        assert_eq!(edits, vec![(EDIT_POS, EDIT_BLOCK)]);
     }
 }

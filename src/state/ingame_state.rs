@@ -51,6 +51,9 @@ const REMOTE_MAX_SPEED: f32 = 12.0;
 const DOUBLE_TAP_WINDOW: f32 = 0.3;
 /// How often (s) a client reports its survival stats to the host.
 const STATS_INTERVAL: f32 = 0.25;
+/// Max edits per `WorldEdits` batch when replaying world state to a joining client.
+/// ~4096 edits ≈ ~60 KB/message, well under the reliable channel's 5 MB budget.
+const WORLD_SYNC_BATCH: usize = 4096;
 
 /// Progressive break state for survival timed mining.
 struct BreakState {
@@ -99,6 +102,8 @@ pub struct InGameState {
     stats_timer: f32,
     /// Networking role + remote players.
     net: NetRole,
+    /// Client-only: whether we've asked the host for the initial world state yet.
+    world_state_requested: bool,
     remote_players: HashMap<PlayerId, RemotePlayer>,
     remote_meshes: Vec<GpuMesh>,
     /// Per-remote-player animation, keyed by id. Speed is derived from the change in
@@ -215,6 +220,7 @@ impl InGameState {
             jump_tap_timer: DOUBLE_TAP_WINDOW * 2.0,
             stats_timer: 0.0,
             net,
+            world_state_requested: false,
             remote_players: HashMap::new(),
             remote_meshes: Vec::new(),
             remote_anims: HashMap::new(),
@@ -401,6 +407,11 @@ impl InGameState {
             self.stats_timer = 0.0;
         }
 
+        // One-shot initial world-state request (client only). Captured here and
+        // written back after the match to avoid borrowing `self` while `self.net` is.
+        let need_world_request = !self.world_state_requested;
+        let mut requested_world_state_now = false;
+
         match &mut self.net {
             NetRole::Singleplayer => {}
             NetRole::Host(host) => {
@@ -482,6 +493,23 @@ impl InGameState {
                             }
                         }
                         ClientMessage::Chat(_) => {}
+                        ClientMessage::RequestWorldState => {
+                            let edits = self.world.collect_edits();
+                            log::debug!(
+                                "replaying {} world edits to player {}",
+                                edits.len(),
+                                pid.0
+                            );
+                            for batch in edits.chunks(WORLD_SYNC_BATCH) {
+                                host.send_to_player(
+                                    pid,
+                                    &ServerMessage::WorldEdits {
+                                        edits: batch.to_vec(),
+                                    },
+                                    Channel::Chunk,
+                                );
+                            }
+                        }
                     }
                 }
 
@@ -547,6 +575,11 @@ impl InGameState {
                 if let Err(err) = client.pump(duration) {
                     log::warn!("client pump error: {err}");
                 }
+                // Ask the host to replay the world's existing edits, once connected.
+                if need_world_request && client.is_connected() {
+                    client.send(&ClientMessage::RequestWorldState, Channel::Reliable);
+                    requested_world_state_now = true;
+                }
                 client.send(
                     &ClientMessage::Move {
                         position,
@@ -587,7 +620,16 @@ impl InGameState {
                                 .push_snapshot(Vec3::from_array(position), yaw, pitch);
                         }
                         ServerMessage::BlockChanged { pos, block } => {
-                            self.world.set_block(pos, block);
+                            // apply_edit (not set_block) so an edit whose chunk hasn't
+                            // streamed in yet is buffered and applied when it loads.
+                            self.world.apply_edit(pos, block);
+                        }
+                        ServerMessage::WorldEdits { edits } => {
+                            let count = edits.len();
+                            for (pos, block) in edits {
+                                self.world.apply_edit(pos, block);
+                            }
+                            log::debug!("applied {count} world-state edits on join");
                         }
                         ServerMessage::PlayerStats {
                             id,
@@ -607,6 +649,10 @@ impl InGameState {
                 }
                 let _ = client.flush();
             }
+        }
+
+        if requested_world_state_now {
+            self.world_state_requested = true;
         }
     }
 
