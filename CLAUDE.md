@@ -76,6 +76,7 @@ references). This keeps the GPU layer decoupled from gameplay.
 | ----------------------- | ------------------------------------------------------------------------------------------ |
 | Add a block type        | `world::block::BlockRegistry::with_builtins` + a tile index & pixel art in `render::tiles` |
 | Change terrain          | `world::generation::{noise,biome,generator}`                                               |
+| Trees/boulders/features | `world::generation::features` (jittered-grid anchors; mesas live in `noise::surface_height`) |
 | Meshing                 | `world::meshing::culled` (face culling; greedy is a TODO)                                  |
 | Player movement/physics | `entity::player`, `entity::physics`                                                        |
 | A new screen            | implement `state::GameState`, push/replace via `Transition`                                |

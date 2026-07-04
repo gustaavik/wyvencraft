@@ -4,6 +4,11 @@
 use crate::core::BlockId;
 use crate::world::block::blocks;
 
+/// Temperatures below this are snowy.
+pub const SNOWY_MAX_TEMP: f32 = -0.35;
+/// Temperatures above this are desert.
+pub const DESERT_MIN_TEMP: f32 = 0.4;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Biome {
     Snowy,
@@ -14,9 +19,9 @@ pub enum Biome {
 impl Biome {
     /// Pick a biome from a temperature sample in roughly `[-1, 1]`.
     pub fn from_temperature(temperature: f32) -> Biome {
-        if temperature < -0.35 {
+        if temperature < SNOWY_MAX_TEMP {
             Biome::Snowy
-        } else if temperature > 0.4 {
+        } else if temperature > DESERT_MIN_TEMP {
             Biome::Desert
         } else {
             Biome::Plains

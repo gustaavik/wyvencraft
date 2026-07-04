@@ -2,6 +2,7 @@
 
 use super::WorldGenerator;
 use super::biome::Biome;
+use super::features;
 use super::noise::{ORE_FIELDS, SEA_LEVEL, TerrainNoise};
 use crate::core::{BlockId, CHUNK_HEIGHT, CHUNK_SIZE, ChunkPos, LocalPos};
 use crate::world::block::blocks;
@@ -170,6 +171,8 @@ impl WorldGenerator for NoiseGenerator {
             }
         }
 
+        features::populate(&mut chunk, &self.noise, self.seed);
+
         chunk
     }
 }
@@ -223,6 +226,80 @@ mod tests {
             .filter(|&local| chunk.get(local).is_air())
             .count();
         assert!(deep_air > 0, "expected caves below y=40");
+    }
+
+    #[test]
+    fn trees_populate_the_landscape() {
+        let generator = NoiseGenerator::new(42);
+        let area: Vec<ChunkPos> = (-6..6)
+            .flat_map(|x| (-6..6).map(move |z| ChunkPos::new(x, z)))
+            .collect();
+        let wood = count_blocks(&generator, &area, blocks::WOOD);
+        let leaves = count_blocks(&generator, &area, blocks::LEAVES);
+        assert!(wood > 0, "no tree trunks generated in sample area");
+        assert!(
+            leaves > wood,
+            "canopies should outnumber trunk blocks: {leaves} leaves vs {wood} wood"
+        );
+    }
+
+    /// Every trunk block rests on something solid — trees never float, even when
+    /// a trunk stands in a different chunk than the cell that anchored it.
+    #[test]
+    fn tree_trunks_are_grounded() {
+        let generator = NoiseGenerator::new(42);
+        for pos in sample_area() {
+            let chunk = generator.generate(pos);
+            for lx in 0..CHUNK_SIZE {
+                for lz in 0..CHUNK_SIZE {
+                    for y in 2..CHUNK_HEIGHT {
+                        let at = |y: i32| {
+                            chunk.get(LocalPos {
+                                x: lx as u8,
+                                y: y as u16,
+                                z: lz as u8,
+                            })
+                        };
+                        if at(y) == blocks::WOOD {
+                            assert!(
+                                !at(y - 1).is_air(),
+                                "floating trunk at {pos:?} ({lx},{y},{lz})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Boulders leave stone poking above the noise surface, which base terrain
+    /// never does on land.
+    #[test]
+    fn boulders_rise_above_the_surface() {
+        let generator = NoiseGenerator::new(42);
+        let noise = TerrainNoise::new(42);
+        let found = (-8..8)
+            .flat_map(|x| (-8..8).map(move |z| ChunkPos::new(x, z)))
+            .any(|pos| {
+                let chunk = generator.generate(pos);
+                let origin = pos.origin();
+                (0..CHUNK_SIZE)
+                    .flat_map(|lx| (0..CHUNK_SIZE).map(move |lz| (lx, lz)))
+                    .any(|(lx, lz)| {
+                        let surface = noise.surface_height(origin.x + lx, origin.z + lz);
+                        (surface + 1..CHUNK_HEIGHT).any(|y| {
+                            chunk.get(LocalPos {
+                                x: lx as u8,
+                                y: y as u16,
+                                z: lz as u8,
+                            }) == blocks::STONE
+                        })
+                    })
+            });
+        assert!(
+            found,
+            "no boulder stone found above the surface in sample area"
+        );
     }
 
     #[test]

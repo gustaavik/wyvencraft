@@ -5,6 +5,7 @@
 //! provide alternative generators (flat world, etc.) without touching callers.
 
 pub mod biome;
+pub mod features;
 pub mod generator;
 pub mod noise;
 
