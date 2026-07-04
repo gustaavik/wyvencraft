@@ -1,9 +1,8 @@
 //! Block texture atlas.
 //!
-//! Until real art exists, the atlas is generated procedurally: each tile index
-//! (assigned in [`crate::world::block`]) gets a tinted, lightly-noised square so
-//! blocks are visually distinct. The CPU-side generation lives here together with
-//! the GPU upload ([`TextureAtlas`]).
+//! The atlas is generated procedurally at startup from the pixel art painted in
+//! [`super::tiles`] (tile indices are defined there too). This module owns the
+//! atlas layout (`tile index -> UV`) and the GPU upload ([`TextureAtlas`]).
 
 use std::sync::Arc;
 
@@ -28,28 +27,6 @@ pub const TILE_SIZE: u32 = 16;
 /// Full atlas edge length in pixels.
 pub const ATLAS_SIZE: u32 = ATLAS_COLUMNS * TILE_SIZE;
 
-/// Base RGB colour per atlas tile index. Index order matches the block textures
-/// assigned in `world::block::BlockRegistry::with_builtins`.
-fn tile_color(tile: u32) -> [u8; 3] {
-    match tile {
-        1 => [128, 128, 128],  // stone
-        2 => [134, 96, 67],    // dirt
-        3 => [95, 159, 53],    // grass top
-        4 => [120, 110, 70],   // grass side
-        5 => [219, 211, 160],  // sand
-        6 => [60, 110, 220],   // water
-        7 => [102, 81, 49],    // wood bark
-        8 => [160, 130, 80],   // wood rings
-        9 => [60, 120, 40],    // leaves
-        10 => [200, 220, 235], // glass
-        11 => [50, 50, 55],    // bedrock
-        12 => [240, 245, 250], // snow
-        13 => [224, 172, 138], // player skin
-        14 => [70, 110, 180],  // player shirt/pants
-        _ => [255, 0, 255],    // missing texture (magenta)
-    }
-}
-
 /// Map an atlas tile index + a `[0,1]` local face UV into atlas texture
 /// coordinates. Shared by the chunk mesher and entity-model builder.
 pub fn atlas_uv(tile: u32, local_uv: [f32; 2]) -> [f32; 2] {
@@ -59,13 +36,9 @@ pub fn atlas_uv(tile: u32, local_uv: [f32; 2]) -> [f32; 2] {
     [(tx + local_uv[0]) / cols, (ty + local_uv[1]) / cols]
 }
 
-/// Cheap deterministic per-pixel variation so flat colours get some texture.
-fn pixel_noise(tile: u32, x: u32, y: u32) -> i32 {
-    let mut h = tile.wrapping_mul(2654435761) ^ x.wrapping_mul(40503) ^ y.wrapping_mul(2246822519);
-    h ^= h >> 13;
-    h = h.wrapping_mul(0x5bd1e995);
-    ((h % 24) as i32) - 12
-}
+/// The magenta marker painted into any atlas tile without assigned art, so a
+/// bad tile index is immediately visible in-game.
+const MISSING_TEXTURE: [u8; 4] = [255, 0, 255, 255];
 
 /// Generate the atlas as tightly packed RGBA8 pixels (`ATLAS_SIZE^2 * 4` bytes).
 pub fn generate_atlas_rgba() -> Vec<u8> {
@@ -75,23 +48,16 @@ pub fn generate_atlas_rgba() -> Vec<u8> {
     for ty in 0..ATLAS_COLUMNS {
         for tx in 0..ATLAS_COLUMNS {
             let tile = ty * ATLAS_COLUMNS + tx;
-            let base = tile_color(tile);
-            let is_transparent_tile = tile == 6 || tile == 10; // water, glass
+            let art = super::tiles::paint(tile);
             for py in 0..TILE_SIZE {
                 for px in 0..TILE_SIZE {
-                    let n = pixel_noise(tile, px, py);
-                    let r = (base[0] as i32 + n).clamp(0, 255) as u8;
-                    let g = (base[1] as i32 + n).clamp(0, 255) as u8;
-                    let b = (base[2] as i32 + n).clamp(0, 255) as u8;
-                    let a = if is_transparent_tile { 150 } else { 255 };
-
-                    let ax = tx * TILE_SIZE + px;
-                    let ay = ty * TILE_SIZE + py;
-                    let idx = ((ay as usize) * size + ax as usize) * 4;
-                    pixels[idx] = r;
-                    pixels[idx + 1] = g;
-                    pixels[idx + 2] = b;
-                    pixels[idx + 3] = a;
+                    let rgba = match &art {
+                        Some(t) => t[py as usize][px as usize],
+                        None => MISSING_TEXTURE,
+                    };
+                    let ax = (tx * TILE_SIZE + px) as usize;
+                    let ay = (ty * TILE_SIZE + py) as usize;
+                    pixels[(ay * size + ax) * 4..][..4].copy_from_slice(&rgba);
                 }
             }
         }

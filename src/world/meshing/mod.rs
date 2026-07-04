@@ -6,7 +6,7 @@
 
 pub mod culled;
 
-pub use culled::mesh_chunk;
+pub use culled::{mesh_block_overlay, mesh_chunk};
 
 use crate::render::mesh::CpuMesh;
 

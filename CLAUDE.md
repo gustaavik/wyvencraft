@@ -72,17 +72,17 @@ references). This keeps the GPU layer decoupled from gameplay.
 - **Command/message** — `net::protocol` (`ClientMessage` / `ServerMessage`).
 
 ### Where to make common changes
-| Task | Location |
-|---|---|
-| Add a block type | `world::block::BlockRegistry::with_builtins` + a tile color in `render::texture::tile_color` |
-| Change terrain | `world::generation::{noise,biome,generator}` |
-| Meshing | `world::meshing::culled` (face culling; greedy is a TODO) |
-| Player movement/physics | `entity::player`, `entity::physics` |
-| A new screen | implement `state::GameState`, push/replace via `Transition` |
-| HUD / inventory UI | `ui::hud`, `ui::inventory` |
-| Networking | `net::{server,client,protocol}`; orchestration in `state::ingame_state` (`NetRole`) |
-| Pipelines / passes | `render::pipeline`, `render::renderer` |
-| Shaders | `assets/shaders/*.{vert,frag}`, declared in `render::shaders` |
+| Task                    | Location                                                                                   |
+| ----------------------- | ------------------------------------------------------------------------------------------ |
+| Add a block type        | `world::block::BlockRegistry::with_builtins` + a tile index & pixel art in `render::tiles` |
+| Change terrain          | `world::generation::{noise,biome,generator}`                                               |
+| Meshing                 | `world::meshing::culled` (face culling; greedy is a TODO)                                  |
+| Player movement/physics | `entity::player`, `entity::physics`                                                        |
+| A new screen            | implement `state::GameState`, push/replace via `Transition`                                |
+| HUD / inventory UI      | `ui::hud`, `ui::inventory`                                                                 |
+| Networking              | `net::{server,client,protocol}`; orchestration in `state::ingame_state` (`NetRole`)        |
+| Pipelines / passes      | `render::pipeline`, `render::renderer`                                                     |
+| Shaders                 | `assets/shaders/*.{vert,frag}`, declared in `render::shaders`                              |
 
 ## Conventions & gotchas
 

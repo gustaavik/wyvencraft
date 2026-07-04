@@ -4,8 +4,12 @@
 use vulkano::buffer::BufferContents;
 use vulkano::pipeline::graphics::vertex_input::Vertex;
 
-/// Vertex for voxel/chunk geometry: world position, face normal, atlas UV, and a
-/// baked ambient-occlusion term.
+/// Marks water faces: the fragment shader cycles their tile through the
+/// [`crate::render::tiles::WATER_FRAMES`] animation frames.
+pub const FLAG_WATER: u32 = 1;
+
+/// Vertex for voxel/chunk geometry: world position, face normal, atlas UV, a
+/// baked ambient-occlusion term, and per-face shader-effect flags.
 #[derive(BufferContents, Vertex, Clone, Copy, Debug, Default)]
 #[repr(C)]
 pub struct ChunkVertex {
@@ -18,6 +22,9 @@ pub struct ChunkVertex {
     /// Ambient occlusion / shading multiplier in `[0,1]`.
     #[format(R32_SFLOAT)]
     pub ao: f32,
+    /// Bit flags for shader effects (see [`FLAG_WATER`]).
+    #[format(R32_UINT)]
+    pub flags: u32,
 }
 
 /// Vertex for entity models and simple coloured geometry.

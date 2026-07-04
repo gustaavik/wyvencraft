@@ -60,6 +60,8 @@ pub struct SceneFrame<'a> {
     pub view_proj: Mat4,
     pub sky: SkyParams,
     pub light: LightParams,
+    /// Seconds of in-game time, driving shader animation (water frames).
+    pub time: f32,
     pub opaque: Vec<&'a GpuMesh>,
     pub transparent: Vec<&'a GpuMesh>,
 }
@@ -157,6 +159,7 @@ impl Renderer {
         pipeline: &Arc<GraphicsPipeline>,
         view_proj: Mat4,
         light: &LightParams,
+        time: f32,
         meshes: &[&GpuMesh],
     ) {
         if meshes.is_empty() {
@@ -176,7 +179,12 @@ impl Renderer {
             .expect("bind atlas set");
         let push = shaders::voxel_vs::PushConstants {
             view_proj: view_proj.to_cols_array_2d(),
-            sun_dir: [light.light_dir.x, light.light_dir.y, light.light_dir.z, 0.0],
+            sun_dir: [
+                light.light_dir.x,
+                light.light_dir.y,
+                light.light_dir.z,
+                time,
+            ],
             light_color: [
                 light.light_color.x,
                 light.light_color.y,
@@ -286,6 +294,7 @@ impl Renderer {
                 &voxel_pipeline,
                 scene.view_proj,
                 &scene.light,
+                scene.time,
                 &scene.opaque,
             );
             self.record_meshes(
@@ -293,6 +302,7 @@ impl Renderer {
                 &transparent_pipeline,
                 scene.view_proj,
                 &scene.light,
+                scene.time,
                 &scene.transparent,
             );
         }

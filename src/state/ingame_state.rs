@@ -17,9 +17,9 @@ use crate::inventory::{Inventory, ItemId, ItemRegistry, ItemStack};
 use crate::net::{
     Channel, Client, ClientMessage, Host, NetVec3, PlayerId, RemotePlayer, ServerMessage,
 };
-use crate::render::{Camera, GpuMesh, LightParams, RenderContext, SceneFrame, SkyParams};
+use crate::render::{Camera, GpuMesh, LightParams, RenderContext, SceneFrame, SkyParams, tiles};
 use crate::ui::hud;
-use crate::world::meshing::mesh_chunk;
+use crate::world::meshing::{mesh_block_overlay, mesh_chunk};
 use crate::world::{BlockRegistry, ChunkLoader, NoiseGenerator, World, WorldGenerator};
 
 /// The networking role of this in-game session.
@@ -94,6 +94,10 @@ pub struct InGameState {
     spawn: Vec3,
     /// Progressive block-break state for survival timed mining.
     breaking: Option<BreakState>,
+    /// Crack overlay drawn on the block being mined (rebuilt as progress grows).
+    break_mesh: Option<GpuMesh>,
+    /// Seconds since entering the state; drives shader animation (water frames).
+    elapsed: f32,
     /// True while the player is dead and awaiting respawn (control frozen).
     dead: bool,
     /// Time (s) since the last jump press, for creative double-tap-to-fly.
@@ -216,6 +220,8 @@ impl InGameState {
             held: None,
             spawn,
             breaking: None,
+            break_mesh: None,
+            elapsed: 0.0,
             dead: false,
             jump_tap_timer: DOUBLE_TAP_WINDOW * 2.0,
             stats_timer: 0.0,
@@ -798,6 +804,21 @@ impl InGameState {
         }
     }
 
+    /// (Re)build the crack overlay for the block being mined; drop it when idle.
+    /// Cheap enough to rebuild every frame (six quads).
+    fn update_break_overlay(&mut self, ctx: &Arc<RenderContext>) {
+        self.break_mesh = self.breaking.as_ref().and_then(|b| {
+            let overlay = mesh_block_overlay(b.block, tiles::crack_tile(b.progress));
+            match GpuMesh::upload(&ctx.memory_allocator, &overlay) {
+                Ok(mesh) => mesh,
+                Err(err) => {
+                    log::error!("break overlay upload failed at {:?}: {err:?}", b.block);
+                    None
+                }
+            }
+        });
+    }
+
     /// Right-click: eat the held food when hungry, otherwise place its block.
     fn use_selected(&mut self) {
         let Some(item_id) = self.inventory.item_in_selected() else {
@@ -862,8 +883,10 @@ impl GameState for InGameState {
         }
 
         if self.inventory_open || self.dead {
-            // Inventory screen / death screen: free cursor, freeze player control.
+            // Inventory screen / death screen: free cursor, freeze player control,
+            // and abandon any in-progress mining.
             ctx.grab_cursor = false;
+            self.breaking = None;
         } else {
             ctx.grab_cursor = true;
 
@@ -946,7 +969,12 @@ impl GameState for InGameState {
         }
 
         self.fov_degrees = ctx.settings.render.fov_degrees;
+        // Wrap the animation clock so f32 precision never degrades over long
+        // sessions. The period must stay a whole multiple of the water loop
+        // (WATER_FRAMES / WATER_FPS = 0.8 s in voxel.frag) to wrap seamlessly.
+        self.elapsed = (self.elapsed + ctx.dt) % 3600.0;
         self.day_cycle.advance(ctx.dt);
+        self.update_break_overlay(ctx.render);
         self.pump_network(ctx.dt);
         self.update_streaming(ctx.settings.render.render_distance);
         self.enqueue_dirty();
@@ -1095,12 +1123,18 @@ impl GameState for InGameState {
             .filter(|(pos, _)| in_view(pos))
             .map(|(_, mesh)| mesh)
             .collect();
-        let transparent: Vec<&GpuMesh> = self
+        let mut transparent: Vec<&GpuMesh> = self
             .transparent_meshes
             .iter()
             .filter(|(pos, _)| in_view(pos))
             .map(|(_, mesh)| mesh)
             .collect();
+
+        // Crack overlay on the block being mined, blended over everything else.
+        // No frustum check: the target is a single nearby block within reach.
+        if let Some(mesh) = &self.break_mesh {
+            transparent.push(mesh);
+        }
 
         // The local player model (third person only) + remote players.
         if let Some(mesh) = &self.player_mesh {
@@ -1130,6 +1164,7 @@ impl GameState for InGameState {
             view_proj: camera.view_projection(),
             sky,
             light,
+            time: self.elapsed,
             opaque,
             transparent,
         })

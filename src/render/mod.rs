@@ -12,6 +12,7 @@ pub mod pipeline;
 pub mod renderer;
 pub mod shaders;
 pub mod texture;
+pub mod tiles;
 pub mod vertex;
 
 pub use camera::Camera;
@@ -19,4 +20,4 @@ pub use context::RenderContext;
 pub use mesh::{CpuMesh, GpuMesh};
 pub use renderer::{LightParams, Renderer, SceneFrame, SkyParams};
 pub use texture::TextureAtlas;
-pub use vertex::{ChunkVertex, EntityVertex, LineVertex};
+pub use vertex::{ChunkVertex, EntityVertex, FLAG_WATER, LineVertex};

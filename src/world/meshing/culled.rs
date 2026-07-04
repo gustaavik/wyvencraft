@@ -2,8 +2,10 @@
 
 use super::ChunkMeshOutput;
 use crate::core::{BlockId, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, Direction};
+use crate::render::mesh::CpuMesh;
 use crate::render::texture::atlas_uv;
-use crate::render::vertex::ChunkVertex;
+use crate::render::tiles;
+use crate::render::vertex::{ChunkVertex, FLAG_WATER};
 use crate::world::block::BlockRegistry;
 use crate::world::chunk::Chunk;
 
@@ -121,6 +123,7 @@ pub fn mesh_chunk(
                     let normal = dir.normal().to_array();
                     let ao = face_shade(dir);
                     let tile = block.textures.tile(dir);
+                    let flags = if tiles::is_water(tile) { FLAG_WATER } else { 0 };
 
                     let base = [world.x as f32, world.y as f32, world.z as f32];
                     let quad = std::array::from_fn(|i| ChunkVertex {
@@ -132,6 +135,7 @@ pub fn mesh_chunk(
                         normal,
                         uv: atlas_uv(tile, uvs[i]),
                         ao,
+                        flags,
                     });
 
                     if block.is_transparent() {
@@ -145,4 +149,51 @@ pub fn mesh_chunk(
     }
 
     out
+}
+
+/// Build an overlay mesh over the block at `pos`, textured with `tile` on all
+/// six faces — used for the crack animation while a block is being mined. The
+/// cube is inflated slightly around its centre so it never z-fights the block.
+pub fn mesh_block_overlay(pos: BlockPos, tile: u32) -> CpuMesh {
+    const INFLATE: f32 = 0.004;
+    let scale = 1.0 + 2.0 * INFLATE;
+    let center = [pos.x as f32 + 0.5, pos.y as f32 + 0.5, pos.z as f32 + 0.5];
+
+    let mut mesh = CpuMesh::new();
+    for dir in Direction::ALL {
+        let (corners, uvs) = face_geometry(dir);
+        let normal = dir.normal().to_array();
+        let quad = std::array::from_fn(|i| ChunkVertex {
+            position: std::array::from_fn(|a| center[a] + (corners[i][a] - 0.5) * scale),
+            normal,
+            uv: atlas_uv(tile, uvs[i]),
+            ao: 1.0,
+            flags: 0,
+        });
+        mesh.push_quad(quad);
+    }
+    mesh
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn block_overlay_covers_all_faces_and_wraps_the_block() {
+        let mesh = mesh_block_overlay(BlockPos::new(2, 5, -3), tiles::CRACK_0);
+        assert_eq!(mesh.vertices.len(), 24); // 6 faces × 4 vertices
+        assert_eq!(mesh.indices.len(), 36);
+        for v in &mesh.vertices {
+            // Every vertex sits just outside the unit cube of the block.
+            assert!(v.position[0] > 1.9 && v.position[0] < 3.1);
+            assert!(v.position[1] > 4.9 && v.position[1] < 6.1);
+            assert!(v.position[2] > -3.1 && v.position[2] < -1.9);
+            // And its UVs stay inside the crack tile.
+            let uv0 = atlas_uv(tiles::CRACK_0, [0.0, 0.0]);
+            let uv1 = atlas_uv(tiles::CRACK_0, [1.0, 1.0]);
+            assert!(v.uv[0] >= uv0[0] && v.uv[0] <= uv1[0]);
+            assert!(v.uv[1] >= uv0[1] && v.uv[1] <= uv1[1]);
+        }
+    }
 }

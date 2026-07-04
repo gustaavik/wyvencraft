@@ -6,6 +6,7 @@
 //! rather than hard-coding `match` arms everywhere.
 
 use crate::core::{BlockId, Direction};
+use crate::render::tiles;
 
 /// How a block participates in meshing/rendering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,8 +117,8 @@ impl BlockRegistry {
     /// Build the registry with the default set of blocks. The push order defines
     /// the numeric [`BlockId`]s (see [`blocks`]).
     pub fn with_builtins() -> Self {
-        // Atlas tile indices are assigned sequentially here; the renderer builds
-        // a matching texture atlas in the same order (see `render::texture`).
+        // Atlas tile indices come from `render::tiles`, which also paints the
+        // matching pixel art into the atlas (see `render::texture`).
         let mut reg = Self { blocks: Vec::new() };
         reg.register(Block {
             name: "air",
@@ -131,7 +132,7 @@ impl BlockRegistry {
             name: "stone",
             render: RenderType::Opaque,
             solid: true,
-            textures: FaceTextures::uniform(1),
+            textures: FaceTextures::uniform(tiles::STONE),
             hardness: 1.5,
             material: BlockMaterial::Stone,
         });
@@ -139,7 +140,7 @@ impl BlockRegistry {
             name: "dirt",
             render: RenderType::Opaque,
             solid: true,
-            textures: FaceTextures::uniform(2),
+            textures: FaceTextures::uniform(tiles::DIRT),
             hardness: 0.5,
             material: BlockMaterial::Dirt,
         });
@@ -147,7 +148,7 @@ impl BlockRegistry {
             name: "grass",
             render: RenderType::Opaque,
             solid: true,
-            textures: FaceTextures::column(3, 2, 4), // top=grass, bottom=dirt, side=grass_side
+            textures: FaceTextures::column(tiles::GRASS_TOP, tiles::DIRT, tiles::GRASS_SIDE),
             hardness: 0.6,
             material: BlockMaterial::Dirt,
         });
@@ -155,7 +156,7 @@ impl BlockRegistry {
             name: "sand",
             render: RenderType::Opaque,
             solid: true,
-            textures: FaceTextures::uniform(5),
+            textures: FaceTextures::uniform(tiles::SAND),
             hardness: 0.5,
             material: BlockMaterial::Sand,
         });
@@ -163,7 +164,7 @@ impl BlockRegistry {
             name: "water",
             render: RenderType::Transparent,
             solid: false,
-            textures: FaceTextures::uniform(6),
+            textures: FaceTextures::uniform(tiles::WATER_0),
             hardness: f32::INFINITY,
             material: BlockMaterial::Other,
         });
@@ -171,7 +172,7 @@ impl BlockRegistry {
             name: "wood",
             render: RenderType::Opaque,
             solid: true,
-            textures: FaceTextures::column(8, 8, 7), // top/bottom=rings, side=bark
+            textures: FaceTextures::column(tiles::WOOD_RINGS, tiles::WOOD_RINGS, tiles::WOOD_BARK),
             hardness: 2.0,
             material: BlockMaterial::Wood,
         });
@@ -179,7 +180,7 @@ impl BlockRegistry {
             name: "leaves",
             render: RenderType::Transparent,
             solid: true,
-            textures: FaceTextures::uniform(9),
+            textures: FaceTextures::uniform(tiles::LEAVES),
             hardness: 0.2,
             material: BlockMaterial::Plant,
         });
@@ -187,7 +188,7 @@ impl BlockRegistry {
             name: "glass",
             render: RenderType::Transparent,
             solid: true,
-            textures: FaceTextures::uniform(10),
+            textures: FaceTextures::uniform(tiles::GLASS),
             hardness: 0.3,
             material: BlockMaterial::Glass,
         });
@@ -195,7 +196,7 @@ impl BlockRegistry {
             name: "bedrock",
             render: RenderType::Opaque,
             solid: true,
-            textures: FaceTextures::uniform(11),
+            textures: FaceTextures::uniform(tiles::BEDROCK),
             hardness: f32::INFINITY,
             material: BlockMaterial::Other,
         });
@@ -203,7 +204,7 @@ impl BlockRegistry {
             name: "snow",
             render: RenderType::Opaque,
             solid: true,
-            textures: FaceTextures::uniform(12),
+            textures: FaceTextures::uniform(tiles::SNOW),
             hardness: 0.2,
             material: BlockMaterial::Dirt,
         });
