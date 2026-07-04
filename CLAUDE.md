@@ -50,8 +50,8 @@ Domain modules with **one-directional dependencies** (do not introduce cycles):
 core      ← everything        coordinate/voxel types, AABB/Ray/Frustum, timing
 render    ← core              Vulkan: context, pipelines, mesh upload, camera, atlas
 world     ← core, render      blocks, chunks, generation, meshing, raycast, loader
-entity    ← core, render      player, swept-AABB physics, humanoid model
 inventory ← core, world       item/stack/inventory data model (no rendering)
+entity    ← core, render, inventory   player, swept-AABB physics, humanoid model, dropped items
 input     ← core, config, entity   winit events → frame-coherent input
 ui        ← inventory, egui   HUD + inventory egui views
 net       ← core              renet host/client, protocol, remote-player interp

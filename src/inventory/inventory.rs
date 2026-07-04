@@ -81,7 +81,11 @@ impl Inventory {
             }
             if slot.is_none() {
                 let put = stack.count.min(max);
-                *slot = Some(ItemStack::new(stack.item, put));
+                // Struct-update (not `new`) so a re-collected tool keeps its wear.
+                *slot = Some(ItemStack {
+                    count: put,
+                    ..stack
+                });
                 stack.count -= put;
             }
         }
@@ -120,6 +124,17 @@ impl Inventory {
         }
     }
 
+    /// Take a single item off the selected stack — the last one takes the whole
+    /// stack (preserving tool durability). Used by the drop key.
+    pub fn take_one_selected(&mut self) -> Option<ItemStack> {
+        let slot = self.slots[self.selected].as_mut()?;
+        if slot.count <= 1 {
+            return self.slots[self.selected].take();
+        }
+        slot.count -= 1;
+        Some(ItemStack::single(slot.item))
+    }
+
     pub fn item_in_selected(&self) -> Option<ItemId> {
         self.selected_stack().map(|s| s.item)
     }
@@ -134,6 +149,37 @@ impl Default for Inventory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn take_one_from_a_stack_leaves_the_rest() {
+        let mut inv = Inventory::new();
+        inv.set_slot(0, Some(ItemStack::new(ItemId(3), 5)));
+        inv.set_selected(0);
+        let taken = inv.take_one_selected().expect("stack has items");
+        assert_eq!(taken.count, 1);
+        assert_eq!(inv.slot(0).expect("rest stays").count, 4);
+    }
+
+    #[test]
+    fn take_one_from_a_single_item_empties_the_slot_and_keeps_durability() {
+        let mut inv = Inventory::new();
+        inv.set_slot(0, Some(ItemStack::with_durability(ItemId(1), 37)));
+        inv.set_selected(0);
+        let taken = inv.take_one_selected().expect("slot has an item");
+        assert_eq!(taken.durability, Some(37));
+        assert!(inv.slot(0).is_none());
+        assert!(inv.take_one_selected().is_none());
+    }
+
+    #[test]
+    fn adding_a_used_tool_keeps_its_durability() {
+        let blocks = crate::world::block::BlockRegistry::with_builtins();
+        let items = ItemRegistry::from_blocks(&blocks);
+        let mut inv = Inventory::new();
+        let leftover = inv.add(ItemStack::with_durability(items.wooden_pickaxe, 12), &items);
+        assert_eq!(leftover, 0);
+        assert_eq!(inv.slot(0).expect("tool stored").durability, Some(12));
+    }
 
     #[test]
     fn tool_breaks_after_durability_depletes() {

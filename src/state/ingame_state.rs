@@ -12,14 +12,17 @@ use super::{GameState, PauseMenuState, StateContext, Transition};
 use crate::core::{
     Aabb, BlockId, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, ChunkPos, DayCycle, GameMode,
 };
-use crate::entity::{AnimationState, HumanoidModel, Perspective, Player};
+use crate::entity::{AnimationState, DROP_SIZE, DroppedItem, HumanoidModel, Perspective, Player};
 use crate::inventory::{Inventory, ItemId, ItemRegistry, ItemStack};
 use crate::net::{
     Channel, Client, ClientMessage, Host, NetVec3, PlayerId, RemotePlayer, ServerMessage,
 };
-use crate::render::{Camera, GpuMesh, LightParams, RenderContext, SceneFrame, SkyParams, tiles};
+use crate::render::{
+    Camera, CpuMesh, GpuMesh, LightParams, RenderContext, SceneFrame, SkyParams, tiles,
+};
 use crate::ui::hud;
-use crate::world::meshing::{mesh_block_overlay, mesh_chunk};
+use crate::world::block::FaceTextures;
+use crate::world::meshing::{mesh_block_overlay, mesh_chunk, push_item_cube};
 use crate::world::{BlockRegistry, ChunkLoader, NoiseGenerator, World, WorldGenerator};
 
 /// The networking role of this in-game session.
@@ -54,6 +57,8 @@ const STATS_INTERVAL: f32 = 0.25;
 /// Max edits per `WorldEdits` batch when replaying world state to a joining client.
 /// ~4096 edits ≈ ~60 KB/message, well under the reliable channel's 5 MB budget.
 const WORLD_SYNC_BATCH: usize = 4096;
+/// How far beyond the player's collision box dropped items are collected.
+const PICKUP_RANGE: f32 = 1.0;
 
 /// Progressive break state for survival timed mining.
 struct BreakState {
@@ -96,6 +101,11 @@ pub struct InGameState {
     breaking: Option<BreakState>,
     /// Crack overlay drawn on the block being mined (rebuilt as progress grows).
     break_mesh: Option<GpuMesh>,
+    /// Item drops lying in the world. Local-only: not synced over the network.
+    drops: Vec<DroppedItem>,
+    /// Combined GPU meshes for all drops, split by render pass (rebuilt per frame).
+    drops_mesh: Option<GpuMesh>,
+    drops_mesh_transparent: Option<GpuMesh>,
     /// Seconds since entering the state; drives shader animation (water frames).
     elapsed: f32,
     /// True while the player is dead and awaiting respawn (control frozen).
@@ -221,6 +231,9 @@ impl InGameState {
             spawn,
             breaking: None,
             break_mesh: None,
+            drops: Vec::new(),
+            drops_mesh: None,
+            drops_mesh_transparent: None,
             elapsed: 0.0,
             dead: false,
             jump_tap_timer: DOUBLE_TAP_WINDOW * 2.0,
@@ -743,8 +756,9 @@ impl InGameState {
         )
     }
 
-    /// Remove the block at `pos`. In survival the block drops into the inventory;
-    /// in creative it just disappears. Broadcasts the edit. Returns `true` on a hit.
+    /// Remove the block at `pos`. In survival the block pops out as a dropped
+    /// item; in creative it just disappears. Broadcasts the edit. Returns `true`
+    /// on a hit.
     fn break_block_at(&mut self, pos: BlockPos) -> bool {
         let Some(prev) = self.world.set_block(pos, BlockId::AIR) else {
             return false;
@@ -755,10 +769,94 @@ impl InGameState {
         if self.player.mode.consumes_blocks()
             && let Some(item) = self.items.item_for_block(prev)
         {
-            self.inventory.add(ItemStack::single(item), &self.items);
+            // Scatter direction varies with the animation clock — cheap pseudo-random.
+            let angle = self.elapsed * 9.73;
+            self.drops
+                .push(DroppedItem::block_drop(ItemStack::single(item), pos, angle));
         }
         self.broadcast_local_edit(pos, BlockId::AIR);
         true
+    }
+
+    /// Toss one item from the selected hotbar slot out in front of the player.
+    fn drop_selected_item(&mut self) {
+        let Some(stack) = self.inventory.take_one_selected() else {
+            return;
+        };
+        self.drops.push(DroppedItem::thrown(
+            stack,
+            self.player.eye_position(),
+            self.player.look_direction(),
+        ));
+    }
+
+    /// Advance drop physics, collect drops the player walks over, cull expired ones.
+    fn update_drops(&mut self, dt: f32) {
+        for item in &mut self.drops {
+            item.update(dt, |p| self.world.is_solid_for_collision(p));
+        }
+        let reach = self.player.aabb().expand(Vec3::splat(PICKUP_RANGE));
+        let dead = self.dead;
+        self.drops.retain_mut(|item| {
+            if item.expired() {
+                return false;
+            }
+            if dead || !item.can_pickup() || !reach.intersects(item.aabb()) {
+                return true;
+            }
+            let leftover = self.inventory.add(item.stack, &self.items);
+            if leftover == 0 {
+                false
+            } else {
+                // Inventory full: whatever didn't fit stays on the ground.
+                item.stack.count = leftover;
+                true
+            }
+        });
+    }
+
+    /// Atlas tiles for a dropped item's cube: the block's own faces for block
+    /// items; simple stand-in tiles for tools and food (no dedicated item art yet).
+    fn drop_textures(&self, item: ItemId) -> FaceTextures {
+        let def = self.items.get(item);
+        match def.place_block {
+            Some(block) => self.blocks.get(block).textures,
+            None if def.tool.is_some() => FaceTextures::uniform(tiles::WOOD_BARK),
+            None => FaceTextures::uniform(tiles::LEAVES),
+        }
+    }
+
+    /// Rebuild the combined drop meshes (opaque + transparent passes). Drops are
+    /// few and tiny, so a per-frame rebuild stays cheap, like remote players.
+    fn update_drops_mesh(&mut self, ctx: &Arc<RenderContext>) {
+        let mut opaque = CpuMesh::new();
+        let mut transparent = CpuMesh::new();
+        for item in &self.drops {
+            let textures = self.drop_textures(item.stack.item);
+            let is_transparent = self
+                .items
+                .get(item.stack.item)
+                .place_block
+                .is_some_and(|b| self.blocks.get(b).is_transparent());
+            let target = if is_transparent {
+                &mut transparent
+            } else {
+                &mut opaque
+            };
+            push_item_cube(
+                target,
+                item.render_center(),
+                DROP_SIZE,
+                item.spin_yaw(),
+                &textures,
+            );
+        }
+        self.drops_mesh = GpuMesh::upload(&ctx.memory_allocator, &opaque)
+            .ok()
+            .flatten();
+        self.drops_mesh_transparent = GpuMesh::upload(&ctx.memory_allocator, &transparent)
+            .ok()
+            .flatten();
     }
 
     /// Survival timed mining: accumulate break progress on the targeted block
@@ -930,6 +1028,11 @@ impl GameState for InGameState {
                 self.inventory.scroll_selected(-scroll.signum() as i32);
             }
 
+            // Toss one item from the selected slot onto the ground.
+            if ctx.input.just_pressed(kb.drop_item) {
+                self.drop_selected_item();
+            }
+
             // Movement + physics.
             let movement = ctx.input.movement(&kb);
             let dt = ctx.dt.min(0.05);
@@ -979,6 +1082,9 @@ impl GameState for InGameState {
         self.update_streaming(ctx.settings.render.render_distance);
         self.enqueue_dirty();
         self.process_mesh_budget(ctx.render);
+        // Drops keep simulating even with the inventory or death screen open.
+        self.update_drops(ctx.dt.min(0.05));
+        self.update_drops_mesh(ctx.render);
 
         // Advance + rebuild animated player models. The local player settles to idle
         // while the inventory is open (movement is frozen).
@@ -1142,6 +1248,14 @@ impl GameState for InGameState {
         }
         for mesh in &self.remote_meshes {
             opaque.push(mesh);
+        }
+
+        // Dropped items, split by pass like the blocks they represent.
+        if let Some(mesh) = &self.drops_mesh {
+            opaque.push(mesh);
+        }
+        if let Some(mesh) = &self.drops_mesh_transparent {
+            transparent.push(mesh);
         }
 
         let atmo = self.day_cycle.atmosphere();

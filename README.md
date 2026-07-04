@@ -85,6 +85,7 @@ Skip the menus with environment variables:
 | Left click | Break block |
 | Right click | Place selected block |
 | Scroll wheel | Select hotbar slot |
+| `Q` | Drop one item from the selected slot |
 | `E` | Open/close inventory |
 | `F5` | Toggle perspective (1st / 3rd person) |
 | `F3` | Toggle debug overlay |

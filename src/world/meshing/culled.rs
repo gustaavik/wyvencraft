@@ -1,12 +1,14 @@
 //! Face-culling chunk mesher.
 
+use glam::Vec3;
+
 use super::ChunkMeshOutput;
 use crate::core::{BlockId, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, Direction};
 use crate::render::mesh::CpuMesh;
 use crate::render::texture::atlas_uv;
 use crate::render::tiles;
 use crate::render::vertex::{ChunkVertex, FLAG_WATER};
-use crate::world::block::BlockRegistry;
+use crate::world::block::{BlockRegistry, FaceTextures};
 use crate::world::chunk::Chunk;
 
 /// Per-face shading so faces read as 3D even before real lighting/AO.
@@ -175,9 +177,72 @@ pub fn mesh_block_overlay(pos: BlockPos, tile: u32) -> CpuMesh {
     mesh
 }
 
+/// Append a small textured cube (a dropped item) to `mesh`: edge length `size`,
+/// centred on `center`, spun `yaw` radians around Y. Faces are shaded and
+/// textured like regular blocks so drops read as miniatures of their block.
+pub fn push_item_cube(
+    mesh: &mut CpuMesh,
+    center: Vec3,
+    size: f32,
+    yaw: f32,
+    textures: &FaceTextures,
+) {
+    let (sin, cos) = yaw.sin_cos();
+    let rotate = |v: [f32; 3]| [v[0] * cos + v[2] * sin, v[1], -v[0] * sin + v[2] * cos];
+
+    for dir in Direction::ALL {
+        let (corners, uvs) = face_geometry(dir);
+        let normal = rotate(dir.normal().to_array());
+        let ao = face_shade(dir);
+        let tile = textures.tile(dir);
+        let quad = std::array::from_fn(|i| {
+            let local = rotate([
+                (corners[i][0] - 0.5) * size,
+                (corners[i][1] - 0.5) * size,
+                (corners[i][2] - 0.5) * size,
+            ]);
+            ChunkVertex {
+                position: [
+                    center.x + local[0],
+                    center.y + local[1],
+                    center.z + local[2],
+                ],
+                normal,
+                uv: atlas_uv(tile, uvs[i]),
+                ao,
+                flags: 0,
+            }
+        });
+        mesh.push_quad(quad);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn item_cube_is_centred_and_compact() {
+        let mut mesh = CpuMesh::new();
+        let center = Vec3::new(1.0, 70.0, -2.0);
+        let size = 0.25;
+        push_item_cube(
+            &mut mesh,
+            center,
+            size,
+            0.7,
+            &FaceTextures::uniform(tiles::STONE),
+        );
+        assert_eq!(mesh.vertices.len(), 24); // 6 faces × 4 vertices
+        assert_eq!(mesh.indices.len(), 36);
+        // Every vertex stays within the cube's rotated bounding radius.
+        let r = size * std::f32::consts::SQRT_2 * 0.5 + 1e-4;
+        for v in &mesh.vertices {
+            assert!((v.position[0] - center.x).abs() <= r);
+            assert!((v.position[1] - center.y).abs() <= size * 0.5 + 1e-4);
+            assert!((v.position[2] - center.z).abs() <= r);
+        }
+    }
 
     #[test]
     fn block_overlay_covers_all_faces_and_wraps_the_block() {
