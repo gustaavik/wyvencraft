@@ -106,6 +106,12 @@ pub mod blocks {
     pub const GLASS: BlockId = BlockId(8);
     pub const BEDROCK: BlockId = BlockId(9);
     pub const SNOW: BlockId = BlockId(10);
+    pub const GRAVEL: BlockId = BlockId(11);
+    pub const CLAY: BlockId = BlockId(12);
+    pub const COAL_ORE: BlockId = BlockId(13);
+    pub const IRON_ORE: BlockId = BlockId(14);
+    pub const GOLD_ORE: BlockId = BlockId(15);
+    pub const DIAMOND_ORE: BlockId = BlockId(16);
 }
 
 /// Lookup table of all registered block types.
@@ -207,6 +213,54 @@ impl BlockRegistry {
             textures: FaceTextures::uniform(tiles::SNOW),
             hardness: 0.2,
             material: BlockMaterial::Dirt,
+        });
+        reg.register(Block {
+            name: "gravel",
+            render: RenderType::Opaque,
+            solid: true,
+            textures: FaceTextures::uniform(tiles::GRAVEL),
+            hardness: 0.6,
+            material: BlockMaterial::Dirt,
+        });
+        reg.register(Block {
+            name: "clay",
+            render: RenderType::Opaque,
+            solid: true,
+            textures: FaceTextures::uniform(tiles::CLAY),
+            hardness: 0.6,
+            material: BlockMaterial::Dirt,
+        });
+        reg.register(Block {
+            name: "coal ore",
+            render: RenderType::Opaque,
+            solid: true,
+            textures: FaceTextures::uniform(tiles::COAL_ORE),
+            hardness: 3.0,
+            material: BlockMaterial::Stone,
+        });
+        reg.register(Block {
+            name: "iron ore",
+            render: RenderType::Opaque,
+            solid: true,
+            textures: FaceTextures::uniform(tiles::IRON_ORE),
+            hardness: 3.0,
+            material: BlockMaterial::Stone,
+        });
+        reg.register(Block {
+            name: "gold ore",
+            render: RenderType::Opaque,
+            solid: true,
+            textures: FaceTextures::uniform(tiles::GOLD_ORE),
+            hardness: 3.0,
+            material: BlockMaterial::Stone,
+        });
+        reg.register(Block {
+            name: "diamond ore",
+            render: RenderType::Opaque,
+            solid: true,
+            textures: FaceTextures::uniform(tiles::DIAMOND_ORE),
+            hardness: 3.0,
+            material: BlockMaterial::Stone,
         });
         reg
     }

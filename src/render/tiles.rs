@@ -19,6 +19,14 @@ pub const LEAVES: u32 = 9;
 pub const GLASS: u32 = 10;
 pub const BEDROCK: u32 = 11;
 pub const SNOW: u32 = 12;
+pub const GRAVEL: u32 = 13;
+pub const CLAY: u32 = 14;
+
+// Row 4: ores (stone with mineral specks).
+pub const COAL_ORE: u32 = 64;
+pub const IRON_ORE: u32 = 65;
+pub const GOLD_ORE: u32 = 66;
+pub const DIAMOND_ORE: u32 = 67;
 
 // Row 1: player skin.
 pub const HEAD_FRONT: u32 = 16;
@@ -78,6 +86,12 @@ pub fn paint(tile: u32) -> Option<TileRgba> {
         GLASS => glass(),
         BEDROCK => bedrock(),
         SNOW => snow(),
+        GRAVEL => gravel(),
+        CLAY => clay(),
+        COAL_ORE => ore(COAL_ORE, [44, 44, 48]),
+        IRON_ORE => ore(IRON_ORE, [214, 158, 110]),
+        GOLD_ORE => ore(GOLD_ORE, [250, 212, 76]),
+        DIAMOND_ORE => ore(DIAMOND_ORE, [104, 224, 220]),
         HEAD_FRONT => head_front(),
         HEAD_SIDE => head_side(),
         HEAD_TOP => fill(|x, y| rgb(HAIR, noise(HEAD_TOP, x, y, 8))),
@@ -261,6 +275,53 @@ fn snow() -> TileRgba {
         let dimple = if hash(SNOW, x, y) % 100 < 8 { -14 } else { 0 };
         rgb([242, 246, 251], dimple + noise(SNOW + 100, x, y, 4))
     })
+}
+
+fn gravel() -> TileRgba {
+    fill(|x, y| {
+        // Rounded pebbles: one tone per cell, with rows sheared per column of
+        // cells so the packing doesn't read as a square grid.
+        let sy = y + (x / 3) * 2;
+        let cell = hash(GRAVEL, x / 3, sy / 3);
+        let tone = (cell % 5) as i32 * 11 - 22;
+        let base = if cell.is_multiple_of(7) {
+            [94, 88, 82] // occasional dark stone
+        } else {
+            [131, 123, 114]
+        };
+        let seam = if x % 3 == 0 || sy % 3 == 0 { -16 } else { 0 };
+        rgb(base, tone + seam + noise(GRAVEL + 100, x, y, 5))
+    })
+}
+
+fn clay() -> TileRgba {
+    fill(|x, y| {
+        // Smooth blue-grey with soft, broad clumps.
+        let clump = noise(CLAY, x / 4, y / 4, 9);
+        rgb([155, 162, 176], clump + noise(CLAY + 100, x, y, 4))
+    })
+}
+
+/// Stone with embedded mineral specks in the ore's signature colour.
+fn ore(tile: u32, color: [u8; 3]) -> TileRgba {
+    let mut art = stone();
+    for i in 0..5u32 {
+        let h = hash(tile, i, 0);
+        let cx = 2 + (h % 12) as i32;
+        let cy = 2 + ((h >> 8) % 12) as i32;
+        let chunky = h.is_multiple_of(3);
+        for dy in -1i32..=1 {
+            for dx in -1i32..=1 {
+                if dx.abs() + dy.abs() == 2 && !chunky {
+                    continue; // small specks are plus-shaped, big ones 3x3
+                }
+                let (px, py) = ((cx + dx) as usize, (cy + dy) as usize);
+                let glint = if dx == 0 && dy == 0 { 26 } else { 0 };
+                art[py][px] = rgb(color, glint + noise(tile + 100, px as u32, py as u32, 10));
+            }
+        }
+    }
+    art
 }
 
 /// One water animation frame: two diagonal wave layers whose phase advances
@@ -456,10 +517,42 @@ mod tests {
     #[test]
     fn opaque_block_tiles_are_fully_opaque() {
         for tile in [
-            STONE, DIRT, GRASS_TOP, GRASS_SIDE, SAND, WOOD_BARK, WOOD_RINGS, BEDROCK, SNOW,
+            STONE,
+            DIRT,
+            GRASS_TOP,
+            GRASS_SIDE,
+            SAND,
+            WOOD_BARK,
+            WOOD_RINGS,
+            BEDROCK,
+            SNOW,
+            GRAVEL,
+            CLAY,
+            COAL_ORE,
+            IRON_ORE,
+            GOLD_ORE,
+            DIAMOND_ORE,
         ] {
             let art = paint(tile).expect("block tile");
             assert!(art.iter().flatten().all(|p| p[3] == 255), "tile {tile}");
+        }
+    }
+
+    #[test]
+    fn ore_tiles_carry_visible_specks() {
+        let stone = paint(STONE).expect("stone");
+        for tile in [COAL_ORE, IRON_ORE, GOLD_ORE, DIAMOND_ORE] {
+            let art = paint(tile).expect("ore tile");
+            let specks = art
+                .iter()
+                .flatten()
+                .zip(stone.iter().flatten())
+                .filter(|(a, b)| a != b)
+                .count();
+            assert!(
+                specks >= 12,
+                "tile {tile} has too few speck pixels: {specks}"
+            );
         }
     }
 
