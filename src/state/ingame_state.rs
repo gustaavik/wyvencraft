@@ -18,7 +18,8 @@ use crate::net::{
     Channel, Client, ClientMessage, Host, NetVec3, PlayerId, RemotePlayer, ServerMessage,
 };
 use crate::render::{
-    Camera, CpuMesh, GpuMesh, LightParams, RenderContext, SceneFrame, SkyParams, tiles,
+    Camera, CpuMesh, GpuLines, GpuMesh, LightParams, RenderContext, SceneFrame, SkyParams, debug,
+    tiles,
 };
 use crate::ui::hud;
 use crate::world::block::FaceTextures;
@@ -59,6 +60,8 @@ const STATS_INTERVAL: f32 = 0.25;
 const WORLD_SYNC_BATCH: usize = 4096;
 /// How far beyond the player's collision box dropped items are collected.
 const PICKUP_RANGE: f32 = 1.0;
+/// Colour of the selection outline on the targeted block (near-black).
+const OUTLINE_COLOR: [f32; 3] = [0.05, 0.05, 0.05];
 
 /// Progressive break state for survival timed mining.
 struct BreakState {
@@ -101,6 +104,9 @@ pub struct InGameState {
     breaking: Option<BreakState>,
     /// Crack overlay drawn on the block being mined (rebuilt as progress grows).
     break_mesh: Option<GpuMesh>,
+    /// Selection outline on the targeted block, cached until the target changes.
+    outline_block: Option<BlockPos>,
+    outline_mesh: Option<GpuLines>,
     /// Item drops lying in the world. Local-only: not synced over the network.
     drops: Vec<DroppedItem>,
     /// Combined GPU meshes for all drops, split by render pass (rebuilt per frame).
@@ -231,6 +237,8 @@ impl InGameState {
             spawn,
             breaking: None,
             break_mesh: None,
+            outline_block: None,
+            outline_mesh: None,
             drops: Vec::new(),
             drops_mesh: None,
             drops_mesh_transparent: None,
@@ -917,6 +925,31 @@ impl InGameState {
         });
     }
 
+    /// (Re)build the selection outline on the targeted block. The geometry only
+    /// depends on the block position, so it's cached until the target changes.
+    fn update_target_outline(&mut self, ctx: &Arc<RenderContext>) {
+        let target = if self.dead {
+            None
+        } else {
+            self.targeted_block().map(|hit| hit.block)
+        };
+        if target == self.outline_block {
+            return;
+        }
+        self.outline_block = target;
+        self.outline_mesh = target.and_then(|block| {
+            let mut vertices = Vec::new();
+            debug::push_block_outline(&mut vertices, block, OUTLINE_COLOR);
+            match GpuLines::upload(&ctx.memory_allocator, &vertices) {
+                Ok(lines) => lines,
+                Err(err) => {
+                    log::error!("selection outline upload failed at {block:?}: {err:?}");
+                    None
+                }
+            }
+        });
+    }
+
     /// Right-click: eat the held food when hungry, otherwise place its block.
     fn use_selected(&mut self) {
         let Some(item_id) = self.inventory.item_in_selected() else {
@@ -1078,6 +1111,7 @@ impl GameState for InGameState {
         self.elapsed = (self.elapsed + ctx.dt) % 3600.0;
         self.day_cycle.advance(ctx.dt);
         self.update_break_overlay(ctx.render);
+        self.update_target_outline(ctx.render);
         self.pump_network(ctx.dt);
         self.update_streaming(ctx.settings.render.render_distance);
         self.enqueue_dirty();
@@ -1281,6 +1315,7 @@ impl GameState for InGameState {
             time: self.elapsed,
             opaque,
             transparent,
+            lines: self.outline_mesh.as_ref(),
         })
     }
 }

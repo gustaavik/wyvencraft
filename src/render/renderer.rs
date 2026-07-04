@@ -21,8 +21,8 @@ use vulkano::render_pass::{AttachmentLoadOp, AttachmentStoreOp};
 use vulkano::sync::GpuFuture;
 
 use super::context::RenderContext;
-use super::mesh::GpuMesh;
-use super::pipeline::{sky, voxel};
+use super::mesh::{GpuLines, GpuMesh};
+use super::pipeline::{line, sky, voxel};
 use super::shaders;
 use super::texture::TextureAtlas;
 
@@ -64,6 +64,8 @@ pub struct SceneFrame<'a> {
     pub time: f32,
     pub opaque: Vec<&'a GpuMesh>,
     pub transparent: Vec<&'a GpuMesh>,
+    /// Debug lines drawn on top of the world (block selection outline).
+    pub lines: Option<&'a GpuLines>,
 }
 
 pub struct Renderer {
@@ -71,6 +73,7 @@ pub struct Renderer {
     sky_pipeline: Arc<GraphicsPipeline>,
     voxel_pipeline: Arc<GraphicsPipeline>,
     transparent_pipeline: Arc<GraphicsPipeline>,
+    line_pipeline: Arc<GraphicsPipeline>,
     atlas_set: Arc<DescriptorSet>,
     /// Cached depth buffer + the size it was created for.
     depth: Option<(Arc<ImageView>, [u32; 2])>,
@@ -84,6 +87,7 @@ impl Renderer {
         let voxel_pipeline = voxel::create(ctx.device().clone(), color_format, DEPTH_FORMAT, false);
         let transparent_pipeline =
             voxel::create(ctx.device().clone(), color_format, DEPTH_FORMAT, true);
+        let line_pipeline = line::create(ctx.device().clone(), color_format, DEPTH_FORMAT);
         let atlas = TextureAtlas::create(&ctx);
 
         let set_layout = voxel_pipeline.layout().set_layouts()[0].clone();
@@ -104,6 +108,7 @@ impl Renderer {
             sky_pipeline,
             voxel_pipeline,
             transparent_pipeline,
+            line_pipeline,
             atlas_set,
             depth: None,
             atlas,
@@ -213,6 +218,36 @@ impl Renderer {
         }
     }
 
+    /// Record the debug-line pass (block selection outline), drawn after the
+    /// world geometry so the outline stays crisp over blended surfaces.
+    fn record_lines(
+        &self,
+        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+        view_proj: Mat4,
+        lines: &GpuLines,
+    ) {
+        let layout = self.line_pipeline.layout().clone();
+        builder
+            .bind_pipeline_graphics(self.line_pipeline.clone())
+            .expect("bind line pipeline");
+        let push = shaders::line_vs::PushConstants {
+            view_proj: view_proj.to_cols_array_2d(),
+        };
+        builder
+            .push_constants(layout, 0, push)
+            .expect("push line view_proj");
+        builder
+            .bind_vertex_buffers(0, lines.vertex_buffer.clone())
+            .expect("bind line vbuf");
+        // SAFETY: pipeline, push constants and vertex buffer are bound and
+        // match the shader interface.
+        unsafe {
+            builder
+                .draw(lines.vertex_count, 1, 0, 0)
+                .expect("draw lines");
+        }
+    }
+
     /// Create or reuse a depth buffer matching `size`.
     fn ensure_depth(&mut self, size: [u32; 2]) -> Arc<ImageView> {
         if let Some((view, cached)) = &self.depth
@@ -305,6 +340,9 @@ impl Renderer {
                 scene.time,
                 &scene.transparent,
             );
+            if let Some(lines) = scene.lines {
+                self.record_lines(&mut builder, scene.view_proj, lines);
+            }
         }
 
         builder.end_rendering().expect("end rendering");

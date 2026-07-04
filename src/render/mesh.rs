@@ -7,7 +7,7 @@ use vulkano::Validated;
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
 
-use super::vertex::ChunkVertex;
+use super::vertex::{ChunkVertex, LineVertex};
 
 /// Plain, render-agnostic geometry built off-thread by the mesher.
 #[derive(Default, Clone)]
@@ -84,6 +84,44 @@ impl GpuMesh {
             vertex_buffer,
             index_buffer,
             index_count: mesh.indices.len() as u32,
+        }))
+    }
+}
+
+/// A vertex buffer of [`LineVertex`] pairs for the debug-line pipeline
+/// (block selection outline, wireframes). Unindexed `LineList` geometry.
+pub struct GpuLines {
+    pub vertex_buffer: Subbuffer<[LineVertex]>,
+    pub vertex_count: u32,
+}
+
+impl GpuLines {
+    /// Upload line-list vertices. Returns `None` for an empty slice.
+    pub fn upload(
+        allocator: &Arc<StandardMemoryAllocator>,
+        vertices: &[LineVertex],
+    ) -> Result<Option<GpuLines>, Validated<vulkano::buffer::AllocateBufferError>> {
+        if vertices.is_empty() {
+            return Ok(None);
+        }
+
+        let vertex_buffer = Buffer::from_iter(
+            allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::VERTEX_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vertices.iter().copied(),
+        )?;
+
+        Ok(Some(GpuLines {
+            vertex_buffer,
+            vertex_count: vertices.len() as u32,
         }))
     }
 }

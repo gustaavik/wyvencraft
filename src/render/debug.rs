@@ -8,23 +8,30 @@ use glam::Vec3;
 use super::vertex::LineVertex;
 use crate::core::BlockPos;
 
-/// Append the 12 edges of the unit cube at `block` to `out`, in the given colour.
+/// How far the outline box is inflated beyond the block, so its edges (which
+/// are coplanar with the block's faces) don't z-fight with them.
+const OUTLINE_INFLATE: f32 = 0.002;
+
+/// Append the 12 edges of the (slightly inflated) unit cube at `block` to
+/// `out`, in the given colour.
 pub fn push_block_outline(out: &mut Vec<LineVertex>, block: BlockPos, color: [f32; 3]) {
     let o = Vec3::new(block.x as f32, block.y as f32, block.z as f32);
-    let c = |dx: f32, dy: f32, dz: f32| LineVertex {
-        position: [o.x + dx, o.y + dy, o.z + dz],
+    let min = o - Vec3::splat(OUTLINE_INFLATE);
+    let max = o + Vec3::splat(1.0 + OUTLINE_INFLATE);
+    let c = |x: f32, y: f32, z: f32| LineVertex {
+        position: [x, y, z],
         color,
     };
     // 8 corners.
     let corners = [
-        c(0.0, 0.0, 0.0),
-        c(1.0, 0.0, 0.0),
-        c(1.0, 0.0, 1.0),
-        c(0.0, 0.0, 1.0),
-        c(0.0, 1.0, 0.0),
-        c(1.0, 1.0, 0.0),
-        c(1.0, 1.0, 1.0),
-        c(0.0, 1.0, 1.0),
+        c(min.x, min.y, min.z),
+        c(max.x, min.y, min.z),
+        c(max.x, min.y, max.z),
+        c(min.x, min.y, max.z),
+        c(min.x, max.y, min.z),
+        c(max.x, max.y, min.z),
+        c(max.x, max.y, max.z),
+        c(min.x, max.y, max.z),
     ];
     // 12 edges as pairs of corner indices.
     const EDGES: [(usize, usize); 12] = [

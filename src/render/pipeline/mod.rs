@@ -9,5 +9,6 @@
 //! Each is created against the swapchain image format with shared camera
 //! uniforms. Implemented in M2 (voxel) and the milestones that follow.
 
+pub mod line;
 pub mod sky;
 pub mod voxel;
