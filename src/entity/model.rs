@@ -92,12 +92,15 @@ impl HumanoidModel {
 
         Self {
             // Heights stack: legs (0..12px), body (12..24px), head (24..32px).
+            // The model faces -Z, so the character's right side is +X (matches
+            // `Player::right()` at yaw 0) — NOT the Minecraft skin convention,
+            // whose model faces +Z with the right arm at -X.
             right_leg: ModelBox {
-                center: Vec3::new(-2.0 * px, 6.0 * px, 0.0),
+                center: Vec3::new(2.0 * px, 6.0 * px, 0.0),
                 size: leg,
             },
             left_leg: ModelBox {
-                center: Vec3::new(2.0 * px, 6.0 * px, 0.0),
+                center: Vec3::new(-2.0 * px, 6.0 * px, 0.0),
                 size: leg,
             },
             body: ModelBox {
@@ -105,11 +108,11 @@ impl HumanoidModel {
                 size: body,
             },
             right_arm: ModelBox {
-                center: Vec3::new(-6.0 * px, 18.0 * px, 0.0),
+                center: Vec3::new(6.0 * px, 18.0 * px, 0.0),
                 size: arm,
             },
             left_arm: ModelBox {
-                center: Vec3::new(6.0 * px, 18.0 * px, 0.0),
+                center: Vec3::new(-6.0 * px, 18.0 * px, 0.0),
                 size: arm,
             },
             head: ModelBox {
@@ -293,10 +296,21 @@ mod tests {
     use std::f32::consts::FRAC_PI_2;
 
     #[test]
-    fn rot_x_rotates_up_to_forward() {
-        // +Y rotated by +90° about X lands on +Z.
+    fn rot_x_rotates_up_to_back() {
+        // +Y rotated by +90° about X lands on +Z — the model's BACK (the front is
+        // -Z). A hanging limb (-Y) under a positive angle thus swings forward (-Z).
         let r = rot_x(Vec3::Y, FRAC_PI_2);
         assert!((r - Vec3::Z).length() < 1e-6, "got {r:?}");
+    }
+
+    #[test]
+    fn right_limbs_sit_on_the_characters_right() {
+        // Facing -Z with +Y up, the character's right side is +X.
+        let model = HumanoidModel::player();
+        assert!(model.right_arm.center.x > 0.0);
+        assert!(model.right_leg.center.x > 0.0);
+        assert!(model.left_arm.center.x < 0.0);
+        assert!(model.left_leg.center.x < 0.0);
     }
 
     #[test]

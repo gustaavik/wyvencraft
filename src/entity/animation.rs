@@ -77,7 +77,8 @@ impl AnimationState {
         // One-shot swing on the main (right) arm: a smooth out-and-back over its window.
         let extra = if self.swing_timer > 0.0 {
             let progress = 1.0 - (self.swing_timer / SWING_DURATION);
-            -(progress * PI).sin() * SWING_REACH
+            // Positive arm angle swings toward the model's front (-Z); see `rot_x`.
+            (progress * PI).sin() * SWING_REACH
         } else {
             0.0
         };
@@ -155,7 +156,8 @@ mod tests {
         anim.trigger_swing();
         anim.advance(0.0, SWING_DURATION / 2.0); // mid-swing → near peak reach
         let mid = anim.pose(0.0).right_arm;
-        assert!(mid < baseline - 1.0, "mid={mid}, baseline={baseline}");
+        // Positive = toward the model's front (-Z), i.e. the punch swings forward.
+        assert!(mid > baseline + 1.0, "mid={mid}, baseline={baseline}");
 
         anim.advance(0.0, SWING_DURATION); // exhaust the swing window
         let after = anim.pose(0.0).right_arm;
