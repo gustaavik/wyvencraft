@@ -54,7 +54,8 @@ impl GameState for ConnectingState {
             return Transition::Replace(Box::new(MultiplayerMenuState::new()));
         }
 
-        // Wait for the Welcome message carrying the world seed + our id + mode.
+        // Wait for the Welcome message carrying the world seed + our id + mode
+        // + the host's crafting recipes.
         let mut welcome = None;
         for msg in client.receive() {
             if let ServerMessage::Welcome {
@@ -63,14 +64,15 @@ impl GameState for ConnectingState {
                 spawn,
                 time_of_day,
                 game_mode,
+                recipes,
             } = msg
             {
-                welcome = Some((seed, your_id, spawn, time_of_day, game_mode));
+                welcome = Some((seed, your_id, spawn, time_of_day, game_mode, recipes));
             }
         }
         let _ = client.flush();
 
-        if let Some((seed, your_id, spawn, time_of_day, game_mode)) = welcome {
+        if let Some((seed, your_id, spawn, time_of_day, game_mode, recipes)) = welcome {
             log::info!(
                 "connected; world seed {seed}, player id {}, spawn {spawn:?}, time {time_of_day:.3}, game_mode {}",
                 your_id.0,
@@ -84,6 +86,7 @@ impl GameState for ConnectingState {
                 spawn,
                 time_of_day,
                 game_mode,
+                recipes,
             )));
         }
 

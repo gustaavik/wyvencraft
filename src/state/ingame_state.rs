@@ -15,7 +15,8 @@ use crate::core::{
 use crate::entity::{AnimationState, DROP_SIZE, DroppedItem, HumanoidModel, Perspective, Player};
 use crate::inventory::{Inventory, ItemId, ItemRegistry, ItemStack, RecipeBook};
 use crate::net::{
-    Channel, Client, ClientMessage, Host, NetVec3, PlayerId, RemotePlayer, ServerMessage,
+    Channel, Client, ClientMessage, Host, NetVec3, PlayerId, RecipeData, RemotePlayer,
+    ServerMessage,
 };
 use crate::render::{
     Camera, CpuMesh, GpuLines, GpuMesh, LightParams, RenderContext, SceneFrame, SkyParams, debug,
@@ -142,18 +143,33 @@ struct RemoteAnim {
 impl InGameState {
     /// Singleplayer world.
     pub fn new(seed: u64, mode: GameMode) -> Self {
-        Self::build(seed, NetRole::Singleplayer, None, DayCycle::default(), mode)
+        Self::build(
+            seed,
+            NetRole::Singleplayer,
+            None,
+            DayCycle::default(),
+            mode,
+            None,
+        )
     }
 
     /// Host a multiplayer session (the host also plays locally).
     pub fn new_host(seed: u64, host: Host, mode: GameMode) -> Self {
-        Self::build(seed, NetRole::Host(host), None, DayCycle::default(), mode)
+        Self::build(
+            seed,
+            NetRole::Host(host),
+            None,
+            DayCycle::default(),
+            mode,
+            None,
+        )
     }
 
     /// Join a multiplayer session as a client (world built from the host's seed).
     /// `spawn` is the position the host assigned us in its `Welcome`; `time_of_day`
     /// seeds our day/night clock to the host's so skies match on join; `mode` is the
-    /// session's game mode as told by the host.
+    /// session's game mode as told by the host; `recipes` are the host's crafting
+    /// recipes (authoritative — the client's own recipe file is ignored).
     pub fn new_client(
         seed: u64,
         client: Client,
@@ -161,6 +177,7 @@ impl InGameState {
         spawn: NetVec3,
         time_of_day: f32,
         mode: GameMode,
+        recipes: Vec<RecipeData>,
     ) -> Self {
         Self::build(
             seed,
@@ -168,22 +185,32 @@ impl InGameState {
             Some(Vec3::from_array(spawn)),
             DayCycle::new(time_of_day),
             mode,
+            Some(recipes),
         )
     }
 
     /// Build the in-game state. `spawn_override` (clients) places the player at the
     /// host-provided position and anchors synchronous generation there; otherwise the
-    /// spawn is found over the origin column.
+    /// spawn is found over the origin column. `recipe_data` (clients) is the host's
+    /// recipe book from the `Welcome`; hosts and singleplayer load the local file.
     fn build(
         seed: u64,
         net: NetRole,
         spawn_override: Option<Vec3>,
         day_cycle: DayCycle,
         mode: GameMode,
+        recipe_data: Option<Vec<RecipeData>>,
     ) -> Self {
         let blocks = Arc::new(BlockRegistry::with_builtins());
         let items = ItemRegistry::from_blocks(&blocks);
-        let recipes = RecipeBook::load(&items);
+        let recipes = match recipe_data {
+            Some(data) => {
+                let book = recipes_from_wire(&data, &items);
+                log::info!("using {} crafting recipes from host", book.recipes().len());
+                book
+            }
+            None => RecipeBook::load(&items),
+        };
 
         let generator: Arc<dyn WorldGenerator> = Arc::new(NoiseGenerator::new(seed));
         let mut world = World::new(generator.clone(), blocks.clone());
@@ -483,6 +510,7 @@ impl InGameState {
                                 spawn: position,
                                 time_of_day,
                                 game_mode: mode,
+                                recipes: recipes_to_wire(&self.recipes, &self.items),
                             },
                             Channel::Reliable,
                         );
@@ -1348,6 +1376,34 @@ impl GameState for InGameState {
     }
 }
 
+/// Serialize the recipe book back to item names for the `Welcome` message.
+fn recipes_to_wire(book: &RecipeBook, items: &ItemRegistry) -> Vec<RecipeData> {
+    book.recipes()
+        .iter()
+        .map(|recipe| RecipeData {
+            output: items.get(recipe.output).name.clone(),
+            count: recipe.count as u32,
+            ingredients: recipe
+                .ingredients
+                .iter()
+                .map(|&(item, n)| (items.get(item).name.clone(), n))
+                .collect(),
+        })
+        .collect()
+}
+
+/// Rebuild a recipe book from a host's wire data. Recipes naming items this
+/// build doesn't know are skipped with a warning (mismatched versions).
+fn recipes_from_wire(data: &[RecipeData], items: &ItemRegistry) -> RecipeBook {
+    let resolved = data
+        .iter()
+        .filter_map(|r| {
+            crate::inventory::crafting::resolve_named(&r.output, r.count, &r.ingredients, items)
+        })
+        .collect();
+    RecipeBook::from_recipes(resolved)
+}
+
 /// Format a normalized time-of-day `[0,1)` (0.0 = midnight) as a 24-hour clock.
 fn format_time_of_day(t: f32) -> String {
     let minutes = (t.rem_euclid(1.0) * 24.0 * 60.0) as u32;
@@ -1362,4 +1418,48 @@ fn find_spawn(world: &World) -> Vec3 {
         }
     }
     Vec3::new(0.5, 80.0, 0.5)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recipe_book_survives_the_wire_roundtrip() {
+        let blocks = BlockRegistry::with_builtins();
+        let items = ItemRegistry::from_blocks(&blocks);
+        let book = RecipeBook::load(&items);
+        assert!(!book.recipes().is_empty());
+
+        let wire = recipes_to_wire(&book, &items);
+        let back = recipes_from_wire(&wire, &items);
+
+        assert_eq!(back.recipes().len(), book.recipes().len());
+        for (a, b) in book.recipes().iter().zip(back.recipes()) {
+            assert_eq!(a.output, b.output);
+            assert_eq!(a.count, b.count);
+            assert_eq!(a.ingredients, b.ingredients);
+        }
+    }
+
+    #[test]
+    fn unknown_wire_recipes_are_skipped_not_fatal() {
+        let blocks = BlockRegistry::with_builtins();
+        let items = ItemRegistry::from_blocks(&blocks);
+        let wire = vec![
+            RecipeData {
+                output: "modded item this build lacks".to_string(),
+                count: 1,
+                ingredients: vec![("wood".to_string(), 1)],
+            },
+            RecipeData {
+                output: "glass".to_string(),
+                count: 1,
+                ingredients: vec![("sand".to_string(), 1)],
+            },
+        ];
+        let book = recipes_from_wire(&wire, &items);
+        assert_eq!(book.recipes().len(), 1);
+        assert_eq!(book.recipes()[0].output, items.find("glass").unwrap());
+    }
 }

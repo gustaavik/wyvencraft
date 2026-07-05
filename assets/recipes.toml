@@ -12,6 +12,9 @@
 # Recipes naming an unknown item are skipped with a warning in the log; if the
 # whole file fails to parse, the game falls back to the recipes compiled into
 # the binary. Edit this file and restart the game to change the recipes.
+#
+# In multiplayer the HOST's recipes are authoritative: they are sent to every
+# client on join, and a client's own copy of this file is ignored.
 
 [[recipe]]
 output = "wooden pickaxe"

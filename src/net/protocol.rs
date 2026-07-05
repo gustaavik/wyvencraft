@@ -16,6 +16,17 @@ pub type NetVec3 = [f32; 3];
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PlayerId(pub u64);
 
+/// One crafting recipe as it travels on the wire. Items are referenced by name
+/// (not id) so the mapping stays stable even if registries differ across
+/// builds; unknown names are skipped by the receiver.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecipeData {
+    pub output: String,
+    pub count: u32,
+    /// Item name -> count consumed from the inventory.
+    pub ingredients: Vec<(String, u32)>,
+}
+
 /// Messages a client sends to the host.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ClientMessage {
@@ -47,13 +58,15 @@ pub enum ClientMessage {
 pub enum ServerMessage {
     /// First message on join: world seed + identity + spawn point + the host's
     /// current time-of-day (so the joining client's sky matches) + the session's
-    /// game mode.
+    /// game mode + the host's crafting recipes (authoritative for the session,
+    /// so everyone crafts by the same rules regardless of local recipe files).
     Welcome {
         seed: u64,
         your_id: PlayerId,
         spawn: NetVec3,
         time_of_day: f32,
         game_mode: GameMode,
+        recipes: Vec<RecipeData>,
     },
     PlayerJoined {
         id: PlayerId,
@@ -143,22 +156,29 @@ mod tests {
     }
 
     #[test]
-    fn welcome_carries_game_mode() {
+    fn welcome_carries_game_mode_and_recipes() {
+        let recipe = RecipeData {
+            output: "wooden pickaxe".to_string(),
+            count: 1,
+            ingredients: vec![("wood".to_string(), 3)],
+        };
         let msg = ServerMessage::Welcome {
             seed: 42,
             your_id: PlayerId(1),
             spawn: [0.5, 80.0, 0.5],
             time_of_day: 0.25,
             game_mode: GameMode::Creative,
+            recipes: vec![recipe.clone()],
         };
         let back: ServerMessage = decode(&encode(&msg)).unwrap();
-        assert!(matches!(
-            back,
+        match back {
             ServerMessage::Welcome {
                 game_mode: GameMode::Creative,
+                recipes,
                 ..
-            }
-        ));
+            } => assert_eq!(recipes, vec![recipe]),
+            _ => panic!("expected a creative-mode Welcome"),
+        }
     }
 
     #[test]

@@ -107,11 +107,17 @@ impl RecipeBook {
         let file: RecipeFile = toml::from_str(text)?;
         let mut recipes = Vec::new();
         for def in file.recipe {
-            if let Some(recipe) = resolve(def, items) {
+            let ingredients: Vec<(String, u32)> = def.ingredients.into_iter().collect();
+            if let Some(recipe) = resolve_named(&def.output, def.count, &ingredients, items) {
                 recipes.push(recipe);
             }
         }
         Ok(Self { recipes })
+    }
+
+    /// A book from already-resolved recipes (e.g. synced from a multiplayer host).
+    pub fn from_recipes(recipes: Vec<Recipe>) -> Self {
+        Self { recipes }
     }
 
     pub fn recipes(&self) -> &[Recipe] {
@@ -123,35 +129,42 @@ impl RecipeBook {
     }
 }
 
-/// Validate one raw recipe and resolve its item names, or drop it with a warning.
-fn resolve(def: RecipeDef, items: &ItemRegistry) -> Option<Recipe> {
+/// Validate one name-based recipe and resolve it against the registry, or drop
+/// it with a warning. Both the TOML entries and recipes received from a
+/// multiplayer host funnel through here.
+pub fn resolve_named(
+    output: &str,
+    count: u32,
+    ingredients: &[(String, u32)],
+    items: &ItemRegistry,
+) -> Option<Recipe> {
     let skip = |why: String| {
-        log::warn!("skipping recipe for {:?}: {why}", def.output);
+        log::warn!("skipping recipe for {output:?}: {why}");
         None::<Recipe>
     };
-    let Some(output) = items.find(&def.output) else {
-        return skip(format!("unknown output item {:?}", def.output));
+    let Some(output_id) = items.find(output) else {
+        return skip(format!("unknown output item {output:?}"));
     };
-    if def.count == 0 || def.count > u8::MAX as u32 {
-        return skip(format!("output count {} out of range 1-255", def.count));
+    if count == 0 || count > u8::MAX as u32 {
+        return skip(format!("output count {count} out of range 1-255"));
     }
-    if def.ingredients.is_empty() {
+    if ingredients.is_empty() {
         return skip("no ingredients".to_string());
     }
-    let mut ingredients = Vec::with_capacity(def.ingredients.len());
-    for (name, count) in &def.ingredients {
+    let mut resolved = Vec::with_capacity(ingredients.len());
+    for (name, n) in ingredients {
         let Some(item) = items.find(name) else {
             return skip(format!("unknown ingredient {name:?}"));
         };
-        if *count == 0 {
+        if *n == 0 {
             return skip(format!("ingredient {name:?} has count 0"));
         }
-        ingredients.push((item, *count));
+        resolved.push((item, *n));
     }
     Some(Recipe {
-        output,
-        count: def.count as u8,
-        ingredients,
+        output: output_id,
+        count: count as u8,
+        ingredients: resolved,
     })
 }
 
