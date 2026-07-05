@@ -79,6 +79,7 @@ references). This keeps the GPU layer decoupled from gameplay.
 | Trees/boulders/features | `world::generation::features` (jittered-grid anchors; mesas live in `noise::surface_height`) |
 | Meshing                 | `world::meshing::culled` (face culling; greedy is a TODO)                                  |
 | Player movement/physics | `entity::player`, `entity::physics`                                                        |
+| Crafting recipes        | `assets/recipes.toml` (data); logic in `inventory::crafting`; panel in `ui::inventory`     |
 | A new screen            | implement `state::GameState`, push/replace via `Transition`                                |
 | HUD / inventory UI      | `ui::hud`, `ui::inventory`                                                                 |
 | Networking              | `net::{server,client,protocol}`; orchestration in `state::ingame_state` (`NetRole`)        |

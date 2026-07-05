@@ -13,7 +13,7 @@ use crate::core::{
     Aabb, BlockId, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, ChunkPos, DayCycle, GameMode,
 };
 use crate::entity::{AnimationState, DROP_SIZE, DroppedItem, HumanoidModel, Perspective, Player};
-use crate::inventory::{Inventory, ItemId, ItemRegistry, ItemStack};
+use crate::inventory::{Inventory, ItemId, ItemRegistry, ItemStack, RecipeBook};
 use crate::net::{
     Channel, Client, ClientMessage, Host, NetVec3, PlayerId, RemotePlayer, ServerMessage,
 };
@@ -76,6 +76,8 @@ pub struct InGameState {
     pub blocks: Arc<BlockRegistry>,
     pub items: ItemRegistry,
     pub inventory: Inventory,
+    /// Crafting recipes, loaded from `assets/recipes.toml` at world start.
+    pub recipes: RecipeBook,
     pub show_debug: bool,
     /// Background terrain generation.
     loader: ChunkLoader,
@@ -181,6 +183,7 @@ impl InGameState {
     ) -> Self {
         let blocks = Arc::new(BlockRegistry::with_builtins());
         let items = ItemRegistry::from_blocks(&blocks);
+        let recipes = RecipeBook::load(&items);
 
         let generator: Arc<dyn WorldGenerator> = Arc::new(NoiseGenerator::new(seed));
         let mut world = World::new(generator.clone(), blocks.clone());
@@ -221,6 +224,7 @@ impl InGameState {
             blocks,
             items,
             inventory,
+            recipes,
             show_debug: false,
             loader,
             meshes: HashMap::new(),
@@ -300,6 +304,28 @@ impl InGameState {
                 }
             }
             (None, None) => {}
+        }
+    }
+
+    /// Craft the recipe at `index`: consume its ingredients and store the
+    /// output; whatever doesn't fit is tossed out in front of the player.
+    fn handle_craft(&mut self, index: usize) {
+        let Some(recipe) = self.recipes.get(index) else {
+            return;
+        };
+        let Some(stack) = recipe.craft(&mut self.inventory, &self.items) else {
+            return;
+        };
+        let leftover = self.inventory.add(stack, &self.items);
+        if leftover > 0 {
+            self.drops.push(DroppedItem::thrown(
+                ItemStack {
+                    count: leftover,
+                    ..stack
+                },
+                self.player.eye_position(),
+                self.player.look_direction(),
+            ));
         }
     }
 
@@ -1170,12 +1196,14 @@ impl GameState for InGameState {
                 egui_ctx,
                 &self.inventory,
                 &self.items,
+                &self.recipes,
                 self.held,
                 self.player.mode,
             ) {
                 match action {
                     InvAction::Slot(index) => self.handle_slot_click(index),
                     InvAction::Pick(id) => self.held = Some(self.items.full_stack(id)),
+                    InvAction::Craft(index) => self.handle_craft(index),
                 }
             }
             return Transition::None;

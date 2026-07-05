@@ -1,0 +1,41 @@
+# Wyvencraft crafting recipes.
+#
+# Every [[recipe]] entry defines one shapeless recipe:
+#
+#   output      - name of the crafted item (must match an in-game item name)
+#   count       - how many the craft produces (optional, default 1)
+#   ingredients - table of item name -> count, consumed from the inventory
+#
+# Item names containing spaces must be quoted when used as ingredient keys,
+# e.g.  ingredients = { "coal ore" = 2, wood = 1 }
+#
+# Recipes naming an unknown item are skipped with a warning in the log; if the
+# whole file fails to parse, the game falls back to the recipes compiled into
+# the binary. Edit this file and restart the game to change the recipes.
+
+[[recipe]]
+output = "wooden pickaxe"
+ingredients = { wood = 3 }
+
+[[recipe]]
+output = "wooden axe"
+ingredients = { wood = 3 }
+
+[[recipe]]
+output = "wooden shovel"
+ingredients = { wood = 2 }
+
+# Stand-in for smelting until furnaces exist.
+[[recipe]]
+output = "glass"
+ingredients = { sand = 1 }
+
+# Stand-in for farming until wheat exists.
+[[recipe]]
+output = "bread"
+ingredients = { apple = 2 }
+
+# Compact loose gravel back into stone.
+[[recipe]]
+output = "stone"
+ingredients = { gravel = 4 }

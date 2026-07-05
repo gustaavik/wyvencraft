@@ -138,6 +138,41 @@ impl Inventory {
     pub fn item_in_selected(&self) -> Option<ItemId> {
         self.selected_stack().map(|s| s.item)
     }
+
+    // --- Crafting support ---
+
+    /// Total number of `item` across all slots.
+    pub fn count_of(&self, item: ItemId) -> u32 {
+        self.slots
+            .iter()
+            .flatten()
+            .filter(|s| s.item == item)
+            .map(|s| s.count as u32)
+            .sum()
+    }
+
+    /// Remove up to `amount` of `item`, draining later slots first so crafting
+    /// eats from the storage grid before the hotbar. Returns how many were
+    /// actually removed.
+    pub fn remove(&mut self, item: ItemId, amount: u32) -> u32 {
+        let mut remaining = amount;
+        for slot in self.slots.iter_mut().rev() {
+            if remaining == 0 {
+                break;
+            }
+            if let Some(stack) = slot
+                && stack.item == item
+            {
+                let taken = (stack.count as u32).min(remaining) as u8;
+                stack.count -= taken;
+                remaining -= taken as u32;
+                if stack.count == 0 {
+                    *slot = None;
+                }
+            }
+        }
+        amount - remaining
+    }
 }
 
 impl Default for Inventory {
@@ -179,6 +214,22 @@ mod tests {
         let leftover = inv.add(ItemStack::with_durability(items.wooden_pickaxe, 12), &items);
         assert_eq!(leftover, 0);
         assert_eq!(inv.slot(0).expect("tool stored").durability, Some(12));
+    }
+
+    #[test]
+    fn remove_drains_later_slots_before_the_hotbar() {
+        let mut inv = Inventory::new();
+        inv.set_slot(0, Some(ItemStack::new(ItemId(7), 10))); // hotbar
+        inv.set_slot(20, Some(ItemStack::new(ItemId(7), 5))); // storage grid
+        assert_eq!(inv.count_of(ItemId(7)), 15);
+
+        let removed = inv.remove(ItemId(7), 8);
+        assert_eq!(removed, 8);
+        assert!(inv.slot(20).is_none(), "storage stack is drained first");
+        assert_eq!(inv.slot(0).expect("hotbar keeps the rest").count, 7);
+
+        assert_eq!(inv.remove(ItemId(7), 100), 7, "removal caps at what exists");
+        assert_eq!(inv.count_of(ItemId(7)), 0);
     }
 
     #[test]

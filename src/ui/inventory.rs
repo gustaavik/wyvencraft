@@ -1,14 +1,18 @@
 //! The inventory screen: a 9x4 slot grid (main + hotbar) drawn with egui, plus a
-//! creative item palette when in creative mode.
+//! creative item palette when in creative mode and a crafting panel listing the
+//! recipes from the [`RecipeBook`].
 //!
 //! Interaction is click-to-move (Minecraft-style): the caller owns a "held"
-//! stack; this view reports the slot clicked (or palette item picked) and renders
-//! the grid + held label. The move logic lives with the inventory owner.
+//! stack; this view reports the slot clicked (or palette item picked, or recipe
+//! crafted) and renders the grid + held label. The move/craft logic lives with
+//! the inventory owner.
 
 use egui::{Color32, Context};
 
 use crate::core::GameMode;
-use crate::inventory::{HOTBAR_SIZE, INVENTORY_SIZE, Inventory, ItemId, ItemRegistry, ItemStack};
+use crate::inventory::{
+    HOTBAR_SIZE, INVENTORY_SIZE, Inventory, ItemId, ItemRegistry, ItemStack, RecipeBook,
+};
 
 const SLOT: f32 = 44.0;
 
@@ -18,6 +22,8 @@ pub enum InvAction {
     Slot(usize),
     /// Picked an item from the creative palette (grab a full stack).
     Pick(ItemId),
+    /// Clicked a recipe's craft button (index into the recipe book).
+    Craft(usize),
 }
 
 fn slot_label(stack: Option<ItemStack>, items: &ItemRegistry) -> String {
@@ -35,6 +41,7 @@ pub fn draw_inventory(
     ctx: &Context,
     inventory: &Inventory,
     items: &ItemRegistry,
+    recipes: &RecipeBook,
     held: Option<ItemStack>,
     mode: GameMode,
 ) -> Option<InvAction> {
@@ -49,6 +56,7 @@ pub fn draw_inventory(
             if mode.is_creative() {
                 ui.label(egui::RichText::new("Creative palette").strong());
                 egui::ScrollArea::vertical()
+                    .id_salt("palette")
                     .max_height(170.0)
                     .show(ui, |ui| {
                         ui.horizontal_wrapped(|ui| {
@@ -61,6 +69,44 @@ pub fn draw_inventory(
                                 }
                             }
                         });
+                    });
+                ui.separator();
+            }
+
+            // Crafting panel: one row per recipe, craftable ones enabled.
+            if !recipes.recipes().is_empty() {
+                ui.label(egui::RichText::new("Crafting").strong());
+                egui::ScrollArea::vertical()
+                    .id_salt("crafting")
+                    .max_height(150.0)
+                    .show(ui, |ui| {
+                        for (index, recipe) in recipes.recipes().iter().enumerate() {
+                            let craftable = recipe.can_craft(inventory);
+                            ui.horizontal(|ui| {
+                                let button =
+                                    egui::Button::new("Craft").min_size(egui::vec2(64.0, 24.0));
+                                if ui.add_enabled(craftable, button).clicked() {
+                                    action = Some(InvAction::Craft(index));
+                                }
+                                let output = &items.get(recipe.output).name;
+                                let needs: Vec<String> = recipe
+                                    .ingredients
+                                    .iter()
+                                    .map(|&(item, n)| format!("{n} {}", items.get(item).name))
+                                    .collect();
+                                let label = if recipe.count > 1 {
+                                    format!("{}x {output} — {}", recipe.count, needs.join(", "))
+                                } else {
+                                    format!("{output} — {}", needs.join(", "))
+                                };
+                                let color = if craftable {
+                                    Color32::WHITE
+                                } else {
+                                    Color32::GRAY
+                                };
+                                ui.label(egui::RichText::new(label).color(color));
+                            });
+                        }
                     });
                 ui.separator();
             }

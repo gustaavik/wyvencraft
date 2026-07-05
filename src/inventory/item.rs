@@ -202,6 +202,14 @@ impl ItemRegistry {
         self.block_to_item.get(block.0 as usize).copied().flatten()
     }
 
+    /// Look up an item by its exact name (as used by recipe files).
+    pub fn find(&self, name: &str) -> Option<ItemId> {
+        self.items
+            .iter()
+            .position(|item| item.name == name)
+            .map(|i| ItemId(i as u16))
+    }
+
     pub fn max_stack(&self, id: ItemId) -> u8 {
         self.get(id).max_stack
     }

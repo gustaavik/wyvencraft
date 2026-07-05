@@ -34,6 +34,7 @@ parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
 bincode = { version = "2", features = ["serde"] }
 bytemuck = { version = "1", features = ["derive"] }
+toml = "0.8"
 
 # --- Errors & logging ---
 thiserror = "2"
