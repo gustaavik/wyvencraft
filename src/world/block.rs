@@ -15,9 +15,14 @@ pub enum RenderType {
     Invisible,
     /// Fully opaque cube; hides neighbouring faces.
     Opaque,
-    /// See-through cube (glass/leaves/water); does not hide neighbours of other
+    /// See-through cube (glass/water); does not hide neighbours of other
     /// block types and is drawn in the transparent pass.
     Transparent,
+    /// Alpha-tested cube (leaves): texture is either fully opaque or fully
+    /// clear per texel, so it draws in the opaque pass with depth writes (the
+    /// shader discards clear texels). Avoids the blend-order artifacts of the
+    /// unsorted transparent pass. Does not hide neighbours of other types.
+    Cutout,
 }
 
 /// What a block is made of — selects which tool mines it fastest.
@@ -83,6 +88,11 @@ impl Block {
     #[inline]
     pub fn is_transparent(&self) -> bool {
         matches!(self.render, RenderType::Transparent)
+    }
+
+    #[inline]
+    pub fn is_cutout(&self) -> bool {
+        matches!(self.render, RenderType::Cutout)
     }
 
     /// Whether the block can ever be mined (finite hardness).
@@ -184,7 +194,7 @@ impl BlockRegistry {
         });
         reg.register(Block {
             name: "leaves",
-            render: RenderType::Transparent,
+            render: RenderType::Cutout,
             solid: true,
             textures: FaceTextures::uniform(tiles::LEAVES),
             hardness: 0.2,

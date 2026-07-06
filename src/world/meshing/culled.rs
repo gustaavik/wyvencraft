@@ -112,7 +112,10 @@ pub fn mesh_chunk(
                     };
                     let neighbor_block = registry.get(neighbor_id);
 
-                    let visible = if block.is_transparent() {
+                    // Transparent and cutout blocks also cull faces shared with
+                    // a same-id neighbour (no interior faces inside a canopy or
+                    // a body of water).
+                    let visible = if block.is_transparent() || block.is_cutout() {
                         neighbor_id != id && !neighbor_block.is_opaque()
                     } else {
                         !neighbor_block.is_opaque()
