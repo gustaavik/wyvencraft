@@ -25,9 +25,20 @@ use crate::core::{Clock, GameMode};
 use crate::input::InputState;
 use crate::net::{DEFAULT_PORT, Host};
 use crate::render::{RenderContext, Renderer};
+use crate::save::{self, SaveError, SavedGame, WorldSave};
 use crate::state::{
     ConnectingState, GameState, InGameState, LoadingState, MainMenuState, StateContext, StateStack,
 };
+
+/// Open (or create, seeding from `WYVEN_SEED`/random) the named world for the
+/// `WYVEN_WORLD` boot paths.
+fn load_named_world(name: &str, mode: GameMode) -> Result<SavedGame, SaveError> {
+    let seed = std::env::var("WYVEN_SEED")
+        .ok()
+        .map(|s| save::parse_seed(&s))
+        .unwrap_or_else(save::random_seed);
+    WorldSave::open_or_create(&save::saves_root(), name, seed, mode)?.load()
+}
 
 /// Top-level run errors.
 #[derive(Debug, thiserror::Error)]
@@ -84,16 +95,39 @@ impl App {
         //   WYVEN_HOST=1            → host a session
         //   WYVEN_JOIN=addr:port    → join a session
         //   WYVEN_MODE=creative     → start in creative (default: survival)
+        //   WYVEN_WORLD=name        → load-or-create this named world (persists);
+        //                             without it boot worlds are ephemeral (no save)
+        //   WYVEN_SEED=seed         → seed if WYVEN_WORLD creates a new world
         let boot_mode = match std::env::var("WYVEN_MODE").as_deref() {
             Ok("creative") | Ok("Creative") => GameMode::Creative,
             _ => GameMode::Survival,
         };
+        let boot_world = std::env::var("WYVEN_WORLD")
+            .ok()
+            .map(|name| load_named_world(&name, boot_mode));
         let initial: Box<dyn GameState> = if std::env::var_os("WYVEN_BOOT_INGAME").is_some() {
-            Box::new(LoadingState::singleplayer(boot_mode))
+            match boot_world {
+                Some(Ok(game)) => Box::new(LoadingState::saved(game)),
+                Some(Err(err)) => {
+                    log::error!("WYVEN_WORLD load failed ({err}); starting ephemeral world");
+                    Box::new(LoadingState::singleplayer(boot_mode))
+                }
+                None => Box::new(LoadingState::singleplayer(boot_mode)),
+            }
         } else if std::env::var_os("WYVEN_HOST").is_some() {
-            let seed = 0x57_56_4E_01;
+            let (seed, game) = match boot_world {
+                Some(Ok(game)) => (game.save.meta.seed, Some(game)),
+                Some(Err(err)) => {
+                    log::error!("WYVEN_WORLD load failed ({err}); hosting ephemeral world");
+                    (0x57_56_4E_01, None)
+                }
+                None => (0x57_56_4E_01, None),
+            };
             match Host::bind(DEFAULT_PORT, seed) {
-                Ok(host) => Box::new(InGameState::new_host(seed, host, boot_mode)),
+                Ok(host) => match game {
+                    Some(game) => Box::new(InGameState::new_host_saved(game, host)),
+                    None => Box::new(InGameState::new_host(seed, host, boot_mode)),
+                },
                 Err(err) => {
                     log::error!("host bind failed: {err}");
                     Box::new(MainMenuState::new())
@@ -285,7 +319,20 @@ impl ApplicationHandler for App {
         let consumed = self.gui.as_mut().map(|g| g.update(&event)).unwrap_or(false);
 
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                // Run every state's exit hook (world autosave) before quitting;
+                // closing the window never goes through StateStack::apply.
+                let mut ctx = StateContext {
+                    settings: &mut self.settings,
+                    input: &self.input,
+                    render: &self.render_context,
+                    dt: 0.0,
+                    elapsed: self.clock.elapsed(),
+                    grab_cursor: false,
+                };
+                self.stack.shutdown(&mut ctx);
+                event_loop.exit()
+            }
             WindowEvent::Resized(_) => {
                 if let Some(renderer) = self.windows.get_primary_renderer_mut() {
                     renderer.resize();

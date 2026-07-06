@@ -25,6 +25,10 @@ Run with logging: `RUST_LOG=info,wyvencraft=debug cargo run`.
 - `WYVEN_BOOT_INGAME=1` → singleplayer world directly
 - `WYVEN_HOST=1` → host a session (port 25565)
 - `WYVEN_JOIN=127.0.0.1:25565` → join a session
+- `WYVEN_WORLD=name` → load-or-create this named world under `saves/` (combines
+  with BOOT_INGAME/HOST). Without it, boot worlds are ephemeral — never saved.
+- `WYVEN_SEED=…` → seed if `WYVEN_WORLD` creates a new world (number, hex, or text)
+- `WYVEN_CLIENT_ID=…` → override the profile identity (run two clients from one dir)
 
 ## Toolchain prerequisites (important — non-obvious)
 
@@ -55,6 +59,7 @@ entity    ← core, render, inventory   player, swept-AABB physics, humanoid mod
 input     ← core, config, entity   winit events → frame-coherent input
 ui        ← inventory, egui   HUD + inventory egui views
 net       ← core              renet host/client, protocol, remote-player interp
+save      ← core, world, inventory, entity   world/player persistence (saves/ dir)
 state     ← all of the above  game-state machine
 app       ← state, render     window + event loop (owns everything)
 ```
@@ -83,6 +88,7 @@ references). This keeps the GPU layer decoupled from gameplay.
 | A new screen            | implement `state::GameState`, push/replace via `Transition`                                |
 | HUD / inventory UI      | `ui::hud`, `ui::inventory`                                                                 |
 | Networking              | `net::{server,client,protocol}`; orchestration in `state::ingame_state` (`NetRole`)        |
+| Saving / world files    | `save` module (formats, `saves/<slug>/`); triggers in `state::ingame_state::save_world`    |
 | Pipelines / passes      | `render::pipeline`, `render::renderer`                                                     |
 | Shaders                 | `assets/shaders/*.{vert,frag}`, declared in `render::shaders`                              |
 
@@ -106,6 +112,16 @@ references). This keeps the GPU layer decoupled from gameplay.
 - **Multiplayer testing:** launch two processes with `WYVEN_HOST=1` and
   `WYVEN_JOIN=127.0.0.1:25565`; the client logs `connected; world seed … player id …`
   on a successful handshake.
+- **Saves are name-based, not id-based.** `saves/<slug>/` stores blocks/items by
+  registry *name* (numeric ids are insertion-order indices and shift across code
+  changes). `saves/` and `profile.toml` are CWD-relative (like `assets/`) and
+  gitignored. Worlds regenerate terrain from the seed; only the edit overlay,
+  players, and metadata are persisted — so terrain-generator changes alter
+  existing worlds' unedited terrain (edits still replay at their coordinates).
+- **Save triggers:** `InGameState::on_exit` (fires on pause, quit-to-menu, app
+  quit, and window close via `StateStack::shutdown`) + a 60 s autosave. Only
+  singleplayer/host sessions of a *named* world hold a save handle; clients and
+  `WYVEN_BOOT_INGAME`-without-`WYVEN_WORLD` boots never write.
 
 ## Verifying a change
 

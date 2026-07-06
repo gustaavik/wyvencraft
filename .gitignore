@@ -1,2 +1,5 @@
 /target
 .cargo/config.toml
+# World saves + local player profile (generated at runtime)
+/saves
+/profile.toml

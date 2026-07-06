@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use renet::{ClientId, ConnectionConfig, RenetServer};
+use renet::{ClientId, ConnectionConfig, RenetServer, ServerEvent};
 use renet_netcode::{NetcodeServerTransport, ServerAuthentication, ServerConfig};
 
 use crate::net::protocol::{self, Channel, ClientMessage, PlayerId, ServerMessage};
@@ -74,19 +74,26 @@ impl Host {
             log::warn!("host transport error: {err}");
         }
 
-        // Detect new connections.
-        for client_id in self.server.clients_id() {
-            if !self.players.contains_key(&client_id) {
-                let pid = PlayerId(self.next_player_id);
-                self.next_player_id += 1;
-                self.players.insert(client_id, pid);
-                self.joined.push(client_id);
-            }
-        }
-        // Detect disconnections.
-        for client_id in self.server.disconnections_id() {
-            if let Some(pid) = self.players.remove(&client_id) {
-                self.left.push(pid);
+        // Drain connection events. Events (not id polling) are required: the
+        // netcode transport removes a disconnected client from the server's map
+        // immediately, so `disconnections_id()` never reports it — the stale
+        // `players` entry would then block the same client id from rejoining.
+        while let Some(event) = self.server.get_event() {
+            match event {
+                ServerEvent::ClientConnected { client_id } => {
+                    if !self.players.contains_key(&client_id) {
+                        let pid = PlayerId(self.next_player_id);
+                        self.next_player_id += 1;
+                        self.players.insert(client_id, pid);
+                        self.joined.push(client_id);
+                    }
+                }
+                ServerEvent::ClientDisconnected { client_id, reason } => {
+                    if let Some(pid) = self.players.remove(&client_id) {
+                        log::info!("player {} disconnected: {reason}", pid.0);
+                        self.left.push(pid);
+                    }
+                }
             }
         }
     }

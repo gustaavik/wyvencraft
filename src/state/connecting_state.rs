@@ -19,7 +19,10 @@ pub struct ConnectingState {
 
 impl ConnectingState {
     pub fn new(address: SocketAddr) -> Self {
-        let (client, status) = match Client::connect(address) {
+        // Connect with the persisted profile identity so the host can recognise
+        // a returning player and hand back their saved inventory/position.
+        let identity = crate::save::client_identity();
+        let (client, status) = match Client::connect(address, identity) {
             Ok(c) => (Some(c), format!("Connecting to {address}…")),
             Err(e) => (None, format!("Connection failed: {e}")),
         };
@@ -55,7 +58,7 @@ impl GameState for ConnectingState {
         }
 
         // Wait for the Welcome message carrying the world seed + our id + mode
-        // + the host's crafting recipes.
+        // + the host's crafting recipes + any saved state it remembers for us.
         let mut welcome = None;
         for msg in client.receive() {
             if let ServerMessage::Welcome {
@@ -65,18 +68,32 @@ impl GameState for ConnectingState {
                 time_of_day,
                 game_mode,
                 recipes,
+                restored,
             } = msg
             {
-                welcome = Some((seed, your_id, spawn, time_of_day, game_mode, recipes));
+                welcome = Some((
+                    seed,
+                    your_id,
+                    spawn,
+                    time_of_day,
+                    game_mode,
+                    recipes,
+                    restored,
+                ));
             }
         }
         let _ = client.flush();
 
-        if let Some((seed, your_id, spawn, time_of_day, game_mode, recipes)) = welcome {
+        if let Some((seed, your_id, spawn, time_of_day, game_mode, recipes, restored)) = welcome {
             log::info!(
-                "connected; world seed {seed}, player id {}, spawn {spawn:?}, time {time_of_day:.3}, game_mode {}",
+                "connected; world seed {seed}, player id {}, spawn {spawn:?}, time {time_of_day:.3}, game_mode {}, saved state: {}",
                 your_id.0,
-                game_mode.label()
+                game_mode.label(),
+                if restored.is_some() {
+                    "restored"
+                } else {
+                    "none"
+                },
             );
             let client = self.client.take().expect("client present");
             return Transition::Replace(Box::new(InGameState::new_client(
@@ -87,6 +104,7 @@ impl GameState for ConnectingState {
                 time_of_day,
                 game_mode,
                 recipes,
+                restored,
             )));
         }
 

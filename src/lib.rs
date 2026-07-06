@@ -11,6 +11,7 @@
 //! inventory ← core, world
 //! input  ← core, config, entity
 //! net    ← core
+//! save   ← core, world, inventory, entity   (world/player persistence)
 //! ui     ← inventory, net, (egui)
 //! state  ← all of the above
 //! app    ← state, render, config   (owns the window + event loop)
@@ -28,6 +29,7 @@ pub mod input;
 pub mod inventory;
 pub mod net;
 pub mod render;
+pub mod save;
 pub mod state;
 pub mod ui;
 pub mod world;

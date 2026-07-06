@@ -292,6 +292,15 @@ impl BlockRegistry {
             .enumerate()
             .map(|(i, b)| (BlockId(i as u16), b))
     }
+
+    /// Look up a block by its registered name (save files reference blocks by
+    /// name because numeric ids shift when the registry changes across builds).
+    pub fn find(&self, name: &str) -> Option<BlockId> {
+        self.blocks
+            .iter()
+            .position(|b| b.name == name)
+            .map(|i| BlockId(i as u16))
+    }
 }
 
 impl Default for BlockRegistry {

@@ -10,6 +10,9 @@ pub mod server;
 pub mod sync;
 
 pub use client::Client;
-pub use protocol::{Channel, ClientMessage, NetVec3, PlayerId, RecipeData, ServerMessage};
+pub use protocol::{
+    Channel, ClientMessage, NetItemStack, NetVec3, PlayerId, PlayerRestore, RecipeData,
+    ServerMessage,
+};
 pub use server::{DEFAULT_PORT, Host};
 pub use sync::RemotePlayer;

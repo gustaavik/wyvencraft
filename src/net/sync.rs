@@ -18,6 +18,8 @@ pub struct RemotePlayer {
     /// Latest synced survival vitals + mode (for overhead UI / future use).
     pub health: f32,
     pub hunger: f32,
+    /// Host-side only: reported with `Stats` so player records persist it.
+    pub saturation: f32,
     pub mode: GameMode,
 }
 
@@ -32,6 +34,7 @@ impl RemotePlayer {
             pitch: 0.0,
             health: crate::entity::player::MAX_HEALTH,
             hunger: crate::entity::player::MAX_HUNGER,
+            saturation: crate::entity::player::MAX_HUNGER,
             mode: GameMode::Survival,
         }
     }

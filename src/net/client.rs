@@ -20,10 +20,12 @@ pub struct Client {
 
 impl Client {
     /// Open a connection to `server_addr` (does not block; poll [`Client::is_connected`]).
-    pub fn connect(server_addr: SocketAddr) -> std::io::Result<Self> {
+    /// `client_id` is the netcode identity we present; passing the persisted
+    /// profile id (see `save::client_identity`) lets a host recognise a
+    /// returning player across sessions.
+    pub fn connect(server_addr: SocketAddr, client_id: u64) -> std::io::Result<Self> {
         let socket = UdpSocket::bind("0.0.0.0:0")?;
         let current_time = unix_now();
-        let client_id = current_time.as_millis() as u64;
         let authentication = ClientAuthentication::Unsecure {
             protocol_id: PROTOCOL_ID,
             client_id,

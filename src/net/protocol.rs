@@ -27,6 +27,30 @@ pub struct RecipeData {
     pub ingredients: Vec<(String, u32)>,
 }
 
+/// An item stack as it travels on the wire. Raw numeric ids (like block edits):
+/// a session assumes both ends run the same build; the *disk* format is the
+/// layer that converts to stable names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetItemStack {
+    pub item: u16,
+    pub count: u8,
+    pub durability: Option<u16>,
+}
+
+/// Saved state the host hands back to a returning player in the `Welcome`, so
+/// their position/vitals/inventory persist across sessions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlayerRestore {
+    pub position: NetVec3,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub health: f32,
+    pub hunger: f32,
+    pub saturation: f32,
+    pub slots: Vec<Option<NetItemStack>>,
+    pub selected: u32,
+}
+
 /// Messages a client sends to the host.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ClientMessage {
@@ -41,7 +65,17 @@ pub enum ClientMessage {
     /// Request to place `block` at `pos`.
     Place { pos: BlockPos, block: BlockId },
     /// Report the client's current survival vitals to the host.
-    Stats { health: f32, hunger: f32 },
+    Stats {
+        health: f32,
+        hunger: f32,
+        saturation: f32,
+    },
+    /// Report the client's inventory so the host can persist it in the world
+    /// save (sent throttled, only when it changed).
+    SyncInventory {
+        slots: Vec<Option<NetItemStack>>,
+        selected: u32,
+    },
     /// Notify the host the client switched game mode.
     SetMode(GameMode),
     /// Chat message.
@@ -60,6 +94,8 @@ pub enum ServerMessage {
     /// current time-of-day (so the joining client's sky matches) + the session's
     /// game mode + the host's crafting recipes (authoritative for the session,
     /// so everyone crafts by the same rules regardless of local recipe files).
+    /// `restored` carries the player's saved state when the host's world save
+    /// recognises this client's identity (`spawn` already points at it then).
     Welcome {
         seed: u64,
         your_id: PlayerId,
@@ -67,6 +103,7 @@ pub enum ServerMessage {
         time_of_day: f32,
         game_mode: GameMode,
         recipes: Vec<RecipeData>,
+        restored: Option<PlayerRestore>,
     },
     PlayerJoined {
         id: PlayerId,
@@ -169,6 +206,7 @@ mod tests {
             time_of_day: 0.25,
             game_mode: GameMode::Creative,
             recipes: vec![recipe.clone()],
+            restored: None,
         };
         let back: ServerMessage = decode(&encode(&msg)).unwrap();
         match back {
@@ -227,5 +265,69 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn sync_inventory_roundtrips() {
+        let msg = ClientMessage::SyncInventory {
+            slots: vec![
+                Some(NetItemStack {
+                    item: 3,
+                    count: 12,
+                    durability: None,
+                }),
+                None,
+                Some(NetItemStack {
+                    item: 17,
+                    count: 1,
+                    durability: Some(42),
+                }),
+            ],
+            selected: 2,
+        };
+        let back: ClientMessage = decode(&encode(&msg)).unwrap();
+        match back {
+            ClientMessage::SyncInventory { slots, selected } => {
+                assert_eq!(selected, 2);
+                assert_eq!(slots.len(), 3);
+                assert_eq!(slots[2].unwrap().durability, Some(42));
+            }
+            _ => panic!("expected SyncInventory"),
+        }
+    }
+
+    #[test]
+    fn welcome_carries_restored_player_state() {
+        let restore = PlayerRestore {
+            position: [4.0, 71.0, -9.0],
+            yaw: 1.5,
+            pitch: -0.2,
+            health: 13.0,
+            hunger: 9.0,
+            saturation: 1.5,
+            slots: vec![
+                None,
+                Some(NetItemStack {
+                    item: 5,
+                    count: 30,
+                    durability: None,
+                }),
+            ],
+            selected: 1,
+        };
+        let msg = ServerMessage::Welcome {
+            seed: 7,
+            your_id: PlayerId(3),
+            spawn: restore.position,
+            time_of_day: 0.5,
+            game_mode: GameMode::Survival,
+            recipes: vec![],
+            restored: Some(restore.clone()),
+        };
+        let back: ServerMessage = decode(&encode(&msg)).unwrap();
+        match back {
+            ServerMessage::Welcome { restored, .. } => assert_eq!(restored, Some(restore)),
+            _ => panic!("expected Welcome"),
+        }
     }
 }

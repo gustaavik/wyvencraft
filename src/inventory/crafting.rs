@@ -257,7 +257,11 @@ mod tests {
         let mut inv = Inventory::new();
         inv.add(ItemStack::new(items.find("wood").unwrap(), 3), &items);
 
-        let out = book.get(0).unwrap().craft(&mut inv, &items).expect("crafts");
+        let out = book
+            .get(0)
+            .unwrap()
+            .craft(&mut inv, &items)
+            .expect("crafts");
         assert_eq!(out.item, items.wooden_pickaxe);
         assert_eq!(out.durability, items.max_durability(items.wooden_pickaxe));
     }

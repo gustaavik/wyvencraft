@@ -13,25 +13,30 @@ use crate::core::{
     Aabb, BlockId, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, ChunkPos, DayCycle, GameMode,
 };
 use crate::entity::{AnimationState, DROP_SIZE, DroppedItem, HumanoidModel, Perspective, Player};
-use crate::inventory::{Inventory, ItemId, ItemRegistry, ItemStack, RecipeBook};
+use crate::inventory::{INVENTORY_SIZE, Inventory, ItemId, ItemRegistry, ItemStack, RecipeBook};
 use crate::net::{
-    Channel, Client, ClientMessage, Host, NetVec3, PlayerId, RecipeData, RemotePlayer,
-    ServerMessage,
+    Channel, Client, ClientMessage, Host, NetItemStack, NetVec3, PlayerId, PlayerRestore,
+    RecipeData, RemotePlayer, ServerMessage,
 };
 use crate::render::{
     Camera, CpuMesh, GpuLines, GpuMesh, LightParams, RenderContext, SceneFrame, SkyParams, debug,
     tiles,
 };
+use crate::save::{ItemStackData, PlayerData, PlayerRecords, SavedGame, WorldData, WorldSave};
 use crate::ui::hud;
 use crate::world::block::FaceTextures;
 use crate::world::meshing::{mesh_block_overlay, mesh_chunk, push_item_cube};
 use crate::world::{BlockRegistry, ChunkLoader, NoiseGenerator, World, WorldGenerator};
 
-/// The networking role of this in-game session.
+/// The networking role of this in-game session. Host/client drivers are boxed
+/// to keep the enum near the size of its `Singleplayer` variant.
 enum NetRole {
     Singleplayer,
-    Host(Host),
-    Client { client: Client, local_id: PlayerId },
+    Host(Box<Host>),
+    Client {
+        client: Box<Client>,
+        local_id: PlayerId,
+    },
 }
 
 /// The host's own player always has this id; clients are numbered from 1.
@@ -59,6 +64,10 @@ const STATS_INTERVAL: f32 = 0.25;
 /// Max edits per `WorldEdits` batch when replaying world state to a joining client.
 /// ~4096 edits ≈ ~60 KB/message, well under the reliable channel's 5 MB budget.
 const WORLD_SYNC_BATCH: usize = 4096;
+/// Seconds between periodic autosaves (persistent worlds only).
+const AUTOSAVE_INTERVAL: f32 = 60.0;
+/// How often (s) a client checks whether to report its inventory to the host.
+const INVENTORY_SYNC_INTERVAL: f32 = 1.0;
 /// How far beyond the player's collision box dropped items are collected.
 const PICKUP_RANGE: f32 = 1.0;
 /// Colour of the selection outline on the targeted block (near-black).
@@ -125,6 +134,22 @@ pub struct InGameState {
     stats_timer: f32,
     /// Networking role + remote players.
     net: NetRole,
+    /// Persistence handle: `Some` when playing a named world as singleplayer or
+    /// host; `None` for clients and ephemeral dev-boot worlds (never saved).
+    save: Option<WorldSave>,
+    /// Seconds accumulated toward the next periodic autosave.
+    autosave_timer: f32,
+    /// Host: saved per-identity player records for this world; handed back to
+    /// returning clients and written to `players.dat`.
+    player_records: PlayerRecords,
+    /// Host: stable identity (netcode client id) of each connected player.
+    remote_identities: HashMap<PlayerId, u64>,
+    /// Host: latest inventory each client reported (kept in wire form; converted
+    /// to the name-based disk form only when a record is written).
+    remote_inventories: HashMap<PlayerId, (Vec<Option<NetItemStack>>, u32)>,
+    /// Client: throttle + change detection for inventory reports to the host.
+    inventory_sync_timer: f32,
+    last_synced_inventory: Option<Inventory>,
     /// Client-only: whether we've asked the host for the initial world state yet.
     world_state_requested: bool,
     remote_players: HashMap<PlayerId, RemotePlayer>,
@@ -157,7 +182,7 @@ impl InGameState {
     pub fn new_host(seed: u64, host: Host, mode: GameMode) -> Self {
         Self::build(
             seed,
-            NetRole::Host(host),
+            NetRole::Host(Box::new(host)),
             None,
             DayCycle::default(),
             mode,
@@ -165,11 +190,78 @@ impl InGameState {
         )
     }
 
+    /// Singleplayer session of a world loaded from (or just created on) disk.
+    pub fn new_saved(game: SavedGame) -> Self {
+        Self::from_save(game, NetRole::Singleplayer)
+    }
+
+    /// Host a multiplayer session of a world loaded from (or created on) disk.
+    pub fn new_host_saved(game: SavedGame, host: Host) -> Self {
+        Self::from_save(game, NetRole::Host(Box::new(host)))
+    }
+
+    /// Build from a saved world: regenerate terrain from the saved seed, replay
+    /// the edit overlay, and restore the player/inventory/clock. This runs
+    /// before the first network pump, so restored edits are already in
+    /// `World::edits` before any client can request world state.
+    fn from_save(game: SavedGame, net: NetRole) -> Self {
+        let SavedGame {
+            save,
+            world,
+            player,
+            players,
+        } = game;
+        // Anchor spawn-area generation at the saved player position (or the
+        // world's recorded spawn) so there's ground under a restored player.
+        let anchor = player
+            .as_ref()
+            .map(|p| Vec3::from_array(p.position))
+            .or_else(|| world.as_ref().map(|_| Vec3::from_array(save.meta.spawn)));
+        let mut state = Self::build(
+            save.meta.seed,
+            net,
+            anchor,
+            DayCycle::new(save.meta.time_of_day),
+            save.meta.game_mode,
+            None,
+        );
+        if let Some(world) = &world {
+            let resolved = world.resolve(&state.blocks);
+            let count = resolved.len();
+            for (pos, block) in resolved {
+                state.world.apply_edit(pos, block);
+            }
+            // `build` conflates the generation anchor with the respawn point;
+            // a saved world keeps its recorded spawn instead.
+            state.spawn = Vec3::from_array(save.meta.spawn);
+            log::info!("restored {count} world edits");
+        }
+        if let Some(player) = &player {
+            player.apply(&mut state.player, &mut state.inventory, &state.items);
+        }
+        log::info!(
+            "loaded world '{}' (seed {}, time {:.3}, player {})",
+            save.meta.name,
+            save.meta.seed,
+            save.meta.time_of_day,
+            if player.is_some() {
+                "restored"
+            } else {
+                "fresh"
+            },
+        );
+        state.player_records = players;
+        state.save = Some(save);
+        state
+    }
+
     /// Join a multiplayer session as a client (world built from the host's seed).
     /// `spawn` is the position the host assigned us in its `Welcome`; `time_of_day`
     /// seeds our day/night clock to the host's so skies match on join; `mode` is the
     /// session's game mode as told by the host; `recipes` are the host's crafting
-    /// recipes (authoritative — the client's own recipe file is ignored).
+    /// recipes (authoritative — the client's own recipe file is ignored);
+    /// `restored` is our saved state if the host's world remembers us.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_client(
         seed: u64,
         client: Client,
@@ -178,15 +270,23 @@ impl InGameState {
         time_of_day: f32,
         mode: GameMode,
         recipes: Vec<RecipeData>,
+        restored: Option<PlayerRestore>,
     ) -> Self {
-        Self::build(
+        let mut state = Self::build(
             seed,
-            NetRole::Client { client, local_id },
+            NetRole::Client {
+                client: Box::new(client),
+                local_id,
+            },
             Some(Vec3::from_array(spawn)),
             DayCycle::new(time_of_day),
             mode,
             Some(recipes),
-        )
+        );
+        if let Some(restored) = &restored {
+            state.apply_restore(restored);
+        }
+        state
     }
 
     /// Build the in-game state. `spawn_override` (clients) places the player at the
@@ -278,6 +378,13 @@ impl InGameState {
             jump_tap_timer: DOUBLE_TAP_WINDOW * 2.0,
             stats_timer: 0.0,
             net,
+            save: None,
+            autosave_timer: 0.0,
+            player_records: PlayerRecords::default(),
+            remote_identities: HashMap::new(),
+            remote_inventories: HashMap::new(),
+            inventory_sync_timer: 0.0,
+            last_synced_inventory: None,
             world_state_requested: false,
             remote_players: HashMap::new(),
             remote_meshes: Vec::new(),
@@ -479,12 +586,31 @@ impl InGameState {
         let mode = self.player.mode;
         let health = self.player.health;
         let hunger = self.player.hunger;
+        let saturation = self.player.saturation;
 
         // Survival stats are low-frequency; throttle them to keep the wire quiet.
         self.stats_timer += dt;
         let send_stats = self.stats_timer >= STATS_INTERVAL;
         if send_stats {
             self.stats_timer = 0.0;
+        }
+
+        // Clients report their inventory (throttled, only on change) so the
+        // host can persist it in the world save.
+        let mut inventory_sync = None;
+        if matches!(self.net, NetRole::Client { .. }) {
+            self.inventory_sync_timer += dt;
+            if self.inventory_sync_timer >= INVENTORY_SYNC_INTERVAL {
+                self.inventory_sync_timer = 0.0;
+                let changed = self.last_synced_inventory.as_ref().is_none_or(|last| {
+                    last.slots() != self.inventory.slots()
+                        || last.selected_index() != self.inventory.selected_index()
+                });
+                if changed {
+                    inventory_sync = Some(inventory_to_wire(&self.inventory));
+                    self.last_synced_inventory = Some(self.inventory.clone());
+                }
+            }
         }
 
         // One-shot initial world-state request (client only). Captured here and
@@ -501,16 +627,29 @@ impl InGameState {
 
                 for cid in host.take_joined() {
                     if let Some(pid) = host.player_id(cid) {
+                        // The netcode client id doubles as the player's stable
+                        // identity: returning players get their saved state back.
+                        let identity: u64 = cid;
+                        let restored = self
+                            .player_records
+                            .0
+                            .get(&identity)
+                            .map(|record| record_to_restore(record, &self.items));
+                        let spawn = restored.as_ref().map(|r| r.position).unwrap_or(position);
+                        if restored.is_some() {
+                            log::info!("player {} rejoined; restoring saved state", pid.0);
+                        }
                         let name = format!("Player {}", pid.0);
                         host.send(
                             cid,
                             &ServerMessage::Welcome {
                                 seed,
                                 your_id: pid,
-                                spawn: position,
+                                spawn,
                                 time_of_day,
                                 game_mode: mode,
                                 recipes: recipes_to_wire(&self.recipes, &self.items),
+                                restored,
                             },
                             Channel::Reliable,
                         );
@@ -521,14 +660,24 @@ impl InGameState {
                             },
                             Channel::Reliable,
                         );
-                        self.remote_players.insert(
-                            pid,
-                            RemotePlayer::new(pid, name, Vec3::from_array(position)),
-                        );
+                        self.remote_identities.insert(pid, identity);
+                        self.remote_players
+                            .insert(pid, RemotePlayer::new(pid, name, Vec3::from_array(spawn)));
                     }
                 }
                 for pid in host.take_left() {
+                    // Snapshot the leaving player so their state survives a rejoin.
+                    record_remote(
+                        &mut self.player_records,
+                        &self.remote_identities,
+                        &self.remote_players,
+                        &self.remote_inventories,
+                        &self.items,
+                        pid,
+                    );
                     self.remote_players.remove(&pid);
+                    self.remote_identities.remove(&pid);
+                    self.remote_inventories.remove(&pid);
                     host.broadcast(&ServerMessage::PlayerLeft { id: pid }, Channel::Reliable);
                 }
 
@@ -562,16 +711,24 @@ impl InGameState {
                                 );
                             }
                         }
-                        ClientMessage::Stats { health, hunger } => {
+                        ClientMessage::Stats {
+                            health,
+                            hunger,
+                            saturation,
+                        } => {
                             if let Some(rp) = self.remote_players.get_mut(&pid) {
                                 rp.health = health;
                                 rp.hunger = hunger;
+                                rp.saturation = saturation;
                             }
                         }
                         ClientMessage::SetMode(m) => {
                             if let Some(rp) = self.remote_players.get_mut(&pid) {
                                 rp.mode = m;
                             }
+                        }
+                        ClientMessage::SyncInventory { slots, selected } => {
+                            self.remote_inventories.insert(pid, (slots, selected));
                         }
                         ClientMessage::Chat(_) => {}
                         ClientMessage::RequestWorldState => {
@@ -670,7 +827,20 @@ impl InGameState {
                     Channel::Unreliable,
                 );
                 if send_stats {
-                    client.send(&ClientMessage::Stats { health, hunger }, Channel::Reliable);
+                    client.send(
+                        &ClientMessage::Stats {
+                            health,
+                            hunger,
+                            saturation,
+                        },
+                        Channel::Reliable,
+                    );
+                }
+                if let Some((slots, selected)) = inventory_sync.take() {
+                    client.send(
+                        &ClientMessage::SyncInventory { slots, selected },
+                        Channel::Reliable,
+                    );
                 }
                 for msg in client.receive() {
                     match msg {
@@ -1045,11 +1215,126 @@ impl InGameState {
             self.player_anim.trigger_swing();
         }
     }
+
+    /// Apply the saved state the host handed back in its `Welcome` (this client
+    /// played this world before). Replaces the starter kit wholesale.
+    fn apply_restore(&mut self, restore: &PlayerRestore) {
+        self.player.position = Vec3::from_array(restore.position);
+        self.player.yaw = restore.yaw;
+        self.player.pitch = restore.pitch;
+        self.player.health = restore.health;
+        self.player.hunger = restore.hunger;
+        self.player.saturation = restore.saturation;
+        for index in 0..INVENTORY_SIZE {
+            let stack = restore.slots.get(index).and_then(|slot| {
+                slot.and_then(|s| {
+                    ((s.item as usize) < self.items.len()).then_some(ItemStack {
+                        item: ItemId(s.item),
+                        count: s.count,
+                        durability: s.durability,
+                    })
+                })
+            });
+            self.inventory.set_slot(index, stack);
+        }
+        self.inventory.set_selected(restore.selected as usize);
+        // Don't immediately echo the restored inventory back to the host.
+        self.last_synced_inventory = Some(self.inventory.clone());
+        log::info!("restored player state from host at {:?}", restore.position);
+    }
+
+    /// Persist the world if this session owns one (singleplayer or host of a
+    /// named world). Clients and ephemeral worlds are no-ops by construction.
+    fn save_world(&mut self) {
+        if self.save.is_none() {
+            return;
+        }
+        debug_assert!(
+            !matches!(self.net, NetRole::Client { .. }),
+            "clients never hold a save handle"
+        );
+        // Fold currently connected players into the persistent records first.
+        let connected: Vec<PlayerId> = self.remote_players.keys().copied().collect();
+        for pid in connected {
+            record_remote(
+                &mut self.player_records,
+                &self.remote_identities,
+                &self.remote_players,
+                &self.remote_inventories,
+                &self.items,
+                pid,
+            );
+        }
+        let world = WorldData::from_world(&self.world);
+        let player = PlayerData::capture(&self.player, &self.inventory, &self.items);
+        let save = self.save.as_mut().expect("checked above");
+        save.meta.game_mode = self.player.mode;
+        save.meta.spawn = self.spawn.to_array();
+        save.meta.time_of_day = self.day_cycle.time_of_day();
+        match save.write(&world, &player, &self.player_records) {
+            Ok(()) => log::info!(
+                "saved world '{}' ({} edits, {} player records)",
+                save.meta.name,
+                world.edits.len(),
+                self.player_records.0.len()
+            ),
+            Err(err) => log::error!("failed to save world '{}': {err}", save.meta.name),
+        }
+    }
+}
+
+/// Snapshot one connected player into the host's persistent per-identity
+/// records. A free function over the individual fields so it can be called from
+/// inside `pump_network`'s borrow of `self.net`.
+fn record_remote(
+    records: &mut PlayerRecords,
+    identities: &HashMap<PlayerId, u64>,
+    remote_players: &HashMap<PlayerId, RemotePlayer>,
+    remote_inventories: &HashMap<PlayerId, (Vec<Option<NetItemStack>>, u32)>,
+    items: &ItemRegistry,
+    pid: PlayerId,
+) {
+    let Some(&identity) = identities.get(&pid) else {
+        return;
+    };
+    let Some(rp) = remote_players.get(&pid) else {
+        return;
+    };
+    // A client that never reported an inventory keeps its previous record's.
+    let (slots, selected) = match remote_inventories.get(&pid) {
+        Some((slots, selected)) => (wire_slots_to_names(slots, items), *selected),
+        None => match records.0.get(&identity) {
+            Some(prev) => (prev.slots.clone(), prev.selected_slot),
+            // Never reported an inventory and no history: don't record at all,
+            // so a rejoin starts fresh (starter kit) instead of empty-handed.
+            None => return,
+        },
+    };
+    records.0.insert(
+        identity,
+        PlayerData {
+            position: rp.position().to_array(),
+            yaw: rp.yaw,
+            pitch: rp.pitch,
+            flying: false,
+            health: rp.health,
+            hunger: rp.hunger,
+            saturation: rp.saturation,
+            selected_slot: selected,
+            slots,
+        },
+    );
 }
 
 impl GameState for InGameState {
     fn name(&self) -> &'static str {
         "InGame"
+    }
+
+    fn on_exit(&mut self, _ctx: &mut StateContext) {
+        // Fires when pausing (Push), quitting to the menu (ReplaceAll), and on
+        // app shutdown (Quit / window close) — every path that leaves the world.
+        self.save_world();
     }
 
     fn update(&mut self, ctx: &mut StateContext) -> Transition {
@@ -1164,6 +1449,14 @@ impl GameState for InGameState {
         // (WATER_FRAMES / WATER_FPS = 0.8 s in voxel.frag) to wrap seamlessly.
         self.elapsed = (self.elapsed + ctx.dt) % 3600.0;
         self.day_cycle.advance(ctx.dt);
+        // Periodic autosave for persistent worlds (also fires on pause/exit).
+        if self.save.is_some() {
+            self.autosave_timer += ctx.dt;
+            if self.autosave_timer >= AUTOSAVE_INTERVAL {
+                self.autosave_timer = 0.0;
+                self.save_world();
+            }
+        }
         self.update_break_overlay(ctx.render);
         self.update_target_outline(ctx.render);
         self.pump_network(ctx.dt);
@@ -1273,6 +1566,13 @@ impl GameState for InGameState {
                 format!("on_ground: {}", self.player.on_ground),
                 format!("net: {}", self.net_status()),
                 format!("time: {}", format_time_of_day(self.day_cycle.time_of_day())),
+                format!(
+                    "world: {}",
+                    self.save
+                        .as_ref()
+                        .map(|s| s.meta.name.as_str())
+                        .unwrap_or("(unsaved)")
+                ),
             ];
             hud::draw_debug(egui_ctx, &lines);
         }
@@ -1392,6 +1692,69 @@ fn recipes_to_wire(book: &RecipeBook, items: &ItemRegistry) -> Vec<RecipeData> {
         .collect()
 }
 
+/// Convert the local inventory to its wire form for `SyncInventory`.
+fn inventory_to_wire(inventory: &Inventory) -> (Vec<Option<NetItemStack>>, u32) {
+    let slots = inventory
+        .slots()
+        .iter()
+        .map(|slot| {
+            slot.map(|stack| NetItemStack {
+                item: stack.item.0,
+                count: stack.count,
+                durability: stack.durability,
+            })
+        })
+        .collect();
+    (slots, inventory.selected_index() as u32)
+}
+
+/// Convert wire inventory slots to the name-based on-disk form. Ids out of this
+/// build's registry range (mismatched peer) become empty slots.
+fn wire_slots_to_names(
+    slots: &[Option<NetItemStack>],
+    items: &ItemRegistry,
+) -> Vec<Option<ItemStackData>> {
+    slots
+        .iter()
+        .map(|slot| {
+            slot.and_then(|s| {
+                ((s.item as usize) < items.len()).then(|| ItemStackData {
+                    name: items.get(ItemId(s.item)).name.clone(),
+                    count: s.count,
+                    durability: s.durability,
+                })
+            })
+        })
+        .collect()
+}
+
+/// Convert a saved record back to wire form for a returning client's `Welcome`.
+/// Item names this build no longer knows are dropped.
+fn record_to_restore(record: &PlayerData, items: &ItemRegistry) -> PlayerRestore {
+    PlayerRestore {
+        position: record.position,
+        yaw: record.yaw,
+        pitch: record.pitch,
+        health: record.health,
+        hunger: record.hunger,
+        saturation: record.saturation,
+        slots: record
+            .slots
+            .iter()
+            .map(|slot| {
+                slot.as_ref().and_then(|s| {
+                    items.find(&s.name).map(|id| NetItemStack {
+                        item: id.0,
+                        count: s.count,
+                        durability: s.durability,
+                    })
+                })
+            })
+            .collect(),
+        selected: record.selected_slot,
+    }
+}
+
 /// Rebuild a recipe book from a host's wire data. Recipes naming items this
 /// build doesn't know are skipped with a warning (mismatched versions).
 fn recipes_from_wire(data: &[RecipeData], items: &ItemRegistry) -> RecipeBook {
@@ -1461,5 +1824,51 @@ mod tests {
         let book = recipes_from_wire(&wire, &items);
         assert_eq!(book.recipes().len(), 1);
         assert_eq!(book.recipes()[0].output, items.find("glass").unwrap());
+    }
+
+    /// End-to-end persistence: create a world, play (edit terrain, move, change
+    /// the inventory), save, and reload it through the real `InGameState` path.
+    #[test]
+    fn saved_world_roundtrips_through_ingame_state() {
+        use crate::save::WorldSave;
+        use crate::world::block::blocks;
+
+        let root = std::env::temp_dir().join(format!("wyven-ingame-save-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let game = WorldSave::create(&root, "Roundtrip", 42, GameMode::Survival)
+            .unwrap()
+            .load()
+            .unwrap();
+        let mut state = InGameState::new_saved(game);
+
+        // "Play": place a block above ground, move, and rearrange the inventory.
+        let edit_pos = BlockPos::new(3, 200, 5);
+        assert!(state.world.set_block(edit_pos, blocks::STONE).is_some());
+        state.player.position = Vec3::new(10.0, 90.0, -4.0);
+        state.player.health = 13.5;
+        state
+            .inventory
+            .set_slot(8, Some(ItemStack::new(state.items.bread, 2)));
+        state.inventory.set_selected(8);
+        state.save_world();
+        drop(state);
+
+        let game = WorldSave::open(&root, "roundtrip").unwrap().load().unwrap();
+        let state = InGameState::new_saved(game);
+        assert_eq!(
+            state.world.block_at(edit_pos),
+            blocks::STONE,
+            "terrain edit persists"
+        );
+        assert_eq!(state.player.position, Vec3::new(10.0, 90.0, -4.0));
+        assert_eq!(state.player.health, 13.5);
+        assert_eq!(
+            state.inventory.slot(8),
+            Some(ItemStack::new(state.items.bread, 2))
+        );
+        assert_eq!(state.inventory.selected_index(), 8);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

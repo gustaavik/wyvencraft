@@ -167,10 +167,20 @@ impl StateStack {
                 self.states.push(state);
             }
             Transition::Quit => {
-                self.states.clear();
+                // Pop with exit hooks (not a bare clear) so e.g. the in-game
+                // state saves the world before the app quits.
+                self.shutdown(ctx);
                 return false;
             }
         }
         !self.states.is_empty()
+    }
+
+    /// Tear down every state, running its exit hook. Called for `Quit` and by
+    /// the app when the window is closed directly (which bypasses transitions).
+    pub fn shutdown(&mut self, ctx: &mut StateContext) {
+        while let Some(mut top) = self.states.pop() {
+            top.on_exit(ctx);
+        }
     }
 }
