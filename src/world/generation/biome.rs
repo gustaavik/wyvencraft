@@ -1,8 +1,7 @@
-//! Simple climate-driven biome selection. Maps a temperature sample to a biome
-//! and its characteristic surface/sub-surface blocks.
-
-use crate::core::BlockId;
-use crate::world::block::blocks;
+//! Simple climate-driven biome selection: maps a temperature sample to a
+//! biome. What each biome *places* is data — see
+//! [`super::config::WorldGenConfig::biome`]. The temperature thresholds stay
+//! code because the mesa noise fade in [`super::noise`] is anchored to them.
 
 /// Temperatures below this are snowy.
 pub const SNOWY_MAX_TEMP: f32 = -0.35;
@@ -25,23 +24,6 @@ impl Biome {
             Biome::Desert
         } else {
             Biome::Plains
-        }
-    }
-
-    /// Block placed on the very top of the terrain column.
-    pub fn surface_block(self) -> BlockId {
-        match self {
-            Biome::Snowy => blocks::SNOW,
-            Biome::Plains => blocks::GRASS,
-            Biome::Desert => blocks::SAND,
-        }
-    }
-
-    /// Block placed in the few layers just beneath the surface.
-    pub fn subsurface_block(self) -> BlockId {
-        match self {
-            Biome::Snowy | Biome::Plains => blocks::DIRT,
-            Biome::Desert => blocks::SAND,
         }
     }
 }

@@ -60,6 +60,34 @@ pub fn is_water(tile: u32) -> bool {
     (WATER_0..WATER_0 + WATER_FRAMES).contains(&tile)
 }
 
+/// Paint the builtin pixel art for a texture *name* (as referenced by
+/// `assets/blocks.toml`). The painters keep the legacy tile constants as their
+/// noise seeds, so the art is identical regardless of which atlas slot the
+/// name is assigned. Animated names (water) are engine tiles, pre-registered
+/// by the tile registry, and are not painted through here.
+pub fn paint_named(name: &str) -> Option<TileRgba> {
+    Some(match name {
+        "stone" => stone(),
+        "dirt" => fill(dirt_pixel),
+        "grass_top" => fill(grass_pixel),
+        "grass_side" => grass_side(),
+        "sand" => sand(),
+        "wood_bark" => wood_bark(),
+        "wood_rings" => wood_rings(),
+        "leaves" => leaves(),
+        "glass" => glass(),
+        "bedrock" => bedrock(),
+        "snow" => snow(),
+        "gravel" => gravel(),
+        "clay" => clay(),
+        "coal_ore" => ore(COAL_ORE, [44, 44, 48]),
+        "iron_ore" => ore(IRON_ORE, [214, 158, 110]),
+        "gold_ore" => ore(GOLD_ORE, [250, 212, 76]),
+        "diamond_ore" => ore(DIAMOND_ORE, [104, 224, 220]),
+        _ => return None,
+    })
+}
+
 /// Crack-overlay tile for a break progress in `[0, 1]`.
 pub fn crack_tile(progress: f32) -> u32 {
     let stage = (progress.clamp(0.0, 1.0) * CRACK_STAGES as f32) as u32;

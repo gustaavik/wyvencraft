@@ -1,0 +1,83 @@
+# Item definitions.
+#
+# A placeable item is auto-generated for every visible, non-fluid-flow block
+# (same name as the block, stacks to 64, places itself). Entries here either
+# OVERRIDE an auto-generated block item by name, or define new items.
+#
+# NAMES ARE THE SAVE FORMAT: player inventories and crafting recipes identify
+# items by the exact `name` string.
+#
+# Fields:
+#   name        unique display/save name
+#   max_stack   defaults to 64, or 1 for tools
+#   place_block name of the block this item places (block items get theirs
+#               automatically)
+#   [item.tool] makes the item a tool:
+#       kind        free-form tool kind; blocks whose drops say
+#                   { requires_tool = "<kind>" } only drop for this kind
+#       dig_speed   mining-speed multiplier when the tool matches (hand = 1.0)
+#       durability  uses before the tool breaks
+#       harvests    block materials this tool mines at full speed
+#   [item.food] makes the item edible: hunger + saturation restored
+#
+# [starter_kit] lists what a fresh survival player spawns with, in hotbar
+# order. Tools spawn fresh (full durability); `count` applies to stackables.
+
+[[item]]
+name = "wooden pickaxe"
+
+[item.tool]
+kind = "pickaxe"
+dig_speed = 2.0
+durability = 60
+harvests = ["stone"]
+
+[[item]]
+name = "wooden axe"
+
+[item.tool]
+kind = "axe"
+dig_speed = 2.0
+durability = 60
+harvests = ["wood"]
+
+[[item]]
+name = "wooden shovel"
+
+[item.tool]
+kind = "shovel"
+dig_speed = 2.0
+durability = 60
+harvests = ["dirt", "sand"]
+
+[[item]]
+name = "shears"
+
+[item.tool]
+kind = "shears"
+dig_speed = 5.0
+durability = 120
+harvests = ["plant"]
+
+[[item]]
+name = "apple"
+
+[item.food]
+hunger = 4.0
+saturation = 2.4
+
+[[item]]
+name = "bread"
+
+[item.food]
+hunger = 5.0
+saturation = 6.0
+
+[starter_kit]
+survival = [
+    { item = "wooden pickaxe" },
+    { item = "wooden axe" },
+    { item = "wooden shovel" },
+    { item = "apple", count = 5 },
+    { item = "bread", count = 3 },
+]

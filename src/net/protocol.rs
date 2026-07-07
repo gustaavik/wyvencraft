@@ -96,12 +96,16 @@ pub enum ServerMessage {
     /// so everyone crafts by the same rules regardless of local recipe files).
     /// `restored` carries the player's saved state when the host's world save
     /// recognises this client's identity (`spawn` already points at it then).
+    /// `content_hash` fingerprints the host's loaded content (blocks/items/
+    /// entities/worldgen definitions); block and item ids cross the wire raw,
+    /// so clients refuse to join when their own hash differs.
     Welcome {
         seed: u64,
         your_id: PlayerId,
         spawn: NetVec3,
         time_of_day: f32,
         game_mode: GameMode,
+        content_hash: u64,
         recipes: Vec<RecipeData>,
         restored: Option<PlayerRestore>,
     },
@@ -205,6 +209,7 @@ mod tests {
             spawn: [0.5, 80.0, 0.5],
             time_of_day: 0.25,
             game_mode: GameMode::Creative,
+            content_hash: 0xDEAD_BEEF,
             recipes: vec![recipe.clone()],
             restored: None,
         };
@@ -212,9 +217,13 @@ mod tests {
         match back {
             ServerMessage::Welcome {
                 game_mode: GameMode::Creative,
+                content_hash,
                 recipes,
                 ..
-            } => assert_eq!(recipes, vec![recipe]),
+            } => {
+                assert_eq!(content_hash, 0xDEAD_BEEF);
+                assert_eq!(recipes, vec![recipe]);
+            }
             _ => panic!("expected a creative-mode Welcome"),
         }
     }
@@ -321,6 +330,7 @@ mod tests {
             spawn: restore.position,
             time_of_day: 0.5,
             game_mode: GameMode::Survival,
+            content_hash: 1,
             recipes: vec![],
             restored: Some(restore.clone()),
         };

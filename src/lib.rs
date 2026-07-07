@@ -9,12 +9,13 @@
 //! world  ← core, render(mesh/vertex)
 //! entity ← core
 //! inventory ← core, world
+//! content ← world, inventory   (registries loaded from assets/*.toml)
 //! input  ← core, config, entity
 //! net    ← core
 //! save   ← core, world, inventory, entity   (world/player persistence)
 //! ui     ← inventory, net, (egui)
 //! state  ← all of the above
-//! app    ← state, render, config   (owns the window + event loop)
+//! app    ← state, content, render, config   (owns the window + event loop)
 //! ```
 
 // Scaffold phase: many APIs exist ahead of the milestone that first calls them.
@@ -23,6 +24,7 @@
 
 pub mod app;
 pub mod config;
+pub mod content;
 pub mod core;
 pub mod entity;
 pub mod input;

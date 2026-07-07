@@ -82,13 +82,15 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(ctx: Arc<RenderContext>, color_format: Format) -> Self {
+    /// `atlas_pixels` is the packed RGBA atlas assembled by the tile registry
+    /// (the renderer stays decoupled from how content chose its textures).
+    pub fn new(ctx: Arc<RenderContext>, color_format: Format, atlas_pixels: Vec<u8>) -> Self {
         let sky_pipeline = sky::create(ctx.device().clone(), color_format, DEPTH_FORMAT);
         let voxel_pipeline = voxel::create(ctx.device().clone(), color_format, DEPTH_FORMAT, false);
         let transparent_pipeline =
             voxel::create(ctx.device().clone(), color_format, DEPTH_FORMAT, true);
         let line_pipeline = line::create(ctx.device().clone(), color_format, DEPTH_FORMAT);
-        let atlas = TextureAtlas::create(&ctx);
+        let atlas = TextureAtlas::create(&ctx, atlas_pixels);
 
         let set_layout = voxel_pipeline.layout().set_layouts()[0].clone();
         let atlas_set = DescriptorSet::new(

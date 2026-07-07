@@ -3,7 +3,7 @@
 
 use crate::world::block::BlockMaterial;
 
-use super::item::ToolKind;
+use super::item::ToolSpec;
 
 /// Speed bonus when the held tool matches the block material.
 const CORRECT_TOOL_FACTOR: f32 = 1.5;
@@ -12,27 +12,17 @@ const WRONG_TOOL_FACTOR: f32 = 5.0;
 /// Floor on break time so even trivial blocks aren't literally instant in survival.
 const MIN_BREAK_SECONDS: f32 = 0.05;
 
-/// Whether `kind` is the preferred tool for `material`.
-pub fn tool_matches(kind: ToolKind, material: BlockMaterial) -> bool {
-    matches!(
-        (kind, material),
-        (ToolKind::Pickaxe, BlockMaterial::Stone)
-            | (ToolKind::Axe, BlockMaterial::Wood)
-            | (ToolKind::Shovel, BlockMaterial::Dirt)
-            | (ToolKind::Shovel, BlockMaterial::Sand)
-            | (ToolKind::Shears, BlockMaterial::Plant)
-    )
-}
-
 /// Seconds to break a block of the given `hardness`/`material` with an optional
-/// `(tool, dig_speed)`. Returns `INFINITY` for unbreakable blocks.
-pub fn break_seconds(hardness: f32, material: BlockMaterial, tool: Option<(ToolKind, f32)>) -> f32 {
+/// held tool. A tool matches when the block's material is in its `harvests`
+/// list (declared in `assets/items.toml`). Returns `INFINITY` for unbreakable
+/// blocks.
+pub fn break_seconds(hardness: f32, material: BlockMaterial, tool: Option<&ToolSpec>) -> f32 {
     if !hardness.is_finite() {
         return f32::INFINITY;
     }
     let seconds = match tool {
-        Some((kind, dig_speed)) if tool_matches(kind, material) => {
-            hardness * CORRECT_TOOL_FACTOR / dig_speed.max(0.1)
+        Some(tool) if tool.harvests.contains(&material) => {
+            hardness * CORRECT_TOOL_FACTOR / tool.dig_speed.max(0.1)
         }
         _ => hardness * WRONG_TOOL_FACTOR,
     };
@@ -43,23 +33,35 @@ pub fn break_seconds(hardness: f32, material: BlockMaterial, tool: Option<(ToolK
 mod tests {
     use super::*;
 
+    fn tool(kind: &str, dig_speed: f32, harvests: &[BlockMaterial]) -> ToolSpec {
+        ToolSpec {
+            kind: kind.into(),
+            dig_speed,
+            durability: 60,
+            harvests: harvests.to_vec(),
+        }
+    }
+
     #[test]
     fn correct_tool_is_faster_than_hand() {
-        let with_pick = break_seconds(1.5, BlockMaterial::Stone, Some((ToolKind::Pickaxe, 2.0)));
+        let pick = tool("pickaxe", 2.0, &[BlockMaterial::Stone]);
+        let with_pick = break_seconds(1.5, BlockMaterial::Stone, Some(&pick));
         let by_hand = break_seconds(1.5, BlockMaterial::Stone, None);
         assert!(with_pick < by_hand);
     }
 
     #[test]
     fn wrong_tool_is_no_faster_than_hand() {
-        let with_shovel = break_seconds(1.5, BlockMaterial::Stone, Some((ToolKind::Shovel, 2.0)));
+        let shovel = tool("shovel", 2.0, &[BlockMaterial::Dirt, BlockMaterial::Sand]);
+        let with_shovel = break_seconds(1.5, BlockMaterial::Stone, Some(&shovel));
         let by_hand = break_seconds(1.5, BlockMaterial::Stone, None);
         assert_eq!(with_shovel, by_hand);
     }
 
     #[test]
     fn shears_cut_plants_faster_than_hand() {
-        let with_shears = break_seconds(0.2, BlockMaterial::Plant, Some((ToolKind::Shears, 5.0)));
+        let shears = tool("shears", 5.0, &[BlockMaterial::Plant]);
+        let with_shears = break_seconds(0.2, BlockMaterial::Plant, Some(&shears));
         let by_hand = break_seconds(0.2, BlockMaterial::Plant, None);
         assert!(with_shears < by_hand);
     }

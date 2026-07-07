@@ -5,10 +5,12 @@
 //! provide alternative generators (flat world, etc.) without touching callers.
 
 pub mod biome;
+pub mod config;
 pub mod features;
 pub mod generator;
 pub mod noise;
 
+pub use config::WorldGenConfig;
 pub use generator::NoiseGenerator;
 
 use crate::core::ChunkPos;

@@ -46,15 +46,15 @@ impl GameState for LoadingState {
         "Loading"
     }
 
-    fn update(&mut self, _ctx: &mut StateContext) -> Transition {
+    fn update(&mut self, ctx: &mut StateContext) -> Transition {
         // M3: poll the chunk loader and only transition once spawn-area chunks
         // are ready. For now, enter the world immediately.
         match self.kind.take() {
             Some(LoadKind::Ephemeral { seed, mode }) => {
-                Transition::Replace(Box::new(InGameState::new(seed, mode)))
+                Transition::Replace(Box::new(InGameState::new(ctx.content.clone(), seed, mode)))
             }
             Some(LoadKind::Saved(game)) => {
-                Transition::Replace(Box::new(InGameState::new_saved(*game)))
+                Transition::Replace(Box::new(InGameState::new_saved(ctx.content.clone(), *game)))
             }
             None => Transition::None,
         }

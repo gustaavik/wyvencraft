@@ -7,9 +7,9 @@
 //! cross-chunk communication — generation stays deterministic in `(seed, pos)`.
 
 use super::biome::Biome;
-use super::noise::{SEA_LEVEL, TerrainNoise};
+use super::config::{TreeDef, TreeShape, WorldGenConfig};
+use super::noise::TerrainNoise;
 use crate::core::{BlockId, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, LocalPos};
-use crate::world::block::blocks;
 use crate::world::chunk::Chunk;
 
 /// One potential tree per grid cell of this many blocks on each axis.
@@ -20,8 +20,6 @@ const TREE_REACH: i32 = 2;
 const BOULDER_CELL: i32 = 24;
 /// Largest horizontal reach of a boulder from its centre.
 const BOULDER_REACH: i32 = 3;
-/// Chance (per mille) that a boulder cell actually holds a boulder.
-const BOULDER_CHANCE: u64 = 300;
 
 const TREE_SALT: u64 = 0x5452_4545; // "TREE"
 const BOULDER_SALT: u64 = 0x524F_434B; // "ROCK"
@@ -31,15 +29,16 @@ const BOULDER_SALT: u64 = 0x524F_434B; // "ROCK"
 enum Overwrite {
     /// Only fill empty cells (leaves must never eat terrain or trunks).
     AirOnly,
-    /// Fill air and leaves (trunks push through overlapping canopies).
-    AirAndLeaves,
+    /// Fill air plus the given block (trunks push through their own canopy
+    /// leaves).
+    AirAnd(BlockId),
     /// Replace anything (boulders embed into the ground).
     Anything,
 }
 
 /// Scatter all surface features into `chunk`. Deterministic in `(seed, pos)`
 /// and independent of neighbouring chunks.
-pub fn populate(chunk: &mut Chunk, noise: &TerrainNoise, seed: u64) {
+pub fn populate(chunk: &mut Chunk, noise: &TerrainNoise, seed: u64, config: &WorldGenConfig) {
     let origin = chunk.pos.origin();
     for_each_anchor(
         origin,
@@ -48,11 +47,11 @@ pub fn populate(chunk: &mut Chunk, noise: &TerrainNoise, seed: u64) {
         seed,
         BOULDER_SALT,
         |x, z, h| {
-            try_boulder(chunk, noise, origin, x, z, h);
+            try_boulder(chunk, noise, origin, x, z, h, config);
         },
     );
     for_each_anchor(origin, TREE_CELL, TREE_REACH, seed, TREE_SALT, |x, z, h| {
-        try_tree(chunk, noise, origin, x, z, h);
+        try_tree(chunk, noise, origin, x, z, h, config);
     });
 }
 
@@ -95,35 +94,56 @@ fn feature_hash(seed: u64, cx: i32, cz: i32, salt: u64) -> u64 {
     h ^ (h >> 31)
 }
 
-/// Grow a tree at `(x, z)` if the climate and terrain allow one there.
-fn try_tree(chunk: &mut Chunk, noise: &TerrainNoise, origin: BlockPos, x: i32, z: i32, h: u64) {
+/// Grow a tree at `(x, z)` if the climate and terrain allow one there. Which
+/// tree (if any) and its chance come from the biome's worldgen config.
+fn try_tree(
+    chunk: &mut Chunk,
+    noise: &TerrainNoise,
+    origin: BlockPos,
+    x: i32,
+    z: i32,
+    h: u64,
+    config: &WorldGenConfig,
+) {
     let ground = noise.surface_height(x, z).clamp(1, CHUNK_HEIGHT - 1);
-    if ground <= SEA_LEVEL {
+    if ground <= config.sea_level {
         return;
     }
     let biome = Biome::from_temperature(noise.temperature(x, z));
     // Per-mille chance a candidate cell grows a tree, before vegetation scaling.
-    let base_chance = match biome {
-        Biome::Plains => 550.0,
-        Biome::Snowy => 400.0,
-        Biome::Desert => return,
+    let Some((tree_index, base_chance)) = config.biome(biome).tree else {
+        return;
     };
     // Vegetation noise clumps trees into groves separated by clearings.
     let richness = (noise.vegetation(x, z) + 0.55).clamp(0.0, 1.3);
     if (h % 1000) as f32 >= base_chance * richness {
         return;
     }
-    match biome {
-        Biome::Plains => place_oak(chunk, origin, x, ground, z, h),
-        Biome::Snowy => place_spruce(chunk, origin, x, ground, z, h),
-        Biome::Desert => unreachable!(),
+    let tree = &config.trees[tree_index];
+    match tree.shape {
+        TreeShape::Oak => place_oak(chunk, origin, x, ground, z, h, tree),
+        TreeShape::Spruce => place_spruce(chunk, origin, x, ground, z, h, tree),
     }
+}
+
+/// Trunk height drawn from the tree's inclusive range by the feature hash.
+fn trunk_height(tree: &TreeDef, h: u64) -> i32 {
+    let (min, max) = tree.trunk_height;
+    min + ((h >> 32) % (max - min + 1) as u64) as i32
 }
 
 /// Classic oak: a short trunk wrapped in two wide leaf layers, a narrow layer,
 /// and a plus-shaped cap.
-fn place_oak(chunk: &mut Chunk, origin: BlockPos, x: i32, ground: i32, z: i32, h: u64) {
-    let trunk_h = 4 + ((h >> 32) % 3) as i32; // 4..=6
+fn place_oak(
+    chunk: &mut Chunk,
+    origin: BlockPos,
+    x: i32,
+    ground: i32,
+    z: i32,
+    h: u64,
+    tree: &TreeDef,
+) {
+    let trunk_h = trunk_height(tree, h);
     let layers: [(i32, i32); 3] = [(trunk_h - 2, 2), (trunk_h - 1, 2), (trunk_h, 1)];
     for (layer, (dy, radius)) in layers.into_iter().enumerate() {
         for dx in -radius..=radius {
@@ -131,14 +151,13 @@ fn place_oak(chunk: &mut Chunk, origin: BlockPos, x: i32, ground: i32, z: i32, h
                 if dx.abs() == radius && dz.abs() == radius && corner_trimmed(h, layer, dx, dz) {
                     continue;
                 }
-                let block = blocks::LEAVES;
                 set_block(
                     chunk,
                     origin,
                     x + dx,
                     ground + dy,
                     z + dz,
-                    block,
+                    tree.leaves,
                     Overwrite::AirOnly,
                 );
             }
@@ -146,15 +165,7 @@ fn place_oak(chunk: &mut Chunk, origin: BlockPos, x: i32, ground: i32, z: i32, h
     }
     for (dx, dz) in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)] {
         let (cx, cy, cz) = (x + dx, ground + trunk_h + 1, z + dz);
-        set_block(
-            chunk,
-            origin,
-            cx,
-            cy,
-            cz,
-            blocks::LEAVES,
-            Overwrite::AirOnly,
-        );
+        set_block(chunk, origin, cx, cy, cz, tree.leaves, Overwrite::AirOnly);
     }
     for dy in 1..=trunk_h {
         set_block(
@@ -163,15 +174,23 @@ fn place_oak(chunk: &mut Chunk, origin: BlockPos, x: i32, ground: i32, z: i32, h
             x,
             ground + dy,
             z,
-            blocks::WOOD,
-            Overwrite::AirAndLeaves,
+            tree.trunk,
+            Overwrite::AirAnd(tree.leaves),
         );
     }
 }
 
-/// Snowy-biome spruce: a taller trunk with a conical canopy narrowing to a tip.
-fn place_spruce(chunk: &mut Chunk, origin: BlockPos, x: i32, ground: i32, z: i32, h: u64) {
-    let trunk_h = 6 + ((h >> 32) % 3) as i32; // 6..=8
+/// Spruce: a taller trunk with a conical canopy narrowing to a tip.
+fn place_spruce(
+    chunk: &mut Chunk,
+    origin: BlockPos,
+    x: i32,
+    ground: i32,
+    z: i32,
+    h: u64,
+    tree: &TreeDef,
+) {
+    let trunk_h = trunk_height(tree, h);
     for dy in 3..=trunk_h {
         let radius = (1 + (trunk_h - dy) / 2).min(2);
         for dx in -radius..=radius {
@@ -179,21 +198,20 @@ fn place_spruce(chunk: &mut Chunk, origin: BlockPos, x: i32, ground: i32, z: i32
                 if radius == 2 && dx.abs() == 2 && dz.abs() == 2 {
                     continue;
                 }
-                let block = blocks::LEAVES;
                 set_block(
                     chunk,
                     origin,
                     x + dx,
                     ground + dy,
                     z + dz,
-                    block,
+                    tree.leaves,
                     Overwrite::AirOnly,
                 );
             }
         }
     }
     let tip = ground + trunk_h + 1;
-    set_block(chunk, origin, x, tip, z, blocks::LEAVES, Overwrite::AirOnly);
+    set_block(chunk, origin, x, tip, z, tree.leaves, Overwrite::AirOnly);
     for dy in 1..=trunk_h {
         set_block(
             chunk,
@@ -201,8 +219,8 @@ fn place_spruce(chunk: &mut Chunk, origin: BlockPos, x: i32, ground: i32, z: i32
             x,
             ground + dy,
             z,
-            blocks::WOOD,
-            Overwrite::AirAndLeaves,
+            tree.trunk,
+            Overwrite::AirAnd(tree.leaves),
         );
     }
 }
@@ -214,13 +232,21 @@ fn corner_trimmed(h: u64, layer: usize, dx: i32, dz: i32) -> bool {
     (h >> (40 + corner)) & 1 == 0
 }
 
-/// Drop a half-buried stone boulder at `(x, z)` if it sits on dry land.
-fn try_boulder(chunk: &mut Chunk, noise: &TerrainNoise, origin: BlockPos, x: i32, z: i32, h: u64) {
-    if h % 1000 >= BOULDER_CHANCE {
+/// Drop a half-buried boulder at `(x, z)` if it sits on dry land.
+fn try_boulder(
+    chunk: &mut Chunk,
+    noise: &TerrainNoise,
+    origin: BlockPos,
+    x: i32,
+    z: i32,
+    h: u64,
+    config: &WorldGenConfig,
+) {
+    if h % 1000 >= config.boulder.chance_per_mille {
         return;
     }
     let ground = noise.surface_height(x, z).clamp(1, CHUNK_HEIGHT - 1);
-    if ground <= SEA_LEVEL {
+    if ground <= config.sea_level {
         return;
     }
     let radius = 1.4 + ((h >> 32) % 7) as f32 * 0.25; // 1.4..=2.9
@@ -237,7 +263,7 @@ fn try_boulder(chunk: &mut Chunk, noise: &TerrainNoise, origin: BlockPos, x: i32
                         bx,
                         by,
                         bz,
-                        blocks::STONE,
+                        config.boulder.block,
                         Overwrite::Anything,
                     );
                 }
@@ -275,7 +301,7 @@ fn set_block(
     let existing = chunk.get(local);
     let replace = match rule {
         Overwrite::AirOnly => existing.is_air(),
-        Overwrite::AirAndLeaves => existing.is_air() || existing == blocks::LEAVES,
+        Overwrite::AirAnd(also) => existing.is_air() || existing == also,
         Overwrite::Anything => true,
     };
     if replace {

@@ -227,7 +227,12 @@ mod tests {
     #[test]
     fn player_snapshot_roundtrips_and_drops_unknown_items() {
         let (_, items) = test_registries();
-        let mut player = Player::new(Vec3::new(10.0, 70.0, -4.0), GameMode::Survival);
+        let kinds = crate::entity::EntityRegistry::builtin();
+        let mut player = Player::new(
+            Vec3::new(10.0, 70.0, -4.0),
+            GameMode::Survival,
+            kinds.player(),
+        );
         player.yaw = 1.2;
         player.pitch = -0.3;
         player.health = 11.0;
@@ -236,9 +241,12 @@ mod tests {
         let mut inventory = Inventory::new();
         inventory.set_slot(
             0,
-            Some(ItemStack::with_durability(items.wooden_pickaxe, 33)),
+            Some(ItemStack::with_durability(
+                items.find("wooden pickaxe").unwrap(),
+                33,
+            )),
         );
-        inventory.set_slot(9, Some(ItemStack::new(items.bread, 3)));
+        inventory.set_slot(9, Some(ItemStack::new(items.find("bread").unwrap(), 3)));
         inventory.set_selected(5);
 
         let mut data = PlayerData::capture(&player, &inventory, &items);
@@ -249,10 +257,10 @@ mod tests {
             durability: None,
         });
 
-        let mut restored_player = Player::new(Vec3::ZERO, GameMode::Survival);
+        let mut restored_player = Player::new(Vec3::ZERO, GameMode::Survival, kinds.player());
         let mut restored_inventory = Inventory::new();
         // Pre-fill a slot to prove apply() clears slots the snapshot left empty.
-        restored_inventory.set_slot(20, Some(ItemStack::new(items.apple, 2)));
+        restored_inventory.set_slot(20, Some(ItemStack::new(items.find("apple").unwrap(), 2)));
         data.apply(&mut restored_player, &mut restored_inventory, &items);
 
         assert_eq!(restored_player.position, player.position);
@@ -261,11 +269,14 @@ mod tests {
         assert_eq!(restored_player.saturation, player.saturation);
         assert_eq!(
             restored_inventory.slot(0),
-            Some(ItemStack::with_durability(items.wooden_pickaxe, 33))
+            Some(ItemStack::with_durability(
+                items.find("wooden pickaxe").unwrap(),
+                33
+            ))
         );
         assert_eq!(
             restored_inventory.slot(9),
-            Some(ItemStack::new(items.bread, 3))
+            Some(ItemStack::new(items.find("bread").unwrap(), 3))
         );
         assert_eq!(restored_inventory.slot(1), None, "unknown item dropped");
         assert_eq!(restored_inventory.slot(20), None, "stale slot cleared");

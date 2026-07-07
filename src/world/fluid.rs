@@ -9,15 +9,19 @@
 //! The sim is event-driven: cells are only (re)evaluated after a nearby block
 //! change, at a fixed tick rate, and each change wakes its neighbours — so
 //! flow ripples outward and *recedes* the same way when its source is cut.
-//! Levels are encoded as distinct block ids ([`block::flowing_water`]), so
-//! flow state travels through the ordinary edit-overlay, save, and network
-//! paths with no extra metadata.
+//! Levels are encoded as distinct block ids (the auto-registered flow blocks
+//! of each fluid, see [`crate::world::block::FluidInfo`]), so flow state
+//! travels through the ordinary edit-overlay, save, and network paths with no
+//! extra metadata.
+//!
+//! The sim itself is fluid-agnostic: it reads the `fluid` component off the
+//! block registry, so any block declared as a fluid source in
+//! `assets/blocks.toml` flows with these rules.
 
 use std::collections::HashSet;
 
 use crate::core::{BlockId, BlockPos, Direction};
 use crate::world::World;
-use crate::world::block::{self, WATER_SOURCE_LEVEL, blocks};
 
 /// Seconds between simulation steps (one "water tick").
 const TICK_INTERVAL: f32 = 0.25;
@@ -85,44 +89,49 @@ impl FluidSim {
 }
 
 /// What the cell at `pos` should become, or `None` if it is stable or not a
-/// fluid cell. Only air and flowing water re-evaluate; sources are permanent
+/// fluid cell. Only air and flowing fluid re-evaluate; sources are permanent
 /// until a block replaces them.
 fn evaluate(world: &World, pos: BlockPos) -> Option<BlockId> {
+    let reg = world.registry();
     let current = world.block_at(pos);
-    if current == blocks::WATER || (!current.is_air() && !block::is_water(current)) {
-        return None;
+    match reg.fluid(current) {
+        Some(f) if f.is_source() => return None,
+        None if !current.is_air() => return None,
+        _ => {}
     }
-    let level = target_level(world, pos);
-    let next = if level == 0 {
-        BlockId::AIR
-    } else {
-        block::flowing_water(level)
+    let next = match target(world, pos) {
+        Some((group, level)) => reg.flowing(group, level),
+        None => BlockId::AIR,
     };
     (next != current).then_some(next)
 }
 
-/// The flow level `pos` is entitled to from its neighbours: a full falling
-/// stream under any water, otherwise one less than the strongest horizontal
-/// neighbour that spreads sideways.
-fn target_level(world: &World, pos: BlockPos) -> u8 {
-    if block::is_water(world.block_at(pos.offset(Direction::PosY))) {
-        return WATER_SOURCE_LEVEL - 1;
+/// The strongest `(group, level)` claim on `pos` from its neighbours: a full
+/// falling stream under any fluid, otherwise one less than the strongest
+/// horizontal neighbour that spreads sideways. `None` when nothing feeds it.
+fn target(world: &World, pos: BlockPos) -> Option<(u16, u8)> {
+    let reg = world.registry();
+    if let Some(above) = reg.fluid(world.block_at(pos.offset(Direction::PosY))) {
+        return Some((above.group, above.max_level - 1));
     }
-    let mut best: u8 = 0;
+    let mut best: Option<(u16, u8)> = None;
     for dir in HORIZONTAL {
         let np = pos.offset(dir);
-        let Some(level) = block::water_level(world.block_at(np)) else {
+        let Some(f) = reg.fluid(world.block_at(np)) else {
             continue;
         };
-        // Water that can still fall (air below) only falls; anything resting
-        // on solid ground feeds sideways. Over water, only a source above
+        // Fluid that can still fall (air below) only falls; anything resting
+        // on solid ground feeds sideways. Over fluid, only a source above
         // another source spreads (an ocean surface fills a breach) — never
-        // water above a falling column, so streams stay one block wide.
+        // fluid above a falling column, so streams stay one block wide.
         let below = world.block_at(np.offset(Direction::NegY));
         let spreads = !below.is_air()
-            && (!block::is_water(below) || (level == WATER_SOURCE_LEVEL && below == blocks::WATER));
-        if spreads {
-            best = best.max(level - 1);
+            && match reg.fluid(below) {
+                None => true,
+                Some(bf) => f.is_source() && bf.is_source() && bf.group == f.group,
+            };
+        if spreads && f.level > 1 && best.is_none_or(|(_, level)| f.level - 1 > level) {
+            best = Some((f.group, f.level - 1));
         }
     }
     best
@@ -134,7 +143,7 @@ mod tests {
 
     use super::*;
     use crate::core::ChunkPos;
-    use crate::world::block::BlockRegistry;
+    use crate::world::block::{BlockRegistry, blocks};
     use crate::world::generation::NoiseGenerator;
     use crate::world::generation::WorldGenerator;
 
@@ -186,11 +195,11 @@ mod tests {
         assert_eq!(world.block_at(CENTER), blocks::WATER);
         assert_eq!(
             world.block_at(BlockPos::new(9, WATER_Y, 8)),
-            block::flowing_water(7)
+            world.registry().flowing(0, 7)
         );
         assert_eq!(
             world.block_at(BlockPos::new(10, WATER_Y, 8)),
-            block::flowing_water(6)
+            world.registry().flowing(0, 6)
         );
         // Nothing climbs the rim or floats above the surface.
         assert!(world.block_at(BlockPos::new(11, WATER_Y + 1, 8)).is_air());
@@ -231,7 +240,7 @@ mod tests {
         for y in WATER_Y..hover.y {
             let pos = BlockPos::new(8, y, 8);
             assert!(
-                block::is_water(world.block_at(pos)),
+                world.registry().is_fluid(world.block_at(pos)),
                 "column gap at {pos:?}"
             );
             if y > WATER_Y {
@@ -240,8 +249,10 @@ mod tests {
             }
         }
         // The landing cell spreads across the floor.
-        assert!(block::is_water(
-            world.block_at(BlockPos::new(9, WATER_Y, 8))
-        ));
+        assert!(
+            world
+                .registry()
+                .is_fluid(world.block_at(BlockPos::new(9, WATER_Y, 8)))
+        );
     }
 }

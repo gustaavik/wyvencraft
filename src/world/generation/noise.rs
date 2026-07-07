@@ -29,8 +29,9 @@ const MESA_EDGE: f64 = 0.03;
 /// so no cliff wall forms along the biome contour itself.
 const MESA_BIOME_FADE: f64 = 0.12;
 
-/// Number of independent ore-vein noise fields (one per ore in the generator's
-/// ore table).
+/// Default number of independent ore-vein noise fields (matches the builtin
+/// ore table; the loaded config sizes the real set via
+/// [`TerrainNoise::with_ore_fields`]).
 pub const ORE_FIELDS: usize = 4;
 
 /// Bundle of noise functions driving world generation. Cheap to clone-free
@@ -43,13 +44,19 @@ pub struct TerrainNoise {
     cave_blob: Perlin,
     cave_tunnel_a: Perlin,
     cave_tunnel_b: Perlin,
-    ores: [Perlin; ORE_FIELDS],
+    /// One field per ore-table entry, seeded by index — the table's order is
+    /// part of a world's identity.
+    ores: Vec<Perlin>,
     temperature: Fbm<Perlin>,
     vegetation: Perlin,
 }
 
 impl TerrainNoise {
     pub fn new(seed: u32) -> Self {
+        Self::with_ore_fields(seed, ORE_FIELDS)
+    }
+
+    pub fn with_ore_fields(seed: u32, ore_fields: usize) -> Self {
         let height = Fbm::<Perlin>::new(seed)
             .set_octaves(5)
             .set_frequency(0.0045)
@@ -65,8 +72,9 @@ impl TerrainNoise {
         let cave_blob = Perlin::new(seed.wrapping_add(0x9E37));
         let cave_tunnel_a = Perlin::new(seed.wrapping_add(0x51ED));
         let cave_tunnel_b = Perlin::new(seed.wrapping_add(0xC2B2));
-        let ores =
-            std::array::from_fn(|i| Perlin::new(seed.wrapping_add(0x85EB + i as u32 * 0x0101)));
+        let ores = (0..ore_fields)
+            .map(|i| Perlin::new(seed.wrapping_add(0x85EB + i as u32 * 0x0101)))
+            .collect();
         let temperature = Fbm::<Perlin>::new(seed.wrapping_add(0x517C))
             .set_octaves(3)
             .set_frequency(0.0016);

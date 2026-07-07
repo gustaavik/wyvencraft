@@ -1,0 +1,94 @@
+# World generation configuration: which blocks terrain is made of, the ore
+# table, tree/boulder features, and per-biome surface blocks.
+#
+# ⚠ Terrain regenerates from the world seed on every load — only player edits
+# are saved. Changing anything here changes the unedited terrain of EXISTING
+# worlds (same as a code change to the generator would).
+#
+# Block values are names from blocks.toml. Unknown names reject the whole
+# file (the engine falls back to its builtin copy) — worldgen silently
+# placing the wrong block would corrupt worlds.
+
+[terrain]
+bedrock = "bedrock"   # placed at y = 0
+stone = "stone"       # base solid, upgraded to ores below
+water = "water"       # fills air up to sea_level
+sea_level = 62
+
+# Ocean-floor covering: `shallow` within 2 blocks of sea level, then noise
+# patches — `gravel.above`/`clay.below` are thresholds on the seabed noise
+# field (roughly [-1, 1]); everything between is `default`.
+[seabed]
+shallow = "sand"
+default = "sand"
+gravel = { block = "gravel", above = 0.30 }
+clay = { block = "clay", below = -0.35 }
+
+# Ore veins, rarest first: earlier entries win where noise fields overlap.
+# ⚠ ORDER IS SEMANTIC: entry i uses noise field i (seeded from its index),
+# so reordering or inserting entries relocates ores in existing worlds.
+# `threshold` is on the ore noise field — higher = rarer.
+[[ore]]
+block = "diamond ore"
+min_y = 1
+max_y = 16
+threshold = 0.68
+
+[[ore]]
+block = "gold ore"
+min_y = 4
+max_y = 32
+threshold = 0.66
+
+[[ore]]
+block = "iron ore"
+min_y = 8
+max_y = 72
+threshold = 0.60
+
+[[ore]]
+block = "coal ore"
+min_y = 16
+max_y = 108
+threshold = 0.55
+
+# Tree types. `shape` names a built-in canopy strategy ("oak": layered round
+# crown; "spruce": cone); the blocks and trunk height range are data.
+[[tree]]
+name = "oak"
+shape = "oak"
+trunk = "wood"
+leaves = "leaves"
+trunk_height = [4, 6]
+
+[[tree]]
+name = "spruce"
+shape = "spruce"
+trunk = "wood"
+leaves = "leaves"
+trunk_height = [6, 8]
+
+# Half-buried boulders on dry land.
+[boulder]
+block = "stone"
+chance_per_mille = 300
+
+# What each biome places. The climate model itself (temperature thresholds,
+# mesas) stays in code. `tree` names a [[tree] ] entry; omit for no trees.
+# `tree_chance_per_mille` is the per-candidate-cell chance before vegetation
+# clumping scales it.
+[biome.plains]
+surface = "grass"
+subsurface = "dirt"
+tree = "oak"
+tree_chance_per_mille = 550
+
+[biome.snowy]
+surface = "snow"
+subsurface = "dirt"
+tree = "spruce"
+tree_chance_per_mille = 400
+
+[biome.desert]
+surface = "sand"
+subsurface = "sand"

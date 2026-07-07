@@ -2,9 +2,11 @@
 //! one by IP address.
 
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::sync::Arc;
 
 use super::connecting_state::ConnectingState;
 use super::{GameState, InGameState, MainMenuState, StateContext, Transition};
+use crate::content::GameContent;
 use crate::core::GameMode;
 use crate::net::{DEFAULT_PORT, Host};
 use crate::save::{self, WorldEntry, WorldSave};
@@ -41,7 +43,7 @@ impl MultiplayerMenuState {
     }
 
     /// Load or create the world to host, bind the server on its seed, and enter.
-    fn host(&mut self) -> Transition {
+    fn host(&mut self, content: Arc<GameContent>) -> Transition {
         let game = match self.selected_world {
             Some(index) => {
                 let Some(world) = self.worlds.get(index) else {
@@ -69,7 +71,9 @@ impl MultiplayerMenuState {
         };
         // Bind with the world's own seed so `Host::seed()` matches the world.
         match Host::bind(DEFAULT_PORT, game.save.meta.seed) {
-            Ok(host) => Transition::Replace(Box::new(InGameState::new_host_saved(game, host))),
+            Ok(host) => {
+                Transition::Replace(Box::new(InGameState::new_host_saved(content, game, host)))
+            }
             Err(err) => {
                 self.error = Some(format!("Host failed: {err}"));
                 Transition::None
@@ -88,7 +92,7 @@ impl GameState for MultiplayerMenuState {
         Transition::None
     }
 
-    fn ui(&mut self, egui_ctx: &egui::Context, _ctx: &mut StateContext) -> Transition {
+    fn ui(&mut self, egui_ctx: &egui::Context, ctx: &mut StateContext) -> Transition {
         let mut transition = Transition::None;
         egui::CentralPanel::default().show(egui_ctx, |ui| {
             ui.vertical_centered(|ui| {
@@ -140,7 +144,7 @@ impl GameState for MultiplayerMenuState {
                     .add_sized([220.0, 36.0], egui::Button::new("Host Game"))
                     .clicked()
                 {
-                    transition = self.host();
+                    transition = self.host(ctx.content.clone());
                 }
 
                 ui.add_space(16.0);

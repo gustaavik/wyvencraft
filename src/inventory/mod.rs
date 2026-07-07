@@ -9,5 +9,5 @@ pub mod mining;
 
 pub use crafting::{Recipe, RecipeBook};
 pub use inventory::{HOTBAR_SIZE, INVENTORY_SIZE, Inventory};
-pub use item::{FoodValue, Item, ItemId, ItemRegistry, ItemStack, ToolKind};
+pub use item::{FoodValue, Item, ItemId, ItemRegistry, ItemStack, ToolSpec};
 pub use mining::break_seconds;

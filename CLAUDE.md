@@ -52,16 +52,17 @@ Domain modules with **one-directional dependencies** (do not introduce cycles):
 
 ```
 core      ← everything        coordinate/voxel types, AABB/Ray/Frustum, timing
-render    ← core              Vulkan: context, pipelines, mesh upload, camera, atlas
+render    ← core              Vulkan: context, pipelines, mesh upload, camera, atlas, tile registry
 world     ← core, render      blocks, chunks, generation, meshing, raycast, loader
 inventory ← core, world       item/stack/inventory data model (no rendering)
 entity    ← core, render, inventory   player, swept-AABB physics, humanoid model, dropped items
+content   ← render, world, inventory, entity   GameContent: registries loaded from assets/*.toml
 input     ← core, config, entity   winit events → frame-coherent input
 ui        ← inventory, egui   HUD + inventory egui views
 net       ← core              renet host/client, protocol, remote-player interp
 save      ← core, world, inventory, entity   world/player persistence (saves/ dir)
 state     ← all of the above  game-state machine
-app       ← state, render     window + event loop (owns everything)
+app       ← state, content, render     window + event loop (owns everything)
 ```
 
 Key rule: **`render` never depends on `world`.** The active game state builds plain
@@ -69,9 +70,18 @@ Key rule: **`render` never depends on `world`.** The active game state builds pl
 references). This keeps the GPU layer decoupled from gameplay.
 
 ### Design patterns in use
+- **Data-driven content** — game content lives in TOML under `assets/`
+  (`blocks.toml`, `items.toml`, `entities.toml`, `worldgen.toml`,
+  `recipes.toml`), loaded once at startup into `content::GameContent` and
+  shared via `Arc`. Behavior is *components + code hooks*: data declares typed
+  components (`drops`, `fluid`, `tool`, `food`, entity params); each component
+  is implemented once in Rust and dispatched on — never on block/item identity.
+  Every file has an embedded `include_str!` fallback and degrades fail-soft
+  with a logged warning (worldgen is strict: any bad name rejects the file).
 - **State pattern** — `state::GameState` trait + `StateStack` (menu → loading →
   in-game → pause overlay). `app` only drives the stack.
-- **Registry** — `world::BlockRegistry`, `inventory::ItemRegistry`.
+- **Registry** — `world::BlockRegistry`, `inventory::ItemRegistry`,
+  `entity::EntityRegistry`, `render::TileRegistry` (texture name → atlas tile).
 - **Strategy** — `world::generation::WorldGenerator` (default `NoiseGenerator`).
 - **Producer/consumer** — `world::loader::ChunkLoader` (crossbeam worker pool).
 - **Command/message** — `net::protocol` (`ClientMessage` / `ServerMessage`).
@@ -79,12 +89,15 @@ references). This keeps the GPU layer decoupled from gameplay.
 ### Where to make common changes
 | Task                    | Location                                                                                   |
 | ----------------------- | ------------------------------------------------------------------------------------------ |
-| Add a block type        | `world::block::BlockRegistry::with_builtins` + a tile index & pixel art in `render::tiles` |
-| Change terrain          | `world::generation::{noise,biome,generator}`                                               |
-| Trees/boulders/features | `world::generation::features` (jittered-grid anchors; mesas live in `noise::surface_height`) |
+| Add a block type        | `assets/blocks.toml` (pure data); texture = PNG in `assets/textures/<name>.png` or a painter in `render::tiles::paint_named` |
+| Add an item / tool / food | `assets/items.toml` (`[item.tool]` with `harvests`, `[item.food]`); starter kit in the same file |
+| Block drop rules        | `drops = ...` on the block in `assets/blocks.toml` (`"self"`, `"none"`, `{ requires_tool }`, `{ item, count }`) |
+| Entity tuning / new kind | `assets/entities.toml` (physics/movement/vitals/item components); a new *behavior* = one new component in `entity::kind` + its code hook |
+| Change terrain          | `assets/worldgen.toml` (blocks, ores, sea level, biome surfaces — ⚠ alters existing worlds); noise/climate/mesas stay in `world::generation::{noise,biome,generator}` |
+| Trees/boulders/features | shapes+chances in `assets/worldgen.toml`; canopy strategies in `world::generation::features` (jittered-grid anchors) |
 | Meshing                 | `world::meshing::culled` (face culling; greedy is a TODO)                                  |
-| Water / fluids          | `world::fluid` (level-based flow sim, ticked from `state::ingame_state`); surface heights in `world::meshing::culled` |
-| Player movement/physics | `entity::player`, `entity::physics`                                                        |
+| Water / fluids          | `[block.fluid]` component in `assets/blocks.toml` (auto-registers flow blocks); sim in `world::fluid` (fluid-agnostic, ticked from `state::ingame_state`) |
+| Player movement/physics | numbers in `assets/entities.toml`; formulas in `entity::player`, `entity::physics`         |
 | Crafting recipes        | `assets/recipes.toml` (data); logic in `inventory::crafting`; panel in `ui::inventory`     |
 | A new screen            | implement `state::GameState`, push/replace via `Transition`                                |
 | HUD / inventory UI      | `ui::hud`, `ui::inventory`                                                                 |

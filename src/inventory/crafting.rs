@@ -262,7 +262,10 @@ mod tests {
             .unwrap()
             .craft(&mut inv, &items)
             .expect("crafts");
-        assert_eq!(out.item, items.wooden_pickaxe);
-        assert_eq!(out.durability, items.max_durability(items.wooden_pickaxe));
+        assert_eq!(out.item, items.find("wooden pickaxe").unwrap());
+        assert_eq!(
+            out.durability,
+            items.max_durability(items.find("wooden pickaxe").unwrap())
+        );
     }
 }

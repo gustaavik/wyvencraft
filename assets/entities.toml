@@ -1,0 +1,73 @@
+# Entity kind definitions: the tuning for every simulated entity type.
+#
+# The engine requires a "player" kind (with movement + vitals) and a
+# "dropped item" kind (with item params); future entity types are added as
+# new [[entity]] entries with the components they need. Numbers here are
+# read at startup — edit and restart to tune.
+#
+# Components:
+#   [entity.physics]   gravity, terminal_velocity, collision width/height,
+#                      ground_friction (exponential damping/s while grounded)
+#   [entity.movement]  walk/sprint/fly/jump speeds, eye_height, reach
+#   [entity.vitals]    health/hunger model (see field names)
+#   [entity.item]      dropped-item behavior: despawn timer, pop/throw
+#                      speeds, pickup grace delays, pickup range
+#   [entity.visual]    kind = "humanoid" (skinned box model) or
+#                      kind = "item_cube" (spinning, bobbing cube)
+
+[[entity]]
+name = "player"
+
+[entity.physics]
+gravity = 28.0
+terminal_velocity = -60.0
+width = 0.6
+height = 1.8
+
+[entity.movement]
+walk_speed = 4.3
+sprint_speed = 6.5
+fly_speed = 12.0
+jump_speed = 9.0
+eye_height = 1.62
+reach = 5.0
+
+[entity.vitals]
+max_health = 20.0
+max_hunger = 20.0
+safe_fall = 3.0
+fall_damage_per_block = 1.0
+hunger_drain_base = 0.05
+hunger_drain_sprint = 0.15
+regen_hunger_threshold = 18.0
+regen_rate = 1.0
+starve_rate = 1.0
+
+[entity.visual]
+kind = "humanoid"
+
+[[entity]]
+name = "dropped item"
+
+[entity.physics]
+gravity = 28.0
+terminal_velocity = -60.0
+width = 0.25
+height = 0.25
+ground_friction = 10.0
+
+[entity.item]
+despawn_seconds = 300.0
+pop_horizontal = 1.4
+pop_vertical = 3.2
+throw_speed = 6.0
+throw_lift = 2.0
+block_drop_delay = 0.3
+thrown_delay = 1.5
+pickup_range = 1.0
+
+[entity.visual]
+kind = "item_cube"
+spin_rate = 1.8
+bob_amplitude = 0.03
+bob_rate = 2.4

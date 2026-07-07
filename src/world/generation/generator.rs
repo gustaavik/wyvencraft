@@ -1,68 +1,47 @@
 //! The default noise-based [`WorldGenerator`].
 
+use std::sync::Arc;
+
 use super::WorldGenerator;
 use super::biome::Biome;
+use super::config::WorldGenConfig;
 use super::features;
-use super::noise::{ORE_FIELDS, SEA_LEVEL, TerrainNoise};
+use super::noise::TerrainNoise;
 use crate::core::{BlockId, CHUNK_HEIGHT, CHUNK_SIZE, ChunkPos, LocalPos};
-use crate::world::block::blocks;
+use crate::world::block::BlockRegistry;
 use crate::world::chunk::Chunk;
-
-/// An ore vein: the block it places, the vertical band it appears in, and how
-/// rare it is (higher threshold = rarer).
-struct OreVein {
-    block: BlockId,
-    min_y: i32,
-    max_y: i32,
-    threshold: f32,
-}
-
-/// Ore table, rarest first so a rich vein wins where noise fields overlap.
-/// Indices double as [`TerrainNoise::ore_density`] field ids.
-const ORE_VEINS: [OreVein; ORE_FIELDS] = [
-    OreVein {
-        block: blocks::DIAMOND_ORE,
-        min_y: 1,
-        max_y: 16,
-        threshold: 0.68,
-    },
-    OreVein {
-        block: blocks::GOLD_ORE,
-        min_y: 4,
-        max_y: 32,
-        threshold: 0.66,
-    },
-    OreVein {
-        block: blocks::IRON_ORE,
-        min_y: 8,
-        max_y: 72,
-        threshold: 0.60,
-    },
-    OreVein {
-        block: blocks::COAL_ORE,
-        min_y: 16,
-        max_y: 108,
-        threshold: 0.55,
-    },
-];
 
 /// Carve where the tunnel field (see [`TerrainNoise::cave_tunnel`]) is below
 /// this squared radius.
 const TUNNEL_RADIUS_SQ: f32 = 0.01;
 
-/// Generates terrain from layered noise. Fully deterministic in `(seed, pos)`,
-/// which is what lets every multiplayer peer reproduce the same world.
+/// Generates terrain from layered noise, placing the blocks chosen by the
+/// [`WorldGenConfig`]. Fully deterministic in `(seed, pos)` for a given
+/// config, which is what lets every multiplayer peer reproduce the same world.
 pub struct NoiseGenerator {
     seed: u64,
     noise: TerrainNoise,
+    config: Arc<WorldGenConfig>,
 }
 
 impl NoiseGenerator {
+    /// A generator using the builtin worldgen configuration (tests and
+    /// fallbacks; the app passes the loaded config via `with_config`).
     pub fn new(seed: u64) -> Self {
+        let blocks = BlockRegistry::with_builtins();
+        Self::with_config(seed, Arc::new(WorldGenConfig::builtin(&blocks)))
+    }
+
+    pub fn with_config(seed: u64, config: Arc<WorldGenConfig>) -> Self {
         Self {
             seed,
-            noise: TerrainNoise::new(seed as u32),
+            noise: TerrainNoise::with_ore_fields(seed as u32, config.ores.len()),
+            config,
         }
+    }
+
+    pub fn config(&self) -> &WorldGenConfig {
+        &self.config
     }
 
     /// Whether caves hollow out this below-surface cell. Blob caverns open up
@@ -80,48 +59,49 @@ impl NoiseGenerator {
         self.noise.cave_tunnel(x, y, z) < TUNNEL_RADIUS_SQ
     }
 
-    /// Ocean-floor covering: sandy shallows near the coast, then noise-driven
-    /// patches of sand, gravel, and clay in deeper water.
+    /// Ocean-floor covering: shallows near the coast, then noise-driven
+    /// patches (gravel/clay/default per the config) in deeper water.
     fn seabed_block(&self, x: i32, z: i32, height: i32) -> BlockId {
-        if SEA_LEVEL - height <= 2 {
-            return blocks::SAND;
+        let seabed = &self.config.seabed;
+        if self.config.sea_level - height <= 2 {
+            return seabed.shallow;
         }
         let n = self.noise.seabed(x, z);
-        if n > 0.30 {
-            blocks::GRAVEL
-        } else if n < -0.35 {
-            blocks::CLAY
+        if n > seabed.gravel_above {
+            seabed.gravel
+        } else if n < seabed.clay_below {
+            seabed.clay
         } else {
-            blocks::SAND
+            seabed.default_block
         }
     }
 
     /// Stone, upgraded to an ore where an ore vein's noise clears its threshold.
     fn ore_or_stone(&self, x: i32, y: i32, z: i32) -> BlockId {
-        for (field, vein) in ORE_VEINS.iter().enumerate() {
+        for (field, vein) in self.config.ores.iter().enumerate() {
             if (vein.min_y..=vein.max_y).contains(&y)
                 && self.noise.ore_density(field, x, y, z) > vein.threshold
             {
                 return vein.block;
             }
         }
-        blocks::STONE
+        self.config.stone
     }
 
     /// Pick the block for a cell at or below the surface (`y <= height`).
     fn solid_block(&self, x: i32, y: i32, z: i32, height: i32, biome: Biome) -> BlockId {
-        let underwater = height < SEA_LEVEL;
+        let underwater = height < self.config.sea_level;
         if self.is_cave(x, y, z, height, underwater) {
-            return blocks::AIR;
+            return BlockId::AIR;
         }
         if underwater {
             if y >= height - 2 {
                 return self.seabed_block(x, z, height);
             }
         } else if y == height {
-            return biome.surface_block();
+            return self.config.biome(biome).surface;
         } else if y >= height - 3 {
-            return biome.subsurface_block();
+            return self.config.biome(biome).subsurface;
         }
         self.ore_or_stone(x, y, z)
     }
@@ -152,13 +132,13 @@ impl WorldGenerator for NoiseGenerator {
                     };
 
                     let block = if y == 0 {
-                        blocks::BEDROCK
+                        self.config.bedrock
                     } else if y > height {
                         // Above ground: water up to sea level, else air.
-                        if y <= SEA_LEVEL {
-                            blocks::WATER
+                        if y <= self.config.sea_level {
+                            self.config.water
                         } else {
-                            blocks::AIR
+                            BlockId::AIR
                         }
                     } else {
                         self.solid_block(wx, y, wz, height, biome)
@@ -171,7 +151,7 @@ impl WorldGenerator for NoiseGenerator {
             }
         }
 
-        features::populate(&mut chunk, &self.noise, self.seed);
+        features::populate(&mut chunk, &self.noise, self.seed, &self.config);
 
         chunk
     }
@@ -180,6 +160,7 @@ impl WorldGenerator for NoiseGenerator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::world::block::blocks;
 
     /// Count occurrences of `block` in the chunks at `positions`.
     fn count_blocks(generator: &NoiseGenerator, positions: &[ChunkPos], block: BlockId) -> usize {
@@ -198,12 +179,68 @@ mod tests {
             .collect()
     }
 
+    /// FNV-1a over the block ids of a chunk, in storage order.
+    fn chunk_hash(chunk: &Chunk) -> u64 {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for block in chunk.blocks() {
+            for byte in block.0.to_le_bytes() {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+        hash
+    }
+
+    /// Determinism tripwire: pins the exact generator output for fixed seeds.
+    /// Existing worlds regenerate unedited terrain from their seed, so any
+    /// change that breaks these hashes silently rewrites players' worlds. The
+    /// data-driven worldgen config must keep them green.
+    #[test]
+    fn worldgen_golden_hashes() {
+        let positions = [
+            ChunkPos::new(0, 0),
+            ChunkPos::new(1, 0),
+            ChunkPos::new(-1, 2),
+            ChunkPos::new(3, -3),
+            ChunkPos::new(-4, -4),
+            ChunkPos::new(8, 5),
+        ];
+        const EXPECTED: [u64; 12] = [
+            0xdc08b2587c03a1ea,
+            0x26323b7c4295e68d,
+            0x13e10e0ca2e51799,
+            0xf2ae2d34a8090f67,
+            0xc753c9641d33dc5e,
+            0x4db7e6c1f297ea18,
+            0x6de90156dc4e9aba,
+            0x7be86e0acc2ed58d,
+            0x7923451cf12ae3ef,
+            0x6b1007b193e91748,
+            0x114d35d38c5e5690,
+            0x7904a7cadd01db54,
+        ];
+        let got: Vec<u64> = [42u64, 0x00C0_FFEE]
+            .iter()
+            .flat_map(|&seed| {
+                let generator = NoiseGenerator::new(seed);
+                positions
+                    .iter()
+                    .map(move |&pos| chunk_hash(&generator.generate(pos)))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(
+            got, EXPECTED,
+            "generator output changed; if intentional, update EXPECTED to {got:#018x?}"
+        );
+    }
+
     #[test]
     fn every_ore_appears_but_stays_rare() {
         let generator = NoiseGenerator::new(42);
         let area = sample_area();
         let stone = count_blocks(&generator, &area, blocks::STONE);
-        for vein in &ORE_VEINS {
+        for vein in &generator.config().ores {
             let ore = count_blocks(&generator, &area, vein.block);
             assert!(ore > 0, "no {:?} generated in sample area", vein.block);
             assert!(ore * 20 < stone, "{:?} too common: {ore}", vein.block);
@@ -311,7 +348,7 @@ mod tests {
             for lx in 0..CHUNK_SIZE {
                 for lz in 0..CHUNK_SIZE {
                     // Walk down from sea level to the first solid block.
-                    for y in (1..=SEA_LEVEL).rev() {
+                    for y in (1..=generator.config().sea_level).rev() {
                         let local = LocalPos {
                             x: lx as u8,
                             y: y as u16,

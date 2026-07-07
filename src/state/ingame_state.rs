@@ -9,13 +9,14 @@ use glam::Vec3;
 use winit::event::MouseButton;
 
 use super::{GameState, PauseMenuState, StateContext, Transition};
+use crate::content::GameContent;
 use crate::core::{
     Aabb, BlockId, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, ChunkPos, DayCycle, GameMode,
 };
-use crate::entity::{AnimationState, DROP_SIZE, DroppedItem, HumanoidModel, Perspective, Player};
-use crate::inventory::{
-    INVENTORY_SIZE, Inventory, ItemId, ItemRegistry, ItemStack, RecipeBook, ToolKind,
+use crate::entity::{
+    AnimationState, DroppedItem, EntityRegistry, HumanoidModel, Perspective, Player,
 };
+use crate::inventory::{INVENTORY_SIZE, Inventory, ItemId, ItemRegistry, ItemStack, RecipeBook};
 use crate::net::{
     Channel, Client, ClientMessage, Host, NetItemStack, NetVec3, PlayerId, PlayerRestore,
     RecipeData, RemotePlayer, ServerMessage,
@@ -26,7 +27,7 @@ use crate::render::{
 };
 use crate::save::{ItemStackData, PlayerData, PlayerRecords, SavedGame, WorldData, WorldSave};
 use crate::ui::hud;
-use crate::world::block::{FaceTextures, blocks};
+use crate::world::block::{Drops, FaceTextures};
 use crate::world::meshing::{mesh_block_overlay, mesh_chunk, push_item_cube};
 use crate::world::{BlockRegistry, ChunkLoader, FluidSim, NoiseGenerator, World, WorldGenerator};
 
@@ -44,8 +45,6 @@ enum NetRole {
 /// The host's own player always has this id; clients are numbered from 1.
 const HOST_PLAYER_ID: PlayerId = PlayerId(0);
 
-/// Reach distance for breaking/placing blocks.
-const REACH: f32 = 5.0;
 /// Chunks generated synchronously at startup so the player has ground to stand on.
 const SPAWN_RADIUS: i32 = 1;
 /// Keep chunks loaded this many chunks beyond the render distance before unloading.
@@ -70,8 +69,6 @@ const WORLD_SYNC_BATCH: usize = 4096;
 const AUTOSAVE_INTERVAL: f32 = 60.0;
 /// How often (s) a client checks whether to report its inventory to the host.
 const INVENTORY_SYNC_INTERVAL: f32 = 1.0;
-/// How far beyond the player's collision box dropped items are collected.
-const PICKUP_RANGE: f32 = 1.0;
 /// Colour of the selection outline on the targeted block (near-black).
 const OUTLINE_COLOR: [f32; 3] = [0.05, 0.05, 0.05];
 
@@ -86,7 +83,11 @@ pub struct InGameState {
     pub world: World,
     pub player: Player,
     pub blocks: Arc<BlockRegistry>,
-    pub items: ItemRegistry,
+    pub items: Arc<ItemRegistry>,
+    pub entities: Arc<EntityRegistry>,
+    /// Fingerprint of the loaded content; hosts send it in `Welcome` so
+    /// mismatched clients refuse the session (raw ids cross the wire).
+    content_hash: u64,
     pub inventory: Inventory,
     /// Crafting recipes, loaded from `assets/recipes.toml` at world start.
     pub recipes: RecipeBook,
@@ -172,8 +173,9 @@ struct RemoteAnim {
 
 impl InGameState {
     /// Singleplayer world.
-    pub fn new(seed: u64, mode: GameMode) -> Self {
+    pub fn new(content: Arc<GameContent>, seed: u64, mode: GameMode) -> Self {
         Self::build(
+            content,
             seed,
             NetRole::Singleplayer,
             None,
@@ -184,8 +186,9 @@ impl InGameState {
     }
 
     /// Host a multiplayer session (the host also plays locally).
-    pub fn new_host(seed: u64, host: Host, mode: GameMode) -> Self {
+    pub fn new_host(content: Arc<GameContent>, seed: u64, host: Host, mode: GameMode) -> Self {
         Self::build(
+            content,
             seed,
             NetRole::Host(Box::new(host)),
             None,
@@ -196,20 +199,20 @@ impl InGameState {
     }
 
     /// Singleplayer session of a world loaded from (or just created on) disk.
-    pub fn new_saved(game: SavedGame) -> Self {
-        Self::from_save(game, NetRole::Singleplayer)
+    pub fn new_saved(content: Arc<GameContent>, game: SavedGame) -> Self {
+        Self::from_save(content, game, NetRole::Singleplayer)
     }
 
     /// Host a multiplayer session of a world loaded from (or created on) disk.
-    pub fn new_host_saved(game: SavedGame, host: Host) -> Self {
-        Self::from_save(game, NetRole::Host(Box::new(host)))
+    pub fn new_host_saved(content: Arc<GameContent>, game: SavedGame, host: Host) -> Self {
+        Self::from_save(content, game, NetRole::Host(Box::new(host)))
     }
 
     /// Build from a saved world: regenerate terrain from the saved seed, replay
     /// the edit overlay, and restore the player/inventory/clock. This runs
     /// before the first network pump, so restored edits are already in
     /// `World::edits` before any client can request world state.
-    fn from_save(game: SavedGame, net: NetRole) -> Self {
+    fn from_save(content: Arc<GameContent>, game: SavedGame, net: NetRole) -> Self {
         let SavedGame {
             save,
             world,
@@ -223,6 +226,7 @@ impl InGameState {
             .map(|p| Vec3::from_array(p.position))
             .or_else(|| world.as_ref().map(|_| Vec3::from_array(save.meta.spawn)));
         let mut state = Self::build(
+            content,
             save.meta.seed,
             net,
             anchor,
@@ -268,6 +272,7 @@ impl InGameState {
     /// `restored` is our saved state if the host's world remembers us.
     #[allow(clippy::too_many_arguments)]
     pub fn new_client(
+        content: Arc<GameContent>,
         seed: u64,
         client: Client,
         local_id: PlayerId,
@@ -278,6 +283,7 @@ impl InGameState {
         restored: Option<PlayerRestore>,
     ) -> Self {
         let mut state = Self::build(
+            content,
             seed,
             NetRole::Client {
                 client: Box::new(client),
@@ -299,6 +305,7 @@ impl InGameState {
     /// spawn is found over the origin column. `recipe_data` (clients) is the host's
     /// recipe book from the `Welcome`; hosts and singleplayer load the local file.
     fn build(
+        content: Arc<GameContent>,
         seed: u64,
         net: NetRole,
         spawn_override: Option<Vec3>,
@@ -306,8 +313,9 @@ impl InGameState {
         mode: GameMode,
         recipe_data: Option<Vec<RecipeData>>,
     ) -> Self {
-        let blocks = Arc::new(BlockRegistry::with_builtins());
-        let items = ItemRegistry::from_blocks(&blocks);
+        let blocks = content.blocks.clone();
+        let items = content.items.clone();
+        let entities = content.entities.clone();
         let recipes = match recipe_data {
             Some(data) => {
                 let book = recipes_from_wire(&data, &items);
@@ -317,7 +325,8 @@ impl InGameState {
             None => RecipeBook::load(&items),
         };
 
-        let generator: Arc<dyn WorldGenerator> = Arc::new(NoiseGenerator::new(seed));
+        let generator: Arc<dyn WorldGenerator> =
+            Arc::new(NoiseGenerator::with_config(seed, content.worldgen.clone()));
         let mut world = World::new(generator.clone(), blocks.clone());
 
         // Worker pool sized to leave headroom for the main + render threads.
@@ -339,22 +348,23 @@ impl InGameState {
         }
         let spawn = spawn_override.unwrap_or_else(|| find_spawn(&world));
 
-        // Creative starts empty (items come from the palette); survival gets a small
-        // starter kit so mining, durability, and eating are usable without crafting.
+        // Creative starts empty (items come from the palette); survival gets the
+        // starter kit declared in assets/items.toml so mining, durability, and
+        // eating are usable without crafting.
         let mut inventory = Inventory::new();
         if !mode.is_creative() {
-            inventory.set_slot(0, Some(items.full_stack(items.wooden_pickaxe)));
-            inventory.set_slot(1, Some(items.full_stack(items.wooden_axe)));
-            inventory.set_slot(2, Some(items.full_stack(items.wooden_shovel)));
-            inventory.set_slot(3, Some(ItemStack::new(items.apple, 5)));
-            inventory.set_slot(4, Some(ItemStack::new(items.bread, 3)));
+            for (slot, stack) in items.starter_kit_survival().iter().enumerate() {
+                inventory.set_slot(slot, Some(*stack));
+            }
         }
 
         Self {
             world,
-            player: Player::new(spawn, mode),
+            player: Player::new(spawn, mode, entities.player()),
             blocks,
             items,
+            entities,
+            content_hash: content.hash,
             inventory,
             recipes,
             show_debug: false,
@@ -465,6 +475,7 @@ impl InGameState {
                 },
                 self.player.eye_position(),
                 self.player.look_direction(),
+                self.entities.dropped_item(),
             ));
         }
     }
@@ -654,6 +665,7 @@ impl InGameState {
                                 spawn,
                                 time_of_day,
                                 game_mode: mode,
+                                content_hash: self.content_hash,
                                 recipes: recipes_to_wire(&self.recipes, &self.items),
                                 restored,
                             },
@@ -991,7 +1003,7 @@ impl InGameState {
         crate::world::raycast(
             self.player.eye_position(),
             self.player.look_direction(),
-            REACH,
+            self.player.movement().reach,
             |p| self.world.is_solid(p),
         )
     }
@@ -1007,24 +1019,44 @@ impl InGameState {
             return false;
         }
         self.fluids.block_changed(pos);
-        // Leaves only drop when cut with shears; anything else drops itself.
-        let drops_item = prev != blocks::LEAVES
-            || self
-                .inventory
-                .item_in_selected()
-                .and_then(|id| self.items.tool(id))
-                == Some(ToolKind::Shears);
         if self.player.mode.consumes_blocks()
-            && drops_item
-            && let Some(item) = self.items.item_for_block(prev)
+            && let Some(stack) = self.block_drop_stack(prev)
         {
             // Scatter direction varies with the animation clock — cheap pseudo-random.
             let angle = self.elapsed * 9.73;
-            self.drops
-                .push(DroppedItem::block_drop(ItemStack::single(item), pos, angle));
+            self.drops.push(DroppedItem::block_drop(
+                stack,
+                pos,
+                angle,
+                self.entities.dropped_item(),
+            ));
         }
         self.broadcast_local_edit(pos, BlockId::AIR);
         true
+    }
+
+    /// What breaking a block of type `block` yields, per its `drops` component
+    /// (`assets/blocks.toml`) and the held tool. `None` when nothing drops.
+    fn block_drop_stack(&self, block: BlockId) -> Option<ItemStack> {
+        let self_item = || self.items.item_for_block(block).map(ItemStack::single);
+        match &self.blocks.get(block).drops {
+            Drops::SelfItem => self_item(),
+            Drops::None => None,
+            Drops::SelfWithTool { kind } => {
+                let held = self
+                    .inventory
+                    .item_in_selected()
+                    .and_then(|id| self.items.tool(id));
+                (held.is_some_and(|tool| tool.kind == *kind)).then(self_item)?
+            }
+            Drops::Item { name, count } => {
+                let id = self.items.find(name)?;
+                Some(ItemStack::new(
+                    id,
+                    (*count).clamp(1, self.items.max_stack(id)),
+                ))
+            }
+        }
     }
 
     /// Toss one item from the selected hotbar slot out in front of the player.
@@ -1036,6 +1068,7 @@ impl InGameState {
             stack,
             self.player.eye_position(),
             self.player.look_direction(),
+            self.entities.dropped_item(),
         ));
     }
 
@@ -1044,12 +1077,13 @@ impl InGameState {
         for item in &mut self.drops {
             item.update(dt, |p| self.world.is_solid_for_collision(p));
         }
-        let reach = self.player.aabb().expand(Vec3::splat(PICKUP_RANGE));
+        let player_aabb = self.player.aabb();
         let dead = self.dead;
         self.drops.retain_mut(|item| {
             if item.expired() {
                 return false;
             }
+            let reach = player_aabb.expand(Vec3::splat(item.pickup_range()));
             if dead || !item.can_pickup() || !reach.intersects(item.aabb()) {
                 return true;
             }
@@ -1095,7 +1129,7 @@ impl InGameState {
             push_item_cube(
                 target,
                 item.render_center(),
-                DROP_SIZE,
+                item.size(),
                 item.spin_yaw(),
                 &textures,
             );
@@ -1128,7 +1162,7 @@ impl InGameState {
         let tool = self
             .inventory
             .item_in_selected()
-            .and_then(|id| self.items.tool(id).map(|k| (k, self.items.dig_speed(id))));
+            .and_then(|id| self.items.tool(id));
         let seconds = crate::inventory::break_seconds(block.hardness, block.material, tool);
 
         // Reset progress when the targeted block changes.
@@ -1570,9 +1604,9 @@ impl GameState for InGameState {
             hud::draw_vitals(
                 egui_ctx,
                 self.player.health,
-                crate::entity::player::MAX_HEALTH,
+                self.player.vitals().max_health,
                 self.player.hunger,
-                crate::entity::player::MAX_HUNGER,
+                self.player.vitals().max_hunger,
             );
         }
         if let Some(breaking) = &self.breaking {
@@ -1871,22 +1905,23 @@ mod tests {
             .unwrap()
             .load()
             .unwrap();
-        let mut state = InGameState::new_saved(game);
+        let mut state = InGameState::new_saved(GameContent::builtin(), game);
 
         // "Play": place a block above ground, move, and rearrange the inventory.
         let edit_pos = BlockPos::new(3, 200, 5);
         assert!(state.world.set_block(edit_pos, blocks::STONE).is_some());
         state.player.position = Vec3::new(10.0, 90.0, -4.0);
         state.player.health = 13.5;
-        state
-            .inventory
-            .set_slot(8, Some(ItemStack::new(state.items.bread, 2)));
+        state.inventory.set_slot(
+            8,
+            Some(ItemStack::new(state.items.find("bread").unwrap(), 2)),
+        );
         state.inventory.set_selected(8);
         state.save_world();
         drop(state);
 
         let game = WorldSave::open(&root, "roundtrip").unwrap().load().unwrap();
-        let state = InGameState::new_saved(game);
+        let state = InGameState::new_saved(GameContent::builtin(), game);
         assert_eq!(
             state.world.block_at(edit_pos),
             blocks::STONE,
@@ -1896,7 +1931,7 @@ mod tests {
         assert_eq!(state.player.health, 13.5);
         assert_eq!(
             state.inventory.slot(8),
-            Some(ItemStack::new(state.items.bread, 2))
+            Some(ItemStack::new(state.items.find("bread").unwrap(), 2))
         );
         assert_eq!(state.inventory.selected_index(), 8);
 

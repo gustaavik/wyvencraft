@@ -1,0 +1,159 @@
+# Block definitions.
+#
+# Every block in the game is declared here; the engine registers them in file
+# order. "air" is built in (always id 0) and may not be declared.
+#
+# NAMES ARE THE SAVE FORMAT. Save files and multiplayer identify blocks by the
+# exact `name` string, so renaming a block orphans it in existing worlds.
+# Reordering entries is safe for saves (they resolve by name) but changes the
+# numeric ids used within a single session.
+#
+# Fields:
+#   name      unique display/save name
+#   render    opaque | transparent | cutout | invisible
+#   solid     whether entities collide with it
+#   hardness  relative mining time; `inf` = unbreakable
+#   material  stone | dirt | sand | wood | plant | glass | other
+#             (matched against a tool's `harvests` list for mining speed)
+#   textures  one texture name for all faces, or
+#             { top = "...", bottom = "...", side = "..." }, or the fully
+#             explicit { neg_x, pos_x, neg_y, pos_y, neg_z, pos_z }
+#   drops     what breaking the block yields (default: the block's own item)
+#             "self" | "none" | { requires_tool = "<tool kind>" }
+#             | { item = "<item name>", count = N }
+#   [block.fluid] with `flow_levels = N` marks the block as a fluid source;
+#             the engine auto-registers "<name> flow 1".."<name> flow N"
+#             blocks after all declared blocks, and the fluid simulation
+#             spreads/recedes between them.
+
+[[block]]
+name = "stone"
+render = "opaque"
+solid = true
+hardness = 1.5
+material = "stone"
+textures = "stone"
+
+[[block]]
+name = "dirt"
+render = "opaque"
+solid = true
+hardness = 0.5
+material = "dirt"
+textures = "dirt"
+
+[[block]]
+name = "grass"
+render = "opaque"
+solid = true
+hardness = 0.6
+material = "dirt"
+textures = { top = "grass_top", bottom = "dirt", side = "grass_side" }
+
+[[block]]
+name = "sand"
+render = "opaque"
+solid = true
+hardness = 0.5
+material = "sand"
+textures = "sand"
+
+[[block]]
+name = "water"
+render = "transparent"
+solid = false
+hardness = inf
+material = "other"
+textures = "water"
+
+[block.fluid]
+flow_levels = 7
+
+[[block]]
+name = "wood"
+render = "opaque"
+solid = true
+hardness = 2.0
+material = "wood"
+textures = { top = "wood_rings", bottom = "wood_rings", side = "wood_bark" }
+
+[[block]]
+name = "leaves"
+render = "cutout"
+solid = true
+hardness = 0.2
+material = "plant"
+textures = "leaves"
+drops = { requires_tool = "shears" }
+
+[[block]]
+name = "glass"
+render = "transparent"
+solid = true
+hardness = 0.3
+material = "glass"
+textures = "glass"
+
+[[block]]
+name = "bedrock"
+render = "opaque"
+solid = true
+hardness = inf
+material = "other"
+textures = "bedrock"
+
+[[block]]
+name = "snow"
+render = "opaque"
+solid = true
+hardness = 0.2
+material = "dirt"
+textures = "snow"
+
+[[block]]
+name = "gravel"
+render = "opaque"
+solid = true
+hardness = 0.6
+material = "dirt"
+textures = "gravel"
+
+[[block]]
+name = "clay"
+render = "opaque"
+solid = true
+hardness = 0.6
+material = "dirt"
+textures = "clay"
+
+[[block]]
+name = "coal ore"
+render = "opaque"
+solid = true
+hardness = 3.0
+material = "stone"
+textures = "coal_ore"
+
+[[block]]
+name = "iron ore"
+render = "opaque"
+solid = true
+hardness = 3.0
+material = "stone"
+textures = "iron_ore"
+
+[[block]]
+name = "gold ore"
+render = "opaque"
+solid = true
+hardness = 3.0
+material = "stone"
+textures = "gold_ore"
+
+[[block]]
+name = "diamond ore"
+render = "opaque"
+solid = true
+hardness = 3.0
+material = "stone"
+textures = "diamond_ore"

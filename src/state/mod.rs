@@ -24,6 +24,7 @@ pub use singleplayer_menu::SingleplayerMenuState;
 use std::sync::Arc;
 
 use crate::config::Settings;
+use crate::content::GameContent;
 use crate::input::InputState;
 use crate::render::{RenderContext, SceneFrame};
 
@@ -33,6 +34,8 @@ pub struct StateContext<'a> {
     pub input: &'a InputState,
     /// GPU device + allocators, for states that upload meshes/textures.
     pub render: &'a Arc<RenderContext>,
+    /// Loaded game content (block/item registries), shared by every session.
+    pub content: &'a Arc<GameContent>,
     /// Variable frame delta (seconds).
     pub dt: f32,
     /// Total elapsed time (seconds).

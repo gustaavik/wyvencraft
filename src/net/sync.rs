@@ -6,6 +6,11 @@ use glam::Vec3;
 use crate::core::GameMode;
 use crate::net::protocol::PlayerId;
 
+/// Display placeholders until the first `PlayerStats` sync arrives (the
+/// authoritative values live in the host's player entity).
+const DEFAULT_HEALTH: f32 = 20.0;
+const DEFAULT_HUNGER: f32 = 20.0;
+
 /// A non-local player as seen by this client.
 pub struct RemotePlayer {
     pub id: PlayerId,
@@ -32,9 +37,9 @@ impl RemotePlayer {
             current: position,
             yaw: 0.0,
             pitch: 0.0,
-            health: crate::entity::player::MAX_HEALTH,
-            hunger: crate::entity::player::MAX_HUNGER,
-            saturation: crate::entity::player::MAX_HUNGER,
+            health: DEFAULT_HEALTH,
+            hunger: DEFAULT_HUNGER,
+            saturation: DEFAULT_HUNGER,
             mode: GameMode::Survival,
         }
     }

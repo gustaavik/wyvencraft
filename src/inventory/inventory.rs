@@ -211,7 +211,10 @@ mod tests {
         let blocks = crate::world::block::BlockRegistry::with_builtins();
         let items = ItemRegistry::from_blocks(&blocks);
         let mut inv = Inventory::new();
-        let leftover = inv.add(ItemStack::with_durability(items.wooden_pickaxe, 12), &items);
+        let leftover = inv.add(
+            ItemStack::with_durability(items.find("wooden pickaxe").unwrap(), 12),
+            &items,
+        );
         assert_eq!(leftover, 0);
         assert_eq!(inv.slot(0).expect("tool stored").durability, Some(12));
     }

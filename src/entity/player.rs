@@ -1,37 +1,13 @@
 //! Player state: transform, movement intent, and physics integration.
+//!
+//! All tuning numbers (speeds, gravity, vitals model) come from the "player"
+//! entity kind in `assets/entities.toml`; the formulas live here.
 
 use glam::Vec3;
 
 use crate::core::{Aabb, BlockPos, GameMode};
+use crate::entity::kind::{EntityKind, MovementParams, PhysicsParams, VitalsParams};
 use crate::entity::physics::{self};
-
-/// Player collision box dimensions.
-pub const PLAYER_WIDTH: f32 = 0.6;
-pub const PLAYER_HEIGHT: f32 = 1.8;
-pub const PLAYER_EYE_HEIGHT: f32 = 1.62;
-
-const GRAVITY: f32 = 28.0; // blocks/s^2
-const JUMP_SPEED: f32 = 9.0;
-const WALK_SPEED: f32 = 4.3;
-const SPRINT_SPEED: f32 = 6.5;
-const FLY_SPEED: f32 = 12.0;
-const TERMINAL_VELOCITY: f32 = -60.0;
-
-/// Full health/hunger (Minecraft-style: 20 = 10 hearts / 10 food shanks).
-pub const MAX_HEALTH: f32 = 20.0;
-pub const MAX_HUNGER: f32 = 20.0;
-/// Falls shorter than this many blocks deal no damage.
-const SAFE_FALL: f32 = 3.0;
-/// Health lost per block fallen beyond [`SAFE_FALL`].
-const FALL_DMG_PER_BLOCK: f32 = 1.0;
-/// Hunger drained per second while idle / while sprinting (added).
-const HUNGER_DRAIN_BASE: f32 = 0.05;
-const HUNGER_DRAIN_SPRINT: f32 = 0.15;
-/// At/above this hunger the player naturally regenerates health.
-const REGEN_HUNGER_THRESHOLD: f32 = 18.0;
-const REGEN_RATE: f32 = 1.0;
-/// Health lost per second while at zero hunger (starvation).
-const STARVE_RATE: f32 = 1.0;
 
 /// Which camera the player is using.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,10 +62,17 @@ pub struct Player {
     pub saturation: f32,
     /// Highest Y reached since last leaving the ground; drives fall-damage.
     fall_peak_y: f32,
+    // Static tuning, copied from the "player" entity kind at construction.
+    physics: PhysicsParams,
+    movement: MovementParams,
+    vitals: VitalsParams,
 }
 
 impl Player {
-    pub fn new(position: Vec3, mode: GameMode) -> Self {
+    /// `kind` is the "player" entity kind from the registry (its movement and
+    /// vitals components are validated present at content load).
+    pub fn new(position: Vec3, mode: GameMode, kind: &EntityKind) -> Self {
+        let vitals = kind.vitals.expect("player kind has vitals");
         Self {
             position,
             velocity: Vec3::ZERO,
@@ -99,24 +82,37 @@ impl Player {
             flying: false,
             perspective: Perspective::First,
             mode,
-            health: MAX_HEALTH,
-            hunger: MAX_HUNGER,
-            saturation: MAX_HUNGER,
+            health: vitals.max_health,
+            hunger: vitals.max_hunger,
+            saturation: vitals.max_hunger,
             fall_peak_y: position.y,
+            physics: kind.physics,
+            movement: kind.movement.expect("player kind has movement"),
+            vitals,
         }
+    }
+
+    /// The vitals tuning (max health/hunger etc.), for the HUD and callers.
+    pub fn vitals(&self) -> &VitalsParams {
+        &self.vitals
+    }
+
+    /// The movement tuning (reach etc.).
+    pub fn movement(&self) -> &MovementParams {
+        &self.movement
     }
 
     /// Eye position used for the camera and raycasting.
     pub fn eye_position(&self) -> Vec3 {
-        self.position + Vec3::new(0.0, PLAYER_EYE_HEIGHT, 0.0)
+        self.position + Vec3::new(0.0, self.movement.eye_height, 0.0)
     }
 
     /// Collision box in world space.
     pub fn aabb(&self) -> Aabb {
-        let half = PLAYER_WIDTH * 0.5;
+        let half = self.physics.width * 0.5;
         Aabb::new(
             self.position - Vec3::new(half, 0.0, half),
-            self.position + Vec3::new(half, PLAYER_HEIGHT, half),
+            self.position + Vec3::new(half, self.physics.height, half),
         )
     }
 
@@ -149,11 +145,11 @@ impl Player {
         let flying = self.flying && self.mode.can_fly();
 
         let speed = if flying {
-            FLY_SPEED
+            self.movement.fly_speed
         } else if input.sprint {
-            SPRINT_SPEED
+            self.movement.sprint_speed
         } else {
-            WALK_SPEED
+            self.movement.walk_speed
         };
 
         self.velocity.x = wish.x * speed;
@@ -161,11 +157,12 @@ impl Player {
 
         if flying {
             let vertical = (input.jump as i32 - input.sneak as i32) as f32;
-            self.velocity.y = vertical * FLY_SPEED;
+            self.velocity.y = vertical * self.movement.fly_speed;
         } else {
-            self.velocity.y = (self.velocity.y - GRAVITY * dt).max(TERMINAL_VELOCITY);
+            self.velocity.y =
+                (self.velocity.y - self.physics.gravity * dt).max(self.physics.terminal_velocity);
             if input.jump && self.on_ground {
-                self.velocity.y = JUMP_SPEED;
+                self.velocity.y = self.movement.jump_speed;
             }
         }
 
@@ -181,8 +178,8 @@ impl Player {
         } else if self.on_ground {
             if !was_on_ground {
                 let dist = self.fall_peak_y - self.position.y;
-                if self.mode.takes_damage() && dist > SAFE_FALL {
-                    self.damage((dist - SAFE_FALL) * FALL_DMG_PER_BLOCK);
+                if self.mode.takes_damage() && dist > self.vitals.safe_fall {
+                    self.damage((dist - self.vitals.safe_fall) * self.vitals.fall_damage_per_block);
                 }
             }
             self.fall_peak_y = self.position.y;
@@ -203,8 +200,15 @@ impl Player {
     /// Advance survival vitals one step (no-op semantics in creative — callers
     /// should only invoke this in survival). `sprinting` raises hunger drain.
     pub fn tick_survival(&mut self, dt: f32, sprinting: bool) {
+        let v = self.vitals;
         // Exertion drains the saturation buffer first, then hunger itself.
-        let drain = (HUNGER_DRAIN_BASE + if sprinting { HUNGER_DRAIN_SPRINT } else { 0.0 }) * dt;
+        let drain = (v.hunger_drain_base
+            + if sprinting {
+                v.hunger_drain_sprint
+            } else {
+                0.0
+            })
+            * dt;
         if self.saturation > 0.0 {
             self.saturation = (self.saturation - drain).max(0.0);
         } else {
@@ -212,14 +216,14 @@ impl Player {
         }
 
         // Natural regeneration while well-fed.
-        if self.hunger >= REGEN_HUNGER_THRESHOLD && self.health < MAX_HEALTH {
-            self.health = (self.health + REGEN_RATE * dt).min(MAX_HEALTH);
+        if self.hunger >= v.regen_hunger_threshold && self.health < v.max_health {
+            self.health = (self.health + v.regen_rate * dt).min(v.max_health);
             self.saturation = (self.saturation - drain).max(0.0);
         }
 
         // Starvation once hunger is fully depleted.
         if self.hunger <= 0.0 {
-            self.health = (self.health - STARVE_RATE * dt).max(0.0);
+            self.health = (self.health - v.starve_rate * dt).max(0.0);
         }
     }
 
@@ -231,9 +235,9 @@ impl Player {
         }
         if mode.is_creative() {
             // Creative is invulnerable; restore vitals so you can't die there.
-            self.health = MAX_HEALTH;
-            self.hunger = MAX_HUNGER;
-            self.saturation = MAX_HUNGER;
+            self.health = self.vitals.max_health;
+            self.hunger = self.vitals.max_hunger;
+            self.saturation = self.vitals.max_hunger;
         }
     }
 
@@ -246,12 +250,12 @@ impl Player {
 
     /// Restore health up to the maximum.
     pub fn heal(&mut self, amount: f32) {
-        self.health = (self.health + amount).min(MAX_HEALTH);
+        self.health = (self.health + amount).min(self.vitals.max_health);
     }
 
     /// Eat: restore hunger, and saturation up to the new hunger level.
     pub fn feed(&mut self, hunger: f32, saturation: f32) {
-        self.hunger = (self.hunger + hunger).min(MAX_HUNGER);
+        self.hunger = (self.hunger + hunger).min(self.vitals.max_hunger);
         self.saturation = (self.saturation + saturation).min(self.hunger);
     }
 
@@ -261,16 +265,16 @@ impl Player {
 
     /// Whether the player has room to eat (hunger below the maximum).
     pub fn is_hungry(&self) -> bool {
-        self.hunger < MAX_HUNGER
+        self.hunger < self.vitals.max_hunger
     }
 
     /// Reset vitals and motion for a respawn at `position`.
     pub fn respawn_at(&mut self, position: Vec3) {
         self.position = position;
         self.velocity = Vec3::ZERO;
-        self.health = MAX_HEALTH;
-        self.hunger = MAX_HUNGER;
-        self.saturation = MAX_HUNGER;
+        self.health = self.vitals.max_health;
+        self.hunger = self.vitals.max_hunger;
+        self.saturation = self.vitals.max_hunger;
         self.fall_peak_y = position.y;
         self.on_ground = false;
     }
@@ -283,6 +287,16 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entity::kind::EntityRegistry;
+
+    /// Full health/hunger per the builtin "player" kind (20 = 10 hearts).
+    const MAX_HEALTH: f32 = 20.0;
+    const MAX_HUNGER: f32 = 20.0;
+
+    /// A test player built from the builtin entity definitions.
+    fn test_player(position: Vec3, mode: GameMode) -> Player {
+        Player::new(position, mode, EntityRegistry::builtin().player())
+    }
 
     /// Regression: a player spawned flush on the ground at an integer Y (as
     /// [`find_spawn`](crate::state) produces) must come to rest instead of sinking
@@ -291,7 +305,7 @@ mod tests {
     fn spawned_player_rests_and_does_not_fall_through() {
         // Solid ground fills y < 65; spawn feet flush on the block top at y = 65.0.
         let solid = |p: BlockPos| p.y < 65;
-        let mut player = Player::new(Vec3::new(0.5, 65.0, 0.5), GameMode::Survival);
+        let mut player = test_player(Vec3::new(0.5, 65.0, 0.5), GameMode::Survival);
         let dt = 1.0 / 60.0;
 
         for _ in 0..240 {
@@ -311,7 +325,7 @@ mod tests {
     #[test]
     fn long_fall_damages_in_survival() {
         let solid = |p: BlockPos| p.y < 65;
-        let mut player = Player::new(Vec3::new(0.5, 85.0, 0.5), GameMode::Survival);
+        let mut player = test_player(Vec3::new(0.5, 85.0, 0.5), GameMode::Survival);
         let dt = 1.0 / 60.0;
         for _ in 0..600 {
             player.update(MovementInput::default(), dt, solid);
@@ -328,7 +342,7 @@ mod tests {
     #[test]
     fn short_fall_is_harmless() {
         let solid = |p: BlockPos| p.y < 65;
-        let mut player = Player::new(Vec3::new(0.5, 67.0, 0.5), GameMode::Survival);
+        let mut player = test_player(Vec3::new(0.5, 67.0, 0.5), GameMode::Survival);
         let dt = 1.0 / 60.0;
         for _ in 0..240 {
             player.update(MovementInput::default(), dt, solid);
@@ -340,7 +354,7 @@ mod tests {
     #[test]
     fn long_fall_is_harmless_in_creative() {
         let solid = |p: BlockPos| p.y < 65;
-        let mut player = Player::new(Vec3::new(0.5, 85.0, 0.5), GameMode::Creative);
+        let mut player = test_player(Vec3::new(0.5, 85.0, 0.5), GameMode::Creative);
         let dt = 1.0 / 60.0;
         for _ in 0..600 {
             player.update(MovementInput::default(), dt, solid);
@@ -350,7 +364,7 @@ mod tests {
 
     #[test]
     fn starvation_drains_health_and_eating_restores_hunger() {
-        let mut player = Player::new(Vec3::new(0.5, 65.0, 0.5), GameMode::Survival);
+        let mut player = test_player(Vec3::new(0.5, 65.0, 0.5), GameMode::Survival);
         player.hunger = 0.0;
         player.saturation = 0.0;
         player.tick_survival(1.0, false);
@@ -363,7 +377,7 @@ mod tests {
 
     #[test]
     fn regen_when_well_fed() {
-        let mut player = Player::new(Vec3::new(0.5, 65.0, 0.5), GameMode::Survival);
+        let mut player = test_player(Vec3::new(0.5, 65.0, 0.5), GameMode::Survival);
         player.health = 10.0;
         player.hunger = MAX_HUNGER;
         player.saturation = MAX_HUNGER;
@@ -373,7 +387,7 @@ mod tests {
 
     #[test]
     fn switching_to_creative_clears_flight_rules_and_heals() {
-        let mut player = Player::new(Vec3::new(0.5, 65.0, 0.5), GameMode::Survival);
+        let mut player = test_player(Vec3::new(0.5, 65.0, 0.5), GameMode::Survival);
         player.health = 3.0;
         player.set_mode(GameMode::Creative);
         assert!(player.mode.can_fly());

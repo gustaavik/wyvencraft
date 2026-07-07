@@ -21,6 +21,7 @@ use winit::window::{CursorGrabMode, WindowId};
 use std::net::SocketAddr;
 
 use crate::config::Settings;
+use crate::content::GameContent;
 use crate::core::{Clock, GameMode};
 use crate::input::InputState;
 use crate::net::{DEFAULT_PORT, Host};
@@ -60,6 +61,8 @@ pub fn run() -> Result<(), AppError> {
 struct App {
     context: VulkanoContext,
     render_context: Arc<RenderContext>,
+    /// Block/item registries loaded from `assets/*.toml` at startup.
+    content: Arc<GameContent>,
     windows: VulkanoWindows,
     gui: Option<Gui>,
     renderer: Option<Renderer>,
@@ -89,6 +92,7 @@ impl App {
         let context = VulkanoContext::new(config);
         log::info!("Vulkan device: {}", context.device_name());
         let render_context = RenderContext::from_vulkano(&context);
+        let content = GameContent::load();
 
         // Dev convenience env vars to skip the menus:
         //   WYVEN_BOOT_INGAME=1     → singleplayer world
@@ -125,8 +129,15 @@ impl App {
             };
             match Host::bind(DEFAULT_PORT, seed) {
                 Ok(host) => match game {
-                    Some(game) => Box::new(InGameState::new_host_saved(game, host)),
-                    None => Box::new(InGameState::new_host(seed, host, boot_mode)),
+                    Some(game) => {
+                        Box::new(InGameState::new_host_saved(content.clone(), game, host))
+                    }
+                    None => Box::new(InGameState::new_host(
+                        content.clone(),
+                        seed,
+                        host,
+                        boot_mode,
+                    )),
                 },
                 Err(err) => {
                     log::error!("host bind failed: {err}");
@@ -145,6 +156,7 @@ impl App {
         Self {
             context,
             render_context,
+            content,
             windows: VulkanoWindows::default(),
             gui: None,
             renderer: None,
@@ -194,6 +206,7 @@ impl App {
                 settings: &mut self.settings,
                 input: &self.input,
                 render: &self.render_context,
+                content: &self.content,
                 dt,
                 elapsed,
                 grab_cursor: grab,
@@ -216,6 +229,7 @@ impl App {
                 settings: &mut self.settings,
                 input: &self.input,
                 render: &self.render_context,
+                content: &self.content,
                 dt,
                 elapsed,
                 grab_cursor: grab,
@@ -305,7 +319,11 @@ impl ApplicationHandler for App {
             },
         );
         self.gui = Some(gui);
-        self.renderer = Some(Renderer::new(self.render_context.clone(), color_format));
+        self.renderer = Some(Renderer::new(
+            self.render_context.clone(),
+            color_format,
+            self.content.tiles.atlas_rgba(),
+        ));
         log::info!("Window, renderer and egui initialised");
     }
 
@@ -326,6 +344,7 @@ impl ApplicationHandler for App {
                     settings: &mut self.settings,
                     input: &self.input,
                     render: &self.render_context,
+                    content: &self.content,
                     dt: 0.0,
                     elapsed: self.clock.elapsed(),
                     grab_cursor: false,

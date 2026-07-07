@@ -1,8 +1,9 @@
 //! Block texture atlas.
 //!
-//! The atlas is generated procedurally at startup from the pixel art painted in
-//! [`super::tiles`] (tile indices are defined there too). This module owns the
-//! atlas layout (`tile index -> UV`) and the GPU upload ([`TextureAtlas`]).
+//! The atlas pixels are assembled at startup by the tile registry
+//! ([`super::tile_registry::TileRegistry::atlas_rgba`]) from PNGs and the
+//! procedural pixel art in [`super::tiles`]. This module owns the atlas
+//! layout (`tile index -> UV`) and the GPU upload ([`TextureAtlas`]).
 
 use std::sync::Arc;
 
@@ -36,36 +37,6 @@ pub fn atlas_uv(tile: u32, local_uv: [f32; 2]) -> [f32; 2] {
     [(tx + local_uv[0]) / cols, (ty + local_uv[1]) / cols]
 }
 
-/// The magenta marker painted into any atlas tile without assigned art, so a
-/// bad tile index is immediately visible in-game.
-const MISSING_TEXTURE: [u8; 4] = [255, 0, 255, 255];
-
-/// Generate the atlas as tightly packed RGBA8 pixels (`ATLAS_SIZE^2 * 4` bytes).
-pub fn generate_atlas_rgba() -> Vec<u8> {
-    let size = ATLAS_SIZE as usize;
-    let mut pixels = vec![0u8; size * size * 4];
-
-    for ty in 0..ATLAS_COLUMNS {
-        for tx in 0..ATLAS_COLUMNS {
-            let tile = ty * ATLAS_COLUMNS + tx;
-            let art = super::tiles::paint(tile);
-            for py in 0..TILE_SIZE {
-                for px in 0..TILE_SIZE {
-                    let rgba = match &art {
-                        Some(t) => t[py as usize][px as usize],
-                        None => MISSING_TEXTURE,
-                    };
-                    let ax = (tx * TILE_SIZE + px) as usize;
-                    let ay = (ty * TILE_SIZE + py) as usize;
-                    pixels[(ay * size + ax) * 4..][..4].copy_from_slice(&rgba);
-                }
-            }
-        }
-    }
-
-    pixels
-}
-
 /// GPU-resident block atlas: the sampled image view + a nearest-filtered sampler
 /// (for the crisp, pixelated voxel look).
 pub struct TextureAtlas {
@@ -74,9 +45,14 @@ pub struct TextureAtlas {
 }
 
 impl TextureAtlas {
-    /// Generate the procedural atlas and upload it to device-local memory.
-    pub fn create(ctx: &RenderContext) -> Self {
-        let pixels = generate_atlas_rgba();
+    /// Upload prebuilt atlas pixels (`ATLAS_SIZE^2 * 4` RGBA8 bytes) to
+    /// device-local memory.
+    pub fn create(ctx: &RenderContext, pixels: Vec<u8>) -> Self {
+        assert_eq!(
+            pixels.len(),
+            (ATLAS_SIZE * ATLAS_SIZE * 4) as usize,
+            "atlas pixel buffer has the wrong size"
+        );
 
         // Host-visible staging buffer.
         let staging = Buffer::from_iter(
