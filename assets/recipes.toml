@@ -28,6 +28,11 @@ ingredients = { wood = 3 }
 output = "wooden shovel"
 ingredients = { wood = 2 }
 
+# Shears: the only way to harvest leaf blocks.
+[[recipe]]
+output = "shears"
+ingredients = { stone = 2, wood = 1 }
+
 # Stand-in for smelting until furnaces exist.
 [[recipe]]
 output = "glass"

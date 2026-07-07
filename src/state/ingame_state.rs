@@ -13,7 +13,9 @@ use crate::core::{
     Aabb, BlockId, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, ChunkPos, DayCycle, GameMode,
 };
 use crate::entity::{AnimationState, DROP_SIZE, DroppedItem, HumanoidModel, Perspective, Player};
-use crate::inventory::{INVENTORY_SIZE, Inventory, ItemId, ItemRegistry, ItemStack, RecipeBook};
+use crate::inventory::{
+    INVENTORY_SIZE, Inventory, ItemId, ItemRegistry, ItemStack, RecipeBook, ToolKind,
+};
 use crate::net::{
     Channel, Client, ClientMessage, Host, NetItemStack, NetVec3, PlayerId, PlayerRestore,
     RecipeData, RemotePlayer, ServerMessage,
@@ -24,7 +26,7 @@ use crate::render::{
 };
 use crate::save::{ItemStackData, PlayerData, PlayerRecords, SavedGame, WorldData, WorldSave};
 use crate::ui::hud;
-use crate::world::block::FaceTextures;
+use crate::world::block::{FaceTextures, blocks};
 use crate::world::meshing::{mesh_block_overlay, mesh_chunk, push_item_cube};
 use crate::world::{BlockRegistry, ChunkLoader, FluidSim, NoiseGenerator, World, WorldGenerator};
 
@@ -1005,7 +1007,15 @@ impl InGameState {
             return false;
         }
         self.fluids.block_changed(pos);
+        // Leaves only drop when cut with shears; anything else drops itself.
+        let drops_item = prev != blocks::LEAVES
+            || self
+                .inventory
+                .item_in_selected()
+                .and_then(|id| self.items.tool(id))
+                == Some(ToolKind::Shears);
         if self.player.mode.consumes_blocks()
+            && drops_item
             && let Some(item) = self.items.item_for_block(prev)
         {
             // Scatter direction varies with the animation clock — cheap pseudo-random.
@@ -1406,6 +1416,12 @@ impl GameState for InGameState {
             let scroll = ctx.input.scroll_delta();
             if scroll != 0.0 {
                 self.inventory.scroll_selected(-scroll.signum() as i32);
+            }
+            // Hotbar selection via the number keys.
+            for (i, key) in kb.hotbar.iter().enumerate() {
+                if ctx.input.just_pressed(*key) {
+                    self.inventory.set_selected(i);
+                }
             }
 
             // Toss one item from the selected slot onto the ground.

@@ -17,6 +17,7 @@ pub enum ToolKind {
     Pickaxe,
     Axe,
     Shovel,
+    Shears,
 }
 
 /// What eating an item restores.
@@ -153,6 +154,7 @@ pub struct ItemRegistry {
     pub wooden_pickaxe: ItemId,
     pub wooden_axe: ItemId,
     pub wooden_shovel: ItemId,
+    pub shears: ItemId,
     pub apple: ItemId,
     pub bread: ItemId,
 }
@@ -181,6 +183,7 @@ impl ItemRegistry {
         let wooden_pickaxe = push(Item::tool("wooden pickaxe", ToolKind::Pickaxe, 2.0, 60));
         let wooden_axe = push(Item::tool("wooden axe", ToolKind::Axe, 2.0, 60));
         let wooden_shovel = push(Item::tool("wooden shovel", ToolKind::Shovel, 2.0, 60));
+        let shears = push(Item::tool("shears", ToolKind::Shears, 5.0, 120));
         let apple = push(Item::food("apple", 4.0, 2.4));
         let bread = push(Item::food("bread", 5.0, 6.0));
 
@@ -190,6 +193,7 @@ impl ItemRegistry {
             wooden_pickaxe,
             wooden_axe,
             wooden_shovel,
+            shears,
             apple,
             bread,
         }

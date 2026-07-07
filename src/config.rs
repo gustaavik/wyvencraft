@@ -84,6 +84,8 @@ pub struct Keybinds {
     pub toggle_debug: KeyCode,
     pub toggle_gamemode: KeyCode,
     pub pause: KeyCode,
+    /// Direct hotbar slot selection; index i selects slot i.
+    pub hotbar: [KeyCode; 9],
 }
 
 impl Default for Keybinds {
@@ -102,6 +104,17 @@ impl Default for Keybinds {
             toggle_debug: KeyCode::F3,
             toggle_gamemode: KeyCode::F4,
             pause: KeyCode::Escape,
+            hotbar: [
+                KeyCode::Digit1,
+                KeyCode::Digit2,
+                KeyCode::Digit3,
+                KeyCode::Digit4,
+                KeyCode::Digit5,
+                KeyCode::Digit6,
+                KeyCode::Digit7,
+                KeyCode::Digit8,
+                KeyCode::Digit9,
+            ],
         }
     }
 }

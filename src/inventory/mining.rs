@@ -20,6 +20,7 @@ pub fn tool_matches(kind: ToolKind, material: BlockMaterial) -> bool {
             | (ToolKind::Axe, BlockMaterial::Wood)
             | (ToolKind::Shovel, BlockMaterial::Dirt)
             | (ToolKind::Shovel, BlockMaterial::Sand)
+            | (ToolKind::Shears, BlockMaterial::Plant)
     )
 }
 
@@ -54,6 +55,13 @@ mod tests {
         let with_shovel = break_seconds(1.5, BlockMaterial::Stone, Some((ToolKind::Shovel, 2.0)));
         let by_hand = break_seconds(1.5, BlockMaterial::Stone, None);
         assert_eq!(with_shovel, by_hand);
+    }
+
+    #[test]
+    fn shears_cut_plants_faster_than_hand() {
+        let with_shears = break_seconds(0.2, BlockMaterial::Plant, Some((ToolKind::Shears, 5.0)));
+        let by_hand = break_seconds(0.2, BlockMaterial::Plant, None);
+        assert!(with_shears < by_hand);
     }
 
     #[test]
