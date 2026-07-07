@@ -5,7 +5,7 @@
 //! registry also defines a few hand-authored tools and foods used by survival.
 
 use crate::core::BlockId;
-use crate::world::block::BlockRegistry;
+use crate::world::block::{BlockRegistry, is_flowing_water};
 
 /// Identifier of an item type; index into the [`ItemRegistry`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -164,7 +164,8 @@ impl ItemRegistry {
         let mut block_to_item = vec![None; blocks.len()];
 
         for (block_id, block) in blocks.iter() {
-            if block_id.is_air() {
+            // Flowing water is fluid-simulation state, not a placeable block.
+            if block_id.is_air() || is_flowing_water(block_id) {
                 continue;
             }
             let item_id = ItemId(items.len() as u16);

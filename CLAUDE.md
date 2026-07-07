@@ -83,6 +83,7 @@ references). This keeps the GPU layer decoupled from gameplay.
 | Change terrain          | `world::generation::{noise,biome,generator}`                                               |
 | Trees/boulders/features | `world::generation::features` (jittered-grid anchors; mesas live in `noise::surface_height`) |
 | Meshing                 | `world::meshing::culled` (face culling; greedy is a TODO)                                  |
+| Water / fluids          | `world::fluid` (level-based flow sim, ticked from `state::ingame_state`); surface heights in `world::meshing::culled` |
 | Player movement/physics | `entity::player`, `entity::physics`                                                        |
 | Crafting recipes        | `assets/recipes.toml` (data); logic in `inventory::crafting`; panel in `ui::inventory`     |
 | A new screen            | implement `state::GameState`, push/replace via `Transition`                                |

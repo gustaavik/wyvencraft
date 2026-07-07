@@ -8,8 +8,50 @@ use crate::render::mesh::CpuMesh;
 use crate::render::texture::atlas_uv;
 use crate::render::tiles;
 use crate::render::vertex::{ChunkVertex, FLAG_WATER};
-use crate::world::block::{BlockRegistry, FaceTextures};
+use crate::world::block::{self, BlockRegistry, FaceTextures, WATER_SOURCE_LEVEL};
 use crate::world::chunk::Chunk;
+
+/// Top of a source water block: two texels (2/16) below the block top.
+/// Flowing water scales down from here with its level.
+const WATER_SURFACE: f32 = 14.0 / 16.0;
+
+/// Rendered surface height of a water cell (fraction of a block).
+fn water_surface(level: u8) -> f32 {
+    f32::from(level) / f32::from(WATER_SOURCE_LEVEL) * WATER_SURFACE
+}
+
+/// Top-corner heights (indexed `[x][z]` by corner offset 0/1) for the water
+/// block at `pos`: each corner takes the highest surface of the four cells
+/// meeting there, or a full block if any of them continues upward (a falling
+/// column or water under a ceiling). The result depends only on the corner's
+/// position, so neighbouring water of different levels computes identical
+/// heights at shared corners and connects into one continuous sheet.
+fn water_corner_heights(
+    pos: BlockPos,
+    sample: &impl Fn(BlockPos) -> BlockId,
+    registry: &BlockRegistry,
+) -> [[f32; 2]; 2] {
+    let mut heights = [[0.0f32; 2]; 2];
+    for cx in 0..2i32 {
+        for cz in 0..2i32 {
+            let mut h = 0.0f32;
+            for (ox, oz) in [(cx - 1, cz - 1), (cx, cz - 1), (cx - 1, cz), (cx, cz)] {
+                let cell = BlockPos::new(pos.x + ox, pos.y, pos.z + oz);
+                let Some(level) = block::water_level(sample(cell)) else {
+                    continue;
+                };
+                let above = sample(cell.offset(Direction::PosY));
+                if block::is_water(above) || registry.get(above).is_opaque() {
+                    h = 1.0;
+                    break;
+                }
+                h = h.max(water_surface(level));
+            }
+            heights[cx as usize][cz as usize] = h;
+        }
+    }
+    heights
+}
 
 /// Per-face shading so faces read as 3D even before real lighting/AO.
 fn face_shade(dir: Direction) -> f32 {
@@ -79,6 +121,22 @@ pub fn mesh_chunk(
     let mut out = ChunkMeshOutput::default();
     let origin = chunk.pos.origin();
 
+    // Read in-chunk neighbours directly; defer to the sampler at borders /
+    // outside the vertical range.
+    let sample = |np: BlockPos| -> BlockId {
+        if np.y < 0 || np.y >= CHUNK_HEIGHT {
+            BlockId::AIR
+        } else if np.x >= origin.x
+            && np.x < origin.x + CHUNK_SIZE
+            && np.z >= origin.z
+            && np.z < origin.z + CHUNK_SIZE
+        {
+            chunk.get(np.to_local().expect("y in range"))
+        } else {
+            neighbor(np)
+        }
+    };
+
     for ly in 0..CHUNK_HEIGHT {
         for lz in 0..CHUNK_SIZE {
             for lx in 0..CHUNK_SIZE {
@@ -95,27 +153,26 @@ pub fn mesh_chunk(
 
                 let world = BlockPos::new(origin.x + lx, ly, origin.z + lz);
 
+                // Water renders with a lowered, per-corner surface so blocks
+                // of different levels slope into each other; everything else
+                // keeps flat full-height tops.
+                let water = block::water_level(id);
+                let heights = match water {
+                    Some(_) => water_corner_heights(world, &sample, registry),
+                    None => [[1.0; 2]; 2],
+                };
+
                 for dir in Direction::ALL {
                     let np = world.offset(dir);
-                    // Read in-chunk neighbours directly; defer to the sampler at
-                    // borders / outside the vertical range.
-                    let neighbor_id = if np.y < 0 || np.y >= CHUNK_HEIGHT {
-                        BlockId::AIR
-                    } else if np.x >= origin.x
-                        && np.x < origin.x + CHUNK_SIZE
-                        && np.z >= origin.z
-                        && np.z < origin.z + CHUNK_SIZE
-                    {
-                        chunk.get(np.to_local().expect("y in range"))
-                    } else {
-                        neighbor(np)
-                    };
+                    let neighbor_id = sample(np);
                     let neighbor_block = registry.get(neighbor_id);
 
                     // Transparent and cutout blocks also cull faces shared with
                     // a same-id neighbour (no interior faces inside a canopy or
-                    // a body of water).
-                    let visible = if block.is_transparent() || block.is_cutout() {
+                    // a body of water); water levels all count as one body.
+                    let visible = if water.is_some() {
+                        !block::is_water(neighbor_id) && !neighbor_block.is_opaque()
+                    } else if block.is_transparent() || block.is_cutout() {
                         neighbor_id != id && !neighbor_block.is_opaque()
                     } else {
                         !neighbor_block.is_opaque()
@@ -131,16 +188,26 @@ pub fn mesh_chunk(
                     let flags = if tiles::is_water(tile) { FLAG_WATER } else { 0 };
 
                     let base = [world.x as f32, world.y as f32, world.z as f32];
-                    let quad = std::array::from_fn(|i| ChunkVertex {
-                        position: [
-                            base[0] + corners[i][0],
-                            base[1] + corners[i][1],
-                            base[2] + corners[i][2],
-                        ],
-                        normal,
-                        uv: atlas_uv(tile, uvs[i]),
-                        ao,
-                        flags,
+                    let quad = std::array::from_fn(|i| {
+                        // Corner y is 0 or 1: top corners take the (possibly
+                        // per-corner lowered) surface height, so the top face
+                        // and the side faces' upper edges move together.
+                        let y = if corners[i][1] > 0.5 {
+                            heights[corners[i][0] as usize][corners[i][2] as usize]
+                        } else {
+                            0.0
+                        };
+                        ChunkVertex {
+                            position: [
+                                base[0] + corners[i][0],
+                                base[1] + y,
+                                base[2] + corners[i][2],
+                            ],
+                            normal,
+                            uv: atlas_uv(tile, uvs[i]),
+                            ao,
+                            flags,
+                        }
                     });
 
                     if block.is_transparent() {
@@ -223,6 +290,98 @@ pub fn push_item_cube(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::{ChunkPos, LocalPos};
+    use crate::world::block::blocks;
+
+    #[test]
+    fn water_surface_is_two_texels_low() {
+        let registry = BlockRegistry::with_builtins();
+        let mut chunk = Chunk::new(ChunkPos::new(0, 0));
+        chunk.set(LocalPos { x: 4, y: 10, z: 4 }, blocks::WATER);
+        let out = mesh_chunk(&chunk, &registry, |_| BlockId::AIR);
+
+        assert_eq!(out.transparent.vertices.len(), 24, "all six faces drawn");
+        let max_y = out
+            .transparent
+            .vertices
+            .iter()
+            .map(|v| v.position[1])
+            .fold(f32::MIN, f32::max);
+        assert_eq!(max_y, 10.0 + WATER_SURFACE);
+    }
+
+    #[test]
+    fn stacked_water_merges_into_one_body() {
+        let registry = BlockRegistry::with_builtins();
+        let mut chunk = Chunk::new(ChunkPos::new(0, 0));
+        chunk.set(LocalPos { x: 4, y: 10, z: 4 }, blocks::WATER);
+        chunk.set(LocalPos { x: 4, y: 11, z: 4 }, blocks::WATER);
+        let out = mesh_chunk(&chunk, &registry, |_| BlockId::AIR);
+
+        // The shared face is culled from both blocks: 2 x 5 faces remain.
+        assert_eq!(out.transparent.vertices.len(), 40);
+        // The lower block reaches the upper block seamlessly (full height);
+        // only the top of the column is lowered.
+        let max_y = out
+            .transparent
+            .vertices
+            .iter()
+            .map(|v| v.position[1])
+            .fold(f32::MIN, f32::max);
+        assert_eq!(max_y, 11.0 + WATER_SURFACE);
+        assert!(
+            out.transparent
+                .vertices
+                .iter()
+                .any(|v| v.position[1] == 11.0)
+        );
+    }
+
+    #[test]
+    fn flowing_water_height_scales_with_level() {
+        let registry = BlockRegistry::with_builtins();
+        let mut chunk = Chunk::new(ChunkPos::new(0, 0));
+        chunk.set(
+            LocalPos { x: 4, y: 10, z: 4 },
+            crate::world::block::flowing_water(4),
+        );
+        let out = mesh_chunk(&chunk, &registry, |_| BlockId::AIR);
+
+        let max_y = out
+            .transparent
+            .vertices
+            .iter()
+            .map(|v| v.position[1])
+            .fold(f32::MIN, f32::max);
+        assert_eq!(max_y, 10.0 + WATER_SURFACE * 0.5);
+    }
+
+    #[test]
+    fn adjacent_water_levels_connect_at_shared_corners() {
+        let registry = BlockRegistry::with_builtins();
+        let mut chunk = Chunk::new(ChunkPos::new(0, 0));
+        chunk.set(LocalPos { x: 4, y: 10, z: 4 }, blocks::WATER);
+        chunk.set(
+            LocalPos { x: 5, y: 10, z: 4 },
+            crate::world::block::flowing_water(4),
+        );
+        let out = mesh_chunk(&chunk, &registry, |_| BlockId::AIR);
+
+        let max_top_at = |x: f32| {
+            out.transparent
+                .vertices
+                .iter()
+                .filter(|v| v.position[0] == x && v.position[1] > 10.0)
+                .map(|v| v.position[1])
+                .fold(f32::MIN, f32::max)
+        };
+        // The flow block's edge shared with the source rises to the source's
+        // surface — no step between the two blocks…
+        assert_eq!(max_top_at(5.0), 10.0 + WATER_SURFACE);
+        // …while its far edge stays at its own level's height, so the top
+        // face slopes downhill.
+        assert_eq!(max_top_at(6.0), 10.0 + WATER_SURFACE * 0.5);
+    }
 
     #[test]
     fn item_cube_is_centred_and_compact() {

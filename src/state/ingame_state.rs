@@ -26,7 +26,7 @@ use crate::save::{ItemStackData, PlayerData, PlayerRecords, SavedGame, WorldData
 use crate::ui::hud;
 use crate::world::block::FaceTextures;
 use crate::world::meshing::{mesh_block_overlay, mesh_chunk, push_item_cube};
-use crate::world::{BlockRegistry, ChunkLoader, NoiseGenerator, World, WorldGenerator};
+use crate::world::{BlockRegistry, ChunkLoader, FluidSim, NoiseGenerator, World, WorldGenerator};
 
 /// The networking role of this in-game session. Host/client drivers are boxed
 /// to keep the enum near the size of its `Singleplayer` variant.
@@ -112,6 +112,9 @@ pub struct InGameState {
     held: Option<ItemStack>,
     /// Where the player (re)spawns on death.
     spawn: Vec3,
+    /// Water flow simulation. Only singleplayer/host sessions tick it (the
+    /// authority); clients receive the resulting edits over the network.
+    fluids: FluidSim,
     /// Progressive block-break state for survival timed mining.
     breaking: Option<BreakState>,
     /// Crack overlay drawn on the block being mined (rebuilt as progress grows).
@@ -366,6 +369,7 @@ impl InGameState {
             inventory_open: false,
             held: None,
             spawn,
+            fluids: FluidSim::new(),
             breaking: None,
             break_mesh: None,
             outline_block: None,
@@ -694,6 +698,7 @@ impl InGameState {
                         }
                         ClientMessage::Break { pos } => {
                             if self.world.set_block(pos, BlockId::AIR).is_some() {
+                                self.fluids.block_changed(pos);
                                 host.broadcast(
                                     &ServerMessage::BlockChanged {
                                         pos,
@@ -705,6 +710,7 @@ impl InGameState {
                         }
                         ClientMessage::Place { pos, block } => {
                             if self.world.set_block(pos, block).is_some() {
+                                self.fluids.block_changed(pos);
                                 host.broadcast(
                                     &ServerMessage::BlockChanged { pos, block },
                                     Channel::Reliable,
@@ -998,6 +1004,7 @@ impl InGameState {
         if prev.is_air() {
             return false;
         }
+        self.fluids.block_changed(pos);
         if self.player.mode.consumes_blocks()
             && let Some(item) = self.items.item_for_block(prev)
         {
@@ -1208,6 +1215,7 @@ impl InGameState {
             return;
         }
         if self.world.set_block(target, block).is_some() {
+            self.fluids.block_changed(target);
             if self.player.mode.consumes_blocks() {
                 self.inventory.consume_selected(1);
             }
@@ -1460,6 +1468,13 @@ impl GameState for InGameState {
         self.update_break_overlay(ctx.render);
         self.update_target_outline(ctx.render);
         self.pump_network(ctx.dt);
+        // Water flow: singleplayer/host simulate authoritatively and broadcast
+        // each change; clients receive them as ordinary BlockChanged edits.
+        if !matches!(self.net, NetRole::Client { .. }) {
+            for (pos, block) in self.fluids.tick(&mut self.world, ctx.dt) {
+                self.broadcast_local_edit(pos, block);
+            }
+        }
         self.update_streaming(ctx.settings.render.render_distance);
         self.enqueue_dirty();
         self.process_mesh_budget(ctx.render);

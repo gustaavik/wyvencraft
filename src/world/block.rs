@@ -122,6 +122,44 @@ pub mod blocks {
     pub const IRON_ORE: BlockId = BlockId(14);
     pub const GOLD_ORE: BlockId = BlockId(15);
     pub const DIAMOND_ORE: BlockId = BlockId(16);
+    /// Flowing water levels 1 (shallowest) through 7, contiguous ids; the
+    /// source block [`WATER`] is level 8. See [`super::water_level`].
+    pub const WATER_FLOW_1: BlockId = BlockId(17);
+    pub const WATER_FLOW_7: BlockId = BlockId(23);
+}
+
+/// Water level of a source block; flowing water decays from 7 down to 1.
+pub const WATER_SOURCE_LEVEL: u8 = 8;
+
+/// Water level at `id`: `Some(8)` for the source, `Some(1..=7)` for flowing
+/// water, `None` for everything else.
+#[inline]
+pub fn water_level(id: BlockId) -> Option<u8> {
+    if id == blocks::WATER {
+        Some(WATER_SOURCE_LEVEL)
+    } else if (blocks::WATER_FLOW_1.0..=blocks::WATER_FLOW_7.0).contains(&id.0) {
+        Some((id.0 - blocks::WATER_FLOW_1.0) as u8 + 1)
+    } else {
+        None
+    }
+}
+
+/// Whether `id` is any form of water (source or flowing).
+#[inline]
+pub fn is_water(id: BlockId) -> bool {
+    water_level(id).is_some()
+}
+
+/// Flowing (non-source) water — simulation state with no item form.
+#[inline]
+pub fn is_flowing_water(id: BlockId) -> bool {
+    water_level(id).is_some_and(|level| level < WATER_SOURCE_LEVEL)
+}
+
+/// The flowing-water block for `level` (clamped to `1..=7`).
+#[inline]
+pub fn flowing_water(level: u8) -> BlockId {
+    BlockId(blocks::WATER_FLOW_1.0 + u16::from(level.clamp(1, 7) - 1))
 }
 
 /// Lookup table of all registered block types.
@@ -272,6 +310,27 @@ impl BlockRegistry {
             hardness: 3.0,
             material: BlockMaterial::Stone,
         });
+        // Flowing water, one block per level 1..=7 (the source "water" is level
+        // 8). Looks and behaves like the source; the level only drives the
+        // fluid simulation and the rendered surface height.
+        for name in [
+            "water flow 1",
+            "water flow 2",
+            "water flow 3",
+            "water flow 4",
+            "water flow 5",
+            "water flow 6",
+            "water flow 7",
+        ] {
+            reg.register(Block {
+                name,
+                render: RenderType::Transparent,
+                solid: false,
+                textures: FaceTextures::uniform(tiles::WATER_0),
+                hardness: f32::INFINITY,
+                material: BlockMaterial::Other,
+            });
+        }
         reg
     }
 
@@ -316,5 +375,28 @@ impl BlockRegistry {
 impl Default for BlockRegistry {
     fn default() -> Self {
         Self::with_builtins()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn water_levels_match_registry_order() {
+        let reg = BlockRegistry::with_builtins();
+        assert_eq!(reg.find("water"), Some(blocks::WATER));
+        assert_eq!(reg.find("water flow 1"), Some(blocks::WATER_FLOW_1));
+        assert_eq!(reg.find("water flow 7"), Some(blocks::WATER_FLOW_7));
+
+        assert_eq!(water_level(blocks::WATER), Some(WATER_SOURCE_LEVEL));
+        for level in 1..=7u8 {
+            let id = flowing_water(level);
+            assert_eq!(water_level(id), Some(level));
+            assert!(is_water(id) && is_flowing_water(id));
+        }
+        assert!(is_water(blocks::WATER) && !is_flowing_water(blocks::WATER));
+        assert_eq!(water_level(blocks::STONE), None);
+        assert_eq!(water_level(BlockId::AIR), None);
     }
 }

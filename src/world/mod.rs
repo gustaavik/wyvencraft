@@ -3,6 +3,7 @@
 
 pub mod block;
 pub mod chunk;
+pub mod fluid;
 pub mod generation;
 pub mod loader;
 pub mod meshing;
@@ -12,6 +13,7 @@ pub mod world;
 
 pub use block::{Block, BlockMaterial, BlockRegistry, RenderType};
 pub use chunk::Chunk;
+pub use fluid::FluidSim;
 pub use generation::{NoiseGenerator, WorldGenerator};
 pub use loader::ChunkLoader;
 pub use raycast::{RaycastHit, raycast};
