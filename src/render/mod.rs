@@ -11,6 +11,7 @@ pub mod mesh;
 pub mod pipeline;
 pub mod renderer;
 pub mod shaders;
+pub mod skin;
 pub mod texture;
 pub mod tile_registry;
 pub mod tiles;

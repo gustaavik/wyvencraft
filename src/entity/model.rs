@@ -7,47 +7,8 @@ use glam::Vec3;
 
 use crate::core::Direction;
 use crate::render::mesh::CpuMesh;
-use crate::render::texture::atlas_uv;
-use crate::render::tiles;
+use crate::render::skin::{self, SkinPart};
 use crate::render::vertex::ChunkVertex;
-
-/// Per-face atlas tiles for a body part, ordered by [`Direction`]
-/// (`-X,+X,-Y,+Y,-Z,+Z`). The model faces `-Z` at rest (matching
-/// `Player::look_direction` at yaw 0), so `-Z` carries the "front" texture.
-type FaceTiles = [u32; 6];
-
-const HEAD_TILES: FaceTiles = [
-    tiles::HEAD_SIDE,
-    tiles::HEAD_SIDE,
-    tiles::SKIN,
-    tiles::HEAD_TOP,
-    tiles::HEAD_FRONT,
-    tiles::HEAD_BACK,
-];
-const BODY_TILES: FaceTiles = [
-    tiles::BODY_SIDE,
-    tiles::BODY_SIDE,
-    tiles::BODY,
-    tiles::BODY,
-    tiles::BODY,
-    tiles::BODY,
-];
-const ARM_TILES: FaceTiles = [
-    tiles::ARM,
-    tiles::ARM,
-    tiles::SKIN,
-    tiles::BODY_SIDE,
-    tiles::ARM,
-    tiles::ARM,
-];
-const LEG_TILES: FaceTiles = [
-    tiles::LEG,
-    tiles::LEG,
-    tiles::SOLE,
-    tiles::LEG,
-    tiles::LEG,
-    tiles::LEG,
-];
 
 /// One rectangular box part of a model, in model-local space (origin at feet).
 #[derive(Debug, Clone, Copy)]
@@ -134,48 +95,48 @@ impl HumanoidModel {
     }
 
     /// Build a renderable mesh for this model at `position` (feet) facing `yaw`,
-    /// articulated by `pose`. Each part is skinned with its own per-face tiles
-    /// (face + hair on the head, shirt on the torso/arms, trousers + boots on the
-    /// legs). With `Pose::default()` the output matches the original static model.
+    /// articulated by `pose`. Each part samples its region of the player skin
+    /// sheet (see [`crate::render::skin`]). With `Pose::default()` the geometry
+    /// matches the original static model.
     pub fn build_mesh(&self, position: Vec3, yaw: f32, pose: &Pose) -> CpuMesh {
         let mut mesh = CpuMesh::new();
-        // (part, tiles, joint pivot, rotation about local X). Limbs swing about their
-        // top (shoulder/hip); the head tilts about its bottom (neck); the body is fixed.
-        let parts: [(ModelBox, FaceTiles, Vec3, f32); 6] = [
+        // (part, skin region, joint pivot, rotation about local X). Limbs swing about
+        // their top (shoulder/hip); the head tilts about its bottom (neck); the body is fixed.
+        let parts: [(ModelBox, SkinPart, Vec3, f32); 6] = [
             (
                 self.head,
-                HEAD_TILES,
+                skin::HEAD,
                 bottom_pivot(self.head),
                 pose.head_pitch,
             ),
-            (self.body, BODY_TILES, self.body.center, 0.0),
+            (self.body, skin::BODY, self.body.center, 0.0),
             (
                 self.left_arm,
-                ARM_TILES,
+                skin::LEFT_ARM,
                 top_pivot(self.left_arm),
                 pose.left_arm,
             ),
             (
                 self.right_arm,
-                ARM_TILES,
+                skin::RIGHT_ARM,
                 top_pivot(self.right_arm),
                 pose.right_arm,
             ),
             (
                 self.left_leg,
-                LEG_TILES,
+                skin::LEFT_LEG,
                 top_pivot(self.left_leg),
                 pose.left_leg,
             ),
             (
                 self.right_leg,
-                LEG_TILES,
+                skin::RIGHT_LEG,
                 top_pivot(self.right_leg),
                 pose.right_leg,
             ),
         ];
-        for (part, face_tiles, pivot, rot) in parts {
-            push_box(&mut mesh, part, face_tiles, position, yaw, pivot, rot);
+        for (part, skin_part, pivot, rot) in parts {
+            push_box(&mut mesh, part, skin_part, position, yaw, pivot, rot);
         }
         mesh
     }
@@ -217,7 +178,7 @@ fn face_shade(dir: Direction) -> f32 {
 fn push_box(
     mesh: &mut CpuMesh,
     part: ModelBox,
-    face_tiles: FaceTiles,
+    skin_part: SkinPart,
     origin: Vec3,
     yaw: f32,
     pivot: Vec3,
@@ -226,25 +187,43 @@ fn push_box(
     let half = part.size * 0.5;
     let lo = part.center - half;
     let hi = part.center + half;
-    let uv = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
 
     for dir in Direction::ALL {
         let corners = box_face_corners(dir, lo, hi);
+        let uv = face_local_uv(dir);
         let normal = rot_y(rot_x(dir.normal(), rot), yaw).to_array();
         let ao = face_shade(dir);
-        let tile = face_tiles[dir as usize];
+        let rect = skin_part.face_rect(dir);
         let quad = std::array::from_fn(|i| {
             let local = rot_x(corners[i] - pivot, rot) + pivot;
             let world = rot_y(local, yaw) + origin;
             ChunkVertex {
                 position: world.to_array(),
                 normal,
-                uv: atlas_uv(tile, uv[i]),
+                uv: skin::face_uv(rect, uv[i]),
                 ao,
                 flags: 0,
             }
         });
         mesh.push_quad(quad);
+    }
+}
+
+/// Local skin UVs (`u` right, `v` down) for the four corners that
+/// [`box_face_corners`] returns, oriented so the Minecraft skin sheet reads
+/// correctly on our model frame (front = -Z, character's right = +X, up = +Y).
+///
+/// Our model is the skin's authoring frame (front +Z, right arm -X) rotated 180°
+/// about Y, so the sides map straight through, but the front/back faces are
+/// horizontally reversed and the top/bottom caps run front-to-back the other way.
+fn face_local_uv(dir: Direction) -> [[f32; 2]; 4] {
+    match dir {
+        // Sides: u runs back→front (+X) / front→back (-X), v top→bottom.
+        Direction::PosX | Direction::NegX => [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]],
+        // Front/back: u runs +X→-X (front) / -X→+X (back), v top→bottom.
+        Direction::NegZ | Direction::PosZ => [[1.0, 1.0], [0.0, 1.0], [0.0, 0.0], [1.0, 0.0]],
+        // Caps: u runs +X→-X, v runs back→front.
+        Direction::PosY | Direction::NegY => [[1.0, 0.0], [0.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
     }
 }
 
@@ -336,10 +315,12 @@ mod tests {
         let model = HumanoidModel::player();
         let mesh = model.build_mesh(Vec3::ZERO, 0.0, &Pose::default());
         // The head is the first part (24 vertices); its front face (-Z, the 5th
-        // in Direction::ALL order) must sample UVs inside the HEAD_FRONT tile.
+        // in Direction::ALL order) must sample UVs inside the head's front rect
+        // on the skin sheet.
         let front = &mesh.vertices[16..20];
-        let uv0 = atlas_uv(tiles::HEAD_FRONT, [0.0, 0.0]);
-        let uv1 = atlas_uv(tiles::HEAD_FRONT, [1.0, 1.0]);
+        let rect = skin::HEAD.face_rect(Direction::NegZ);
+        let uv0 = skin::face_uv(rect, [0.0, 0.0]);
+        let uv1 = skin::face_uv(rect, [1.0, 1.0]);
         for v in front {
             assert_eq!(v.normal, [0.0, 0.0, -1.0], "front face points -Z");
             assert!(

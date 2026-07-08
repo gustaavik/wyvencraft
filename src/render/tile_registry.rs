@@ -7,14 +7,16 @@
 //! dynamically at load; nothing outside the registry should assume a name's
 //! index.
 //!
-//! *Engine tiles* (player skin, the animated water frames, the break-crack
-//! overlay) are pre-registered at the fixed indices declared in
-//! [`super::tiles`], because the entity model and the fragment shader's water
-//! animation address them by constant. Animated textures occupy contiguous
-//! same-row slots (`<name>_<frame>.png` overrides each frame).
+//! *Engine tiles* (the player skin sheet, the animated water frames, the
+//! break-crack overlay) are pre-registered at fixed indices: the skin block is
+//! blitted from [`super::skin`]; water and cracks are painted from the
+//! constants in [`super::tiles`], since the entity model and the fragment
+//! shader's water animation address them by constant. Animated textures occupy
+//! contiguous same-row slots (`<name>_<frame>.png` overrides each frame).
 
 use std::collections::HashMap;
 
+use super::skin;
 use super::texture::{ATLAS_COLUMNS, ATLAS_SIZE, TILE_SIZE};
 use super::tiles::{self, TileRgba};
 
@@ -61,11 +63,19 @@ impl TileRegistry {
         // Tile 0 is the reserved missing-texture marker.
         reg.used[0] = true;
 
-        // Unnamed engine art addressed by constant: player skin + cracks.
-        let skin = tiles::HEAD_FRONT..=tiles::SOLE;
+        // Unnamed engine art addressed by constant: the break-crack overlay.
         let cracks = tiles::CRACK_0..tiles::CRACK_0 + tiles::CRACK_STAGES;
-        for tile in skin.chain(cracks) {
+        for tile in cracks {
             reg.claim_fixed(tile);
+        }
+
+        // Player skin: blit the 64×64 Minecraft-format sheet into its reserved
+        // atlas block. Each tile carries its own art (sliced from the sheet), so
+        // it is set directly rather than through `claim_fixed`/`tiles::paint`.
+        let sheet = skin::load_default();
+        for (tile, art) in skin::atlas_tiles(&sheet) {
+            reg.used[tile as usize] = true;
+            reg.pixels[tile as usize] = Some(art);
         }
 
         // Water animation: the shader steps `tile + frame` horizontally from
@@ -247,7 +257,7 @@ mod tests {
         // Content never lands on an engine slot.
         for name in ["stone", "dirt", "leaves", "glass"] {
             let t = reg.resolve(name).tile;
-            assert!(!(tiles::HEAD_FRONT..=tiles::SOLE).contains(&t));
+            assert!(!skin::atlas_tile_indices().any(|s| s == t));
             assert!(!(tiles::WATER_0..tiles::WATER_0 + tiles::WATER_FRAMES).contains(&t));
             assert!(!(tiles::CRACK_0..tiles::CRACK_0 + tiles::CRACK_STAGES).contains(&t));
             assert_ne!(t, 0);
