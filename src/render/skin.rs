@@ -4,8 +4,10 @@
 //! model can address it by pixel rect instead of whole tiles. Layout follows
 //! the standard Minecraft skin unwrap: per part, a horizontal strip of
 //! right|front|left|back side faces with top/bottom above it, plus a second
-//! overlay layer (hat, jacket, sleeves, pants) that is flattened onto the base
-//! at load time — the model samples a single composited layer.
+//! overlay layer (hat, jacket, sleeves, pants). The base and overlay regions are
+//! both left in the atlas with their alpha intact; the model draws the overlay
+//! as a slightly inflated second shell (its transparent pixels are alpha-tested
+//! away in the shader) for a 3D layered look.
 //!
 //! `assets/textures/defaultskin.png` overrides the embedded copy; an invalid
 //! or missing file degrades fail-soft with a logged warning.
@@ -64,6 +66,33 @@ pub const LEFT_LEG: SkinPart = SkinPart {
     size: [4, 12, 4],
 };
 
+// Overlay layer: the second, inflated shell. Same unwrap as each base part at a
+// different sheet origin, so `face_rect`/`face_uv` apply unchanged.
+pub const HAT: SkinPart = SkinPart {
+    uv: [32, 0],
+    size: [8, 8, 8],
+};
+pub const JACKET: SkinPart = SkinPart {
+    uv: [16, 32],
+    size: [8, 12, 4],
+};
+pub const RIGHT_SLEEVE: SkinPart = SkinPart {
+    uv: [40, 32],
+    size: [4, 12, 4],
+};
+pub const LEFT_SLEEVE: SkinPart = SkinPart {
+    uv: [48, 48],
+    size: [4, 12, 4],
+};
+pub const RIGHT_PANTS: SkinPart = SkinPart {
+    uv: [0, 32],
+    size: [4, 12, 4],
+};
+pub const LEFT_PANTS: SkinPart = SkinPart {
+    uv: [0, 48],
+    size: [4, 12, 4],
+};
+
 const PARTS: [SkinPart; 6] = [HEAD, BODY, RIGHT_ARM, LEFT_ARM, RIGHT_LEG, LEFT_LEG];
 
 impl SkinPart {
@@ -115,8 +144,9 @@ pub fn atlas_tiles(skin: &SkinRgba) -> impl Iterator<Item = (u32, TileRgba)> + '
 }
 
 /// Load the default player skin: the PNG on disk if present and valid, else
-/// the embedded copy. Overlay layers are flattened onto the base parts and the
-/// base face rects forced opaque (matching how Minecraft treats the base layer).
+/// the embedded copy. The base face rects are forced opaque (matching how
+/// Minecraft treats the base layer); overlay regions keep their alpha for the
+/// separate inflated overlay shell the model draws.
 pub fn load_default() -> Box<SkinRgba> {
     let mut skin = match std::fs::read(SKIN_PATH) {
         Ok(bytes) => match decode(&bytes) {
@@ -131,7 +161,7 @@ pub fn load_default() -> Box<SkinRgba> {
         },
         Err(_) => embedded(),
     };
-    flatten_overlays(&mut skin);
+    force_base_opaque(&mut skin);
     skin
 }
 
@@ -168,33 +198,10 @@ fn decode(bytes: &[u8]) -> Result<Box<SkinRgba>, String> {
     Ok(skin)
 }
 
-/// `(overlay origin, base origin, region size)` for the six overlay layers.
-/// Each overlay region mirrors its base part's unwrap at a different origin,
-/// so whole regions composite 1:1.
-const OVERLAYS: [([u32; 2], [u32; 2], [u32; 2]); 6] = [
-    ([32, 0], [0, 0], [32, 16]),    // hat → head
-    ([16, 32], [16, 16], [24, 16]), // jacket → body
-    ([40, 32], [40, 16], [16, 16]), // right sleeve → right arm
-    ([48, 48], [32, 48], [16, 16]), // left sleeve → left arm
-    ([0, 32], [0, 16], [16, 16]),   // right pants → right leg
-    ([0, 48], [16, 48], [16, 16]),  // left pants → left leg
-];
-
-/// Composite the overlay layers onto the base parts (source-over), then force
-/// the base face rects opaque so the model never renders see-through skin.
-fn flatten_overlays(skin: &mut SkinRgba) {
-    for (over, base, size) in OVERLAYS {
-        for y in 0..size[1] as usize {
-            for x in 0..size[0] as usize {
-                let src = skin[over[1] as usize + y][over[0] as usize + x];
-                if src[3] == 0 {
-                    continue;
-                }
-                let dst = &mut skin[base[1] as usize + y][base[0] as usize + x];
-                *dst = blend(*dst, src);
-            }
-        }
-    }
+/// Force the base layer's face rects fully opaque, so the inner body never
+/// renders see-through (matching how Minecraft treats the base layer). The
+/// overlay regions are left untouched — their alpha drives the 3D overlay shell.
+fn force_base_opaque(skin: &mut SkinRgba) {
     for part in PARTS {
         for dir in Direction::ALL {
             let [x, y, w, h] = part.face_rect(dir);
@@ -205,18 +212,6 @@ fn flatten_overlays(skin: &mut SkinRgba) {
             }
         }
     }
-}
-
-/// Source-over blend of an overlay pixel onto a base pixel (keeps base alpha).
-fn blend(base: [u8; 4], over: [u8; 4]) -> [u8; 4] {
-    let a = over[3] as u32;
-    let mix = |o: u8, b: u8| ((o as u32 * a + b as u32 * (255 - a) + 127) / 255) as u8;
-    [
-        mix(over[0], base[0]),
-        mix(over[1], base[1]),
-        mix(over[2], base[2]),
-        base[3],
-    ]
 }
 
 #[cfg(test)]

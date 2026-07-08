@@ -95,48 +95,81 @@ impl HumanoidModel {
     }
 
     /// Build a renderable mesh for this model at `position` (feet) facing `yaw`,
-    /// articulated by `pose`. Each part samples its region of the player skin
-    /// sheet (see [`crate::render::skin`]). With `Pose::default()` the geometry
-    /// matches the original static model.
+    /// articulated by `pose`. Each part is drawn twice: the base box sampling its
+    /// base region of the player skin sheet (see [`crate::render::skin`]), then a
+    /// slightly inflated overlay box sampling the hat/jacket/sleeve/pants region —
+    /// its transparent pixels are alpha-tested away in the shader, giving a 3D
+    /// layered look. With `Pose::default()` the base geometry matches the original
+    /// static model.
     pub fn build_mesh(&self, position: Vec3, yaw: f32, pose: &Pose) -> CpuMesh {
+        // Overlay-shell inflation per side (Minecraft `CubeDeformation`), in blocks.
+        const HAT: f32 = 0.5 / 16.0;
+        const LAYER: f32 = 0.25 / 16.0;
+
         let mut mesh = CpuMesh::new();
-        // (part, skin region, joint pivot, rotation about local X). Limbs swing about
-        // their top (shoulder/hip); the head tilts about its bottom (neck); the body is fixed.
-        let parts: [(ModelBox, SkinPart, Vec3, f32); 6] = [
+        // (part, base skin, overlay skin, overlay inflation, joint pivot, rotation
+        // about local X). Limbs swing about their top (shoulder/hip); the head tilts
+        // about its bottom (neck); the body is fixed. The overlay shares the base
+        // part's pivot/rotation so it stays locked to the limb.
+        let parts: [(ModelBox, SkinPart, SkinPart, f32, Vec3, f32); 6] = [
             (
                 self.head,
                 skin::HEAD,
+                skin::HAT,
+                HAT,
                 bottom_pivot(self.head),
                 pose.head_pitch,
             ),
-            (self.body, skin::BODY, self.body.center, 0.0),
+            (
+                self.body,
+                skin::BODY,
+                skin::JACKET,
+                LAYER,
+                self.body.center,
+                0.0,
+            ),
             (
                 self.left_arm,
                 skin::LEFT_ARM,
+                skin::LEFT_SLEEVE,
+                LAYER,
                 top_pivot(self.left_arm),
                 pose.left_arm,
             ),
             (
                 self.right_arm,
                 skin::RIGHT_ARM,
+                skin::RIGHT_SLEEVE,
+                LAYER,
                 top_pivot(self.right_arm),
                 pose.right_arm,
             ),
             (
                 self.left_leg,
                 skin::LEFT_LEG,
+                skin::LEFT_PANTS,
+                LAYER,
                 top_pivot(self.left_leg),
                 pose.left_leg,
             ),
             (
                 self.right_leg,
                 skin::RIGHT_LEG,
+                skin::RIGHT_PANTS,
+                LAYER,
                 top_pivot(self.right_leg),
                 pose.right_leg,
             ),
         ];
-        for (part, skin_part, pivot, rot) in parts {
-            push_box(&mut mesh, part, skin_part, position, yaw, pivot, rot);
+        for (part, base, overlay, inflate, pivot, rot) in parts {
+            push_box(&mut mesh, part, base, position, yaw, pivot, rot);
+            // Overlay shell: the same box grown by `inflate` on every side, sharing
+            // the base part's pivot so it articulates locked to the limb.
+            let shell = ModelBox {
+                center: part.center,
+                size: part.size + Vec3::splat(2.0 * inflate),
+            };
+            push_box(&mut mesh, shell, overlay, position, yaw, pivot, rot);
         }
         mesh
     }
@@ -296,18 +329,21 @@ mod tests {
     fn rest_pose_matches_static_layout() {
         let model = HumanoidModel::player();
         let mesh = model.build_mesh(Vec3::ZERO, 0.0, &Pose::default());
-        // 6 parts × 6 faces × 4 vertices.
-        assert_eq!(mesh.vertices.len(), 144);
+        // 6 parts, each drawn as a base + an inflated overlay box:
+        // 12 boxes × 6 faces × 4 vertices.
+        assert_eq!(mesh.vertices.len(), 288);
         // At origin with zero yaw and a rest pose the geometry is untransformed: the
-        // head top sits at 32px = 2.0 units and the feet at 0.
+        // base head top sits at 32px = 2.0 units and the base feet at 0, and the
+        // overlay shell inflates the extremes by the hat (+0.5px) / pants (-0.25px)
+        // deformation.
         let (min_y, max_y) = mesh
             .vertices
             .iter()
             .fold((f32::MAX, f32::MIN), |(lo, hi), v| {
                 (lo.min(v.position[1]), hi.max(v.position[1]))
             });
-        assert!((min_y - 0.0).abs() < 1e-6, "min_y={min_y}");
-        assert!((max_y - 2.0).abs() < 1e-6, "max_y={max_y}");
+        assert!((max_y - (2.0 + 0.5 / 16.0)).abs() < 1e-6, "max_y={max_y}");
+        assert!((min_y - (-0.25 / 16.0)).abs() < 1e-6, "min_y={min_y}");
     }
 
     #[test]
