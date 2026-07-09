@@ -200,9 +200,9 @@ fn rot_x(p: Vec3, a: f32) -> Vec3 {
 fn face_shade(dir: Direction) -> f32 {
     match dir {
         Direction::PosY => 1.0,
-        Direction::NegY => 0.5,
-        Direction::PosX | Direction::NegX => 0.78,
-        Direction::PosZ | Direction::NegZ => 0.66,
+        Direction::NegY => 0.68,
+        Direction::PosX | Direction::NegX => 0.86,
+        Direction::PosZ | Direction::NegZ => 0.80,
     }
 }
 

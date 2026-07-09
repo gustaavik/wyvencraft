@@ -76,13 +76,13 @@ impl DayCycle {
 
         // World directional-light keyframes.
         let day_light = Vec3::new(1.00, 0.97, 0.88);
-        let night_light = Vec3::new(0.30, 0.36, 0.55);
+        let night_light = Vec3::new(0.48, 0.54, 0.70);
         let dusk_light = Vec3::new(1.00, 0.70, 0.45);
         let light_color = night_light
             .lerp(day_light, day)
             .lerp(dusk_light, horizon_glow * 0.5);
 
-        let ambient = lerp(0.18, 0.55, day);
+        let ambient = lerp(0.35, 0.82, day);
 
         // After dusk the key light comes from the moon (opposite the sun) so faces
         // still get some shape; it's kept dim via `light_color` (night palette).

@@ -56,9 +56,9 @@ fn water_corner_heights(
 fn face_shade(dir: Direction) -> f32 {
     match dir {
         Direction::PosY => 1.0,
-        Direction::NegY => 0.5,
-        Direction::PosX | Direction::NegX => 0.75,
-        Direction::PosZ | Direction::NegZ => 0.62,
+        Direction::NegY => 0.68,
+        Direction::PosX | Direction::NegX => 0.85,
+        Direction::PosZ | Direction::NegZ => 0.78,
     }
 }
 
