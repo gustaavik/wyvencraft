@@ -9,6 +9,10 @@ use std::sync::Arc;
 
 use egui_winit_vulkano::{Gui, GuiConfig};
 use vulkano::device::DeviceFeatures;
+use vulkano::image::sampler::{Filter, SamplerAddressMode, SamplerCreateInfo};
+use vulkano::image::view::ImageView;
+use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
+use vulkano::memory::allocator::AllocationCreateInfo;
 use vulkano::swapchain::PresentMode;
 use vulkano_util::context::{VulkanoConfig, VulkanoContext};
 use vulkano_util::window::{VulkanoWindows, WindowDescriptor, WindowMode};
@@ -29,7 +33,13 @@ use crate::render::{RenderContext, Renderer};
 use crate::save::{self, SaveError, SavedGame, WorldSave};
 use crate::state::{
     ConnectingState, GameState, InGameState, LoadingState, MainMenuState, StateContext, StateStack,
+    UiTextures,
 };
+
+/// Fixed size of the inventory player-model preview image, in pixels. The 0.48
+/// aspect (tall and narrow) matches the mockup's black box; the image is
+/// downscaled into whatever rect the inventory reserves.
+const PREVIEW_SIZE: [u32; 2] = [384, 800];
 
 /// Open (or create, seeding from `WYVEN_SEED`/random) the named world for the
 /// `WYVEN_WORLD` boot paths.
@@ -66,6 +76,11 @@ struct App {
     windows: VulkanoWindows,
     gui: Option<Gui>,
     renderer: Option<Renderer>,
+    /// Offscreen colour image the player-model preview renders into, sampled by
+    /// egui inside the inventory screen. Created once with the window.
+    preview_image: Option<Arc<ImageView>>,
+    /// egui handles for the block atlas and the preview image (registered once).
+    ui_textures: Option<UiTextures>,
     settings: Settings,
     input: InputState,
     clock: Clock,
@@ -160,6 +175,8 @@ impl App {
             windows: VulkanoWindows::default(),
             gui: None,
             renderer: None,
+            preview_image: None,
+            ui_textures: None,
             settings: Settings::default(),
             input: InputState::new(),
             clock: Clock::new(),
@@ -193,6 +210,12 @@ impl App {
         let dt = self.clock.tick();
         let elapsed = self.clock.elapsed();
 
+        // egui textures are registered in `resumed`, which always precedes the
+        // first frame; without a window there is nothing to render anyway.
+        let Some(ui_tex) = self.ui_textures else {
+            return;
+        };
+
         // --- Update the active state ---
         let aspect = self
             .windows
@@ -207,6 +230,7 @@ impl App {
                 input: &self.input,
                 render: &self.render_context,
                 content: &self.content,
+                ui_tex,
                 dt,
                 elapsed,
                 grab_cursor: grab,
@@ -230,6 +254,7 @@ impl App {
                 input: &self.input,
                 render: &self.render_context,
                 content: &self.content,
+                ui_tex,
                 dt,
                 elapsed,
                 grab_cursor: grab,
@@ -262,6 +287,23 @@ impl App {
             .get_primary_renderer()
             .unwrap()
             .swapchain_image_view();
+
+        // Player-model preview into its offscreen image first, so the swapchain
+        // image's only writer before the egui overlay is the world pass (exactly
+        // the inventory-closed path — inserting this pass *between* world and egui
+        // breaks vulkano's swapchain layout tracking). Only runs with the
+        // inventory open; egui samples the finished image via the future chain.
+        let preview = self.stack.preview_frame();
+        let before = match (
+            preview.as_ref(),
+            self.renderer.as_mut(),
+            self.preview_image.as_ref(),
+        ) {
+            (Some(preview), Some(renderer), Some(target)) => {
+                renderer.draw_model(before, target.clone(), preview)
+            }
+            _ => before,
+        };
 
         let scene = self.stack.scene_frame(aspect);
         let after_scene = match self.renderer.as_mut() {
@@ -318,12 +360,56 @@ impl ApplicationHandler for App {
                 ..Default::default()
             },
         );
-        self.gui = Some(gui);
-        self.renderer = Some(Renderer::new(
+        let renderer = Renderer::new(
             self.render_context.clone(),
             color_format,
             self.content.tiles.atlas_rgba(),
-        ));
+        );
+
+        // Offscreen colour target for the inventory's live player preview, in
+        // the swapchain format the pipelines were built with, usable both as a
+        // render target and as an egui-sampled texture.
+        let preview_image = Image::new(
+            self.render_context.memory_allocator.clone(),
+            ImageCreateInfo {
+                image_type: ImageType::Dim2d,
+                format: color_format,
+                extent: [PREVIEW_SIZE[0], PREVIEW_SIZE[1], 1],
+                usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED,
+                ..Default::default()
+            },
+            AllocationCreateInfo::default(),
+        )
+        .expect("preview image");
+        let preview_view = ImageView::new_default(preview_image).expect("preview view");
+
+        // Register both images with egui once: the atlas (nearest, for crisp
+        // pixel-art item icons) and the preview (linear, since the 3D render is
+        // downscaled into the panel).
+        let mut gui = gui;
+        let atlas = gui.register_user_image_view(
+            renderer.atlas_view(),
+            SamplerCreateInfo {
+                mag_filter: Filter::Nearest,
+                min_filter: Filter::Nearest,
+                address_mode: [SamplerAddressMode::ClampToEdge; 3],
+                ..Default::default()
+            },
+        );
+        let preview = gui.register_user_image_view(
+            preview_view.clone(),
+            SamplerCreateInfo {
+                mag_filter: Filter::Linear,
+                min_filter: Filter::Linear,
+                address_mode: [SamplerAddressMode::ClampToEdge; 3],
+                ..Default::default()
+            },
+        );
+
+        self.gui = Some(gui);
+        self.renderer = Some(renderer);
+        self.preview_image = Some(preview_view);
+        self.ui_textures = Some(UiTextures { atlas, preview });
         log::info!("Window, renderer and egui initialised");
     }
 
@@ -340,11 +426,16 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => {
                 // Run every state's exit hook (world autosave) before quitting;
                 // closing the window never goes through StateStack::apply.
+                let ui_tex = self.ui_textures.unwrap_or(UiTextures {
+                    atlas: egui::TextureId::default(),
+                    preview: egui::TextureId::default(),
+                });
                 let mut ctx = StateContext {
                     settings: &mut self.settings,
                     input: &self.input,
                     render: &self.render_context,
                     content: &self.content,
+                    ui_tex,
                     dt: 0.0,
                     elapsed: self.clock.elapsed(),
                     grab_cursor: false,

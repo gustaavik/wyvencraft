@@ -9,6 +9,11 @@ use crate::core::{Aabb, BlockPos, GameMode};
 use crate::entity::kind::{EntityKind, MovementParams, PhysicsParams, VitalsParams};
 use crate::entity::physics::{self};
 
+/// Defense points beyond which armor stops helping (an 80% reduction).
+const MAX_DEFENSE: f32 = 20.0;
+/// Defense points that would absorb a hit entirely, were `MAX_DEFENSE` not lower.
+const DEFENSE_PER_FULL_ABSORB: f32 = 25.0;
+
 /// Which camera the player is using.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Perspective {
@@ -60,6 +65,11 @@ pub struct Player {
     pub health: f32,
     pub hunger: f32,
     pub saturation: f32,
+    /// Defense points from worn armor, mixed into [`Player::damage`]. Kept as a
+    /// field rather than a `damage` argument because fall damage fires from
+    /// inside [`Player::update`], which cannot see the inventory; the owner
+    /// (`InGameState`) refreshes it each frame from `Inventory::total_defense`.
+    pub defense: f32,
     /// Highest Y reached since last leaving the ground; drives fall-damage.
     fall_peak_y: f32,
     // Static tuning, copied from the "player" entity kind at construction.
@@ -85,6 +95,7 @@ impl Player {
             health: vitals.max_health,
             hunger: vitals.max_hunger,
             saturation: vitals.max_hunger,
+            defense: 0.0,
             fall_peak_y: position.y,
             physics: kind.physics,
             movement: kind.movement.expect("player kind has movement"),
@@ -241,10 +252,14 @@ impl Player {
         }
     }
 
-    /// Apply damage (clamped, and only in a mode that takes damage).
+    /// Apply damage (clamped, and only in a mode that takes damage). Worn armor
+    /// absorbs 4% per defense point, up to the 20 points that cap at an 80%
+    /// reduction — so a fully armored player always takes at least a fifth.
     pub fn damage(&mut self, amount: f32) {
         if self.mode.takes_damage() {
-            self.health = (self.health - amount).max(0.0);
+            let absorbed = self.defense.clamp(0.0, MAX_DEFENSE) / DEFENSE_PER_FULL_ABSORB;
+            let taken = amount * (1.0 - absorbed);
+            self.health = (self.health - taken).max(0.0);
         }
     }
 
@@ -348,6 +363,35 @@ mod tests {
             player.update(MovementInput::default(), dt, solid);
         }
         assert_eq!(player.health, MAX_HEALTH, "a 2-block fall should be safe");
+    }
+
+    /// Armor mitigates every damage source, including the fall damage raised
+    /// from inside `update` — which is why `defense` is a field, not an argument.
+    #[test]
+    fn armor_softens_damage_down_to_the_floor() {
+        let mut bare = test_player(Vec3::new(0.5, 65.0, 0.5), GameMode::Survival);
+        bare.damage(10.0);
+        assert_eq!(bare.health, MAX_HEALTH - 10.0, "no armor, no mitigation");
+
+        // The shipped full set is 17 points: 17/25 = 68% absorbed.
+        let mut armored = test_player(Vec3::new(0.5, 65.0, 0.5), GameMode::Survival);
+        armored.defense = 17.0;
+        armored.damage(10.0);
+        assert!(
+            (armored.health - (MAX_HEALTH - 3.2)).abs() < 1e-3,
+            "17 points should absorb 68%; health = {}",
+            armored.health
+        );
+
+        // Defense past the cap keeps the 20% floor rather than granting immunity.
+        let mut invincible = test_player(Vec3::new(0.5, 65.0, 0.5), GameMode::Survival);
+        invincible.defense = 999.0;
+        invincible.damage(10.0);
+        assert!(
+            (invincible.health - (MAX_HEALTH - 2.0)).abs() < 1e-3,
+            "damage floors at 20%; health = {}",
+            invincible.health
+        );
     }
 
     /// The same long fall in creative deals no damage (invulnerable).

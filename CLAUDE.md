@@ -90,7 +90,10 @@ references). This keeps the GPU layer decoupled from gameplay.
 | Task                    | Location                                                                                   |
 | ----------------------- | ------------------------------------------------------------------------------------------ |
 | Add a block type        | `assets/blocks.toml` (pure data); texture = PNG in `assets/textures/<name>.png` or a painter in `render::tiles::paint_named` |
-| Add an item / tool / food | `assets/items.toml` (`[item.tool]` with `harvests`, `[item.food]`); starter kit in the same file |
+| Add an item / tool / food / armor | `assets/items.toml` (`[item.tool]` with `harvests`, `[item.food]`, `[item.armor]` with `slot`/`defense`/`durability`); starter kit in the same file |
+| Armor (slots, defense, wear, render) | data in `assets/items.toml` `[item.armor]`; slots 36..42 in `inventory::inventory`; defense math in `entity::player::damage`; equip gate + wear in `state::ingame_state`; worn-model shells + cape in `entity::model::build_mesh_armored`; procedural sheets in `render::armor`; net via `ServerMessage::PlayerEquipment` |
+| Item icons (2D)         | painters in `render::tiles::paint_named` (PNG-overridable); `ItemIcon` computed in `content` (cube from block faces vs flat tile); drawn by `ui::icon::draw_item_icon` (atlas registered with egui in `app`) |
+| Live player preview     | offscreen pass `render::Renderer::draw_model` + `PreviewFrame`; mesh/camera in `state::ingame_state::{update_preview_mesh,preview_frame}`; image + egui `TextureId` in `app` (runs *before* the world pass) |
 | Block drop rules        | `drops = ...` on the block in `assets/blocks.toml` (`"self"`, `"none"`, `{ requires_tool }`, `{ item, count }`) |
 | Entity tuning / new kind | `assets/entities.toml` (physics/movement/vitals/item components); a new *behavior* = one new component in `entity::kind` + its code hook |
 | Change terrain          | `assets/worldgen.toml` (blocks, ores, sea level, biome surfaces — ⚠ alters existing worlds); noise/climate/mesas stay in `world::generation::{noise,biome,generator}` |

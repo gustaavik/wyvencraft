@@ -30,6 +30,10 @@ use super::texture::TextureAtlas;
 /// draw the procedural sky behind).
 const SKY_COLOR: [f32; 4] = [0.52, 0.70, 0.96, 1.0];
 const DEPTH_FORMAT: Format = Format::D32_SFLOAT;
+/// Backdrop for the inventory player preview: a near-black opaque fill matching
+/// the mockup's box. Opaque (not transparent) sidesteps premultiplied-alpha
+/// halos when egui composites the sampled image over the inventory panel.
+const PREVIEW_BG: [f32; 4] = [0.02, 0.02, 0.03, 1.0];
 
 /// Parameters for the procedural sky pass, derived from the day/night cycle.
 #[derive(Clone, Copy)]
@@ -68,6 +72,15 @@ pub struct SceneFrame<'a> {
     pub lines: Option<&'a GpuLines>,
 }
 
+/// Everything the renderer needs to draw the player-model preview into the
+/// inventory's offscreen image: a fixed orbit camera, a neutral light, and the
+/// one model mesh. No sky, no world.
+pub struct PreviewFrame<'a> {
+    pub view_proj: Mat4,
+    pub light: LightParams,
+    pub model: &'a GpuMesh,
+}
+
 pub struct Renderer {
     ctx: Arc<RenderContext>,
     sky_pipeline: Arc<GraphicsPipeline>,
@@ -75,9 +88,10 @@ pub struct Renderer {
     transparent_pipeline: Arc<GraphicsPipeline>,
     line_pipeline: Arc<GraphicsPipeline>,
     atlas_set: Arc<DescriptorSet>,
-    /// Cached depth buffer + the size it was created for.
-    depth: Option<(Arc<ImageView>, [u32; 2])>,
-    #[allow(dead_code)]
+    /// Depth buffers keyed by size. The swapchain pass and the (differently
+    /// sized) preview pass each keep their own entry, so alternating between
+    /// them every frame doesn't thrash a single-slot cache.
+    depth_cache: Vec<(Arc<ImageView>, [u32; 2])>,
     atlas: TextureAtlas,
 }
 
@@ -112,9 +126,15 @@ impl Renderer {
             transparent_pipeline,
             line_pipeline,
             atlas_set,
-            depth: None,
+            depth_cache: Vec::new(),
             atlas,
         }
+    }
+
+    /// The block-atlas image view, for the app to register with egui so the UI
+    /// can draw item icons from the same texture the world samples.
+    pub fn atlas_view(&self) -> Arc<ImageView> {
+        self.atlas.image_view.clone()
     }
 
     /// Record the fullscreen procedural sky pass (drawn before world geometry).
@@ -252,9 +272,7 @@ impl Renderer {
 
     /// Create or reuse a depth buffer matching `size`.
     fn ensure_depth(&mut self, size: [u32; 2]) -> Arc<ImageView> {
-        if let Some((view, cached)) = &self.depth
-            && *cached == size
-        {
+        if let Some((view, _)) = self.depth_cache.iter().find(|(_, s)| *s == size) {
             return view.clone();
         }
         let image = Image::new(
@@ -270,7 +288,7 @@ impl Renderer {
         )
         .expect("depth image");
         let view = ImageView::new_default(image).expect("depth view");
-        self.depth = Some((view.clone(), size));
+        self.depth_cache.push((view.clone(), size));
         view
     }
 
@@ -353,6 +371,74 @@ impl Renderer {
         before
             .then_execute(self.ctx.graphics_queue().clone(), command_buffer)
             .expect("execute scene cb")
+            .boxed()
+    }
+
+    /// Render just the player model into `target` (the inventory preview's
+    /// offscreen image), chaining after `before`. Reuses the voxel pipeline and
+    /// the shared atlas — the skin already lives there — so it needs no new GPU
+    /// resources. The caller folds the returned future into the one passed to
+    /// egui's overlay pass so the sampled image is finished first.
+    pub fn draw_model(
+        &mut self,
+        before: Box<dyn GpuFuture>,
+        target: Arc<ImageView>,
+        preview: &PreviewFrame,
+    ) -> Box<dyn GpuFuture> {
+        let extent = target.image().extent();
+        let size = [extent[0], extent[1]];
+        let depth = self.ensure_depth(size);
+
+        let mut builder = AutoCommandBufferBuilder::primary(
+            self.ctx.command_allocator.clone(),
+            self.ctx.graphics_queue().queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )
+        .expect("preview command buffer");
+
+        builder
+            .begin_rendering(RenderingInfo {
+                color_attachments: vec![Some(RenderingAttachmentInfo {
+                    load_op: AttachmentLoadOp::Clear,
+                    store_op: AttachmentStoreOp::Store,
+                    clear_value: Some(ClearValue::Float(PREVIEW_BG)),
+                    ..RenderingAttachmentInfo::image_view(target.clone())
+                })],
+                depth_attachment: Some(RenderingAttachmentInfo {
+                    load_op: AttachmentLoadOp::Clear,
+                    store_op: AttachmentStoreOp::DontCare,
+                    clear_value: Some(ClearValue::Depth(1.0)),
+                    ..RenderingAttachmentInfo::image_view(depth)
+                }),
+                ..Default::default()
+            })
+            .expect("begin preview rendering");
+
+        let viewport = Viewport {
+            offset: [0.0, 0.0],
+            extent: [size[0] as f32, size[1] as f32],
+            depth_range: 0.0..=1.0,
+        };
+        builder
+            .set_viewport(0, [viewport].into_iter().collect())
+            .expect("set preview viewport");
+
+        let voxel_pipeline = self.voxel_pipeline.clone();
+        self.record_meshes(
+            &mut builder,
+            &voxel_pipeline,
+            preview.view_proj,
+            &preview.light,
+            0.0,
+            &[preview.model],
+        );
+
+        builder.end_rendering().expect("end preview rendering");
+        let command_buffer = builder.build().expect("build preview cb");
+
+        before
+            .then_execute(self.ctx.graphics_queue().clone(), command_buffer)
+            .expect("execute preview cb")
             .boxed()
     }
 }

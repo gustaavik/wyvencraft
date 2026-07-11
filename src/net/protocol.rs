@@ -142,6 +142,14 @@ pub enum ServerMessage {
         hunger: f32,
         mode: GameMode,
     },
+    /// A player's equipped armor, one item id per armor slot (`None` = empty).
+    /// Sent reliably on change (and to a joining client for everyone already in),
+    /// so remote player models render armor without bloating the per-tick
+    /// movement snapshot.
+    PlayerEquipment {
+        id: PlayerId,
+        armor: [Option<u16>; 6],
+    },
 }
 
 /// Logical network channels, mapped to renet channel ids.

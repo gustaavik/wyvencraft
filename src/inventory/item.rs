@@ -2,9 +2,9 @@
 //!
 //! Items are kept independent of rendering. Every placeable block gets an
 //! auto-generated item; `assets/items.toml` then declares the rest (tools,
-//! foods) as data, expressing behavior through typed components ([`ToolSpec`],
-//! [`FoodValue`]) that the gameplay code dispatches on — never on item
-//! identity.
+//! foods, armor) as data, expressing behavior through typed components
+//! ([`ToolSpec`], [`FoodValue`], [`ArmorSpec`]) that the gameplay code
+//! dispatches on — never on item identity.
 
 use crate::core::BlockId;
 use crate::world::block::{BlockMaterial, BlockRegistry};
@@ -40,6 +40,61 @@ pub struct FoodValue {
     pub saturation: f32,
 }
 
+/// Which equipment slot an armor piece occupies. The discriminants are the
+/// order of the armor slots in the inventory (see `super::inventory::ARMOR_START`)
+/// and of the labelled column in the inventory screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ArmorSlot {
+    Helmet,
+    Chestplate,
+    Leggings,
+    Boots,
+    Glove,
+    Cape,
+}
+
+impl ArmorSlot {
+    pub const ALL: [ArmorSlot; 6] = [
+        ArmorSlot::Helmet,
+        ArmorSlot::Chestplate,
+        ArmorSlot::Leggings,
+        ArmorSlot::Boots,
+        ArmorSlot::Glove,
+        ArmorSlot::Cape,
+    ];
+
+    /// Offset of this slot within the inventory's armor region.
+    #[inline]
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
+    /// Display name, also the label shown beside the slot.
+    pub fn label(self) -> &'static str {
+        match self {
+            ArmorSlot::Helmet => "Helmet",
+            ArmorSlot::Chestplate => "Chestplate",
+            ArmorSlot::Leggings => "Leggings",
+            ArmorSlot::Boots => "Boots",
+            ArmorSlot::Glove => "Glove",
+            ArmorSlot::Cape => "Cape",
+        }
+    }
+}
+
+/// Armor behavior component (`[item.armor]` in `assets/items.toml`): which slot
+/// the piece fits, how much damage it absorbs, and how long it lasts.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArmorSpec {
+    pub slot: ArmorSlot,
+    /// Defense points; summed across worn pieces (see `Player::damage`).
+    pub defense: f32,
+    /// Uses before the piece wears out.
+    pub durability: u16,
+}
+
 /// Static description of an item type.
 #[derive(Debug, Clone)]
 pub struct Item {
@@ -51,6 +106,8 @@ pub struct Item {
     pub tool: Option<ToolSpec>,
     /// If set, the item is edible.
     pub food: Option<FoodValue>,
+    /// If set, the item is wearable armor.
+    pub armor: Option<ArmorSpec>,
 }
 
 impl Item {
@@ -62,6 +119,7 @@ impl Item {
             place_block: Some(block),
             tool: None,
             food: None,
+            armor: None,
         }
     }
 }
@@ -142,6 +200,7 @@ struct ItemDef {
     place_block: Option<String>,
     tool: Option<ToolSpec>,
     food: Option<FoodValue>,
+    armor: Option<ArmorSpec>,
 }
 
 #[derive(serde::Deserialize)]
@@ -229,17 +288,20 @@ impl ItemRegistry {
                     if def.food.is_some() {
                         item.food = def.food;
                     }
+                    if def.armor.is_some() {
+                        item.armor = def.armor;
+                    }
                 }
                 None => {
-                    let max_stack =
-                        def.max_stack
-                            .unwrap_or(if def.tool.is_some() { 1 } else { 64 });
+                    let single = def.tool.is_some() || def.armor.is_some();
+                    let max_stack = def.max_stack.unwrap_or(if single { 1 } else { 64 });
                     items.push(Item {
                         name: def.name,
                         max_stack,
                         place_block,
                         tool: def.tool,
                         food: def.food,
+                        armor: def.armor,
                     });
                 }
             }
@@ -300,8 +362,18 @@ impl ItemRegistry {
         self.get(id).food
     }
 
+    pub fn armor(&self, id: ItemId) -> Option<ArmorSpec> {
+        self.get(id).armor
+    }
+
+    /// Starting durability of a fresh item, for the components that wear out.
+    /// An item is never both a tool and armor; tools win if a file says otherwise.
     pub fn max_durability(&self, id: ItemId) -> Option<u16> {
-        self.get(id).tool.as_ref().map(|tool| tool.durability)
+        let item = self.get(id);
+        item.tool
+            .as_ref()
+            .map(|tool| tool.durability)
+            .or_else(|| item.armor.map(|armor| armor.durability))
     }
 
     /// A full, ready-to-use stack of `id` (max count, or a fresh tool).
@@ -381,10 +453,19 @@ mod tests {
         ];
         // (name, hunger, saturation)
         let foods = [("apple", 4.0, 2.4), ("bread", 5.0, 6.0)];
+        // (name, slot, defense, durability)
+        let armors = [
+            ("helmet", ArmorSlot::Helmet, 2.0, 120),
+            ("chestplate", ArmorSlot::Chestplate, 6.0, 240),
+            ("leggings", ArmorSlot::Leggings, 5.0, 200),
+            ("boots", ArmorSlot::Boots, 2.0, 120),
+            ("glove", ArmorSlot::Glove, 1.0, 80),
+            ("cape", ArmorSlot::Cape, 1.0, 80),
+        ];
 
         assert_eq!(
             items.len(),
-            block_items.len() + tools.len() + foods.len(),
+            block_items.len() + tools.len() + foods.len() + armors.len(),
             "item count changed"
         );
 
@@ -425,6 +506,24 @@ mod tests {
             assert_eq!(food.hunger, hunger, "{name}: hunger");
             assert_eq!(food.saturation, saturation, "{name}: saturation");
             assert_eq!(items.find(name), Some(id), "{name}: find");
+        }
+
+        for (offset, &(name, slot, defense, durability)) in armors.iter().enumerate() {
+            let id = ItemId((block_items.len() + tools.len() + foods.len() + offset) as u16);
+            let item = items.get(id);
+            assert_eq!(item.name, name, "armor: name");
+            assert_eq!(item.max_stack, 1, "{name}: max_stack");
+            let armor = item.armor.expect("armor spec");
+            assert_eq!(armor.slot, slot, "{name}: slot");
+            assert_eq!(armor.defense, defense, "{name}: defense");
+            assert_eq!(armor.durability, durability, "{name}: durability");
+            assert_eq!(items.find(name), Some(id), "{name}: find");
+            // Armor wears like a tool: a fresh piece carries full durability.
+            assert_eq!(
+                items.full_stack(id),
+                ItemStack::with_durability(id, durability),
+                "{name}: full_stack"
+            );
         }
 
         // The starter kit resolves in hotbar order: three fresh tools, then

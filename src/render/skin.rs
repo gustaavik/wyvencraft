@@ -23,8 +23,11 @@ pub const SKIN_SIZE: u32 = 64;
 const SKIN_TILES: u32 = SKIN_SIZE / TILE_SIZE;
 /// Atlas tile column/row of the sheet's top-left tile (top-right corner of the
 /// atlas, clear of the water and crack rows).
-const SKIN_COL: u32 = ATLAS_COLUMNS - SKIN_TILES;
-const SKIN_ROW: u32 = 0;
+pub const SKIN_COL: u32 = ATLAS_COLUMNS - SKIN_TILES;
+pub const SKIN_ROW: u32 = 0;
+
+/// The player skin's atlas origin as an `[col, row]` tile pair.
+pub const SKIN_ORIGIN: [u32; 2] = [SKIN_COL, SKIN_ROW];
 
 const SKIN_PATH: &str = "assets/textures/defaultskin.png";
 const EMBEDDED_SKIN: &[u8] = include_bytes!("../../assets/textures/defaultskin.png");
@@ -95,6 +98,13 @@ pub const LEFT_PANTS: SkinPart = SkinPart {
 
 const PARTS: [SkinPart; 6] = [HEAD, BODY, RIGHT_ARM, LEFT_ARM, RIGHT_LEG, LEFT_LEG];
 
+/// The cape: a thin, tall box hung off the shoulders. Not part of the standard
+/// skin unwrap — it's used only by the cape armor sheet and its own model box.
+pub const CAPE: SkinPart = SkinPart {
+    uv: [0, 0],
+    size: [10, 16, 1],
+};
+
 impl SkinPart {
     /// Pixel rect `(x, y, w, h)` on the sheet for the face pointing `dir`, in
     /// the model's frame (front = -Z, character's right = +X — see
@@ -113,34 +123,59 @@ impl SkinPart {
     }
 }
 
+/// Edge length of a 64×64 sheet in atlas tiles (skin and armor share it).
+pub const SHEET_TILES: u32 = SKIN_SIZE / TILE_SIZE;
+
 /// Map a face rect + local image uv (u → right, v → down) into atlas texture
-/// coordinates. The skin-space counterpart of [`super::texture::atlas_uv`].
-pub fn face_uv(rect: [u32; 4], local: [f32; 2]) -> [f32; 2] {
+/// coordinates for a sheet whose top-left tile is `origin_tile` (`[col, row]`).
+/// Generic over the sheet position so armor sheets reuse it; the skin-space
+/// counterpart of [`super::texture::atlas_uv`].
+pub fn sheet_uv(origin_tile: [u32; 2], rect: [u32; 4], local: [f32; 2]) -> [f32; 2] {
     let size = ATLAS_SIZE as f32;
-    let origin = [SKIN_COL * TILE_SIZE, SKIN_ROW * TILE_SIZE];
+    let origin = [origin_tile[0] * TILE_SIZE, origin_tile[1] * TILE_SIZE];
     [
         (origin[0] as f32 + rect[0] as f32 + local[0] * rect[2] as f32) / size,
         (origin[1] as f32 + rect[1] as f32 + local[1] * rect[3] as f32) / size,
     ]
 }
 
-/// The atlas tile indices reserved for the sheet (a `SKIN_TILES`² block).
-pub fn atlas_tile_indices() -> impl Iterator<Item = u32> {
-    (0..SKIN_TILES * SKIN_TILES)
-        .map(|i| (SKIN_ROW + i / SKIN_TILES) * ATLAS_COLUMNS + SKIN_COL + i % SKIN_TILES)
+/// [`sheet_uv`] for the player skin's fixed atlas block.
+pub fn face_uv(rect: [u32; 4], local: [f32; 2]) -> [f32; 2] {
+    sheet_uv([SKIN_COL, SKIN_ROW], rect, local)
 }
 
-/// The sheet sliced into atlas tiles, as `(tile index, tile pixels)` pairs.
-pub fn atlas_tiles(skin: &SkinRgba) -> impl Iterator<Item = (u32, TileRgba)> + '_ {
-    atlas_tile_indices().enumerate().map(|(i, tile)| {
-        let (tx, ty) = (i as u32 % SKIN_TILES, i as u32 / SKIN_TILES);
+/// The atlas tile indices reserved for the player skin (a `SHEET_TILES`² block).
+pub fn atlas_tile_indices() -> impl Iterator<Item = u32> {
+    tile_indices_at([SKIN_COL, SKIN_ROW])
+}
+
+/// The atlas tile indices of a `SHEET_TILES`² block at `origin_tile`.
+pub fn tile_indices_at(origin_tile: [u32; 2]) -> impl Iterator<Item = u32> {
+    let [col, row] = origin_tile;
+    (0..SHEET_TILES * SHEET_TILES)
+        .map(move |i| (row + i / SHEET_TILES) * ATLAS_COLUMNS + col + i % SHEET_TILES)
+}
+
+/// A 64×64 sheet sliced into the atlas tiles of the block at `origin_tile`, as
+/// `(tile index, tile pixels)` pairs.
+pub fn atlas_tiles_at(
+    sheet: &SkinRgba,
+    origin_tile: [u32; 2],
+) -> impl Iterator<Item = (u32, TileRgba)> + '_ {
+    tile_indices_at(origin_tile).enumerate().map(|(i, tile)| {
+        let (tx, ty) = (i as u32 % SHEET_TILES, i as u32 / SHEET_TILES);
         let art = std::array::from_fn(|y| {
             std::array::from_fn(|x| {
-                skin[(ty * TILE_SIZE) as usize + y][(tx * TILE_SIZE) as usize + x]
+                sheet[(ty * TILE_SIZE) as usize + y][(tx * TILE_SIZE) as usize + x]
             })
         });
         (tile, art)
     })
+}
+
+/// The player skin sliced into its reserved atlas tiles.
+pub fn atlas_tiles(skin: &SkinRgba) -> impl Iterator<Item = (u32, TileRgba)> + '_ {
+    atlas_tiles_at(skin, [SKIN_COL, SKIN_ROW])
 }
 
 /// Load the default player skin: the PNG on disk if present and valid, else
@@ -169,8 +204,8 @@ fn embedded() -> Box<SkinRgba> {
     decode(EMBEDDED_SKIN).expect("embedded default skin decodes")
 }
 
-/// Decode a 64×64 skin PNG (RGBA or RGB, 8-bit).
-fn decode(bytes: &[u8]) -> Result<Box<SkinRgba>, String> {
+/// Decode a 64×64 skin/armor PNG (RGBA or RGB, 8-bit).
+pub fn decode(bytes: &[u8]) -> Result<Box<SkinRgba>, String> {
     let mut decoder = png::Decoder::new(bytes);
     decoder.set_transformations(png::Transformations::normalize_to_color8());
     let mut reader = decoder.read_info().map_err(|e| e.to_string())?;

@@ -6,6 +6,8 @@
 use glam::Vec3;
 
 use crate::core::Direction;
+use crate::inventory::{ARMOR_SIZE, ArmorSlot, ItemId, ItemRegistry};
+use crate::render::armor::ArmorKind;
 use crate::render::mesh::CpuMesh;
 use crate::render::skin::{self, SkinPart};
 use crate::render::vertex::ChunkVertex;
@@ -20,12 +22,16 @@ pub struct ModelBox {
 }
 
 /// Per-part articulation applied (around each joint pivot) before the global
-/// yaw/translate. All angles are rotations about the model-local X axis, in radians.
+/// yaw/translate. Angles are rotations about the model-local X axis (radians),
+/// except `head_yaw` which turns the head about the neck's vertical axis.
 /// `Pose::default()` is the rest pose, identical to the original static model.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Pose {
     /// Head tilt (look up/down), rotated about the neck.
     pub head_pitch: f32,
+    /// Head turn (look left/right), rotated about the neck. Only the inventory
+    /// preview uses it (to track the cursor); the world pose leaves it 0.
+    pub head_yaw: f32,
     pub left_arm: f32,
     pub right_arm: f32,
     pub left_leg: f32,
@@ -108,10 +114,11 @@ impl HumanoidModel {
 
         let mut mesh = CpuMesh::new();
         // (part, base skin, overlay skin, overlay inflation, joint pivot, rotation
-        // about local X). Limbs swing about their top (shoulder/hip); the head tilts
-        // about its bottom (neck); the body is fixed. The overlay shares the base
-        // part's pivot/rotation so it stays locked to the limb.
-        let parts: [(ModelBox, SkinPart, SkinPart, f32, Vec3, f32); 6] = [
+        // about local X, extra turn about local Y). Limbs swing about their top
+        // (shoulder/hip); the head tilts + turns about its bottom (neck); the body
+        // is fixed. The overlay shares the base part's pivot/rotation so it stays
+        // locked to the limb.
+        let parts: [(ModelBox, SkinPart, SkinPart, f32, Vec3, f32, f32); 6] = [
             (
                 self.head,
                 skin::HEAD,
@@ -119,6 +126,7 @@ impl HumanoidModel {
                 HAT,
                 bottom_pivot(self.head),
                 pose.head_pitch,
+                pose.head_yaw,
             ),
             (
                 self.body,
@@ -126,6 +134,7 @@ impl HumanoidModel {
                 skin::JACKET,
                 LAYER,
                 self.body.center,
+                0.0,
                 0.0,
             ),
             (
@@ -135,6 +144,7 @@ impl HumanoidModel {
                 LAYER,
                 top_pivot(self.left_arm),
                 pose.left_arm,
+                0.0,
             ),
             (
                 self.right_arm,
@@ -143,6 +153,7 @@ impl HumanoidModel {
                 LAYER,
                 top_pivot(self.right_arm),
                 pose.right_arm,
+                0.0,
             ),
             (
                 self.left_leg,
@@ -151,6 +162,7 @@ impl HumanoidModel {
                 LAYER,
                 top_pivot(self.left_leg),
                 pose.left_leg,
+                0.0,
             ),
             (
                 self.right_leg,
@@ -159,19 +171,200 @@ impl HumanoidModel {
                 LAYER,
                 top_pivot(self.right_leg),
                 pose.right_leg,
+                0.0,
             ),
         ];
-        for (part, base, overlay, inflate, pivot, rot) in parts {
-            push_box(&mut mesh, part, base, position, yaw, pivot, rot);
+        for (part, base, overlay, inflate, pivot, rot, local_yaw) in parts {
+            push_box(
+                &mut mesh,
+                part,
+                base,
+                skin::SKIN_ORIGIN,
+                position,
+                yaw,
+                pivot,
+                rot,
+                local_yaw,
+            );
             // Overlay shell: the same box grown by `inflate` on every side, sharing
             // the base part's pivot so it articulates locked to the limb.
             let shell = ModelBox {
                 center: part.center,
                 size: part.size + Vec3::splat(2.0 * inflate),
             };
-            push_box(&mut mesh, shell, overlay, position, yaw, pivot, rot);
+            push_box(
+                &mut mesh,
+                shell,
+                overlay,
+                skin::SKIN_ORIGIN,
+                position,
+                yaw,
+                pivot,
+                rot,
+                local_yaw,
+            );
         }
         mesh
+    }
+
+    /// Like [`HumanoidModel::build_mesh`], plus an inflated shell for each worn
+    /// armor piece. `armor` gives the item in each [`ArmorSlot`] (in `ALL`
+    /// order); pieces sample their own atlas sheet and their transparent pixels
+    /// are alpha-tested away, so partial coverage (boots, gloves) reads right.
+    pub fn build_mesh_armored(
+        &self,
+        position: Vec3,
+        yaw: f32,
+        pose: &Pose,
+        armor: &[Option<ItemId>; ARMOR_SIZE],
+        items: &ItemRegistry,
+    ) -> CpuMesh {
+        let mut mesh = self.build_mesh(position, yaw, pose);
+        for slot in ArmorSlot::ALL {
+            let Some(id) = armor[slot.index()] else {
+                continue;
+            };
+            // Only draw a piece that actually declares this slot.
+            if items.armor(id).map(|a| a.slot) != Some(slot) {
+                continue;
+            }
+            self.push_armor(&mut mesh, slot, position, yaw, pose);
+        }
+        mesh
+    }
+
+    /// Append one armor piece's inflated shells to `mesh`.
+    fn push_armor(
+        &self,
+        mesh: &mut CpuMesh,
+        slot: ArmorSlot,
+        position: Vec3,
+        yaw: f32,
+        pose: &Pose,
+    ) {
+        let kind = armor_kind(slot);
+        let origin = kind.origin();
+        let inflate = armor_inflation(slot) / 16.0;
+
+        // The cape is a standalone box hung off the shoulders, not a body part.
+        if slot == ArmorSlot::Cape {
+            let shell = ModelBox {
+                center: cape_box().center,
+                size: cape_box().size + Vec3::splat(2.0 * inflate),
+            };
+            let pivot = top_pivot(cape_box());
+            push_box(
+                mesh,
+                shell,
+                skin::CAPE,
+                origin,
+                position,
+                yaw,
+                pivot,
+                0.0,
+                0.0,
+            );
+            return;
+        }
+
+        for &index in armor_body_parts(slot) {
+            let (part, skin_part, pivot, rot, local_yaw) = self.articulated_part(index, pose);
+            let shell = ModelBox {
+                center: part.center,
+                size: part.size + Vec3::splat(2.0 * inflate),
+            };
+            push_box(
+                mesh, shell, skin_part, origin, position, yaw, pivot, rot, local_yaw,
+            );
+        }
+    }
+
+    /// The `index`-th body part (in `ARTICULATION` order) with its base skin
+    /// unwrap, joint pivot, pitch, and head-turn (only the head turns).
+    fn articulated_part(&self, index: usize, pose: &Pose) -> (ModelBox, SkinPart, Vec3, f32, f32) {
+        match index {
+            0 => (
+                self.head,
+                skin::HEAD,
+                bottom_pivot(self.head),
+                pose.head_pitch,
+                pose.head_yaw,
+            ),
+            1 => (self.body, skin::BODY, self.body.center, 0.0, 0.0),
+            2 => (
+                self.left_arm,
+                skin::LEFT_ARM,
+                top_pivot(self.left_arm),
+                pose.left_arm,
+                0.0,
+            ),
+            3 => (
+                self.right_arm,
+                skin::RIGHT_ARM,
+                top_pivot(self.right_arm),
+                pose.right_arm,
+                0.0,
+            ),
+            4 => (
+                self.left_leg,
+                skin::LEFT_LEG,
+                top_pivot(self.left_leg),
+                pose.left_leg,
+                0.0,
+            ),
+            _ => (
+                self.right_leg,
+                skin::RIGHT_LEG,
+                top_pivot(self.right_leg),
+                pose.right_leg,
+                0.0,
+            ),
+        }
+    }
+}
+
+/// The cape's model box: a thin, tall slab hung off the shoulders, back face
+/// flush behind the body (which sits at `z = +2px`, since the model faces −Z).
+fn cape_box() -> ModelBox {
+    ModelBox {
+        center: Vec3::new(0.0, 16.0, 2.5) / 16.0,
+        size: Vec3::new(10.0, 16.0, 1.0) / 16.0,
+    }
+}
+
+/// Map an inventory armor slot to its render sheet.
+fn armor_kind(slot: ArmorSlot) -> ArmorKind {
+    match slot {
+        ArmorSlot::Helmet => ArmorKind::Helmet,
+        ArmorSlot::Chestplate => ArmorKind::Chestplate,
+        ArmorSlot::Leggings => ArmorKind::Leggings,
+        ArmorSlot::Boots => ArmorKind::Boots,
+        ArmorSlot::Glove => ArmorKind::Glove,
+        ArmorSlot::Cape => ArmorKind::Cape,
+    }
+}
+
+/// Which body parts (indices into [`HumanoidModel::articulated_part`]) each slot
+/// covers. The cape is handled separately (its own box).
+fn armor_body_parts(slot: ArmorSlot) -> &'static [usize] {
+    match slot {
+        ArmorSlot::Helmet => &[0],
+        ArmorSlot::Chestplate => &[1, 2, 3],
+        ArmorSlot::Leggings => &[1, 4, 5],
+        ArmorSlot::Boots => &[4, 5],
+        ArmorSlot::Glove => &[2, 3],
+        ArmorSlot::Cape => &[],
+    }
+}
+
+/// Per-side shell inflation (in pixels) so overlapping pieces don't z-fight and
+/// all sit outside the skin overlay (0.25 limbs / 0.5 hat). Bigger = further out.
+fn armor_inflation(slot: ArmorSlot) -> f32 {
+    match slot {
+        ArmorSlot::Leggings => 0.75,
+        ArmorSlot::Helmet | ArmorSlot::Chestplate => 1.0,
+        ArmorSlot::Boots | ArmorSlot::Glove => 1.25,
+        ArmorSlot::Cape => 0.5,
     }
 }
 
@@ -206,16 +399,22 @@ fn face_shade(dir: Direction) -> f32 {
     }
 }
 
-/// Emit the 6 faces of one model box into `mesh`. Each vertex is rotated about
-/// `pivot` by `rot` (the joint articulation), then by `yaw`, then offset by `origin`.
+/// Emit the 6 faces of one model box into `mesh`, sampling the 64×64 sheet at
+/// atlas `sheet_origin` (the player skin, or an armor sheet). Each vertex is
+/// pitched about `pivot` by `rot`, turned about the pivot's vertical axis by
+/// `local_yaw` (head look), then rotated by the global `yaw` and offset by
+/// `origin`. `local_yaw` is 0 for every part but the head.
+#[allow(clippy::too_many_arguments)]
 fn push_box(
     mesh: &mut CpuMesh,
     part: ModelBox,
     skin_part: SkinPart,
+    sheet_origin: [u32; 2],
     origin: Vec3,
     yaw: f32,
     pivot: Vec3,
     rot: f32,
+    local_yaw: f32,
 ) {
     let half = part.size * 0.5;
     let lo = part.center - half;
@@ -224,16 +423,18 @@ fn push_box(
     for dir in Direction::ALL {
         let corners = box_face_corners(dir, lo, hi);
         let uv = face_local_uv(dir);
-        let normal = rot_y(rot_x(dir.normal(), rot), yaw).to_array();
+        // local_yaw and the global yaw are both about Y, so they compose for the
+        // (translation-free) normal; positions rotate about their own centres.
+        let normal = rot_y(rot_x(dir.normal(), rot), local_yaw + yaw).to_array();
         let ao = face_shade(dir);
         let rect = skin_part.face_rect(dir);
         let quad = std::array::from_fn(|i| {
-            let local = rot_x(corners[i] - pivot, rot) + pivot;
+            let local = rot_y(rot_x(corners[i] - pivot, rot), local_yaw) + pivot;
             let world = rot_y(local, yaw) + origin;
             ChunkVertex {
                 position: world.to_array(),
                 normal,
-                uv: skin::face_uv(rect, uv[i]),
+                uv: skin::sheet_uv(sheet_origin, rect, uv[i]),
                 ao,
                 flags: 0,
             }
@@ -323,6 +524,40 @@ mod tests {
         assert!(model.right_leg.center.x > 0.0);
         assert!(model.left_arm.center.x < 0.0);
         assert!(model.left_leg.center.x < 0.0);
+    }
+
+    #[test]
+    fn armor_adds_one_box_per_covered_part() {
+        let blocks = crate::world::block::BlockRegistry::with_builtins();
+        let items = crate::inventory::ItemRegistry::from_blocks(&blocks);
+        let model = HumanoidModel::player();
+        let bare = model
+            .build_mesh(Vec3::ZERO, 0.0, &Pose::default())
+            .vertices
+            .len();
+
+        // A chestplate covers body + both arms: three extra boxes, 24 verts each.
+        let mut armor = [None; ARMOR_SIZE];
+        armor[ArmorSlot::Chestplate.index()] = items.find("chestplate");
+        let mesh = model.build_mesh_armored(Vec3::ZERO, 0.0, &Pose::default(), &armor, &items);
+        assert_eq!(mesh.vertices.len(), bare + 3 * 24, "chestplate = 3 boxes");
+
+        // A helmet adds one box; the cape adds its own standalone box.
+        let mut armor = [None; ARMOR_SIZE];
+        armor[ArmorSlot::Helmet.index()] = items.find("helmet");
+        armor[ArmorSlot::Cape.index()] = items.find("cape");
+        let mesh = model.build_mesh_armored(Vec3::ZERO, 0.0, &Pose::default(), &armor, &items);
+        assert_eq!(
+            mesh.vertices.len(),
+            bare + 2 * 24,
+            "helmet + cape = 2 boxes"
+        );
+
+        // An item that isn't the slot's armor is ignored.
+        let mut armor = [None; ARMOR_SIZE];
+        armor[ArmorSlot::Helmet.index()] = items.find("stone");
+        let mesh = model.build_mesh_armored(Vec3::ZERO, 0.0, &Pose::default(), &armor, &items);
+        assert_eq!(mesh.vertices.len(), bare, "a non-armor item equips nothing");
     }
 
     #[test]

@@ -7,4 +7,5 @@
 //! `pause_menu`) as those milestones land.
 
 pub mod hud;
+pub mod icon;
 pub mod inventory;

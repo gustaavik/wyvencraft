@@ -26,6 +26,9 @@ pub struct RemotePlayer {
     /// Host-side only: reported with `Stats` so player records persist it.
     pub saturation: f32,
     pub mode: GameMode,
+    /// Equipped armor item id per [`crate::inventory::ArmorSlot`] (in `ALL`
+    /// order), synced via `PlayerEquipment` so the model renders it.
+    pub armor: [Option<u16>; crate::inventory::ARMOR_SIZE],
 }
 
 impl RemotePlayer {
@@ -41,6 +44,7 @@ impl RemotePlayer {
             hunger: DEFAULT_HUNGER,
             saturation: DEFAULT_HUNGER,
             mode: GameMode::Survival,
+            armor: [None; crate::inventory::ARMOR_SIZE],
         }
     }
 

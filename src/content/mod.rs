@@ -12,11 +12,25 @@
 
 use std::sync::Arc;
 
+use crate::core::Direction;
 use crate::entity::EntityRegistry;
 use crate::inventory::ItemRegistry;
 use crate::render::TileRegistry;
 use crate::world::block::{BUILTIN_BLOCKS, BlockRegistry};
 use crate::world::generation::WorldGenConfig;
+
+/// How an item is drawn as a 2D icon in the inventory and hotbar. Computed once
+/// at content load and indexed by `ItemId`, so the UI never touches block or
+/// tile registries at draw time. Kept off [`crate::inventory::Item`] on purpose:
+/// texture assignment is visual-only and must not feed [`content_hash`], which
+/// gates multiplayer joins.
+#[derive(Debug, Clone, Copy)]
+pub enum ItemIcon {
+    /// A placeable solid block, drawn as a shaded isometric cube.
+    Cube { top: u32, left: u32, right: u32 },
+    /// Anything else (tools, food, armor, fluids), drawn as one flat tile.
+    Flat(u32),
+}
 
 /// All loaded content registries, shared across the app.
 pub struct GameContent {
@@ -27,6 +41,8 @@ pub struct GameContent {
     pub items: Arc<ItemRegistry>,
     pub entities: Arc<EntityRegistry>,
     pub worldgen: Arc<WorldGenConfig>,
+    /// 2D icon for each item, indexed by `ItemId` (see [`ItemIcon`]).
+    pub item_icons: Vec<ItemIcon>,
     /// Fingerprint of every gameplay-affecting definition. Exchanged in the
     /// multiplayer `Welcome`: raw block/item ids cross the wire, so a session
     /// between peers with divergent content would silently corrupt worlds —
@@ -49,6 +65,7 @@ impl GameContent {
         let items = Arc::new(load_items(&blocks));
         let entities = Arc::new(load_entities());
         let worldgen = Arc::new(load_worldgen(&blocks));
+        let item_icons = build_item_icons(&mut tiles, &blocks, &items);
         let hash = content_hash(&blocks, &items, &entities, &worldgen);
         Arc::new(Self {
             tiles,
@@ -56,6 +73,7 @@ impl GameContent {
             items,
             entities,
             worldgen,
+            item_icons,
             hash,
         })
     }
@@ -67,6 +85,7 @@ impl GameContent {
         let items = Arc::new(ItemRegistry::from_blocks(&blocks));
         let entities = Arc::new(EntityRegistry::builtin());
         let worldgen = Arc::new(WorldGenConfig::builtin(&blocks));
+        let item_icons = build_item_icons(&mut tiles, &blocks, &items);
         let hash = content_hash(&blocks, &items, &entities, &worldgen);
         Arc::new(Self {
             tiles,
@@ -74,9 +93,37 @@ impl GameContent {
             items,
             entities,
             worldgen,
+            item_icons,
             hash,
         })
     }
+}
+
+/// Resolve an icon for every item. A placeable solid block becomes an isometric
+/// cube from its own face tiles (so new blocks get an icon for free); everything
+/// else — tools, food, armor, and fluids — resolves its name to one flat tile.
+fn build_item_icons(
+    tiles: &mut TileRegistry,
+    blocks: &BlockRegistry,
+    items: &ItemRegistry,
+) -> Vec<ItemIcon> {
+    items
+        .iter()
+        .map(|(_, item)| {
+            // A cube reads wrong for fluids, so only truly solid blocks get one.
+            if let Some(block_id) = item.place_block {
+                let block = blocks.get(block_id);
+                if block.is_visible() && block.fluid.is_none() {
+                    return ItemIcon::Cube {
+                        top: block.textures.tile(Direction::PosY),
+                        left: block.textures.tile(Direction::NegZ),
+                        right: block.textures.tile(Direction::PosX),
+                    };
+                }
+            }
+            ItemIcon::Flat(tiles.resolve(&item.name).tile)
+        })
+        .collect()
 }
 
 /// FNV-1a over a canonical rendering of the definitions. The `Debug`

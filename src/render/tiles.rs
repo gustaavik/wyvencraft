@@ -3,6 +3,10 @@
 //! Every tile is painted deterministically at startup — no image assets on
 //! disk. The tile indices defined here are the single source of truth shared
 //! by the block registry ([`crate::world::block`]) and the block-break overlay.
+//!
+//! Blocks are painted with noise; the item icons at the bottom of the file are
+//! drawn as ASCII sprites instead, because a pickaxe silhouette is easier to
+//! read (and edit) as a picture than as arithmetic.
 
 use super::texture::TILE_SIZE;
 
@@ -65,6 +69,20 @@ pub fn paint_named(name: &str) -> Option<TileRgba> {
         "iron_ore" => ore(IRON_ORE, [214, 158, 110]),
         "gold_ore" => ore(GOLD_ORE, [250, 212, 76]),
         "diamond_ore" => ore(DIAMOND_ORE, [104, 224, 220]),
+        // Item icons. These are resolved by their in-game item name (spaces and
+        // all), so the inventory can ask the tile registry for "wooden pickaxe".
+        "wooden pickaxe" => tool_icon(PICKAXE, WOOD_HANDLE, STONE_HEAD),
+        "wooden axe" => tool_icon(AXE, WOOD_HANDLE, STONE_HEAD),
+        "wooden shovel" => tool_icon(SHOVEL, WOOD_HANDLE, STONE_HEAD),
+        "shears" => sprite(SHEARS, SHEARS_PALETTE),
+        "apple" => sprite(APPLE, APPLE_PALETTE),
+        "bread" => sprite(BREAD, BREAD_PALETTE),
+        "helmet" => sprite(HELMET, IRON_ARMOR_PALETTE),
+        "chestplate" => sprite(CHESTPLATE, IRON_ARMOR_PALETTE),
+        "leggings" => sprite(LEGGINGS, IRON_ARMOR_PALETTE),
+        "boots" => sprite(BOOTS, IRON_ARMOR_PALETTE),
+        "glove" => sprite(GLOVE, CLOTH_ARMOR_PALETTE),
+        "cape" => sprite(CAPE, CLOTH_ARMOR_PALETTE),
         _ => return None,
     })
 }
@@ -408,6 +426,328 @@ fn cracks(stage: u32) -> TileRgba {
     tile
 }
 
+// ---- item icons -------------------------------------------------------------
+//
+// Icons are 16×16 ASCII sprites: each of the 16 rows is a 16-char string, and
+// every non-space char is looked up in a palette to get its RGBA. A space is
+// transparent. This keeps a recognisable silhouette editable by hand, unlike
+// the noise-based block art above.
+
+/// A 16-row × 16-col sprite. Rows shorter than 16 chars pad transparent.
+type Sprite = [&'static str; N];
+
+/// `(char, rgba)` colour table for a sprite.
+type Palette = [(char, [u8; 4])];
+
+/// Rasterise an ASCII sprite through its palette; unmapped chars (and spaces)
+/// are transparent.
+fn sprite(art: Sprite, palette: &Palette) -> TileRgba {
+    let lookup = |c: char| palette.iter().find(|(k, _)| *k == c).map(|(_, v)| *v);
+    fill(|x, y| {
+        art[y as usize]
+            .chars()
+            .nth(x as usize)
+            .and_then(lookup)
+            .unwrap_or([0, 0, 0, 0])
+    })
+}
+
+/// Compose a tool icon: the shared wooden handle sprite tinted `handle`, then
+/// the head sprite tinted `head` painted on top.
+fn tool_icon(head: Sprite, handle: [u8; 4], head_color: [u8; 4]) -> TileRgba {
+    let handle_px = sprite(HANDLE, &[('H', handle)]);
+    let head_px = sprite(head, &[('#', head_color), ('.', shade(head_color, -34))]);
+    fill(|x, y| {
+        let (hx, hy) = (x as usize, y as usize);
+        let h = head_px[hy][hx];
+        if h[3] > 0 { h } else { handle_px[hy][hx] }
+    })
+}
+
+/// Darken/lighten an rgba by a flat delta (keeps alpha).
+fn shade(c: [u8; 4], delta: i32) -> [u8; 4] {
+    rgba([c[0], c[1], c[2]], delta, c[3])
+}
+
+const WOOD_HANDLE: [u8; 4] = [140, 100, 58, 255];
+const STONE_HEAD: [u8; 4] = [122, 122, 128, 255];
+
+// A diagonal handle from the bottom-left to the upper-right, shared by all tools.
+const HANDLE: Sprite = [
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "            H   ",
+    "           H    ",
+    "          H     ",
+    "         H      ",
+    "        H       ",
+    "       H        ",
+    "      H         ",
+    "     H          ",
+    "    H           ",
+    "   H            ",
+    "                ",
+];
+
+const PICKAXE: Sprite = [
+    "                ",
+    "  ..        ..  ",
+    " .##.      .##. ",
+    " .###.    .###. ",
+    "  .####..####.  ",
+    "    .########.  ",
+    "      .####.    ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+];
+
+const AXE: Sprite = [
+    "                ",
+    "        ....    ",
+    "       .####.   ",
+    "      .######.  ",
+    "      .######.  ",
+    "      .#####.   ",
+    "       .###.    ",
+    "        ..      ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+];
+
+const SHOVEL: Sprite = [
+    "                ",
+    "         ...    ",
+    "        .###.   ",
+    "        .###.   ",
+    "        .###.   ",
+    "         .#.    ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+];
+
+const SHEARS: Sprite = [
+    "                ",
+    "  bb        bb  ",
+    " b..b      b..b ",
+    " b..b      b..b ",
+    "  b..b    b..b  ",
+    "   b..b  b..b   ",
+    "    b..bb..b    ",
+    "     b.mm.b     ",
+    "      bmmb      ",
+    "     bm..mb     ",
+    "     m....m     ",
+    "     m....m     ",
+    "      m..m      ",
+    "       mm       ",
+    "                ",
+    "                ",
+];
+
+const SHEARS_PALETTE: &Palette = &[
+    ('b', [176, 182, 190, 255]),
+    ('.', [214, 220, 228, 255]),
+    ('m', [90, 96, 104, 255]),
+];
+
+const APPLE: Sprite = [
+    "                ",
+    "        s       ",
+    "        s       ",
+    "       l s      ",
+    "      ll        ",
+    "    hh..hhh     ",
+    "   h..#...hh    ",
+    "  h..#....hh    ",
+    "  h.......hh    ",
+    "  h.......hh    ",
+    "  hh.....hh     ",
+    "   hh...hh      ",
+    "    hh.hh       ",
+    "     hhh        ",
+    "                ",
+    "                ",
+];
+
+const APPLE_PALETTE: &Palette = &[
+    ('h', [176, 34, 40, 255]),
+    ('.', [214, 52, 58, 255]),
+    ('#', [244, 150, 150, 255]),
+    ('s', [96, 66, 40, 255]),
+    ('l', [96, 158, 60, 255]),
+];
+
+const BREAD: Sprite = [
+    "                ",
+    "                ",
+    "     ccccc      ",
+    "   cc##c##cc    ",
+    "  c#######c#c   ",
+    " c##cc###c##c   ",
+    " c#c##c#####c   ",
+    " c##########c   ",
+    " c##cc###c##c   ",
+    "  c########c    ",
+    "   cc####cc     ",
+    "     cccc       ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+];
+
+const BREAD_PALETTE: &Palette = &[('c', [150, 96, 44, 255]), ('#', [206, 152, 78, 255])];
+
+const IRON_ARMOR_PALETTE: &Palette = &[
+    ('#', [200, 205, 212, 255]),
+    ('.', [150, 156, 166, 255]),
+    ('o', [108, 114, 124, 255]),
+];
+
+const CLOTH_ARMOR_PALETTE: &Palette = &[
+    ('#', [150, 84, 62, 255]),
+    ('.', [116, 62, 44, 255]),
+    ('o', [88, 46, 32, 255]),
+];
+
+const HELMET: Sprite = [
+    "                ",
+    "                ",
+    "    o######o    ",
+    "   o########o   ",
+    "  o##########o  ",
+    "  o##########o  ",
+    "  o#........#o  ",
+    "  o#.oooooo.#o  ",
+    "  o##o....o##o  ",
+    "  o##o....o##o  ",
+    "   oo o..o oo   ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+];
+
+const CHESTPLATE: Sprite = [
+    "                ",
+    "   o#o    o#o   ",
+    "  o###o..o###o  ",
+    "  o##########o  ",
+    "  o##########o  ",
+    "  o#.######.#o  ",
+    "  o#.######.#o  ",
+    "  o##########o  ",
+    "  o##########o  ",
+    "  o##########o  ",
+    "  o##########o  ",
+    "   oo######oo   ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+];
+
+const LEGGINGS: Sprite = [
+    "                ",
+    "                ",
+    "  o##########o  ",
+    "  o##########o  ",
+    "  o##########o  ",
+    "  o####oo####o  ",
+    "  o###o..o###o  ",
+    "  o###o  o###o  ",
+    "  o##.o  o.##o  ",
+    "  o##.o  o.##o  ",
+    "  o##o    o##o  ",
+    "   oo      oo   ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+];
+
+const BOOTS: Sprite = [
+    "                ",
+    "                ",
+    "                ",
+    "  o##o    o##o  ",
+    "  o##o    o##o  ",
+    "  o##o    o##o  ",
+    "  o##oo  oo##o  ",
+    "  o########.#o  ",
+    "  o##########o  ",
+    "  o##########o  ",
+    "  oo########oo  ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+];
+
+const GLOVE: Sprite = [
+    "                ",
+    "                ",
+    "    o#o o#o     ",
+    "    o#o o#o o#o ",
+    "    o#o o#o o#o ",
+    "    o#####o o#o ",
+    "   o########o   ",
+    "  o#########o   ",
+    "  o#.#######o   ",
+    "  o#########o   ",
+    "  o########o    ",
+    "   oo#####oo    ",
+    "     ooooo      ",
+    "                ",
+    "                ",
+    "                ",
+];
+
+const CAPE: Sprite = [
+    "                ",
+    "   oo######oo   ",
+    "   o#......#o   ",
+    "   o#......#o   ",
+    "   o#......#o   ",
+    "   o#......#o   ",
+    "   o#......#o   ",
+    "   o#......#o   ",
+    "   o#......#o   ",
+    "   o#......#o   ",
+    "   o#......#o   ",
+    "   o#......#o   ",
+    "   o#.####.#o   ",
+    "    o#....#o    ",
+    "     oo##oo     ",
+    "                ",
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,6 +755,30 @@ mod tests {
     fn crack_pixels(stage: u32) -> usize {
         let tile = paint(CRACK_0 + stage).expect("crack tile");
         tile.iter().flatten().filter(|p| p[3] > 0).count()
+    }
+
+    #[test]
+    fn item_icons_paint_a_recognisable_silhouette() {
+        for name in [
+            "wooden pickaxe",
+            "wooden axe",
+            "wooden shovel",
+            "shears",
+            "apple",
+            "bread",
+            "helmet",
+            "chestplate",
+            "leggings",
+            "boots",
+            "glove",
+            "cape",
+        ] {
+            let art = paint_named(name).unwrap_or_else(|| panic!("no icon for {name}"));
+            let opaque = art.iter().flatten().filter(|p| p[3] > 0).count();
+            // Enough pixels to read as a shape, but not a full opaque square.
+            assert!(opaque > 20, "{name} icon nearly empty: {opaque} px");
+            assert!(opaque < N * N, "{name} icon has no transparent margin");
+        }
     }
 
     #[test]

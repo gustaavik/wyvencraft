@@ -47,3 +47,29 @@ ingredients = { apple = 2 }
 [[recipe]]
 output = "stone"
 ingredients = { gravel = 4 }
+
+# Armor. The plate pieces are beaten straight from ore — another stand-in for
+# smelting. Glove and cape are woven from leaves until a proper cloth exists.
+[[recipe]]
+output = "helmet"
+ingredients = { "iron ore" = 5 }
+
+[[recipe]]
+output = "chestplate"
+ingredients = { "iron ore" = 8 }
+
+[[recipe]]
+output = "leggings"
+ingredients = { "iron ore" = 7 }
+
+[[recipe]]
+output = "boots"
+ingredients = { "iron ore" = 4 }
+
+[[recipe]]
+output = "glove"
+ingredients = { leaves = 4 }
+
+[[recipe]]
+output = "cape"
+ingredients = { leaves = 6 }

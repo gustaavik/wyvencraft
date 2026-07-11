@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::{BlockId, BlockPos};
 use crate::entity::Player;
-use crate::inventory::{INVENTORY_SIZE, Inventory, ItemRegistry, ItemStack};
+use crate::inventory::{Inventory, ItemRegistry, ItemStack, TOTAL_SLOTS};
 use crate::world::{BlockRegistry, World};
 
 /// The world's block-edit overlay: everything that diverges from the terrain
@@ -123,6 +123,10 @@ impl PlayerData {
 
     /// Restore onto a freshly built player/inventory. Overwrites *all* slots
     /// (clearing the starter kit); unknown item names become empty slots.
+    ///
+    /// A save written before armor existed carries only the 36 storage slots;
+    /// the missing armor entries read back as `None`, so old worlds load with an
+    /// unarmored player instead of failing the version check.
     pub fn apply(&self, player: &mut Player, inventory: &mut Inventory, items: &ItemRegistry) {
         player.position = Vec3::from_array(self.position);
         player.yaw = self.yaw;
@@ -131,7 +135,7 @@ impl PlayerData {
         player.health = self.health;
         player.hunger = self.hunger;
         player.saturation = self.saturation;
-        for index in 0..INVENTORY_SIZE {
+        for index in 0..TOTAL_SLOTS {
             let stack = self.slots.get(index).and_then(|slot| {
                 slot.as_ref().and_then(|data| {
                     let id = items.find(&data.name);

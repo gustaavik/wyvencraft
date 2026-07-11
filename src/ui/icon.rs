@@ -1,0 +1,125 @@
+//! Drawing item icons into egui from the block atlas.
+//!
+//! The atlas is registered with egui once (see [`crate::app`]) to get the
+//! [`egui::TextureId`] these helpers sample. A [`crate::content::ItemIcon`] is
+//! either a flat tile (tools, food, armor, fluids) or an isometric cube built
+//! from a block's own face tiles — both emit a single [`egui::Mesh`]. Consumed
+//! by the inventory screen and the HUD hotbar so they render items identically.
+
+use egui::epaint::{Mesh, Vertex};
+use egui::{Color32, Painter, Pos2, Rect, Shape, TextureId, pos2};
+
+use crate::content::ItemIcon;
+use crate::render::texture::{ATLAS_COLUMNS, ATLAS_SIZE};
+
+/// Isometric cube face tints (gamma space — egui linearizes them). The lit top
+/// reads brightest, the two visible sides progressively darker, giving a small
+/// tile enough shading to read as a 3D block.
+const TOP_TINT: Color32 = Color32::from_gray(255);
+const LEFT_TINT: Color32 = Color32::from_gray(204);
+const RIGHT_TINT: Color32 = Color32::from_gray(153);
+
+/// Draw `icon` filling `rect`, sampling the block atlas at `atlas`.
+pub fn draw_item_icon(painter: &Painter, rect: Rect, icon: ItemIcon, atlas: TextureId) {
+    let mut mesh = Mesh::with_texture(atlas);
+    match icon {
+        ItemIcon::Flat(tile) => {
+            let [u0, v0, u1, v1] = tile_uv(tile);
+            quad(
+                &mut mesh,
+                [
+                    rect.left_top(),
+                    rect.right_top(),
+                    rect.right_bottom(),
+                    rect.left_bottom(),
+                ],
+                [pos2(u0, v0), pos2(u1, v0), pos2(u1, v1), pos2(u0, v1)],
+                Color32::WHITE,
+            );
+        }
+        ItemIcon::Cube { top, left, right } => cube(&mut mesh, rect, top, left, right),
+    }
+    painter.add(Shape::mesh(mesh));
+}
+
+/// Emit the three visible faces of an isometric cube inscribed in `rect`.
+fn cube(mesh: &mut Mesh, rect: Rect, top: u32, left: u32, right: u32) {
+    let c = rect.center();
+    let s = 0.5 * rect.width().min(rect.height());
+    // Hexagon silhouette of a cube seen from a top corner.
+    let top_v = pos2(c.x, c.y - s);
+    let upper_l = pos2(c.x - s, c.y - s * 0.5);
+    let upper_r = pos2(c.x + s, c.y - s * 0.5);
+    let mid = pos2(c.x, c.y);
+    let lower_l = pos2(c.x - s, c.y + s * 0.5);
+    let lower_r = pos2(c.x + s, c.y + s * 0.5);
+    let bottom = pos2(c.x, c.y + s);
+
+    let [tu0, tv0, tu1, tv1] = tile_uv(top);
+    quad(
+        mesh,
+        [top_v, upper_r, mid, upper_l],
+        [
+            pos2(tu0, tv0),
+            pos2(tu1, tv0),
+            pos2(tu1, tv1),
+            pos2(tu0, tv1),
+        ],
+        TOP_TINT,
+    );
+
+    let [lu0, lv0, lu1, lv1] = tile_uv(left);
+    quad(
+        mesh,
+        [upper_l, mid, bottom, lower_l],
+        [
+            pos2(lu0, lv0),
+            pos2(lu1, lv0),
+            pos2(lu1, lv1),
+            pos2(lu0, lv1),
+        ],
+        LEFT_TINT,
+    );
+
+    let [ru0, rv0, ru1, rv1] = tile_uv(right);
+    quad(
+        mesh,
+        [upper_r, lower_r, bottom, mid],
+        [
+            pos2(ru0, rv0),
+            pos2(ru0, rv1),
+            pos2(ru1, rv1),
+            pos2(ru1, rv0),
+        ],
+        RIGHT_TINT,
+    );
+}
+
+/// Push one textured quad (two triangles) into `mesh`.
+fn quad(mesh: &mut Mesh, pts: [Pos2; 4], uvs: [Pos2; 4], color: Color32) {
+    let base = mesh.vertices.len() as u32;
+    for i in 0..4 {
+        mesh.vertices.push(Vertex {
+            pos: pts[i],
+            uv: uvs[i],
+            color,
+        });
+    }
+    mesh.indices
+        .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+}
+
+/// Normalized atlas UVs `[u0, v0, u1, v1]` for `tile`, inset half a texel so
+/// nearest sampling can't bleed into the neighbouring tile.
+fn tile_uv(tile: u32) -> [f32; 4] {
+    let cols = ATLAS_COLUMNS as f32;
+    let inset = 0.5 / ATLAS_SIZE as f32;
+    let tx = (tile % ATLAS_COLUMNS) as f32;
+    let ty = (tile / ATLAS_COLUMNS) as f32;
+    [
+        tx / cols + inset,
+        ty / cols + inset,
+        (tx + 1.0) / cols - inset,
+        (ty + 1.0) / cols - inset,
+    ]
+}

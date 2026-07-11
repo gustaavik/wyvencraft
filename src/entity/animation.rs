@@ -85,6 +85,8 @@ impl AnimationState {
 
         Pose {
             head_pitch,
+            // Head turn is only driven by the inventory preview; gameplay leaves it 0.
+            head_yaw: 0.0,
             // Arms swing opposite the legs (diagonal gait); idle sway mirrors between
             // the arms; the one-shot swing rides on top of the right arm.
             left_arm: swing + idle,

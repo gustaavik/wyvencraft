@@ -4,6 +4,7 @@
 //! NOT about the game world — callers hand it [`mesh::CpuMesh`] data and camera
 //! state. That keeps `render` free of any dependency on `world`/`entity`.
 
+pub mod armor;
 pub mod camera;
 pub mod context;
 pub mod debug;
@@ -20,7 +21,7 @@ pub mod vertex;
 pub use camera::Camera;
 pub use context::RenderContext;
 pub use mesh::{CpuMesh, GpuLines, GpuMesh};
-pub use renderer::{LightParams, Renderer, SceneFrame, SkyParams};
+pub use renderer::{LightParams, PreviewFrame, Renderer, SceneFrame, SkyParams};
 pub use texture::TextureAtlas;
 pub use tile_registry::{TileEntry, TileRegistry};
 pub use vertex::{ChunkVertex, EntityVertex, FLAG_WATER, LineVertex};

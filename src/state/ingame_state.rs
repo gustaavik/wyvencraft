@@ -16,14 +16,16 @@ use crate::core::{
 use crate::entity::{
     AnimationState, DroppedItem, EntityRegistry, HumanoidModel, Perspective, Player,
 };
-use crate::inventory::{INVENTORY_SIZE, Inventory, ItemId, ItemRegistry, ItemStack, RecipeBook};
+use crate::inventory::{
+    ARMOR_SIZE, ARMOR_START, Inventory, ItemId, ItemRegistry, ItemStack, RecipeBook, TOTAL_SLOTS,
+};
 use crate::net::{
     Channel, Client, ClientMessage, Host, NetItemStack, NetVec3, PlayerId, PlayerRestore,
     RecipeData, RemotePlayer, ServerMessage,
 };
 use crate::render::{
-    Camera, CpuMesh, GpuLines, GpuMesh, LightParams, RenderContext, SceneFrame, SkyParams, debug,
-    tiles,
+    Camera, CpuMesh, GpuLines, GpuMesh, LightParams, PreviewFrame, RenderContext, SceneFrame,
+    SkyParams, debug, tiles,
 };
 use crate::save::{ItemStackData, PlayerData, PlayerRecords, SavedGame, WorldData, WorldSave};
 use crate::ui::hud;
@@ -55,6 +57,8 @@ const REQUEST_BUDGET: usize = 64;
 const MESH_BUDGET: usize = 8;
 /// Camera distance behind/in front of the player in third-person view.
 const THIRD_PERSON_DISTANCE: f32 = 4.0;
+/// Radians of preview rotation per pixel dragged across the model preview.
+const PREVIEW_DRAG_SENSITIVITY: f32 = 0.01;
 /// Upper bound on a remote player's derived speed, so a teleport or first snapshot
 /// can't drive an absurd walk cadence.
 const REMOTE_MAX_SPEED: f32 = 12.0;
@@ -106,6 +110,13 @@ pub struct InGameState {
     player_mesh: Option<GpuMesh>,
     /// Procedural animation state for the local player's model.
     player_anim: AnimationState,
+    /// Player-model mesh for the inventory preview (built only while the
+    /// inventory is open), and the yaw the preview is rotated to by dragging.
+    preview_mesh: Option<GpuMesh>,
+    preview_yaw: f32,
+    /// Where the preview model's head looks — (yaw, pitch) toward the cursor,
+    /// set by the inventory UI. Purely cosmetic; never affects the world player.
+    preview_look: (f32, f32),
     fov_degrees: f32,
     /// Time-of-day clock driving the sky and world lighting.
     day_cycle: DayCycle,
@@ -153,6 +164,10 @@ pub struct InGameState {
     /// Host: latest inventory each client reported (kept in wire form; converted
     /// to the name-based disk form only when a record is written).
     remote_inventories: HashMap<PlayerId, (Vec<Option<NetItemStack>>, u32)>,
+    /// Host: last equipment (armor item ids) broadcast for each player, so
+    /// `PlayerEquipment` is only re-sent on change and a joiner can be brought
+    /// up to date with everyone's current gear.
+    equipment_broadcast: HashMap<PlayerId, [Option<u16>; ARMOR_SIZE]>,
     /// Client: throttle + change detection for inventory reports to the host.
     inventory_sync_timer: f32,
     last_synced_inventory: Option<Inventory>,
@@ -376,6 +391,9 @@ impl InGameState {
             player_model: HumanoidModel::player(),
             player_mesh: None,
             player_anim: AnimationState::new(),
+            preview_mesh: None,
+            preview_yaw: std::f32::consts::PI,
+            preview_look: (0.0, 0.0),
             fov_degrees: 70.0,
             day_cycle,
             inventory_open: false,
@@ -399,6 +417,7 @@ impl InGameState {
             player_records: PlayerRecords::default(),
             remote_identities: HashMap::new(),
             remote_inventories: HashMap::new(),
+            equipment_broadcast: HashMap::new(),
             inventory_sync_timer: 0.0,
             last_synced_inventory: None,
             world_state_requested: false,
@@ -427,6 +446,13 @@ impl InGameState {
 
     /// Click-to-move logic for an inventory slot (pick up / place / merge / swap).
     fn handle_slot_click(&mut self, index: usize) {
+        // An armor slot only accepts its own piece. Taking a piece back off is
+        // always allowed, so this only gates the held stack going in.
+        if let Some(held) = self.held
+            && !self.inventory.can_equip(index, held.item, &self.items)
+        {
+            return;
+        }
         match (self.held, self.inventory.slot(index)) {
             (None, Some(stack)) => {
                 self.held = Some(stack);
@@ -487,10 +513,39 @@ impl InGameState {
             return;
         }
         let pose = self.player_anim.pose(self.player.pitch);
-        let mesh = self
-            .player_model
-            .build_mesh(self.player.position, self.player.yaw, &pose);
+        let armor = self.inventory.equipped_armor();
+        let mesh = self.player_model.build_mesh_armored(
+            self.player.position,
+            self.player.yaw,
+            &pose,
+            &armor,
+            &self.items,
+        );
         self.player_mesh = GpuMesh::upload(&ctx.memory_allocator, &mesh).ok().flatten();
+    }
+
+    /// Rebuild the inventory-preview player mesh: the model at the origin, turned
+    /// to `preview_yaw`, wearing the currently equipped armor. Only built while
+    /// the inventory is open; cleared otherwise so the offscreen pass is skipped.
+    fn update_preview_mesh(&mut self, ctx: &Arc<RenderContext>) {
+        if !self.inventory_open {
+            self.preview_mesh = None;
+            return;
+        }
+        // The preview head tracks the cursor (yaw + pitch), independent of the
+        // world player's facing; limbs still idle-animate from the anim state.
+        let mut pose = self.player_anim.pose(self.player.pitch);
+        pose.head_yaw = self.preview_look.0;
+        pose.head_pitch = self.preview_look.1;
+        let armor = self.inventory.equipped_armor();
+        let mesh = self.player_model.build_mesh_armored(
+            Vec3::ZERO,
+            self.preview_yaw,
+            &pose,
+            &armor,
+            &self.items,
+        );
+        self.preview_mesh = GpuMesh::upload(&ctx.memory_allocator, &mesh).ok().flatten();
     }
 
     /// Request/insert/unload chunks around the player using the worker pool.
@@ -681,6 +736,15 @@ impl InGameState {
                         self.remote_identities.insert(pid, identity);
                         self.remote_players
                             .insert(pid, RemotePlayer::new(pid, name, Vec3::from_array(spawn)));
+                        // Bring the newcomer up to date on everyone's current gear
+                        // (unchanging equipment isn't otherwise re-broadcast).
+                        for (&id, &armor) in &self.equipment_broadcast {
+                            host.send(
+                                cid,
+                                &ServerMessage::PlayerEquipment { id, armor },
+                                Channel::Reliable,
+                            );
+                        }
                     }
                 }
                 for pid in host.take_left() {
@@ -696,6 +760,7 @@ impl InGameState {
                     self.remote_players.remove(&pid);
                     self.remote_identities.remove(&pid);
                     self.remote_inventories.remove(&pid);
+                    self.equipment_broadcast.remove(&pid);
                     host.broadcast(&ServerMessage::PlayerLeft { id: pid }, Channel::Reliable);
                 }
 
@@ -748,6 +813,9 @@ impl InGameState {
                             }
                         }
                         ClientMessage::SyncInventory { slots, selected } => {
+                            if let Some(rp) = self.remote_players.get_mut(&pid) {
+                                rp.armor = armor_from_slots(&slots);
+                            }
                             self.remote_inventories.insert(pid, (slots, selected));
                         }
                         ClientMessage::Chat(_) => {}
@@ -822,6 +890,21 @@ impl InGameState {
                                 hunger,
                                 mode,
                             },
+                            Channel::Reliable,
+                        );
+                    }
+                }
+
+                // Broadcast armor whenever it changes (the host's own from its
+                // inventory, each remote's from its last inventory sync).
+                let mut equip: Vec<(PlayerId, [Option<u16>; ARMOR_SIZE])> =
+                    vec![(HOST_PLAYER_ID, armor_ids(&self.inventory))];
+                equip.extend(self.remote_players.iter().map(|(pid, rp)| (*pid, rp.armor)));
+                for (id, armor) in equip {
+                    if self.equipment_broadcast.get(&id) != Some(&armor) {
+                        self.equipment_broadcast.insert(id, armor);
+                        host.broadcast(
+                            &ServerMessage::PlayerEquipment { id, armor },
                             Channel::Reliable,
                         );
                     }
@@ -915,6 +998,14 @@ impl InGameState {
                                 })
                                 .set_stats(health, hunger, mode);
                         }
+                        ServerMessage::PlayerEquipment { id, armor } if id != local_id => {
+                            self.remote_players
+                                .entry(id)
+                                .or_insert_with(|| {
+                                    RemotePlayer::new(id, format!("Player {}", id.0), Vec3::ZERO)
+                                })
+                                .armor = armor;
+                        }
                         _ => {}
                     }
                 }
@@ -963,12 +1054,14 @@ impl InGameState {
         self.remote_meshes.clear();
         // Snapshot the render-relevant fields first so we can mutate `remote_anims`
         // and read `player_model` without holding a borrow on `remote_players`.
-        let snapshots: Vec<(PlayerId, Vec3, f32, f32)> = self
+        // (id, position, yaw, pitch, armor item ids)
+        type Snapshot = (PlayerId, Vec3, f32, f32, [Option<u16>; ARMOR_SIZE]);
+        let snapshots: Vec<Snapshot> = self
             .remote_players
             .values()
-            .map(|rp| (rp.id, rp.position(), rp.yaw, rp.pitch))
+            .map(|rp| (rp.id, rp.position(), rp.yaw, rp.pitch, rp.armor))
             .collect();
-        for (id, pos, yaw, pitch) in snapshots {
+        for (id, pos, yaw, pitch, armor_ids) in snapshots {
             let state = self.remote_anims.entry(id).or_insert_with(|| RemoteAnim {
                 anim: AnimationState::new(),
                 last_pos: pos,
@@ -980,7 +1073,10 @@ impl InGameState {
             state.last_pos = pos;
             let pose = state.anim.pose(pitch);
 
-            let mesh = self.player_model.build_mesh(pos, yaw, &pose);
+            let armor = armor_item_ids(armor_ids, &self.items);
+            let mesh = self
+                .player_model
+                .build_mesh_armored(pos, yaw, &pose, &armor, &self.items);
             if let Ok(Some(gpu)) = GpuMesh::upload(&ctx.memory_allocator, &mesh) {
                 self.remote_meshes.push(gpu);
             }
@@ -1277,7 +1373,7 @@ impl InGameState {
         self.player.health = restore.health;
         self.player.hunger = restore.hunger;
         self.player.saturation = restore.saturation;
-        for index in 0..INVENTORY_SIZE {
+        for index in 0..TOTAL_SLOTS {
             let stack = restore.slots.get(index).and_then(|slot| {
                 slot.and_then(|s| {
                     ((s.item as usize) < self.items.len()).then_some(ItemStack {
@@ -1463,11 +1559,20 @@ impl GameState for InGameState {
                 self.drop_selected_item();
             }
 
-            // Movement + physics.
+            // Movement + physics. Refresh the worn defense first: `update` can
+            // raise fall damage internally, and it must be mitigated by whatever
+            // the player is wearing right now.
             let movement = ctx.input.movement(&kb);
             let dt = ctx.dt.min(0.05);
+            self.player.defense = self.inventory.total_defense(&self.items);
+            let health_before = self.player.health;
             self.player
                 .update(movement, dt, |p| self.world.is_solid_for_collision(p));
+            // A health drop across `update` means fall damage landed; the health
+            // delta is the only signal that escapes it, and it's enough.
+            if self.player.health < health_before {
+                self.inventory.wear_armor(1);
+            }
 
             // Survival vitals: hunger drain, regen, starvation.
             if self.player.mode.takes_damage() {
@@ -1543,6 +1648,7 @@ impl GameState for InGameState {
         };
         self.player_anim.advance(local_speed, anim_dt);
         self.update_player_mesh(ctx.render);
+        self.update_preview_mesh(ctx.render);
         self.update_remote_meshes(ctx.render, anim_dt);
         Transition::None
     }
@@ -1578,18 +1684,27 @@ impl GameState for InGameState {
         }
 
         if self.inventory_open {
-            if let Some(action) = crate::ui::inventory::draw_inventory(
+            let out = crate::ui::inventory::draw_inventory(
                 egui_ctx,
                 &self.inventory,
                 &self.items,
                 &self.recipes,
+                &ctx.content.item_icons,
                 self.held,
                 self.player.mode,
-            ) {
+                ctx.ui_tex,
+            );
+            if let Some(look) = out.head_look {
+                self.preview_look = look;
+            }
+            if let Some(action) = out.action {
                 match action {
                     InvAction::Slot(index) => self.handle_slot_click(index),
                     InvAction::Pick(id) => self.held = Some(self.items.full_stack(id)),
                     InvAction::Craft(index) => self.handle_craft(index),
+                    InvAction::Rotate(dx) => {
+                        self.preview_yaw -= dx * PREVIEW_DRAG_SENSITIVITY;
+                    }
                 }
             }
             return Transition::None;
@@ -1739,6 +1854,52 @@ impl GameState for InGameState {
             lines: self.outline_mesh.as_ref(),
         })
     }
+
+    fn preview_frame(&self) -> Option<PreviewFrame<'_>> {
+        let model = self.preview_mesh.as_ref()?;
+        // Fixed head-height orbit looking at the model built at the origin.
+        // The preview image is 0.48:1 (see PREVIEW_SIZE in app.rs).
+        let target = Vec3::new(0.0, 1.05, 0.0);
+        let mut camera = Camera::new(32.0, 0.48);
+        camera.position = Vec3::new(0.0, 1.05, 3.9);
+        camera.forward = (target - camera.position).normalize();
+        // Neutral, mostly-ambient light so the model reads clearly against the
+        // dark preview backdrop, independent of the world's time of day.
+        let light = LightParams {
+            light_dir: Vec3::new(0.3, 0.8, 0.5).normalize(),
+            light_color: Vec3::splat(0.9),
+            ambient: 0.55,
+        };
+        Some(PreviewFrame {
+            view_proj: camera.view_projection(),
+            light,
+            model,
+        })
+    }
+}
+
+/// Worn armor item ids for the wire, from an inventory's armor slots.
+fn armor_ids(inventory: &Inventory) -> [Option<u16>; ARMOR_SIZE] {
+    inventory.equipped_armor().map(|slot| slot.map(|id| id.0))
+}
+
+/// Worn armor item ids from a wire inventory snapshot's armor slots.
+fn armor_from_slots(slots: &[Option<NetItemStack>]) -> [Option<u16>; ARMOR_SIZE] {
+    std::array::from_fn(|i| {
+        slots
+            .get(ARMOR_START + i)
+            .and_then(|slot| slot.map(|s| s.item))
+    })
+}
+
+/// Resolve wire armor ids to `ItemId`s the local registry knows, dropping any
+/// out-of-range id (a peer running divergent content is already refused, but be
+/// safe: raw ids index the registry directly).
+fn armor_item_ids(
+    ids: [Option<u16>; ARMOR_SIZE],
+    items: &ItemRegistry,
+) -> [Option<ItemId>; ARMOR_SIZE] {
+    ids.map(|id| id.filter(|i| (*i as usize) < items.len()).map(ItemId))
 }
 
 /// Serialize the recipe book back to item names for the `Welcome` message.

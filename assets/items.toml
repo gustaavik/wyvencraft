@@ -19,9 +19,15 @@
 #       durability  uses before the tool breaks
 #       harvests    block materials this tool mines at full speed
 #   [item.food] makes the item edible: hunger + saturation restored
+#   [item.armor] makes the item wearable:
+#       slot        which equipment slot it fits: helmet, chestplate, leggings,
+#                   boots, glove, cape. A piece only goes in its own slot.
+#       defense     defense points, summed across worn pieces
+#       durability  hits taken before the piece breaks
 #
 # [starter_kit] lists what a fresh survival player spawns with, in hotbar
-# order. Tools spawn fresh (full durability); `count` applies to stackables.
+# order. Tools and armor spawn fresh (full durability); `count` applies to
+# stackables.
 
 [[item]]
 name = "wooden pickaxe"
@@ -72,6 +78,58 @@ name = "bread"
 [item.food]
 hunger = 5.0
 saturation = 6.0
+
+# Armor. Worn pieces live in the six equipment slots; their `defense` sums into
+# the damage reduction applied by `Player::damage`, and every hit wears each worn
+# piece by one point. A piece only fits the slot it names.
+
+[[item]]
+name = "helmet"
+
+[item.armor]
+slot = "helmet"
+defense = 2.0
+durability = 120
+
+[[item]]
+name = "chestplate"
+
+[item.armor]
+slot = "chestplate"
+defense = 6.0
+durability = 240
+
+[[item]]
+name = "leggings"
+
+[item.armor]
+slot = "leggings"
+defense = 5.0
+durability = 200
+
+[[item]]
+name = "boots"
+
+[item.armor]
+slot = "boots"
+defense = 2.0
+durability = 120
+
+[[item]]
+name = "glove"
+
+[item.armor]
+slot = "glove"
+defense = 1.0
+durability = 80
+
+[[item]]
+name = "cape"
+
+[item.armor]
+slot = "cape"
+defense = 1.0
+durability = 80
 
 [starter_kit]
 survival = [

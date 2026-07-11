@@ -26,7 +26,15 @@ use std::sync::Arc;
 use crate::config::Settings;
 use crate::content::GameContent;
 use crate::input::InputState;
-use crate::render::{RenderContext, SceneFrame};
+use crate::render::{PreviewFrame, RenderContext, SceneFrame};
+
+/// egui texture handles the app registers once and hands to the UI each frame:
+/// the block atlas (for item icons) and the offscreen player-model preview.
+#[derive(Clone, Copy)]
+pub struct UiTextures {
+    pub atlas: egui::TextureId,
+    pub preview: egui::TextureId,
+}
 
 /// Shared, per-frame context handed to states.
 pub struct StateContext<'a> {
@@ -36,6 +44,8 @@ pub struct StateContext<'a> {
     pub render: &'a Arc<RenderContext>,
     /// Loaded game content (block/item registries), shared by every session.
     pub content: &'a Arc<GameContent>,
+    /// egui handles for the block atlas and the player-model preview image.
+    pub ui_tex: UiTextures,
     /// Variable frame delta (seconds).
     pub dt: f32,
     /// Total elapsed time (seconds).
@@ -88,6 +98,13 @@ pub trait GameState {
         None
     }
 
+    /// Provide the player-model preview to render into the inventory's offscreen
+    /// image this frame, if any. Only the in-game state, with its inventory open,
+    /// returns `Some`; every other frame skips the extra pass entirely.
+    fn preview_frame(&self) -> Option<PreviewFrame<'_>> {
+        None
+    }
+
     /// Human-readable name for debugging.
     fn name(&self) -> &'static str;
 }
@@ -116,6 +133,12 @@ impl StateStack {
     /// (e.g. the pause menu) still shows the world rendered by the state beneath.
     pub fn scene_frame(&self, aspect: f32) -> Option<SceneFrame<'_>> {
         self.states.iter().rev().find_map(|s| s.scene_frame(aspect))
+    }
+
+    /// The player-model preview to render this frame, searched top-down like
+    /// [`StateStack::scene_frame`].
+    pub fn preview_frame(&self) -> Option<PreviewFrame<'_>> {
+        self.states.iter().rev().find_map(|s| s.preview_frame())
     }
 
     /// Update the top state and apply its transition. Returns `false` if the app
