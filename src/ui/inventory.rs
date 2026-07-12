@@ -21,6 +21,8 @@ use crate::ui::icon::draw_item_icon;
 const SLOT: f32 = 46.0;
 const PAD: f32 = 5.0;
 const GAP: f32 = 14.0;
+/// Width of the right-hand panel (crafting list / creative palette).
+const SIDE_PANEL_W: f32 = 360.0;
 
 // Light-grey panel palette, matching the mockup regardless of egui's theme.
 const PANEL_BG: Color32 = Color32::from_rgb(196, 196, 196);
@@ -327,25 +329,41 @@ impl View<'_> {
         recipes: &RecipeBook,
         mode: GameMode,
     ) -> Option<InvAction> {
-        let panel_w = 360.0;
         let panel_h = 6.0 * (SLOT + PAD) - PAD;
-        ui.allocate_ui(vec2(panel_w, panel_h), |ui| {
-            if mode.is_creative() {
-                ui.label(egui::RichText::new("Items").strong().color(TEXT));
-                self.palette(ui)
+        ui.allocate_ui(vec2(SIDE_PANEL_W, panel_h), |ui| {
+            // `allocate_ui` reserves space but does not clip; clamp everything
+            // drawn here to the panel box so a wide row or an overscrolled icon
+            // can't spill into the rest of the window.
+            ui.set_clip_rect(ui.max_rect());
+            let header = if mode.is_creative() {
+                "Items"
             } else {
-                ui.label(egui::RichText::new("Crafting").strong().color(TEXT));
-                self.crafting_list(ui, recipes)
+                "Crafting"
+            };
+            ui.label(egui::RichText::new(header).strong().color(TEXT));
+            // Fixed inner extents (below the header, minus the scrollbar) so the
+            // scroll list can't stretch the auto-sized window or push past the
+            // panel edge — the regression this replaced relied on `allocate_ui`
+            // bounding the scroll area, which it doesn't during layout passes.
+            let inner_w = SIDE_PANEL_W - 16.0;
+            let inner_h = panel_h - 24.0;
+            if mode.is_creative() {
+                self.palette(ui, inner_w, inner_h)
+            } else {
+                self.crafting_list(ui, recipes, inner_w, inner_h)
             }
         })
         .inner
     }
 
     /// Creative palette: every item as a click-to-grab icon, wrapping to fit.
-    fn palette(&self, ui: &mut egui::Ui) -> Option<InvAction> {
+    fn palette(&self, ui: &mut egui::Ui, width: f32, height: f32) -> Option<InvAction> {
         egui::ScrollArea::vertical()
             .id_salt("palette")
+            .max_height(height)
+            .auto_shrink([false, false])
             .show(ui, |ui| {
+                ui.set_width(width);
                 ui.horizontal_wrapped(|ui| {
                     let mut a = None;
                     for (id, item) in self.items.iter() {
@@ -367,10 +385,19 @@ impl View<'_> {
 
     /// Survival crafting list: one clickable row per recipe, greyed when the
     /// ingredients aren't in the storage grid.
-    fn crafting_list(&self, ui: &mut egui::Ui, recipes: &RecipeBook) -> Option<InvAction> {
+    fn crafting_list(
+        &self,
+        ui: &mut egui::Ui,
+        recipes: &RecipeBook,
+        width: f32,
+        height: f32,
+    ) -> Option<InvAction> {
         egui::ScrollArea::vertical()
             .id_salt("crafting")
+            .max_height(height)
+            .auto_shrink([false, false])
             .show(ui, |ui| {
+                ui.set_width(width);
                 let mut a = None;
                 for (index, recipe) in recipes.recipes().iter().enumerate() {
                     let craftable = recipe.can_craft(self.inventory);
