@@ -270,9 +270,6 @@ impl GameState for InGameState {
                 self.player.vitals().max_hunger,
             );
         }
-        if let Some(breaking) = &self.breaking {
-            hud::draw_break_progress(egui_ctx, breaking.progress);
-        }
 
         if self.show_debug {
             let fps = if ctx.dt > 0.0 { 1.0 / ctx.dt } else { 0.0 };

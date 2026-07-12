@@ -74,6 +74,7 @@ Skip the menus with environment variables:
 | `WYVEN_BOOT_INGAME=1` | Boot straight into a singleplayer world |
 | `WYVEN_HOST=1` | Host a session immediately (port `25565`) |
 | `WYVEN_JOIN=addr:port` | Connect to a host immediately |
+| `WYVEN_WORLD=test` | Select the world too connect too |
 
 ## Controls
 

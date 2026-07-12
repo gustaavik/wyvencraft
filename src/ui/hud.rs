@@ -63,7 +63,12 @@ pub fn draw_hotbar(
                 }
 
                 if let Some(stack) = inventory.slot(i) {
-                    draw_item_icon(painter, cell.shrink(6.0), icons[stack.item.0 as usize], atlas);
+                    draw_item_icon(
+                        painter,
+                        cell.shrink(6.0),
+                        icons[stack.item.0 as usize],
+                        atlas,
+                    );
                     if stack.count > 1 {
                         painter.text(
                             cell.right_bottom() - egui::vec2(2.0, 1.0),
@@ -187,22 +192,6 @@ pub fn draw_vitals(ctx: &Context, health: f32, max_health: f32, hunger: f32, max
                 Color32::from_rgb(55, 40, 20),
             );
         });
-}
-
-/// Draw a small break-progress bar just below the crosshair.
-pub fn draw_break_progress(ctx: &Context, progress: f32) {
-    let screen = ctx.screen_rect();
-    let center = screen.center();
-    let w = 40.0;
-    let h = 5.0;
-    let painter = ctx.layer_painter(egui::LayerId::background());
-    let track = egui::Rect::from_min_size(
-        egui::pos2(center.x - w * 0.5, center.y + 16.0),
-        egui::vec2(w, h),
-    );
-    painter.rect_filled(track, 1.0, Color32::from_black_alpha(160));
-    let fill = egui::Rect::from_min_size(track.min, egui::vec2(w * progress.clamp(0.0, 1.0), h));
-    painter.rect_filled(fill, 1.0, Color32::from_white_alpha(220));
 }
 
 /// Draw the current game-mode label in the top-right corner.
