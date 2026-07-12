@@ -251,7 +251,13 @@ impl GameState for InGameState {
         }
 
         hud::draw_crosshair(egui_ctx);
-        hud::draw_hotbar(egui_ctx, &self.inventory, &self.items);
+        hud::draw_hotbar(
+            egui_ctx,
+            &self.inventory,
+            &self.items,
+            &ctx.content.item_icons,
+            ctx.ui_tex.atlas,
+        );
         hud::draw_mode_indicator(egui_ctx, self.player.mode.label());
 
         // Survival HUD: vitals and break progress.

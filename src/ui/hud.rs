@@ -3,7 +3,9 @@
 
 use egui::{Align2, Color32, Context, Stroke};
 
+use crate::content::ItemIcon;
 use crate::inventory::{HOTBAR_SIZE, Inventory, ItemRegistry};
+use crate::ui::icon::draw_item_icon;
 
 /// Draw a simple crosshair at the screen centre.
 pub fn draw_crosshair(ctx: &Context) {
@@ -23,8 +25,14 @@ pub fn draw_crosshair(ctx: &Context) {
 }
 
 /// Draw the hotbar (9 slots) anchored to the bottom-centre, highlighting the
-/// selected slot and labelling each with its item + count.
-pub fn draw_hotbar(ctx: &Context, inventory: &Inventory, items: &ItemRegistry) {
+/// selected slot and drawing each item's icon + count.
+pub fn draw_hotbar(
+    ctx: &Context,
+    inventory: &Inventory,
+    items: &ItemRegistry,
+    icons: &[ItemIcon],
+    atlas: egui::TextureId,
+) {
     let slot = 48.0;
     let pad = 4.0;
     let width = HOTBAR_SIZE as f32 * (slot + pad) + pad;
@@ -55,15 +63,7 @@ pub fn draw_hotbar(ctx: &Context, inventory: &Inventory, items: &ItemRegistry) {
                 }
 
                 if let Some(stack) = inventory.slot(i) {
-                    let name = &items.get(stack.item).name;
-                    let label: String = name.chars().take(3).collect();
-                    painter.text(
-                        cell.center(),
-                        Align2::CENTER_CENTER,
-                        label,
-                        egui::FontId::monospace(13.0),
-                        Color32::WHITE,
-                    );
+                    draw_item_icon(painter, cell.shrink(6.0), icons[stack.item.0 as usize], atlas);
                     if stack.count > 1 {
                         painter.text(
                             cell.right_bottom() - egui::vec2(2.0, 1.0),
