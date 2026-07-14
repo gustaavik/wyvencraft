@@ -160,6 +160,40 @@ impl PlayerData {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PlayerRecords(pub HashMap<u64, PlayerData>);
 
+/// One saved mob (`mobs.dat`). Kind by name (the save convention); transient
+/// state (velocity, brain, cooldowns, mob ids) deliberately resets on load.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MobData {
+    pub kind: String,
+    pub position: [f32; 3],
+    pub health: f32,
+    /// Under the daylight-despawn rule (so dawn still reaps it after a load).
+    pub night_spawned: bool,
+}
+
+/// The world's live mob population (`mobs.dat`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MobsData {
+    pub mobs: Vec<MobData>,
+}
+
+impl MobsData {
+    /// Snapshot the live mobs for the save.
+    pub fn from_mobs(mobs: &[crate::entity::Mob]) -> Self {
+        Self {
+            mobs: mobs
+                .iter()
+                .map(|mob| MobData {
+                    kind: mob.kind_name.clone(),
+                    position: mob.position.to_array(),
+                    health: mob.health,
+                    night_spawned: mob.night_spawned,
+                })
+                .collect(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

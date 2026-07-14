@@ -29,6 +29,8 @@ Run with logging: `RUST_LOG=info,wyvencraft=debug cargo run`.
   with BOOT_INGAME/HOST). Without it, boot worlds are ephemeral — never saved.
 - `WYVEN_SEED=…` → seed if `WYVEN_WORLD` creates a new world (number, hex, or text)
 - `WYVEN_CLIENT_ID=…` → override the profile identity (run two clients from one dir)
+- `WYVEN_DEBUG_SPAWN=cow,zombie,…` → spawn the named mobs next to the player at
+  boot (singleplayer/host), without waiting on the spawner
 
 ## Toolchain prerequisites (important — non-obvious)
 
@@ -55,7 +57,7 @@ core      ← everything        coordinate/voxel types, AABB/Ray/Frustum, timing
 render    ← core              Vulkan: context, pipelines, mesh upload, camera, atlas, tile registry
 world     ← core, render      blocks, chunks, generation, meshing, raycast, loader
 inventory ← core, world       item/stack/inventory data model (no rendering)
-entity    ← core, render, inventory   player, swept-AABB physics, humanoid model, dropped items
+entity    ← core, render, inventory   player, swept-AABB physics, humanoid/quadruped models, dropped items, mobs (brain/spawning/projectiles)
 content   ← render, world, inventory, entity   GameContent: registries loaded from assets/*.toml
 input     ← core, config, entity   winit events → frame-coherent input
 ui        ← inventory, egui   HUD + inventory egui views
@@ -95,7 +97,11 @@ references). This keeps the GPU layer decoupled from gameplay.
 | Item icons (2D)         | painters in `render::tiles::paint_named` (PNG-overridable); `ItemIcon` computed in `content` (cube from block faces vs flat tile); drawn by `ui::icon::draw_item_icon` (atlas registered with egui in `app`) |
 | Live player preview     | offscreen pass `render::Renderer::draw_model` + `PreviewFrame`; mesh/camera in `state::ingame_state::{update_preview_mesh,preview_frame}`; image + egui `TextureId` in `app` (runs *before* the world pass) |
 | Block drop rules        | `drops = ...` on the block in `assets/blocks.toml` (`"self"`, `"none"`, `{ requires_tool }`, `{ item, count }`) |
-| Entity tuning / new kind | `assets/entities.toml` (physics/movement/vitals/item components); a new *behavior* = one new component in `entity::kind` + its code hook |
+| Entity tuning / new kind | `assets/entities.toml` (physics/movement/vitals/item/mob components); a new *behavior* = one new component in `entity::kind` + its code hook |
+| Add / tune a mob        | `assets/entities.toml` (`[entity.mob]`: health, speeds, hostility, `[entity.mob.ranged]`, `drops`; `[entity.visual]` humanoid `skin=`/`arms_forward` or quadruped) + a `[[spawn]]` entry in `assets/spawning.toml`; skin painter in `render::mobskin` (PNG override `assets/textures/mob_<name>.png`) |
+| Mob AI behavior         | `entity::brain` (pure state machine: Idle/Wander/Chase/Flee, perception → intent); body/physics in `entity::mob`; state-layer tick/perception/combat in `state::ingame_state::mobs` |
+| Mob spawning rules      | `assets/spawning.toml` (caps, ring distances, weights, groups, night rules — strict: unknown entity rejects the file); planner in `entity::spawning` (pure, seeded); world sampling in `state::ingame_state::mobs::update_spawning` |
+| Projectiles             | `entity::projectile` (ballistic `Arrow`); launch tuning in `[entity.mob.ranged]`; ticked in `state::ingame_state::mobs::update_arrows` |
 | Change terrain          | `assets/worldgen.toml` (blocks, ores, sea level, biome surfaces — ⚠ alters existing worlds); noise/climate/mesas stay in `world::generation::{noise,biome,generator}` |
 | Trees/boulders/features | shapes+chances in `assets/worldgen.toml`; canopy strategies in `world::generation::features` (jittered-grid anchors) |
 | Meshing                 | `world::meshing::culled` (face culling; greedy is a TODO)                                  |
@@ -133,8 +139,10 @@ references). This keeps the GPU layer decoupled from gameplay.
   registry *name* (numeric ids are insertion-order indices and shift across code
   changes). `saves/` and `profile.toml` are CWD-relative (like `assets/`) and
   gitignored. Worlds regenerate terrain from the seed; only the edit overlay,
-  players, and metadata are persisted — so terrain-generator changes alter
-  existing worlds' unedited terrain (edits still replay at their coordinates).
+  players, mobs (`mobs.dat`, kind-by-name, fail-soft), and metadata are
+  persisted — so terrain-generator changes alter existing worlds' unedited
+  terrain (edits still replay at their coordinates). Dropped items and arrows
+  are never saved.
 - **Save triggers:** `InGameState::on_exit` (fires on pause, quit-to-menu, app
   quit, and window close via `StateStack::shutdown`) + a 60 s autosave. Only
   singleplayer/host sessions of a *named* world hold a save handle; clients and

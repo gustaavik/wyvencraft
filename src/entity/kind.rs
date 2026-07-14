@@ -79,6 +79,79 @@ pub struct ItemEntityParams {
     pub pickup_range: f32,
 }
 
+/// Mob behavior tuning: health, locomotion speeds, and (for hostiles) how the
+/// mob acquires and attacks a target. Presence of this component is what makes
+/// an entity kind a mob (simulated by the AI brain and eligible for spawning).
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MobParams {
+    pub max_health: f32,
+    /// Wander speed / chase-or-flee speed (blocks/s).
+    pub walk_speed: f32,
+    pub run_speed: f32,
+    pub jump_speed: f32,
+    /// Hostiles chase and attack players; passive mobs flee when hurt.
+    #[serde(default)]
+    pub hostile: bool,
+    /// Distance within which a hostile notices a visible player.
+    #[serde(default)]
+    pub aggro_range: f32,
+    /// Attack triggers within this distance (melee reach, or firing range).
+    #[serde(default)]
+    pub attack_range: f32,
+    /// Melee damage per hit (unused by ranged mobs).
+    #[serde(default)]
+    pub attack_damage: f32,
+    /// Seconds between attacks.
+    #[serde(default = "default_attack_cooldown")]
+    pub attack_cooldown: f32,
+    /// Present on mobs that attack by firing a projectile instead of meleeing.
+    #[serde(default)]
+    pub ranged: Option<RangedParams>,
+    /// What the mob drops on death.
+    #[serde(default)]
+    pub drops: Vec<MobDrop>,
+}
+
+fn default_attack_cooldown() -> f32 {
+    1.0
+}
+
+/// Projectile attack tuning (the skeleton's bow). The projectile itself is not
+/// an entity kind: these numbers fully describe it.
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RangedParams {
+    /// Launch speed (blocks/s) and damage on a player hit.
+    pub projectile_speed: f32,
+    pub projectile_damage: f32,
+    /// The mob backs away when the target is closer than this.
+    pub keep_distance: f32,
+    /// Blocks/s² pulling the projectile down.
+    #[serde(default = "default_projectile_gravity")]
+    pub projectile_gravity: f32,
+    /// Seconds before an airborne projectile despawns.
+    #[serde(default = "default_projectile_lifetime")]
+    pub lifetime: f32,
+}
+
+fn default_projectile_gravity() -> f32 {
+    20.0
+}
+
+fn default_projectile_lifetime() -> f32 {
+    8.0
+}
+
+/// One entry of a mob's death-drop table: `min..=max` of the named item.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MobDrop {
+    pub item: String,
+    pub min: u8,
+    pub max: u8,
+}
+
 /// Spin/bob tuning for the item-cube visual.
 #[derive(Debug, Clone, Copy, Default, serde::Deserialize)]
 pub struct ItemCubeParams {
@@ -89,14 +162,41 @@ pub struct ItemCubeParams {
     pub bob_rate: f32,
 }
 
+/// Humanoid-model options. Defaults reproduce the player: its own skin sheet
+/// and a normal rest pose.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct HumanoidVisual {
+    /// Named mob skin sheet (`render::mobskin`); `None` = the player skin.
+    #[serde(default)]
+    pub skin: Option<String>,
+    /// Hold both arms straight forward (the zombie shamble).
+    #[serde(default)]
+    pub arms_forward: bool,
+}
+
+/// Four-legged box model (cow, sheep): a body slab on four legs with a head at
+/// the front. Part sizes are in skin pixels (16 px = 1 block), like the
+/// humanoid model's proportions.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct QuadrupedVisual {
+    /// Named mob skin sheet (`render::mobskin`).
+    pub skin: String,
+    /// Part extents in px: `[width, height, depth]` (depth runs nose→tail).
+    pub body: [f32; 3],
+    pub head: [f32; 3],
+    pub leg: [f32; 3],
+}
+
 /// How the entity is drawn.
-#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum VisualSpec {
     /// The skinned box model ([`crate::entity::HumanoidModel`]).
-    Humanoid,
+    Humanoid(HumanoidVisual),
     /// A small spinning cube textured like the carried item.
     ItemCube(ItemCubeParams),
+    /// The four-legged box model ([`crate::entity::QuadrupedModel`]).
+    Quadruped(QuadrupedVisual),
 }
 
 /// One entity type: a name plus the components it carries.
@@ -111,6 +211,8 @@ pub struct EntityKind {
     pub vitals: Option<VitalsParams>,
     #[serde(default)]
     pub item: Option<ItemEntityParams>,
+    #[serde(default)]
+    pub mob: Option<MobParams>,
     pub visual: VisualSpec,
 }
 
@@ -203,7 +305,7 @@ mod tests {
     #[test]
     fn builtin_entities_golden() {
         let reg = EntityRegistry::builtin();
-        assert_eq!(reg.len(), 2);
+        assert_eq!(reg.len(), 6);
 
         let player = reg.player();
         assert_eq!(player.physics.gravity, 28.0);
@@ -224,7 +326,13 @@ mod tests {
         assert_eq!(vitals.hunger_drain_sprint, 0.15);
         assert_eq!(vitals.regen_hunger_threshold, 18.0);
         assert_eq!((vitals.regen_rate, vitals.starve_rate), (1.0, 1.0));
-        assert!(matches!(player.visual, VisualSpec::Humanoid));
+        match &player.visual {
+            VisualSpec::Humanoid(v) => {
+                assert_eq!(v.skin, None, "player uses the player skin");
+                assert!(!v.arms_forward);
+            }
+            other => panic!("player should be humanoid, got {other:?}"),
+        }
 
         let drop = reg.dropped_item();
         assert_eq!((drop.physics.width, drop.physics.height), (0.25, 0.25));
@@ -235,14 +343,156 @@ mod tests {
         assert_eq!((item.throw_speed, item.throw_lift), (6.0, 2.0));
         assert_eq!((item.block_drop_delay, item.thrown_delay), (0.3, 1.5));
         assert_eq!(item.pickup_range, 1.0);
-        match drop.visual {
+        match &drop.visual {
             VisualSpec::ItemCube(cube) => {
                 assert_eq!(cube.spin_rate, 1.8);
                 assert_eq!(cube.bob_amplitude, 0.03);
                 assert_eq!(cube.bob_rate, 2.4);
             }
-            VisualSpec::Humanoid => panic!("dropped item should be an item cube"),
+            other => panic!("dropped item should be an item cube, got {other:?}"),
         }
+
+        // The passive mobs: quadrupeds with a drop table, no hostility.
+        let cow = reg.find("cow").expect("cow kind");
+        assert_eq!((cow.physics.width, cow.physics.height), (0.9, 1.4));
+        let mob = cow.mob.as_ref().expect("cow mob params");
+        assert_eq!(mob.max_health, 10.0);
+        assert_eq!((mob.walk_speed, mob.run_speed), (1.4, 3.0));
+        assert_eq!(mob.jump_speed, 9.0);
+        assert!(!mob.hostile);
+        assert!(mob.ranged.is_none());
+        assert_eq!(mob.attack_cooldown, 1.0, "defaulted");
+        assert_eq!(mob.drops.len(), 1);
+        assert_eq!(mob.drops[0].item, "raw beef");
+        assert_eq!((mob.drops[0].min, mob.drops[0].max), (1, 3));
+        match &cow.visual {
+            VisualSpec::Quadruped(v) => {
+                assert_eq!(v.skin, "cow");
+                assert_eq!(v.body, [12.0, 10.0, 18.0]);
+                assert_eq!(v.head, [8.0, 8.0, 6.0]);
+                assert_eq!(v.leg, [4.0, 11.0, 4.0]);
+            }
+            other => panic!("cow should be a quadruped, got {other:?}"),
+        }
+
+        let sheep = reg.find("sheep").expect("sheep kind");
+        let mob = sheep.mob.as_ref().expect("sheep mob params");
+        assert_eq!(mob.max_health, 8.0);
+        assert!(!mob.hostile);
+        assert_eq!(mob.drops[0].item, "raw mutton");
+        assert_eq!((mob.drops[0].min, mob.drops[0].max), (1, 2));
+        assert!(matches!(&sheep.visual, VisualSpec::Quadruped(v) if v.skin == "sheep"));
+
+        // The hostiles: a melee humanoid and a ranged one.
+        let zombie = reg.find("zombie").expect("zombie kind");
+        assert_eq!((zombie.physics.width, zombie.physics.height), (0.6, 1.8));
+        let mob = zombie.mob.as_ref().expect("zombie mob params");
+        assert!(mob.hostile);
+        assert_eq!(mob.max_health, 20.0);
+        assert_eq!((mob.aggro_range, mob.attack_range), (16.0, 1.6));
+        assert_eq!((mob.attack_damage, mob.attack_cooldown), (3.0, 1.0));
+        assert!(mob.ranged.is_none());
+        assert!(mob.drops.is_empty());
+        match &zombie.visual {
+            VisualSpec::Humanoid(v) => {
+                assert_eq!(v.skin.as_deref(), Some("zombie"));
+                assert!(v.arms_forward);
+            }
+            other => panic!("zombie should be humanoid, got {other:?}"),
+        }
+
+        let skeleton = reg.find("skeleton").expect("skeleton kind");
+        let mob = skeleton.mob.as_ref().expect("skeleton mob params");
+        assert!(mob.hostile);
+        assert_eq!(mob.max_health, 16.0);
+        assert_eq!((mob.aggro_range, mob.attack_range), (18.0, 12.0));
+        assert_eq!(mob.attack_cooldown, 1.6);
+        let ranged = mob.ranged.expect("skeleton ranged params");
+        assert_eq!(ranged.projectile_speed, 18.0);
+        assert_eq!(ranged.projectile_damage, 3.0);
+        assert_eq!(ranged.keep_distance, 8.0);
+        assert_eq!(ranged.projectile_gravity, 20.0, "defaulted");
+        assert_eq!(ranged.lifetime, 8.0, "defaulted");
+        assert!(
+            matches!(&skeleton.visual, VisualSpec::Humanoid(v) if v.skin.as_deref() == Some("skeleton") && !v.arms_forward)
+        );
+    }
+
+    #[test]
+    fn mob_component_is_optional_but_strict() {
+        // A kind without [entity.mob] parses (it's just not a mob) …
+        let plain = r#"
+            [[entity]]
+            name = "player"
+            [entity.physics]
+            gravity = 28.0
+            terminal_velocity = -60.0
+            width = 0.6
+            height = 1.8
+            [entity.movement]
+            walk_speed = 4.3
+            sprint_speed = 6.5
+            fly_speed = 12.0
+            jump_speed = 9.0
+            eye_height = 1.62
+            reach = 5.0
+            [entity.vitals]
+            max_health = 20.0
+            max_hunger = 20.0
+            safe_fall = 3.0
+            fall_damage_per_block = 1.0
+            hunger_drain_base = 0.05
+            hunger_drain_sprint = 0.15
+            regen_hunger_threshold = 18.0
+            regen_rate = 1.0
+            starve_rate = 1.0
+            [entity.visual]
+            kind = "humanoid"
+
+            [[entity]]
+            name = "dropped item"
+            [entity.physics]
+            gravity = 28.0
+            terminal_velocity = -60.0
+            width = 0.25
+            height = 0.25
+            [entity.item]
+            despawn_seconds = 300.0
+            pop_horizontal = 1.4
+            pop_vertical = 3.2
+            throw_speed = 6.0
+            throw_lift = 2.0
+            block_drop_delay = 0.3
+            thrown_delay = 1.5
+            pickup_range = 1.0
+            [entity.visual]
+            kind = "item_cube"
+            spin_rate = 1.8
+            bob_amplitude = 0.03
+            bob_rate = 2.4
+        "#;
+        let reg = EntityRegistry::from_toml(plain).expect("plain file parses");
+        assert!(reg.player().mob.is_none());
+
+        // … while a misspelled mob field rejects the file.
+        let bad = format!(
+            "{plain}\n\
+            [[entity]]\n\
+            name = \"cow\"\n\
+            [entity.physics]\n\
+            gravity = 28.0\n\
+            terminal_velocity = -60.0\n\
+            width = 0.9\n\
+            height = 1.4\n\
+            [entity.mob]\n\
+            max_health = 10.0\n\
+            walk_sped = 1.4\n\
+            run_speed = 3.0\n\
+            jump_speed = 9.0\n\
+            [entity.visual]\n\
+            kind = \"humanoid\"\n"
+        );
+        assert!(EntityRegistry::from_toml(&bad).is_err());
     }
 
     #[test]

@@ -1,0 +1,51 @@
+# Mob spawning rules: which mobs appear, how often, where, and when they
+# despawn. Read at startup — edit and restart to tune.
+#
+# Entity values are names from entities.toml (the kind must carry an
+# [entity.mob] component). An unknown name rejects the WHOLE file and the
+# engine falls back to its builtin copy (the strict worldgen policy: silently
+# spawning the wrong thing would be worse than ignoring the file).
+#
+# [limits] applies globally; each [[spawn]] entry is one mob type's rules:
+#   entity        the mob kind to spawn
+#   weight        relative pick chance among currently eligible entries
+#   group         [min, max] mobs placed together per successful roll
+#   cap           most simultaneous live mobs of this type
+#   night_only    only spawn while the sun is down
+#   despawn_in_daylight   reap survivors when the sun comes back up
+
+[limits]
+max_mobs = 40              # global live-mob cap
+spawn_interval = 2.0       # seconds between spawn passes
+attempts = 6               # candidate positions rolled per pass
+min_player_distance = 16.0 # never spawn closer to a player than this
+max_player_distance = 48.0 # ... or farther than this
+despawn_distance = 96.0    # despawn mobs farther than this from every player
+
+[[spawn]]
+entity = "cow"
+weight = 10
+group = [1, 3]
+cap = 10
+
+[[spawn]]
+entity = "sheep"
+weight = 10
+group = [2, 4]
+cap = 10
+
+[[spawn]]
+entity = "zombie"
+weight = 12
+group = [1, 2]
+cap = 10
+night_only = true
+despawn_in_daylight = true
+
+[[spawn]]
+entity = "skeleton"
+weight = 8
+group = [1, 1]
+cap = 6
+night_only = true
+despawn_in_daylight = true

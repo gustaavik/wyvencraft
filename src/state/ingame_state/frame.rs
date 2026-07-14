@@ -128,13 +128,27 @@ impl GameState for InGameState {
             if ctx.input.mouse_just_pressed(MouseButton::Left) {
                 self.player_anim.trigger_swing();
             }
+            // A mob in the crosshair takes the hit (and blocks mining on the
+            // block behind it); otherwise the click falls through to blocks.
+            let mob_target = self.targeted_mob();
             if self.player.mode.instant_break() {
                 // Creative: instant break on click.
                 self.breaking = None;
-                if ctx.input.mouse_just_pressed(MouseButton::Left)
-                    && let Some(hit) = self.targeted_block()
-                {
-                    self.break_block_at(hit.block);
+                if ctx.input.mouse_just_pressed(MouseButton::Left) {
+                    match mob_target {
+                        Some(index) => self.attack_mob(index),
+                        None => {
+                            if let Some(hit) = self.targeted_block() {
+                                self.break_block_at(hit.block);
+                            }
+                        }
+                    }
+                }
+            } else if let Some(index) = mob_target {
+                // Survival with a mob in reach: swing on click, don't mine.
+                self.breaking = None;
+                if ctx.input.mouse_just_pressed(MouseButton::Left) {
+                    self.attack_mob(index);
                 }
             } else {
                 // Survival: progressive mining while the dig button is held.
@@ -169,13 +183,20 @@ impl GameState for InGameState {
             for (pos, block) in self.fluids.tick(&mut self.world, ctx.dt) {
                 self.broadcast_local_edit(pos, block);
             }
+            // Mobs are host-authoritative like fluids; clients only render
+            // the replicated copies.
+            self.update_mobs(ctx.dt.min(0.05));
+            self.update_spawning(ctx.dt);
         }
         self.update_streaming(ctx.settings.render.render_distance);
         self.enqueue_dirty();
         self.process_mesh_budget(ctx.render);
-        // Drops keep simulating even with the inventory or death screen open.
+        // Drops and arrows keep simulating even with the inventory or death
+        // screen open.
         self.update_drops(ctx.dt.min(0.05));
+        self.update_arrows(ctx.dt.min(0.05));
         self.update_drops_mesh(ctx.render);
+        self.update_mob_meshes(ctx.render, ctx.dt.min(0.05));
 
         // Advance + rebuild animated player models. The local player settles to idle
         // while the inventory is open (movement is frozen).
@@ -287,6 +308,12 @@ impl GameState for InGameState {
                     self.loader.pending_count()
                 ),
                 format!("on_ground: {}", self.player.on_ground),
+                format!(
+                    "mobs: {} live / {} arrows / {} drops",
+                    self.mobs.len() + self.remote_mobs.len(),
+                    self.arrows.len(),
+                    self.drops.len()
+                ),
                 format!("net: {}", self.net_status()),
                 format!("time: {}", format_time_of_day(self.day_cycle.time_of_day())),
                 format!(
@@ -355,11 +382,17 @@ impl GameState for InGameState {
             transparent.push(mesh);
         }
 
-        // The local player model (third person only) + remote players.
+        // The local player model (third person only) + remote players + mobs.
         if let Some(mesh) = &self.player_mesh {
             opaque.push(mesh);
         }
         for mesh in &self.remote_meshes {
+            opaque.push(mesh);
+        }
+        for mesh in &self.mob_meshes {
+            opaque.push(mesh);
+        }
+        if let Some(mesh) = &self.arrows_mesh {
             opaque.push(mesh);
         }
 

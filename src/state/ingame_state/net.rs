@@ -9,10 +9,12 @@ use std::time::Duration;
 
 use glam::Vec3;
 
+use super::mobs::{self, RemoteMob};
 use super::{
     HOST_PLAYER_ID, INVENTORY_SYNC_INTERVAL, InGameState, NetRole, STATS_INTERVAL, WORLD_SYNC_BATCH,
 };
 use crate::core::{BlockId, BlockPos};
+use crate::entity::Arrow;
 use crate::inventory::{ARMOR_SIZE, ARMOR_START, Inventory, ItemId, ItemRegistry, RecipeBook};
 use crate::net::{
     Channel, ClientMessage, NetItemStack, PlayerId, PlayerRestore, RecipeData, RemotePlayer,
@@ -61,6 +63,11 @@ impl InGameState {
         // written back after the match to avoid borrowing `self` while `self.net` is.
         let need_world_request = !self.world_state_requested;
         let mut requested_world_state_now = false;
+        // Client-side effects that need `&mut self` and so must run after the
+        // match releases its borrow of `self.net`: loot from mobs this player
+        // killed, and mob damage addressed to this player.
+        let mut my_kills: Vec<(String, u64, Vec3)> = Vec::new();
+        let mut incoming_damage = 0.0f32;
 
         match &mut self.net {
             NetRole::Singleplayer => {}
@@ -207,6 +214,43 @@ impl InGameState {
                                     Channel::Chunk,
                                 );
                             }
+                            // ... and the current mob population, so the
+                            // joiner sees what already roams the world.
+                            for mob in &self.mobs {
+                                host.send_to_player(
+                                    pid,
+                                    &ServerMessage::MobSpawned {
+                                        id: mob.id.0,
+                                        kind: mob.kind_name.clone(),
+                                        position: mob.position.to_array(),
+                                    },
+                                    Channel::Reliable,
+                                );
+                            }
+                        }
+                        ClientMessage::Attack { id } => {
+                            // Validate reach against the attacker's last known
+                            // position, then apply with kill credit; the hurt
+                            // (or death) event reaches clients via mob_events.
+                            let Some(attacker) =
+                                self.remote_players.get(&pid).map(|rp| rp.position())
+                            else {
+                                continue;
+                            };
+                            if let Some(mob) = self.mobs.iter_mut().find(|m| m.id.0 == id)
+                                && mobs::attack_in_range(attacker, mob.position)
+                            {
+                                let to_mob = mob.position - attacker;
+                                let push = Vec3::new(to_mob.x, 0.0, to_mob.z).normalize_or_zero()
+                                    * mobs::KNOCKBACK_PUSH
+                                    + Vec3::Y * mobs::KNOCKBACK_LIFT;
+                                mob.damage(mobs::PLAYER_ATTACK_DAMAGE, push);
+                                mob.last_attacker = Some(pid.0);
+                                self.mob_events.push(ServerMessage::MobHurt {
+                                    id,
+                                    health: mob.health,
+                                });
+                            }
                         }
                     }
                 }
@@ -280,6 +324,25 @@ impl InGameState {
                             Channel::Reliable,
                         );
                     }
+                }
+
+                // Mob lifecycle events queued by this frame's simulation
+                // (spawns, hurts, deaths, arrows, remote-player damage), then
+                // one batched unreliable movement snapshot for all live mobs.
+                for msg in std::mem::take(&mut self.mob_events) {
+                    host.broadcast(&msg, Channel::Reliable);
+                }
+                if !self.mobs.is_empty() {
+                    host.broadcast(
+                        &ServerMessage::MobStates {
+                            mobs: self
+                                .mobs
+                                .iter()
+                                .map(|m| (m.id.0, m.position.to_array(), m.yaw))
+                                .collect(),
+                        },
+                        Channel::Unreliable,
+                    );
                 }
                 host.flush();
             }
@@ -378,6 +441,59 @@ impl InGameState {
                                 })
                                 .armor = armor;
                         }
+                        ServerMessage::MobSpawned { id, kind, position } => {
+                            match self.entities.find(&kind) {
+                                Some(k) if k.mob.is_some() => {
+                                    log::debug!("replicating mob {id} ({kind}) from host");
+                                    self.remote_mobs
+                                        .insert(id, RemoteMob::new(k, Vec3::from_array(position)));
+                                }
+                                // Shouldn't happen (the content hash gates
+                                // divergent builds), but degrade gracefully.
+                                _ => log::warn!("host spawned unknown mob kind {kind:?}; ignoring"),
+                            }
+                        }
+                        ServerMessage::MobStates { mobs } => {
+                            for (id, position, yaw) in mobs {
+                                // Unknown ids are fine: an unreliable snapshot
+                                // can outrun its reliable MobSpawned.
+                                if let Some(mob) = self.remote_mobs.get_mut(&id) {
+                                    mob.push_snapshot(Vec3::from_array(position), yaw);
+                                }
+                            }
+                        }
+                        ServerMessage::MobHurt { .. } => {
+                            // Reserved for hurt feedback (flash/sound); the
+                            // authoritative outcome arrives as MobDespawned.
+                        }
+                        ServerMessage::MobDespawned { id, killed_by } => {
+                            if let Some(mob) = self.remote_mobs.remove(&id)
+                                && killed_by == Some(local_id)
+                            {
+                                // This player made the kill: roll the loot
+                                // locally (deferred; needs &mut self).
+                                my_kills.push((mob.kind_name().to_string(), id, mob.position()));
+                            }
+                        }
+                        ServerMessage::ArrowSpawned {
+                            position,
+                            velocity,
+                            gravity,
+                            lifetime,
+                        } => {
+                            // Visual-only on clients: damage is host-side, so
+                            // the local copy carries none.
+                            self.arrows.push(Arrow::new(
+                                Vec3::from_array(position),
+                                Vec3::from_array(velocity),
+                                0.0,
+                                gravity,
+                                lifetime,
+                            ));
+                        }
+                        ServerMessage::PlayerDamaged { id, amount } if id == local_id => {
+                            incoming_damage += amount;
+                        }
                         _ => {}
                     }
                 }
@@ -387,6 +503,12 @@ impl InGameState {
 
         if requested_world_state_now {
             self.world_state_requested = true;
+        }
+        for (kind, id, position) in my_kills {
+            self.pop_drops_for(&kind, id, position);
+        }
+        if incoming_damage > 0.0 {
+            self.damage_local_player(incoming_damage);
         }
     }
 

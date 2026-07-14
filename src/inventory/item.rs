@@ -452,7 +452,12 @@ mod tests {
             ("shears", "shears", 5.0, 120, &[BlockMaterial::Plant]),
         ];
         // (name, hunger, saturation)
-        let foods = [("apple", 4.0, 2.4), ("bread", 5.0, 6.0)];
+        let foods = [
+            ("apple", 4.0, 2.4),
+            ("bread", 5.0, 6.0),
+            ("raw beef", 3.0, 1.8),
+            ("raw mutton", 2.0, 1.2),
+        ];
         // (name, slot, defense, durability)
         let armors = [
             ("helmet", ArmorSlot::Helmet, 2.0, 120),

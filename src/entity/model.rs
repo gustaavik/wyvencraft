@@ -6,6 +6,7 @@
 use glam::Vec3;
 
 use crate::core::Direction;
+use crate::entity::kind::QuadrupedVisual;
 use crate::inventory::{ARMOR_SIZE, ArmorSlot, ItemId, ItemRegistry};
 use crate::render::armor::ArmorKind;
 use crate::render::mesh::CpuMesh;
@@ -101,13 +102,26 @@ impl HumanoidModel {
     }
 
     /// Build a renderable mesh for this model at `position` (feet) facing `yaw`,
-    /// articulated by `pose`. Each part is drawn twice: the base box sampling its
-    /// base region of the player skin sheet (see [`crate::render::skin`]), then a
-    /// slightly inflated overlay box sampling the hat/jacket/sleeve/pants region —
-    /// its transparent pixels are alpha-tested away in the shader, giving a 3D
-    /// layered look. With `Pose::default()` the base geometry matches the original
-    /// static model.
+    /// articulated by `pose`, sampling the player skin sheet.
     pub fn build_mesh(&self, position: Vec3, yaw: f32, pose: &Pose) -> CpuMesh {
+        self.build_mesh_sheet(position, yaw, pose, skin::SKIN_ORIGIN)
+    }
+
+    /// Like [`HumanoidModel::build_mesh`] but sampling the 64×64 sheet at
+    /// `sheet_origin` — how humanoid mobs reuse this model with their own
+    /// skins ([`crate::render::mobskin`]). Each part is drawn twice: the base
+    /// box sampling its base region of the sheet (see [`crate::render::skin`]),
+    /// then a slightly inflated overlay box sampling the
+    /// hat/jacket/sleeve/pants region — its transparent pixels are alpha-tested
+    /// away in the shader, giving a 3D layered look. With `Pose::default()` the
+    /// base geometry matches the original static model.
+    pub fn build_mesh_sheet(
+        &self,
+        position: Vec3,
+        yaw: f32,
+        pose: &Pose,
+        sheet_origin: [u32; 2],
+    ) -> CpuMesh {
         // Overlay-shell inflation per side (Minecraft `CubeDeformation`), in blocks.
         const HAT: f32 = 0.5 / 16.0;
         const LAYER: f32 = 0.25 / 16.0;
@@ -179,7 +193,7 @@ impl HumanoidModel {
                 &mut mesh,
                 part,
                 base,
-                skin::SKIN_ORIGIN,
+                sheet_origin,
                 position,
                 yaw,
                 pivot,
@@ -196,7 +210,7 @@ impl HumanoidModel {
                 &mut mesh,
                 shell,
                 overlay,
-                skin::SKIN_ORIGIN,
+                sheet_origin,
                 position,
                 yaw,
                 pivot,
@@ -320,6 +334,101 @@ impl HumanoidModel {
                 0.0,
             ),
         }
+    }
+}
+
+/// A four-legged box model (cow, sheep): a horizontal body slab on four leg
+/// posts with a head at the front (-Z). Proportions come from the kind's
+/// `[entity.visual]` data ([`QuadrupedVisual`]); textures from a mob skin
+/// sheet ([`crate::render::mobskin`]'s quadruped unwrap).
+pub struct QuadrupedModel {
+    pub body: ModelBox,
+    pub head: ModelBox,
+    /// Front-left, front-right, hind-left, hind-right.
+    pub legs: [ModelBox; 4],
+}
+
+impl QuadrupedModel {
+    /// Assemble the part boxes from pixel dimensions (16 px = 1 block).
+    /// Legs stand at the body's corners; the body overlaps their tops by 2 px
+    /// so swinging legs never open a gap; the head sits proud at the front.
+    pub fn new(v: &QuadrupedVisual) -> Self {
+        let px = 1.0 / 16.0;
+        let (bw, bh, bd) = (v.body[0] * px, v.body[1] * px, v.body[2] * px);
+        let (hw, hh, hd) = (v.head[0] * px, v.head[1] * px, v.head[2] * px);
+        let (lw, lh, ld) = (v.leg[0] * px, v.leg[1] * px, v.leg[2] * px);
+
+        let body_bottom = lh - 2.0 * px;
+        let body = ModelBox {
+            center: Vec3::new(0.0, body_bottom + bh * 0.5, 0.0),
+            size: Vec3::new(bw, bh, bd),
+        };
+        let head = ModelBox {
+            // Nose forward of the body, eyes level with the body's top.
+            center: Vec3::new(
+                0.0,
+                body_bottom + bh - hh * 0.5 + 1.0 * px,
+                -(bd + hd) * 0.5 + 1.0 * px,
+            ),
+            size: Vec3::new(hw, hh, hd),
+        };
+        let (lx, lz) = ((bw - lw) * 0.5, (bd - ld) * 0.5);
+        let leg = |x: f32, z: f32| ModelBox {
+            center: Vec3::new(x, lh * 0.5, z),
+            size: Vec3::new(lw, lh, ld),
+        };
+        Self {
+            body,
+            head,
+            legs: [leg(-lx, -lz), leg(lx, -lz), leg(-lx, lz), leg(lx, lz)],
+        }
+    }
+
+    /// Build the mesh at `position` (feet) facing `yaw`, sampling the sheet at
+    /// `sheet_origin`. Pose channels are reused: arms drive the front legs and
+    /// legs the hind pair, so [`super::AnimationState`]'s anti-phase arm/leg
+    /// swing yields a natural diagonal trot with no quadruped-specific
+    /// animation code.
+    pub fn build_mesh(
+        &self,
+        position: Vec3,
+        yaw: f32,
+        pose: &Pose,
+        sheet_origin: [u32; 2],
+    ) -> CpuMesh {
+        use crate::render::mobskin::{Q_BODY, Q_HEAD, Q_LEG};
+
+        let mut mesh = CpuMesh::new();
+        let swings = [pose.left_arm, pose.right_arm, pose.left_leg, pose.right_leg];
+        let parts = [
+            (self.body, Q_BODY, self.body.center, 0.0, 0.0),
+            (
+                self.head,
+                Q_HEAD,
+                // The neck: where the head meets the body's front face.
+                self.head.center + Vec3::new(0.0, 0.0, self.head.size.z * 0.5),
+                pose.head_pitch,
+                pose.head_yaw,
+            ),
+            (self.legs[0], Q_LEG, top_pivot(self.legs[0]), swings[0], 0.0),
+            (self.legs[1], Q_LEG, top_pivot(self.legs[1]), swings[1], 0.0),
+            (self.legs[2], Q_LEG, top_pivot(self.legs[2]), swings[2], 0.0),
+            (self.legs[3], Q_LEG, top_pivot(self.legs[3]), swings[3], 0.0),
+        ];
+        for (part, skin_part, pivot, rot, local_yaw) in parts {
+            push_box(
+                &mut mesh,
+                part,
+                skin_part,
+                sheet_origin,
+                position,
+                yaw,
+                pivot,
+                rot,
+                local_yaw,
+            );
+        }
+        mesh
     }
 }
 
@@ -605,6 +714,91 @@ mod tests {
                 v.uv
             );
         }
+    }
+
+    #[test]
+    fn quadruped_builds_six_boxes_grounded_at_the_feet() {
+        let visual = QuadrupedVisual {
+            skin: "cow".into(),
+            body: [12.0, 10.0, 18.0],
+            head: [8.0, 8.0, 6.0],
+            leg: [4.0, 11.0, 4.0],
+        };
+        let model = QuadrupedModel::new(&visual);
+        let mesh = model.build_mesh(Vec3::ZERO, 0.0, &Pose::default(), [0, 12]);
+        // 6 boxes (body, head, 4 legs) × 6 faces × 4 vertices, no overlays.
+        assert_eq!(mesh.vertices.len(), 144);
+        // Feet on the ground; the body slab overlaps the leg tops.
+        let min_y = mesh
+            .vertices
+            .iter()
+            .fold(f32::MAX, |lo, v| lo.min(v.position[1]));
+        assert!(min_y.abs() < 1e-6, "legs stand on the origin: {min_y}");
+        let px = 1.0 / 16.0;
+        let leg_top = 11.0 * px;
+        let body_bottom = model.body.center.y - model.body.size.y * 0.5;
+        assert!(body_bottom < leg_top, "body overlaps the legs");
+        // Head is forward of the body (model faces -Z).
+        assert!(model.head.center.z < model.body.center.z - model.body.size.z * 0.4);
+        // Legs at the four corners: two forward, two back, mirrored in X.
+        let (front, hind): (Vec<&ModelBox>, Vec<&ModelBox>) =
+            model.legs.iter().partition(|l| l.center.z < 0.0);
+        assert_eq!(front.len(), 2);
+        assert_eq!(hind.len(), 2);
+        assert!(front.iter().any(|l| l.center.x < 0.0) && front.iter().any(|l| l.center.x > 0.0));
+    }
+
+    #[test]
+    fn quadruped_legs_swing_about_their_hips() {
+        let visual = QuadrupedVisual {
+            skin: "sheep".into(),
+            body: [12.0, 10.0, 16.0],
+            head: [7.0, 7.0, 6.0],
+            leg: [4.0, 10.0, 4.0],
+        };
+        let model = QuadrupedModel::new(&visual);
+        let rest = model.build_mesh(Vec3::ZERO, 0.0, &Pose::default(), [4, 12]);
+        let swung = model.build_mesh(
+            Vec3::ZERO,
+            0.0,
+            &Pose {
+                left_arm: 0.8,
+                ..Default::default()
+            },
+            [4, 12],
+        );
+        // Body + head (first two boxes, 48 verts) are unaffected...
+        for (a, b) in rest.vertices[..48].iter().zip(&swung.vertices[..48]) {
+            assert_eq!(a.position, b.position);
+        }
+        // ...while the front-left leg (third box) moved.
+        assert!(
+            rest.vertices[48..72]
+                .iter()
+                .zip(&swung.vertices[48..72])
+                .any(|(a, b)| a.position != b.position),
+            "front-left leg should swing with the left_arm channel"
+        );
+    }
+
+    #[test]
+    fn humanoid_sheet_origin_shifts_the_uvs() {
+        let model = HumanoidModel::player();
+        let default_sheet = model.build_mesh(Vec3::ZERO, 0.0, &Pose::default());
+        let mob_sheet = model.build_mesh_sheet(Vec3::ZERO, 0.0, &Pose::default(), [12, 4]);
+        assert_eq!(default_sheet.vertices.len(), mob_sheet.vertices.len());
+        // Identical geometry, different texture region.
+        for (a, b) in default_sheet.vertices.iter().zip(&mob_sheet.vertices) {
+            assert_eq!(a.position, b.position);
+        }
+        assert!(
+            default_sheet
+                .vertices
+                .iter()
+                .zip(&mob_sheet.vertices)
+                .any(|(a, b)| a.uv != b.uv),
+            "a different sheet origin must move the UVs"
+        );
     }
 
     #[test]

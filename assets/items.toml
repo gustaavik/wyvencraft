@@ -79,6 +79,22 @@ name = "bread"
 hunger = 5.0
 saturation = 6.0
 
+# Mob drops (see the mob `drops` lists in entities.toml).
+
+[[item]]
+name = "raw beef"
+
+[item.food]
+hunger = 3.0
+saturation = 1.8
+
+[[item]]
+name = "raw mutton"
+
+[item.food]
+hunger = 2.0
+saturation = 1.2
+
 # Armor. Worn pieces live in the six equipment slots; their `defense` sums into
 # the damage reduction applied by `Player::damage`, and every hit wears each worn
 # piece by one point. A piece only fits the slot it names.

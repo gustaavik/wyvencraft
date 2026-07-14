@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use crate::core::Direction;
-use crate::entity::EntityRegistry;
+use crate::entity::{EntityRegistry, SpawnConfig};
 use crate::inventory::ItemRegistry;
 use crate::render::TileRegistry;
 use crate::world::block::{BUILTIN_BLOCKS, BlockRegistry};
@@ -41,6 +41,8 @@ pub struct GameContent {
     pub items: Arc<ItemRegistry>,
     pub entities: Arc<EntityRegistry>,
     pub worldgen: Arc<WorldGenConfig>,
+    /// Mob spawn rules (`assets/spawning.toml`).
+    pub spawning: Arc<SpawnConfig>,
     /// 2D icon for each item, indexed by `ItemId` (see [`ItemIcon`]).
     pub item_icons: Vec<ItemIcon>,
     /// Fingerprint of every gameplay-affecting definition. Exchanged in the
@@ -55,6 +57,7 @@ const BLOCKS_PATH: &str = "assets/blocks.toml";
 const ITEMS_PATH: &str = "assets/items.toml";
 const ENTITIES_PATH: &str = "assets/entities.toml";
 const WORLDGEN_PATH: &str = "assets/worldgen.toml";
+const SPAWNING_PATH: &str = "assets/spawning.toml";
 
 impl GameContent {
     /// Load content from `assets/` (CWD-relative, like recipes and saves),
@@ -65,14 +68,16 @@ impl GameContent {
         let items = Arc::new(load_items(&blocks));
         let entities = Arc::new(load_entities());
         let worldgen = Arc::new(load_worldgen(&blocks));
+        let spawning = Arc::new(load_spawning(&entities));
         let item_icons = build_item_icons(&mut tiles, &blocks, &items);
-        let hash = content_hash(&blocks, &items, &entities, &worldgen);
+        let hash = content_hash(&blocks, &items, &entities, &worldgen, &spawning);
         Arc::new(Self {
             tiles,
             blocks,
             items,
             entities,
             worldgen,
+            spawning,
             item_icons,
             hash,
         })
@@ -85,14 +90,16 @@ impl GameContent {
         let items = Arc::new(ItemRegistry::from_blocks(&blocks));
         let entities = Arc::new(EntityRegistry::builtin());
         let worldgen = Arc::new(WorldGenConfig::builtin(&blocks));
+        let spawning = Arc::new(SpawnConfig::builtin(&entities));
         let item_icons = build_item_icons(&mut tiles, &blocks, &items);
-        let hash = content_hash(&blocks, &items, &entities, &worldgen);
+        let hash = content_hash(&blocks, &items, &entities, &worldgen, &spawning);
         Arc::new(Self {
             tiles,
             blocks,
             items,
             entities,
             worldgen,
+            spawning,
             item_icons,
             hash,
         })
@@ -135,8 +142,9 @@ fn content_hash(
     items: &ItemRegistry,
     entities: &EntityRegistry,
     worldgen: &WorldGenConfig,
+    spawning: &SpawnConfig,
 ) -> u64 {
-    let repr = format!("{blocks:?}|{items:?}|{entities:?}|{worldgen:?}");
+    let repr = format!("{blocks:?}|{items:?}|{entities:?}|{worldgen:?}|{spawning:?}");
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in repr.as_bytes() {
         hash ^= u64::from(*byte);
@@ -208,6 +216,29 @@ fn load_entities() -> EntityRegistry {
     }
 }
 
+fn load_spawning(entities: &EntityRegistry) -> SpawnConfig {
+    let text = match std::fs::read_to_string(SPAWNING_PATH) {
+        Ok(text) => text,
+        Err(err) => {
+            log::info!("could not read {SPAWNING_PATH} ({err}); using builtin spawning");
+            return SpawnConfig::builtin(entities);
+        }
+    };
+    match SpawnConfig::from_toml(&text, entities) {
+        Ok(config) => {
+            log::info!(
+                "loaded {} spawn rules from {SPAWNING_PATH}",
+                config.entries.len()
+            );
+            config
+        }
+        Err(err) => {
+            log::warn!("failed to parse {SPAWNING_PATH}: {err}; using builtin spawning");
+            SpawnConfig::builtin(entities)
+        }
+    }
+}
+
 fn load_items(blocks: &BlockRegistry) -> ItemRegistry {
     let text = match std::fs::read_to_string(ITEMS_PATH) {
         Ok(text) => text,
@@ -254,10 +285,24 @@ mod tests {
         let items = Arc::new(ItemRegistry::from_blocks(&blocks));
         let entities = Arc::new(EntityRegistry::builtin());
         let worldgen = Arc::new(WorldGenConfig::builtin(&blocks));
+        let spawning = Arc::new(SpawnConfig::builtin(&entities));
         assert_ne!(
-            content_hash(&blocks, &items, &entities, &worldgen),
+            content_hash(&blocks, &items, &entities, &worldgen, &spawning),
             a.hash,
             "a changed definition must change the hash"
+        );
+
+        // Spawn rules gate multiplayer too: divergent rules = divergent hash.
+        use crate::entity::spawning::BUILTIN_SPAWNING;
+        let tweaked = BUILTIN_SPAWNING.replace("max_mobs = 40", "max_mobs = 99");
+        let spawning = Arc::new(SpawnConfig::from_toml(&tweaked, &entities).unwrap());
+        let blocks = Arc::new(builtin_blocks(&mut TileRegistry::with_engine_tiles()));
+        let items = Arc::new(ItemRegistry::from_blocks(&blocks));
+        let worldgen = Arc::new(WorldGenConfig::builtin(&blocks));
+        assert_ne!(
+            content_hash(&blocks, &items, &entities, &worldgen, &spawning),
+            a.hash,
+            "changed spawn rules must change the hash"
         );
     }
 }

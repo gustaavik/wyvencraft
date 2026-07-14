@@ -12,8 +12,17 @@
 #   [entity.vitals]    health/hunger model (see field names)
 #   [entity.item]      dropped-item behavior: despawn timer, pop/throw
 #                      speeds, pickup grace delays, pickup range
-#   [entity.visual]    kind = "humanoid" (skinned box model) or
-#                      kind = "item_cube" (spinning, bobbing cube)
+#   [entity.mob]       makes the kind a mob: max_health, walk/run/jump
+#                      speeds, drops = [{ item, min, max }] death loot;
+#                      hostile = true adds aggro_range, attack_range,
+#                      attack_damage, attack_cooldown; [entity.mob.ranged]
+#                      (projectile_speed/damage, keep_distance) makes the
+#                      attack a projectile instead of melee.
+#                      Spawn rules live in spawning.toml, not here.
+#   [entity.visual]    kind = "humanoid" (skinned box model; optional
+#                      skin = "<mob skin>", arms_forward = true),
+#                      kind = "quadruped" (skin + body/head/leg px sizes),
+#                      or kind = "item_cube" (spinning, bobbing cube)
 
 [[entity]]
 name = "player"
@@ -71,3 +80,106 @@ kind = "item_cube"
 spin_rate = 1.8
 bob_amplitude = 0.03
 bob_rate = 2.4
+
+[[entity]]
+name = "cow"
+
+[entity.physics]
+gravity = 28.0
+terminal_velocity = -60.0
+width = 0.9
+height = 1.4
+ground_friction = 10.0
+
+[entity.mob]
+max_health = 10.0
+walk_speed = 1.4
+run_speed = 3.0
+jump_speed = 9.0
+drops = [{ item = "raw beef", min = 1, max = 3 }]
+
+[entity.visual]
+kind = "quadruped"
+skin = "cow"
+body = [12.0, 10.0, 18.0]
+head = [8.0, 8.0, 6.0]
+leg = [4.0, 11.0, 4.0]
+
+[[entity]]
+name = "sheep"
+
+[entity.physics]
+gravity = 28.0
+terminal_velocity = -60.0
+width = 0.9
+height = 1.3
+ground_friction = 10.0
+
+[entity.mob]
+max_health = 8.0
+walk_speed = 1.3
+run_speed = 2.8
+jump_speed = 9.0
+drops = [{ item = "raw mutton", min = 1, max = 2 }]
+
+[entity.visual]
+kind = "quadruped"
+skin = "sheep"
+body = [12.0, 10.0, 16.0]
+head = [7.0, 7.0, 6.0]
+leg = [4.0, 10.0, 4.0]
+
+[[entity]]
+name = "zombie"
+
+[entity.physics]
+gravity = 28.0
+terminal_velocity = -60.0
+width = 0.6
+height = 1.8
+ground_friction = 10.0
+
+[entity.mob]
+max_health = 20.0
+walk_speed = 1.0
+run_speed = 3.4
+jump_speed = 9.0
+hostile = true
+aggro_range = 16.0
+attack_range = 1.6
+attack_damage = 3.0
+attack_cooldown = 1.0
+
+[entity.visual]
+kind = "humanoid"
+skin = "zombie"
+arms_forward = true
+
+[[entity]]
+name = "skeleton"
+
+[entity.physics]
+gravity = 28.0
+terminal_velocity = -60.0
+width = 0.6
+height = 1.8
+ground_friction = 10.0
+
+[entity.mob]
+max_health = 16.0
+walk_speed = 1.0
+run_speed = 3.2
+jump_speed = 9.0
+hostile = true
+aggro_range = 18.0
+attack_range = 12.0
+attack_cooldown = 1.6
+
+[entity.mob.ranged]
+projectile_speed = 18.0
+projectile_damage = 3.0
+keep_distance = 8.0
+
+[entity.visual]
+kind = "humanoid"
+skin = "skeleton"

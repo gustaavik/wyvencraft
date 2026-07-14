@@ -106,6 +106,12 @@ pub const CAPE: SkinPart = SkinPart {
 };
 
 impl SkinPart {
+    /// A part unwrap at `uv` for a box of `size` pixels (width, height,
+    /// depth). Lets other sheets (mob skins) define their own layouts.
+    pub const fn new(uv: [u32; 2], size: [u32; 3]) -> Self {
+        Self { uv, size }
+    }
+
     /// Pixel rect `(x, y, w, h)` on the sheet for the face pointing `dir`, in
     /// the model's frame (front = -Z, character's right = +X — see
     /// [`crate::entity::model`]).

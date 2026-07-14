@@ -81,10 +81,13 @@ pub enum ClientMessage {
     /// Chat message.
     Chat(String),
     /// Sent once after entering the world: "I'm in-game, send me the current world
-    /// state." The host replies with the accumulated block edits as [`ServerMessage::WorldEdits`].
-    /// Pull-based (rather than pushed on join) so it can't be lost to the connecting
-    /// state draining channels before the in-game state exists.
+    /// state." The host replies with the accumulated block edits as [`ServerMessage::WorldEdits`]
+    /// and one [`ServerMessage::MobSpawned`] per live mob. Pull-based (rather than
+    /// pushed on join) so it can't be lost to the connecting state draining
+    /// channels before the in-game state exists.
     RequestWorldState,
+    /// Melee swing landed on mob `id` (the host validates range and applies).
+    Attack { id: u64 },
 }
 
 /// Messages the host sends to clients.
@@ -149,6 +152,47 @@ pub enum ServerMessage {
     PlayerEquipment {
         id: PlayerId,
         armor: [Option<u16>; 6],
+    },
+    /// A mob came into existence (spawned, or replayed to a joining client).
+    /// Kind travels by name (the recipe-wire precedent): unknown names are
+    /// skipped with a warning; the content hash already gates real mismatches.
+    MobSpawned {
+        id: u64,
+        kind: String,
+        position: NetVec3,
+    },
+    /// Positions + facings of every live mob, batched once per host frame
+    /// (sent on the unreliable channel, like player movement).
+    MobStates {
+        mobs: Vec<(u64, NetVec3, f32)>,
+    },
+    /// A mob took damage (authoritative health mirror / hurt feedback).
+    MobHurt {
+        id: u64,
+        health: f32,
+    },
+    /// A mob left the world. `killed_by` names the killing player, if any —
+    /// that peer (and only that peer) rolls and spawns the loot locally,
+    /// consistent with block drops being per-peer local.
+    MobDespawned {
+        id: u64,
+        killed_by: Option<PlayerId>,
+    },
+    /// A mob launched a projectile. Fire-and-forget: clients simulate the
+    /// arc locally for display; damage stays host-side. Carries its own
+    /// ballistics so no kind lookup is needed.
+    ArrowSpawned {
+        position: NetVec3,
+        velocity: NetVec3,
+        gravity: f32,
+        lifetime: f32,
+    },
+    /// A mob (or its arrow) hit the addressed player. The client applies it
+    /// to itself through its own armor mitigation and reports the result
+    /// back via its normal `Stats` sync (clients own their vitals).
+    PlayerDamaged {
+        id: PlayerId,
+        amount: f32,
     },
 }
 
@@ -311,6 +355,82 @@ mod tests {
             }
             _ => panic!("expected SyncInventory"),
         }
+    }
+
+    #[test]
+    fn mob_messages_roundtrip() {
+        let attack = decode::<ClientMessage>(&encode(&ClientMessage::Attack { id: 9 })).unwrap();
+        assert!(matches!(attack, ClientMessage::Attack { id: 9 }));
+
+        let spawned = ServerMessage::MobSpawned {
+            id: 3,
+            kind: "cow".to_string(),
+            position: [10.0, 64.0, -3.0],
+        };
+        match decode::<ServerMessage>(&encode(&spawned)).unwrap() {
+            ServerMessage::MobSpawned { id, kind, position } => {
+                assert_eq!((id, kind.as_str()), (3, "cow"));
+                assert_eq!(position, [10.0, 64.0, -3.0]);
+            }
+            other => panic!("expected MobSpawned, got {other:?}"),
+        }
+
+        let states = ServerMessage::MobStates {
+            mobs: vec![(3, [1.0, 2.0, 3.0], 0.5), (4, [4.0, 5.0, 6.0], -1.0)],
+        };
+        match decode::<ServerMessage>(&encode(&states)).unwrap() {
+            ServerMessage::MobStates { mobs } => {
+                assert_eq!(mobs.len(), 2);
+                assert_eq!(mobs[1], (4, [4.0, 5.0, 6.0], -1.0));
+            }
+            other => panic!("expected MobStates, got {other:?}"),
+        }
+
+        let hurt = decode::<ServerMessage>(&encode(&ServerMessage::MobHurt { id: 3, health: 4.5 }))
+            .unwrap();
+        assert!(matches!(hurt, ServerMessage::MobHurt { id: 3, health } if health == 4.5));
+
+        let despawned = decode::<ServerMessage>(&encode(&ServerMessage::MobDespawned {
+            id: 3,
+            killed_by: Some(PlayerId(2)),
+        }))
+        .unwrap();
+        assert!(matches!(
+            despawned,
+            ServerMessage::MobDespawned {
+                id: 3,
+                killed_by: Some(PlayerId(2)),
+            }
+        ));
+
+        let arrow = ServerMessage::ArrowSpawned {
+            position: [0.0, 70.0, 0.0],
+            velocity: [18.0, 2.0, 0.0],
+            gravity: 20.0,
+            lifetime: 8.0,
+        };
+        match decode::<ServerMessage>(&encode(&arrow)).unwrap() {
+            ServerMessage::ArrowSpawned {
+                velocity, gravity, ..
+            } => {
+                assert_eq!(velocity, [18.0, 2.0, 0.0]);
+                assert_eq!(gravity, 20.0);
+            }
+            other => panic!("expected ArrowSpawned, got {other:?}"),
+        }
+
+        let damaged = decode::<ServerMessage>(&encode(&ServerMessage::PlayerDamaged {
+            id: PlayerId(1),
+            amount: 3.0,
+        }))
+        .unwrap();
+        assert!(matches!(
+            damaged,
+            ServerMessage::PlayerDamaged {
+                id: PlayerId(1),
+                amount,
+            } if amount == 3.0
+        ));
     }
 
     #[test]

@@ -60,6 +60,34 @@ impl Aabb {
             && self.min.z < other.max.z
             && self.max.z > other.min.z
     }
+
+    /// Slab-test ray intersection: the distance along `dir` (normalized) at
+    /// which the ray from `origin` enters this box, if it does within
+    /// `max_t`. An origin inside the box hits at `0.0`. Used for melee
+    /// targeting (crosshair ray vs mob boxes).
+    pub fn ray_hit(self, origin: Vec3, dir: Vec3, max_t: f32) -> Option<f32> {
+        let mut t_enter: f32 = 0.0;
+        let mut t_exit = max_t;
+        for axis in 0..3 {
+            let (o, d) = (origin[axis], dir[axis]);
+            let (lo, hi) = (self.min[axis], self.max[axis]);
+            if d.abs() < 1.0e-8 {
+                // Parallel to the slab: must already be inside it.
+                if o < lo || o > hi {
+                    return None;
+                }
+                continue;
+            }
+            let (t0, t1) = ((lo - o) / d, (hi - o) / d);
+            let (near, far) = if t0 < t1 { (t0, t1) } else { (t1, t0) };
+            t_enter = t_enter.max(near);
+            t_exit = t_exit.min(far);
+            if t_enter > t_exit {
+                return None;
+            }
+        }
+        Some(t_enter)
+    }
 }
 
 /// A ray with a normalized direction, used for block targeting.
@@ -143,5 +171,47 @@ impl Frustum {
             }
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ray_hits_a_box_ahead_and_misses_beside() {
+        let cube = Aabb::new(Vec3::new(-0.5, 0.0, -4.5), Vec3::new(0.5, 1.0, -3.5));
+        // Straight down -Z from the origin: enter at 3.5.
+        let hit = cube.ray_hit(Vec3::new(0.0, 0.5, 0.0), Vec3::NEG_Z, 10.0);
+        assert!((hit.unwrap() - 3.5).abs() < 1e-6);
+        // Beyond max_t, or aimed elsewhere: no hit.
+        assert!(
+            cube.ray_hit(Vec3::new(0.0, 0.5, 0.0), Vec3::NEG_Z, 3.0)
+                .is_none()
+        );
+        assert!(
+            cube.ray_hit(Vec3::new(0.0, 0.5, 0.0), Vec3::Z, 10.0)
+                .is_none()
+        );
+        assert!(
+            cube.ray_hit(Vec3::new(2.0, 0.5, 0.0), Vec3::NEG_Z, 10.0)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn ray_from_inside_hits_at_zero() {
+        let cube = Aabb::new(Vec3::splat(-1.0), Vec3::splat(1.0));
+        assert_eq!(cube.ray_hit(Vec3::ZERO, Vec3::X, 5.0), Some(0.0));
+    }
+
+    #[test]
+    fn parallel_ray_outside_the_slab_misses() {
+        let cube = Aabb::new(Vec3::ZERO, Vec3::ONE);
+        // Runs parallel to the box along Z, two units above it.
+        assert!(
+            cube.ray_hit(Vec3::new(0.5, 3.0, -5.0), Vec3::Z, 20.0)
+                .is_none()
+        );
     }
 }

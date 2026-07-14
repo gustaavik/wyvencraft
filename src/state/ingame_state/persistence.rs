@@ -7,7 +7,7 @@ use super::net::record_remote;
 use super::{InGameState, NetRole};
 use crate::inventory::{ItemId, ItemStack, TOTAL_SLOTS};
 use crate::net::{PlayerId, PlayerRestore};
-use crate::save::{PlayerData, WorldData};
+use crate::save::{MobsData, PlayerData, WorldData};
 
 impl InGameState {
     /// Apply the saved state the host handed back in its `Welcome` (this client
@@ -61,16 +61,18 @@ impl InGameState {
         }
         let world = WorldData::from_world(&self.world);
         let player = PlayerData::capture(&self.player, &self.inventory, &self.items);
+        let mobs = MobsData::from_mobs(&self.mobs);
         let save = self.save.as_mut().expect("checked above");
         save.meta.game_mode = self.player.mode;
         save.meta.spawn = self.spawn.to_array();
         save.meta.time_of_day = self.day_cycle.time_of_day();
-        match save.write(&world, &player, &self.player_records) {
+        match save.write(&world, &player, &self.player_records, &mobs) {
             Ok(()) => log::info!(
-                "saved world '{}' ({} edits, {} player records)",
+                "saved world '{}' ({} edits, {} player records, {} mobs)",
                 save.meta.name,
                 world.edits.len(),
-                self.player_records.0.len()
+                self.player_records.0.len(),
+                mobs.mobs.len()
             ),
             Err(err) => log::error!("failed to save world '{}': {err}", save.meta.name),
         }

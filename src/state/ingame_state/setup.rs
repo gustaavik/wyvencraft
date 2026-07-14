@@ -10,7 +10,7 @@ use super::net::recipes_from_wire;
 use super::{DOUBLE_TAP_WINDOW, InGameState, NetRole, SPAWN_RADIUS};
 use crate::content::GameContent;
 use crate::core::{BlockPos, CHUNK_HEIGHT, ChunkPos, DayCycle, GameMode};
-use crate::entity::{AnimationState, HumanoidModel, Player};
+use crate::entity::{AnimationState, HumanoidModel, Player, Spawner};
 use crate::inventory::{Inventory, RecipeBook};
 use crate::net::{Client, Host, NetVec3, PlayerId, PlayerRestore, RecipeData};
 use crate::save::{PlayerRecords, SavedGame};
@@ -63,6 +63,7 @@ impl InGameState {
             world,
             player,
             players,
+            mobs,
         } = game;
         // Anchor spawn-area generation at the saved player position (or the
         // world's recorded spawn) so there's ground under a restored player.
@@ -92,6 +93,27 @@ impl InGameState {
         }
         if let Some(player) = &player {
             player.apply(&mut state.player, &mut state.inventory, &state.items);
+        }
+        // Respawn the saved mob population. Fresh ids and brains (both are
+        // session-scoped); unknown kinds fail soft like unknown blocks/items.
+        let saved_mobs = mobs.mobs.len();
+        for data in mobs.mobs {
+            let position = Vec3::from_array(data.position);
+            match state.spawn_mob(&data.kind, position) {
+                Some(_) => {
+                    if let Some(mob) = state.mobs.last_mut() {
+                        mob.health = data.health.min(mob.params.max_health);
+                        mob.night_spawned = data.night_spawned;
+                    }
+                }
+                None => log::warn!(
+                    "save references unknown mob kind '{}'; dropping it",
+                    data.kind
+                ),
+            }
+        }
+        if saved_mobs > 0 {
+            log::info!("restored {} of {saved_mobs} saved mobs", state.mobs.len());
         }
         log::info!(
             "loaded world '{}' (seed {}, time {:.3}, player {})",
@@ -203,7 +225,7 @@ impl InGameState {
             }
         }
 
-        Self {
+        let mut state = Self {
             world,
             player: Player::new(spawn, mode, entities.player()),
             blocks,
@@ -234,6 +256,15 @@ impl InGameState {
             break_mesh: None,
             outline_block: None,
             outline_mesh: None,
+            mobs: Vec::new(),
+            next_mob_id: 0,
+            spawning: content.spawning.clone(),
+            spawner: Spawner::new(seed ^ 0x5EED_0F5B_A3B1_E5B0),
+            remote_mobs: HashMap::new(),
+            mob_events: Vec::new(),
+            mob_meshes: Vec::new(),
+            arrows: Vec::new(),
+            arrows_mesh: None,
             drops: Vec::new(),
             drops_mesh: None,
             drops_mesh_transparent: None,
@@ -254,7 +285,11 @@ impl InGameState {
             remote_players: HashMap::new(),
             remote_meshes: Vec::new(),
             remote_anims: HashMap::new(),
+        };
+        if !matches!(state.net, NetRole::Client { .. }) {
+            state.debug_spawn_from_env();
         }
+        state
     }
 }
 

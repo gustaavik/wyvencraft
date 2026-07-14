@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::GameMode;
 use crate::core::day_cycle::DEFAULT_START;
 
-pub use data::{ItemStackData, PlayerData, PlayerRecords, WorldData};
+pub use data::{ItemStackData, MobData, MobsData, PlayerData, PlayerRecords, WorldData};
 
 /// On-disk format version, stamped into `level.toml` and every `.dat` header.
 pub const SAVE_VERSION: u32 = 1;
@@ -40,6 +40,7 @@ const LEVEL_FILE: &str = "level.toml";
 const WORLD_FILE: &str = "world.dat";
 const PLAYER_FILE: &str = "player.dat";
 const PLAYERS_FILE: &str = "players.dat";
+const MOBS_FILE: &str = "mobs.dat";
 /// Local player profile (stable multiplayer identity), next to `saves/`.
 const PROFILE_FILE: &str = "profile.toml";
 
@@ -102,6 +103,7 @@ pub struct SavedGame {
     pub world: Option<WorldData>,
     pub player: Option<PlayerData>,
     pub players: PlayerRecords,
+    pub mobs: MobsData,
 }
 
 /// One row of the world list in the menus.
@@ -200,27 +202,38 @@ impl WorldSave {
                 None
             })
             .unwrap_or_default();
+        // Missing = a pre-mobs save (fresh population); corrupt fails soft
+        // like the player files — the terrain remains playable.
+        let mobs = read_dat::<MobsData>(&self.dir.join(MOBS_FILE))
+            .unwrap_or_else(|err| {
+                log::warn!("ignoring corrupt mobs.dat for '{}': {err}", self.slug);
+                None
+            })
+            .unwrap_or_default();
         Ok(SavedGame {
             save: self,
             world,
             player,
             players,
+            mobs,
         })
     }
 
     /// Persist the world: metadata + edits + the local player + remote-player
-    /// records. Bumps `last_played`.
+    /// records + the mob population. Bumps `last_played`.
     pub fn write(
         &mut self,
         world: &WorldData,
         player: &PlayerData,
         players: &PlayerRecords,
+        mobs: &MobsData,
     ) -> Result<(), SaveError> {
         self.meta.last_played_unix = unix_now();
         self.write_level()?;
         write_dat(&self.dir.join(WORLD_FILE), world)?;
         write_dat(&self.dir.join(PLAYER_FILE), player)?;
         write_dat(&self.dir.join(PLAYERS_FILE), players)?;
+        write_dat(&self.dir.join(MOBS_FILE), mobs)?;
         Ok(())
     }
 
@@ -483,9 +496,17 @@ mod tests {
         };
         let mut players = PlayerRecords::default();
         players.0.insert(77, player.clone());
+        let mobs = MobsData {
+            mobs: vec![MobData {
+                kind: "cow".into(),
+                position: [8.0, 65.0, -2.0],
+                health: 6.5,
+                night_spawned: false,
+            }],
+        };
         save.meta.spawn = [0.5, 71.0, 0.5];
         save.meta.time_of_day = 0.42;
-        save.write(&world, &player, &players).unwrap();
+        save.write(&world, &player, &players, &mobs).unwrap();
 
         let game = WorldSave::open(&root, "test-world")
             .unwrap()
@@ -502,6 +523,15 @@ mod tests {
         assert_eq!(loaded_player.slots, player.slots);
         assert_eq!(loaded_player.selected_slot, 4);
         assert_eq!(game.players.0.get(&77).unwrap().slots, player.slots);
+        assert_eq!(game.mobs, mobs, "mob population round-trips");
+
+        // A save without mobs.dat (pre-mobs world) still loads, empty.
+        fs::remove_file(root.join("test-world").join(MOBS_FILE)).unwrap();
+        let game = WorldSave::open(&root, "test-world")
+            .unwrap()
+            .load()
+            .unwrap();
+        assert_eq!(game.mobs, MobsData::default(), "missing mobs.dat = empty");
 
         // No temp files left behind by the atomic writes.
         let leftovers: Vec<_> = fs::read_dir(root.join("test-world"))

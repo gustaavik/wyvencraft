@@ -9,6 +9,7 @@ pub mod camera;
 pub mod context;
 pub mod debug;
 pub mod mesh;
+pub mod mobskin;
 pub mod pipeline;
 pub mod renderer;
 pub mod shaders;

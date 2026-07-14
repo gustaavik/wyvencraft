@@ -42,6 +42,11 @@ impl DayCycle {
         self.time_of_day = t.rem_euclid(1.0);
     }
 
+    /// True while the sun is below the horizon (mob spawning's night gate).
+    pub fn is_night(&self) -> bool {
+        self.sun_direction().y < 0.0
+    }
+
     /// Unit direction **toward** the sun in world space (Y-up). The sun rises in
     /// the east, passes overhead at noon, and sets in the west; a small Z tilt
     /// keeps the arc from being perfectly vertical.
@@ -186,6 +191,14 @@ mod tests {
     fn sun_is_near_horizon_at_sunrise_and_sunset() {
         assert!(DayCycle::new(0.25).sun_direction().y.abs() < 0.2);
         assert!(DayCycle::new(0.75).sun_direction().y.abs() < 0.2);
+    }
+
+    #[test]
+    fn night_spans_midnight_but_not_noon() {
+        assert!(DayCycle::new(0.0).is_night(), "midnight is night");
+        assert!(DayCycle::new(0.9).is_night(), "late evening is night");
+        assert!(!DayCycle::new(0.5).is_night(), "noon is day");
+        assert!(!DayCycle::new(0.3).is_night(), "mid-morning is day");
     }
 
     #[test]

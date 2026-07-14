@@ -7,6 +7,7 @@
 //! - [`net`] — the per-frame network pump and wire (de)serialization.
 //! - [`streaming`] — chunk request/insert/unload and mesh budgeting.
 //! - [`interaction`] — block break/place, mining, drops, target outline.
+//! - [`mobs`] — mob spawning, AI perception/updates, and their attacks.
 //! - [`models`] — player/preview/remote animated model meshes.
 //! - [`inventory`] — the inventory-screen click/craft handlers.
 //! - [`persistence`] — world save + restore.
@@ -15,6 +16,7 @@
 mod frame;
 mod interaction;
 mod inventory;
+mod mobs;
 mod models;
 mod net;
 mod persistence;
@@ -27,9 +29,12 @@ use std::sync::Arc;
 use glam::Vec3;
 
 use crate::core::{BlockPos, ChunkPos, DayCycle};
-use crate::entity::{AnimationState, DroppedItem, EntityRegistry, HumanoidModel, Player};
+use crate::entity::{
+    AnimationState, Arrow, DroppedItem, EntityRegistry, HumanoidModel, Mob, Player, SpawnConfig,
+    Spawner,
+};
 use crate::inventory::{ARMOR_SIZE, Inventory, ItemRegistry, ItemStack, RecipeBook};
-use crate::net::{Client, Host, NetItemStack, PlayerId, RemotePlayer};
+use crate::net::{Client, Host, NetItemStack, PlayerId, RemotePlayer, ServerMessage};
 use crate::render::{GpuLines, GpuMesh};
 use crate::save::{PlayerRecords, WorldSave};
 use crate::world::{BlockRegistry, ChunkLoader, FluidSim, World};
@@ -137,6 +142,28 @@ pub struct InGameState {
     /// Selection outline on the targeted block, cached until the target changes.
     outline_block: Option<BlockPos>,
     outline_mesh: Option<GpuLines>,
+    /// Live mobs, simulated by the authority (singleplayer/host) only.
+    /// Clients keep interpolated replicas in `remote_mobs` instead.
+    mobs: Vec<Mob>,
+    /// Next value for a host-allocated [`crate::entity::MobId`].
+    next_mob_id: u64,
+    /// Mob spawn rules from `assets/spawning.toml` (part of the content hash).
+    spawning: Arc<SpawnConfig>,
+    /// The periodic spawn scheduler (authority only; idle on clients).
+    spawner: Spawner,
+    /// Client: replicas of the host's mobs, keyed by wire id.
+    remote_mobs: HashMap<u64, mobs::RemoteMob>,
+    /// Host: reliable mob events (spawn/hurt/death/arrow/player-damage)
+    /// queued by the simulation this frame, drained into the broadcast by
+    /// `pump_network`. Kept as a field so mob code never borrows `net`.
+    mob_events: Vec<ServerMessage>,
+    /// One GPU mesh per visible mob, rebuilt each frame like remote players.
+    mob_meshes: Vec<GpuMesh>,
+    /// Arrows in flight. Every peer simulates the ones it knows about; only
+    /// the authority applies their damage.
+    arrows: Vec<Arrow>,
+    /// Combined mesh for all arrows (rebuilt per frame, like drops).
+    arrows_mesh: Option<GpuMesh>,
     /// Item drops lying in the world. Local-only: not synced over the network.
     drops: Vec<DroppedItem>,
     /// Combined GPU meshes for all drops, split by render pass (rebuilt per frame).
@@ -243,6 +270,51 @@ mod tests {
         assert_eq!(book.recipes()[0].output, items.find("glass").unwrap());
     }
 
+    /// End-to-end combat: spawn a cow next to the player, punch it to death,
+    /// and confirm its raw-beef loot pops as dropped items.
+    #[test]
+    fn killing_a_cow_drops_raw_beef() {
+        let mut state = InGameState::new(GameContent::builtin(), 7, GameMode::Survival);
+        let cow_kind = state.entities.find("cow").expect("cow kind");
+        let max_health = cow_kind.mob.as_ref().unwrap().max_health;
+
+        // Stand the cow on the ground right in front of the player.
+        let look = state.player.look_direction();
+        let pos = state.player.position + Vec3::new(look.x, 0.0, look.z).normalize() * 2.0;
+        let ground = state
+            .find_ground(pos.x, pos.z, crate::core::CHUNK_HEIGHT - 2)
+            .expect("ground near spawn");
+        state
+            .spawn_mob("cow", Vec3::new(pos.x, ground, pos.z))
+            .expect("cow spawns");
+
+        // The crosshair ray finds it (it may need to be exactly ahead: aim by
+        // construction, the player looks along `look` from the eye).
+        let Some(mobs::MobTargetRef::Local(index)) = state.targeted_mob() else {
+            panic!("cow should be under the crosshair as a local mob");
+        };
+
+        // Punch until dead; the next tick reaps it and rolls the drop table.
+        let hits = (max_health / 2.0).ceil() as usize; // PLAYER_ATTACK_DAMAGE
+        for _ in 0..hits {
+            state.attack_mob(mobs::MobTargetRef::Local(index));
+        }
+        state.update_mobs(1.0 / 60.0);
+        assert!(state.mobs.is_empty(), "cow should be dead and reaped");
+        assert!(!state.drops.is_empty(), "death should drop loot");
+        let beef = state.items.find("raw beef").unwrap();
+        let dropped: u32 = state
+            .drops
+            .iter()
+            .filter(|d| d.stack.item == beef)
+            .map(|d| u32::from(d.stack.count))
+            .sum();
+        assert!(
+            (1..=3).contains(&dropped),
+            "cow drops 1..=3 raw beef, got {dropped}"
+        );
+    }
+
     /// End-to-end persistence: create a world, play (edit terrain, move, change
     /// the inventory), save, and reload it through the real `InGameState` path.
     #[test]
@@ -259,7 +331,8 @@ mod tests {
             .unwrap();
         let mut state = InGameState::new_saved(GameContent::builtin(), game);
 
-        // "Play": place a block above ground, move, and rearrange the inventory.
+        // "Play": place a block above ground, move, rearrange the inventory,
+        // and share the world with a slightly hurt zombie.
         let edit_pos = BlockPos::new(3, 200, 5);
         assert!(state.world.set_block(edit_pos, blocks::STONE).is_some());
         state.player.position = Vec3::new(10.0, 90.0, -4.0);
@@ -269,6 +342,11 @@ mod tests {
             Some(ItemStack::new(state.items.find("bread").unwrap(), 2)),
         );
         state.inventory.set_selected(8);
+        state
+            .spawn_mob("zombie", Vec3::new(6.0, 80.0, 6.0))
+            .expect("zombie spawns");
+        state.mobs[0].health = 11.0;
+        state.mobs[0].night_spawned = true;
         state.save_world();
         drop(state);
 
@@ -286,6 +364,11 @@ mod tests {
             Some(ItemStack::new(state.items.find("bread").unwrap(), 2))
         );
         assert_eq!(state.inventory.selected_index(), 8);
+        assert_eq!(state.mobs.len(), 1, "the zombie survives the reload");
+        assert_eq!(state.mobs[0].kind_name, "zombie");
+        assert_eq!(state.mobs[0].position, Vec3::new(6.0, 80.0, 6.0));
+        assert_eq!(state.mobs[0].health, 11.0);
+        assert!(state.mobs[0].night_spawned, "daylight rule survives");
 
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -77,6 +77,8 @@ pub fn paint_named(name: &str) -> Option<TileRgba> {
         "shears" => sprite(SHEARS, SHEARS_PALETTE),
         "apple" => sprite(APPLE, APPLE_PALETTE),
         "bread" => sprite(BREAD, BREAD_PALETTE),
+        "raw beef" => sprite(RAW_BEEF, RAW_BEEF_PALETTE),
+        "raw mutton" => sprite(RAW_MUTTON, RAW_MUTTON_PALETTE),
         "helmet" => sprite(HELMET, IRON_ARMOR_PALETTE),
         "chestplate" => sprite(CHESTPLATE, IRON_ARMOR_PALETTE),
         "leggings" => sprite(LEGGINGS, IRON_ARMOR_PALETTE),
@@ -622,6 +624,58 @@ const BREAD: Sprite = [
 
 const BREAD_PALETTE: &Palette = &[('c', [150, 96, 44, 255]), ('#', [206, 152, 78, 255])];
 
+// A steak: dark seared rim around red flesh with a pale marbling streak.
+const RAW_BEEF: Sprite = [
+    "                ",
+    "                ",
+    "                ",
+    "    rrrrrrr     ",
+    "   r#######rr   ",
+    "  r####m####rr  ",
+    "  r###m#####rr  ",
+    " r####m######r  ",
+    " r#####m#####r  ",
+    " r######m###rr  ",
+    "  r########rr   ",
+    "   rrr####rr    ",
+    "     rrrrrr     ",
+    "                ",
+    "                ",
+    "                ",
+];
+
+const RAW_BEEF_PALETTE: &Palette = &[
+    ('r', [130, 32, 34, 255]),
+    ('#', [198, 60, 62, 255]),
+    ('m', [232, 176, 168, 255]),
+];
+
+// A chop on the bone: pink meat with a pale bone stub at the lower left.
+const RAW_MUTTON: Sprite = [
+    "                ",
+    "                ",
+    "       ppppp    ",
+    "      p#####p   ",
+    "     p#######p  ",
+    "     p#######p  ",
+    "    p########p  ",
+    "    p#######p   ",
+    "   bp######p    ",
+    "  bb p####p     ",
+    " bbb  pppp      ",
+    " bb             ",
+    "                ",
+    "                ",
+    "                ",
+    "                ",
+];
+
+const RAW_MUTTON_PALETTE: &Palette = &[
+    ('p', [168, 62, 70, 255]),
+    ('#', [224, 108, 116, 255]),
+    ('b', [230, 224, 210, 255]),
+];
+
 const IRON_ARMOR_PALETTE: &Palette = &[
     ('#', [200, 205, 212, 255]),
     ('.', [150, 156, 166, 255]),
@@ -766,6 +820,8 @@ mod tests {
             "shears",
             "apple",
             "bread",
+            "raw beef",
+            "raw mutton",
             "helmet",
             "chestplate",
             "leggings",

@@ -48,9 +48,9 @@ impl DroppedItem {
             pickup_delay: delay,
             physics: kind.physics,
             params: kind.item.expect("dropped-item kind has item params"),
-            visual: match kind.visual {
-                VisualSpec::ItemCube(cube) => cube,
-                VisualSpec::Humanoid => ItemCubeParams::default(),
+            visual: match &kind.visual {
+                VisualSpec::ItemCube(cube) => *cube,
+                _ => ItemCubeParams::default(),
             },
         }
     }

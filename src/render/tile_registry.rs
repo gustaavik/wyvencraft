@@ -18,7 +18,7 @@ use std::collections::HashMap;
 
 use super::texture::{ATLAS_COLUMNS, ATLAS_SIZE, TILE_SIZE};
 use super::tiles::{self, TileRgba};
-use super::{armor, skin};
+use super::{armor, mobskin, skin};
 
 /// Total atlas capacity; growth requires touching `ATLAS_COLUMNS` in the
 /// fragment shader too, so it is fixed for now.
@@ -82,6 +82,14 @@ impl TileRegistry {
         // like the skin, so worn pieces sample them with the same face rects.
         for kind in armor::ALL {
             for (tile, art) in armor::atlas_tiles(kind) {
+                reg.used[tile as usize] = true;
+                reg.pixels[tile as usize] = Some(art);
+            }
+        }
+
+        // Mob skin sheets: same scheme, filling out the high band (rows 4–15).
+        for kind in mobskin::ALL {
+            for (tile, art) in mobskin::atlas_tiles(kind) {
                 reg.used[tile as usize] = true;
                 reg.pixels[tile as usize] = Some(art);
             }
@@ -268,6 +276,7 @@ mod tests {
             let t = reg.resolve(name).tile;
             assert!(!skin::atlas_tile_indices().any(|s| s == t));
             assert!(!armor::is_armor_tile(t), "{name} landed in the armor band");
+            assert!(!mobskin::is_mob_tile(t), "{name} landed in a mob sheet");
             assert!(!(tiles::WATER_0..tiles::WATER_0 + tiles::WATER_FRAMES).contains(&t));
             assert!(!(tiles::CRACK_0..tiles::CRACK_0 + tiles::CRACK_STAGES).contains(&t));
             assert_ne!(t, 0);
