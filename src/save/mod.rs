@@ -17,6 +17,7 @@
 //! an existing save.
 
 pub mod data;
+pub mod repository;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -29,6 +30,10 @@ use crate::core::GameMode;
 use crate::core::day_cycle::DEFAULT_START;
 
 pub use data::{ItemStackData, MobData, MobsData, PlayerData, PlayerRecords, WorldData};
+pub use repository::{
+    FileWorldRepository, InMemoryWorldRepository, NullWorldRepository, SaveLog, WorldRepository,
+    WorldSnapshot,
+};
 
 /// On-disk format version, stamped into `level.toml` and every `.dat` header.
 pub const SAVE_VERSION: u32 = 1;

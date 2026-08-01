@@ -172,7 +172,7 @@ impl GameState for InGameState {
         self.elapsed = (self.elapsed + ctx.dt) % 3600.0;
         self.day_cycle.advance(ctx.dt);
         // Periodic autosave for persistent worlds (also fires on pause/exit).
-        if self.save.is_some() {
+        if self.save.is_persistent() {
             self.autosave_timer += ctx.dt;
             if self.autosave_timer >= AUTOSAVE_INTERVAL {
                 self.autosave_timer = 0.0;
@@ -321,13 +321,7 @@ impl GameState for InGameState {
                 ),
                 format!("net: {}", self.net_status()),
                 format!("time: {}", format_time_of_day(self.day_cycle.time_of_day())),
-                format!(
-                    "world: {}",
-                    self.save
-                        .as_ref()
-                        .map(|s| s.meta.name.as_str())
-                        .unwrap_or("(unsaved)")
-                ),
+                format!("world: {}", self.save.world_name()),
             ];
             hud::draw_debug(egui_ctx, &lines);
         }

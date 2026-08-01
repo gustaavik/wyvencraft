@@ -18,10 +18,6 @@
 //! app    ← state, content, render, config   (owns the window + event loop)
 //! ```
 
-// Scaffold phase: many APIs exist ahead of the milestone that first calls them.
-// This is removed as the milestones fill in.
-#![allow(dead_code)]
-
 pub mod app;
 pub mod config;
 pub mod content;

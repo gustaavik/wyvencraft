@@ -36,7 +36,7 @@ use crate::entity::{
 use crate::inventory::{ARMOR_SIZE, Inventory, ItemRegistry, ItemStack, RecipeBook};
 use crate::net::{Client, Host, NetItemStack, PlayerId, RemotePlayer, ServerMessage};
 use crate::render::{GpuLines, GpuMesh};
-use crate::save::{PlayerRecords, WorldSave};
+use crate::save::{PlayerRecords, WorldRepository};
 use crate::world::{BlockRegistry, ChunkLoader, FluidSim, World};
 
 /// The networking role of this in-game session. Host/client drivers are boxed
@@ -186,9 +186,10 @@ pub struct InGameState {
     stats_timer: f32,
     /// Networking role + remote players.
     net: NetRole,
-    /// Persistence handle: `Some` when playing a named world as singleplayer or
-    /// host; `None` for clients and ephemeral dev-boot worlds (never saved).
-    save: Option<WorldSave>,
+    /// Where this session's world is persisted. A `FileWorldRepository` when
+    /// playing a named world as singleplayer or host; the null repository for
+    /// clients and ephemeral dev-boot worlds, which are never saved.
+    save: Box<dyn WorldRepository>,
     /// Seconds accumulated toward the next periodic autosave.
     autosave_timer: f32,
     /// Host: saved per-identity player records for this world; handed back to

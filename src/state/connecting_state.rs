@@ -11,7 +11,6 @@ use crate::net::{Client, ServerMessage};
 const TIMEOUT_SECS: f32 = 12.0;
 
 pub struct ConnectingState {
-    address: SocketAddr,
     client: Option<Client>,
     elapsed: f32,
     status: String,
@@ -27,7 +26,6 @@ impl ConnectingState {
             Err(e) => (None, format!("Connection failed: {e}")),
         };
         Self {
-            address,
             client,
             elapsed: 0.0,
             status,

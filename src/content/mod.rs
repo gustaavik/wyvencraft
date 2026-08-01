@@ -8,7 +8,11 @@
 //!
 //! Loading is fail-soft, following the recipes-file precedent: a missing or
 //! invalid file logs a warning and falls back to the embedded builtin copy,
-//! so the game always boots.
+//! so the game always boots. Where the text comes from is a [`ContentSource`],
+//! so the same load path serves the real `assets/` directory, the
+//! builtins-only build, and test fixtures.
+
+pub mod source;
 
 use std::sync::Arc;
 
@@ -18,6 +22,9 @@ use crate::inventory::ItemRegistry;
 use crate::render::TileRegistry;
 use crate::world::block::{BUILTIN_BLOCKS, BlockRegistry};
 use crate::world::generation::WorldGenConfig;
+
+use source::load_or_builtin;
+pub use source::{ContentSource, EmbeddedSource, FsSource, MapSource};
 
 /// How an item is drawn as a 2D icon in the inventory and hotbar. Computed once
 /// at content load and indexed by `ItemId`, so the UI never touches block or
@@ -63,34 +70,70 @@ impl GameContent {
     /// Load content from `assets/` (CWD-relative, like recipes and saves),
     /// falling back to the embedded builtin copies. Never fails.
     pub fn load() -> Arc<Self> {
-        let mut tiles = TileRegistry::with_engine_tiles();
-        let blocks = Arc::new(load_blocks(&mut tiles));
-        let items = Arc::new(load_items(&blocks));
-        let entities = Arc::new(load_entities());
-        let worldgen = Arc::new(load_worldgen(&blocks));
-        let spawning = Arc::new(load_spawning(&entities));
-        let item_icons = build_item_icons(&mut tiles, &blocks, &items);
-        let hash = content_hash(&blocks, &items, &entities, &worldgen, &spawning);
-        Arc::new(Self {
-            tiles,
-            blocks,
-            items,
-            entities,
-            worldgen,
-            spawning,
-            item_icons,
-            hash,
-        })
+        Self::from_source(&FsSource)
     }
 
     /// The embedded builtin content only — used by tests and as the fallback.
     pub fn builtin() -> Arc<Self> {
+        Self::from_source(&EmbeddedSource)
+    }
+
+    /// Build every registry from `source`, in dependency order: blocks name the
+    /// tiles and back the placeable items, entities gate the spawn rules. Each
+    /// file falls back to its builtin independently, so one bad file never
+    /// costs more than itself.
+    pub fn from_source(source: &dyn ContentSource) -> Arc<Self> {
         let mut tiles = TileRegistry::with_engine_tiles();
-        let blocks = Arc::new(builtin_blocks(&mut tiles));
-        let items = Arc::new(ItemRegistry::from_blocks(&blocks));
-        let entities = Arc::new(EntityRegistry::builtin());
-        let worldgen = Arc::new(WorldGenConfig::builtin(&blocks));
-        let spawning = Arc::new(SpawnConfig::builtin(&entities));
+
+        // Blocks own the tile registry: both the parsed and the builtin path
+        // must register their textures into the *same* `tiles`, or the tile
+        // indices baked into block faces won't match the atlas built below.
+        let blocks = Arc::new(load_or_builtin(
+            source,
+            BLOCKS_PATH,
+            "blocks",
+            &mut tiles,
+            BlockRegistry::from_toml,
+            builtin_blocks,
+            |reg| format!("{} blocks", reg.len()),
+        ));
+        let items = Arc::new(load_or_builtin(
+            source,
+            ITEMS_PATH,
+            "items",
+            &mut (),
+            |text, _| ItemRegistry::from_toml(text, &blocks),
+            |_| ItemRegistry::from_blocks(&blocks),
+            |reg| format!("{} items", reg.len()),
+        ));
+        let entities = Arc::new(load_or_builtin(
+            source,
+            ENTITIES_PATH,
+            "entities",
+            &mut (),
+            |text, _| EntityRegistry::from_toml(text),
+            |_| EntityRegistry::builtin(),
+            |reg| format!("{} entity kinds", reg.len()),
+        ));
+        let worldgen = Arc::new(load_or_builtin(
+            source,
+            WORLDGEN_PATH,
+            "worldgen",
+            &mut (),
+            |text, _| WorldGenConfig::from_toml(text, &blocks),
+            |_| WorldGenConfig::builtin(&blocks),
+            |_| "worldgen config".to_string(),
+        ));
+        let spawning = Arc::new(load_or_builtin(
+            source,
+            SPAWNING_PATH,
+            "spawning",
+            &mut (),
+            |text, _| SpawnConfig::from_toml(text, &entities),
+            |_| SpawnConfig::builtin(&entities),
+            |config| format!("{} spawn rules", config.entries.len()),
+        ));
+
         let item_icons = build_item_icons(&mut tiles, &blocks, &items);
         let hash = content_hash(&blocks, &items, &entities, &worldgen, &spawning);
         Arc::new(Self {
@@ -157,108 +200,6 @@ fn builtin_blocks(tiles: &mut TileRegistry) -> BlockRegistry {
     BlockRegistry::from_toml(BUILTIN_BLOCKS, tiles).expect("embedded blocks.toml must parse")
 }
 
-fn load_blocks(tiles: &mut TileRegistry) -> BlockRegistry {
-    let text = match std::fs::read_to_string(BLOCKS_PATH) {
-        Ok(text) => text,
-        Err(err) => {
-            log::info!("could not read {BLOCKS_PATH} ({err}); using builtin blocks");
-            return builtin_blocks(tiles);
-        }
-    };
-    let registry = match BlockRegistry::from_toml(&text, tiles) {
-        Ok(reg) => reg,
-        Err(err) => {
-            log::warn!("failed to parse {BLOCKS_PATH}: {err}; using builtin blocks");
-            return builtin_blocks(tiles);
-        }
-    };
-    log::info!("loaded {} blocks from {BLOCKS_PATH}", registry.len());
-    registry
-}
-
-fn load_worldgen(blocks: &BlockRegistry) -> WorldGenConfig {
-    let text = match std::fs::read_to_string(WORLDGEN_PATH) {
-        Ok(text) => text,
-        Err(err) => {
-            log::info!("could not read {WORLDGEN_PATH} ({err}); using builtin worldgen");
-            return WorldGenConfig::builtin(blocks);
-        }
-    };
-    match WorldGenConfig::from_toml(&text, blocks) {
-        Ok(config) => {
-            log::info!("loaded worldgen config from {WORLDGEN_PATH}");
-            config
-        }
-        Err(err) => {
-            log::warn!("failed to parse {WORLDGEN_PATH}: {err}; using builtin worldgen");
-            WorldGenConfig::builtin(blocks)
-        }
-    }
-}
-
-fn load_entities() -> EntityRegistry {
-    let text = match std::fs::read_to_string(ENTITIES_PATH) {
-        Ok(text) => text,
-        Err(err) => {
-            log::info!("could not read {ENTITIES_PATH} ({err}); using builtin entities");
-            return EntityRegistry::builtin();
-        }
-    };
-    match EntityRegistry::from_toml(&text) {
-        Ok(reg) => {
-            log::info!("loaded {} entity kinds from {ENTITIES_PATH}", reg.len());
-            reg
-        }
-        Err(err) => {
-            log::warn!("failed to parse {ENTITIES_PATH}: {err}; using builtin entities");
-            EntityRegistry::builtin()
-        }
-    }
-}
-
-fn load_spawning(entities: &EntityRegistry) -> SpawnConfig {
-    let text = match std::fs::read_to_string(SPAWNING_PATH) {
-        Ok(text) => text,
-        Err(err) => {
-            log::info!("could not read {SPAWNING_PATH} ({err}); using builtin spawning");
-            return SpawnConfig::builtin(entities);
-        }
-    };
-    match SpawnConfig::from_toml(&text, entities) {
-        Ok(config) => {
-            log::info!(
-                "loaded {} spawn rules from {SPAWNING_PATH}",
-                config.entries.len()
-            );
-            config
-        }
-        Err(err) => {
-            log::warn!("failed to parse {SPAWNING_PATH}: {err}; using builtin spawning");
-            SpawnConfig::builtin(entities)
-        }
-    }
-}
-
-fn load_items(blocks: &BlockRegistry) -> ItemRegistry {
-    let text = match std::fs::read_to_string(ITEMS_PATH) {
-        Ok(text) => text,
-        Err(err) => {
-            log::info!("could not read {ITEMS_PATH} ({err}); using builtin items");
-            return ItemRegistry::from_blocks(blocks);
-        }
-    };
-    match ItemRegistry::from_toml(&text, blocks) {
-        Ok(reg) => {
-            log::info!("loaded {} items from {ITEMS_PATH}", reg.len());
-            reg
-        }
-        Err(err) => {
-            log::warn!("failed to parse {ITEMS_PATH}: {err}; using builtin items");
-            ItemRegistry::from_blocks(blocks)
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,8 +207,95 @@ mod tests {
     #[test]
     fn builtin_content_loads() {
         let content = GameContent::builtin();
-        assert!(content.blocks.len() > 0);
-        assert!(content.items.len() > 0);
+        assert!(!content.blocks.is_empty());
+        assert!(!content.items.is_empty());
+    }
+
+    /// An empty source serves no files, so every registry must fall back to its
+    /// builtin — i.e. `from_source` over nothing is exactly `builtin()`. This is
+    /// what lets the two constructors share one code path.
+    #[test]
+    fn an_empty_source_is_the_builtin_content() {
+        let empty = GameContent::from_source(&MapSource::new());
+        let builtin = GameContent::builtin();
+        assert_eq!(empty.hash, builtin.hash);
+        assert_eq!(empty.blocks.len(), builtin.blocks.len());
+        assert_eq!(empty.items.len(), builtin.items.len());
+    }
+
+    /// Definitions really do come from the source: a fixture adding a block
+    /// yields a registry containing it, with its item and icon derived.
+    ///
+    /// The fixture extends the builtin blocks rather than replacing them,
+    /// because `worldgen.toml` names concrete blocks ("wood", "stone", …) and
+    /// resolving it against a registry missing them is a hard error by design.
+    #[test]
+    fn definitions_are_read_from_the_source() {
+        let blocks = format!(
+            "{BUILTIN_BLOCKS}\n\
+             [[block]]\n\
+             name = \"testonium\"\n\
+             render = \"opaque\"\n\
+             solid = true\n\
+             hardness = 1.0\n\
+             material = \"stone\"\n\
+             textures = \"stone\"\n"
+        );
+        let content = GameContent::from_source(&MapSource::new().with(BLOCKS_PATH, blocks));
+
+        let builtin = GameContent::builtin();
+        assert_eq!(
+            content.blocks.len(),
+            builtin.blocks.len() + 1,
+            "the fixture's block is registered on top of the builtins"
+        );
+        assert!(content.blocks.find("testonium").is_some());
+        // The auto-generated placeable item comes with it, and every item
+        // resolved an icon — proving the fixture's textures reached the same
+        // TileRegistry the atlas is built from.
+        assert!(content.items.find("testonium").is_some());
+        assert_eq!(content.item_icons.len(), content.items.len());
+        assert_ne!(content.hash, builtin.hash, "new block changes the hash");
+    }
+
+    /// Fail-soft is per file: a malformed blocks.toml costs only the blocks,
+    /// and the other four registries still load from the source.
+    #[test]
+    fn a_malformed_file_falls_back_alone() {
+        let source = MapSource::new()
+            .with(BLOCKS_PATH, "this is not valid toml {{{")
+            .with(
+                ENTITIES_PATH,
+                crate::entity::kind::BUILTIN_ENTITIES
+                    .replace("max_health = 20.0", "max_health = 17.0"),
+            );
+        let content = GameContent::from_source(&source);
+
+        let builtin = GameContent::builtin();
+        assert_eq!(
+            content.blocks.len(),
+            builtin.blocks.len(),
+            "bad blocks.toml falls back to the builtin blocks"
+        );
+        // ...while the entities file, which parsed fine, was still honoured.
+        assert_ne!(
+            content.hash, builtin.hash,
+            "the tweaked entities file must still take effect"
+        );
+    }
+
+    /// Worldgen is strict by design (an unknown block name would silently
+    /// generate the wrong terrain), so a bad name rejects the whole file.
+    #[test]
+    fn unknown_worldgen_block_rejects_the_file() {
+        let bad = crate::world::generation::config::BUILTIN_WORLDGEN
+            .replace("bedrock = \"bedrock\"", "bedrock = \"no such block\"");
+        let content = GameContent::from_source(&MapSource::new().with(WORLDGEN_PATH, bad));
+        let builtin = GameContent::builtin();
+        assert_eq!(
+            content.hash, builtin.hash,
+            "a rejected worldgen file leaves the builtin content in place"
+        );
     }
 
     /// The content hash is stable across loads of identical definitions (it

@@ -13,7 +13,7 @@ use crate::core::{BlockPos, CHUNK_HEIGHT, ChunkPos, DayCycle, GameMode};
 use crate::entity::{AnimationState, HumanoidModel, Player, Spawner};
 use crate::inventory::{Inventory, RecipeBook};
 use crate::net::{Client, Host, NetVec3, PlayerId, PlayerRestore, RecipeData};
-use crate::save::{PlayerRecords, SavedGame};
+use crate::save::{FileWorldRepository, NullWorldRepository, PlayerRecords, SavedGame};
 use crate::world::{ChunkLoader, FluidSim, NoiseGenerator, World, WorldGenerator};
 
 impl InGameState {
@@ -127,7 +127,7 @@ impl InGameState {
             },
         );
         state.player_records = players;
-        state.save = Some(save);
+        state.save = Box::new(FileWorldRepository::new(save));
         state
     }
 
@@ -275,7 +275,7 @@ impl InGameState {
             render_alpha: 0.0,
             stats_timer: 0.0,
             net,
-            save: None,
+            save: Box::new(NullWorldRepository),
             autosave_timer: 0.0,
             player_records: PlayerRecords::default(),
             remote_identities: HashMap::new(),
