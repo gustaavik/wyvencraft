@@ -72,10 +72,10 @@ impl GameState for ConnectingState {
             {
                 // Raw block/item ids cross the wire, so divergent content
                 // definitions would silently corrupt the session. Refuse.
-                if content_hash != ctx.content.hash {
+                if content_hash != ctx.resources.content.hash {
                     log::warn!(
                         "content mismatch: host {content_hash:#018x} vs ours {:#018x}; refusing to join",
-                        ctx.content.hash
+                        ctx.resources.content.hash
                     );
                     return Transition::Replace(Box::new(MultiplayerMenuState::new()));
                 }
@@ -105,7 +105,7 @@ impl GameState for ConnectingState {
             );
             let client = self.client.take().expect("client present");
             return Transition::Replace(Box::new(InGameState::new_client(
-                ctx.content.clone(),
+                ctx.resources.content.clone(),
                 seed,
                 client,
                 your_id,

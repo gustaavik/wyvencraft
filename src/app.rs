@@ -22,18 +22,17 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::PhysicalKey;
 use winit::window::{CursorGrabMode, WindowId};
 
-use std::net::SocketAddr;
-
+use crate::boot::{BootPlan, SystemEnv, WorldChoice};
 use crate::config::Settings;
 use crate::content::GameContent;
 use crate::core::{Clock, GameMode};
 use crate::input::InputState;
-use crate::net::{DEFAULT_PORT, Host};
+use crate::net::Host;
 use crate::render::{RenderContext, Renderer};
 use crate::save::{self, SaveError, SavedGame, WorldSave};
 use crate::state::{
-    ConnectingState, GameState, InGameState, LoadingState, MainMenuState, StateContext, StateStack,
-    UiTextures,
+    ConnectingState, GameState, InGameState, LoadingState, MainMenuState, Resources, StateContext,
+    StateStack, UiTextures,
 };
 
 /// Fixed size of the inventory player-model preview image, in pixels. The 0.48
@@ -41,14 +40,59 @@ use crate::state::{
 /// downscaled into whatever rect the inventory reserves.
 const PREVIEW_SIZE: [u32; 2] = [384, 800];
 
-/// Open (or create, seeding from `WYVEN_SEED`/random) the named world for the
-/// `WYVEN_WORLD` boot paths.
-fn load_named_world(name: &str, mode: GameMode) -> Result<SavedGame, SaveError> {
-    let seed = std::env::var("WYVEN_SEED")
-        .ok()
-        .map(|s| save::parse_seed(&s))
-        .unwrap_or_else(save::random_seed);
-    WorldSave::open_or_create(&save::saves_root(), name, seed, mode)?.load()
+/// Seed used by ephemeral (never-saved) host worlds.
+const EPHEMERAL_SEED: u64 = 0x57_56_4E_01;
+
+/// Open (or create) the world a [`BootPlan`] asks for. `Ephemeral` has no save
+/// directory at all, so it yields `None` and the caller builds a throwaway world.
+fn open_boot_world(world: &WorldChoice, mode: GameMode) -> Option<Result<SavedGame, SaveError>> {
+    let WorldChoice::Named { name, seed } = world else {
+        return None;
+    };
+    let seed = seed.unwrap_or_else(save::random_seed);
+    Some(
+        WorldSave::open_or_create(&save::saves_root(), name, seed, mode)
+            .and_then(|save| save.load()),
+    )
+}
+
+/// Turn a [`BootPlan`] into the state the app starts on. This is where the
+/// plan's decisions become effects: opening saves, binding sockets.
+fn initial_state(plan: BootPlan, content: &Arc<GameContent>) -> Box<dyn GameState> {
+    match plan {
+        BootPlan::MainMenu => Box::new(MainMenuState::new()),
+        BootPlan::Singleplayer { world, mode } => match open_boot_world(&world, mode) {
+            Some(Ok(game)) => Box::new(LoadingState::saved(game)),
+            Some(Err(err)) => {
+                log::error!("WYVEN_WORLD load failed ({err}); starting ephemeral world");
+                Box::new(LoadingState::singleplayer(mode))
+            }
+            None => Box::new(LoadingState::singleplayer(mode)),
+        },
+        BootPlan::Host { world, mode, port } => {
+            let (seed, game) = match open_boot_world(&world, mode) {
+                Some(Ok(game)) => (game.save.meta.seed, Some(game)),
+                Some(Err(err)) => {
+                    log::error!("WYVEN_WORLD load failed ({err}); hosting ephemeral world");
+                    (EPHEMERAL_SEED, None)
+                }
+                None => (EPHEMERAL_SEED, None),
+            };
+            match Host::bind(port, seed) {
+                Ok(host) => match game {
+                    Some(game) => {
+                        Box::new(InGameState::new_host_saved(content.clone(), game, host))
+                    }
+                    None => Box::new(InGameState::new_host(content.clone(), seed, host, mode)),
+                },
+                Err(err) => {
+                    log::error!("host bind failed: {err}");
+                    Box::new(MainMenuState::new())
+                }
+            }
+        }
+        BootPlan::Join { address } => Box::new(ConnectingState::new(address)),
+    }
 }
 
 /// Top-level run errors.
@@ -109,64 +153,10 @@ impl App {
         let render_context = RenderContext::from_vulkano(&context);
         let content = GameContent::load();
 
-        // Dev convenience env vars to skip the menus:
-        //   WYVEN_BOOT_INGAME=1     → singleplayer world
-        //   WYVEN_HOST=1            → host a session
-        //   WYVEN_JOIN=addr:port    → join a session
-        //   WYVEN_MODE=creative     → start in creative (default: survival)
-        //   WYVEN_WORLD=name        → load-or-create this named world (persists);
-        //                             without it boot worlds are ephemeral (no save)
-        //   WYVEN_SEED=seed         → seed if WYVEN_WORLD creates a new world
-        let boot_mode = match std::env::var("WYVEN_MODE").as_deref() {
-            Ok("creative") | Ok("Creative") => GameMode::Creative,
-            _ => GameMode::Survival,
-        };
-        let boot_world = std::env::var("WYVEN_WORLD")
-            .ok()
-            .map(|name| load_named_world(&name, boot_mode));
-        let initial: Box<dyn GameState> = if std::env::var_os("WYVEN_BOOT_INGAME").is_some() {
-            match boot_world {
-                Some(Ok(game)) => Box::new(LoadingState::saved(game)),
-                Some(Err(err)) => {
-                    log::error!("WYVEN_WORLD load failed ({err}); starting ephemeral world");
-                    Box::new(LoadingState::singleplayer(boot_mode))
-                }
-                None => Box::new(LoadingState::singleplayer(boot_mode)),
-            }
-        } else if std::env::var_os("WYVEN_HOST").is_some() {
-            let (seed, game) = match boot_world {
-                Some(Ok(game)) => (game.save.meta.seed, Some(game)),
-                Some(Err(err)) => {
-                    log::error!("WYVEN_WORLD load failed ({err}); hosting ephemeral world");
-                    (0x57_56_4E_01, None)
-                }
-                None => (0x57_56_4E_01, None),
-            };
-            match Host::bind(DEFAULT_PORT, seed) {
-                Ok(host) => match game {
-                    Some(game) => {
-                        Box::new(InGameState::new_host_saved(content.clone(), game, host))
-                    }
-                    None => Box::new(InGameState::new_host(
-                        content.clone(),
-                        seed,
-                        host,
-                        boot_mode,
-                    )),
-                },
-                Err(err) => {
-                    log::error!("host bind failed: {err}");
-                    Box::new(MainMenuState::new())
-                }
-            }
-        } else if let Some(join) = std::env::var_os("WYVEN_JOIN") {
-            match join.to_string_lossy().parse::<SocketAddr>() {
-                Ok(addr) => Box::new(ConnectingState::new(addr)),
-                Err(_) => Box::new(MainMenuState::new()),
-            }
-        } else {
-            Box::new(MainMenuState::new())
-        };
+        // Dev convenience env vars skip the menus — see `boot` for the rules:
+        //   WYVEN_BOOT_INGAME / WYVEN_HOST / WYVEN_JOIN / WYVEN_MODE /
+        //   WYVEN_WORLD / WYVEN_SEED.
+        let initial = initial_state(BootPlan::from_env(&SystemEnv), &content);
 
         Self {
             context,
@@ -228,9 +218,11 @@ impl App {
             let mut ctx = StateContext {
                 settings: &mut self.settings,
                 input: &self.input,
-                render: &self.render_context,
-                content: &self.content,
-                ui_tex,
+                resources: Resources {
+                    render: &self.render_context,
+                    content: &self.content,
+                    ui_tex,
+                },
                 dt,
                 elapsed,
                 grab_cursor: grab,
@@ -252,9 +244,11 @@ impl App {
             let mut ctx = StateContext {
                 settings: &mut self.settings,
                 input: &self.input,
-                render: &self.render_context,
-                content: &self.content,
-                ui_tex,
+                resources: Resources {
+                    render: &self.render_context,
+                    content: &self.content,
+                    ui_tex,
+                },
                 dt,
                 elapsed,
                 grab_cursor: grab,
@@ -433,9 +427,11 @@ impl ApplicationHandler for App {
                 let mut ctx = StateContext {
                     settings: &mut self.settings,
                     input: &self.input,
-                    render: &self.render_context,
-                    content: &self.content,
-                    ui_tex,
+                    resources: Resources {
+                        render: &self.render_context,
+                        content: &self.content,
+                        ui_tex,
+                    },
                     dt: 0.0,
                     elapsed: self.clock.elapsed(),
                     grab_cursor: false,

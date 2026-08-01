@@ -37,16 +37,28 @@ pub struct UiTextures {
     pub preview: egui::TextureId,
 }
 
-/// Shared, per-frame context handed to states.
-pub struct StateContext<'a> {
-    pub settings: &'a mut Settings,
-    pub input: &'a InputState,
+/// The app-owned resources a state may draw from: the GPU, the loaded content,
+/// and the egui texture handles.
+///
+/// Grouped because they travel together and almost nothing needs them — the
+/// menus reach for `content` at most, and since the in-game state's GPU work
+/// moved behind a single seam, `render` has exactly one consumer. Keeping them
+/// off the flat context makes it obvious that a state touching `resources` is
+/// doing something with assets, not just reading a frame delta.
+#[derive(Clone, Copy)]
+pub struct Resources<'a> {
     /// GPU device + allocators, for states that upload meshes/textures.
     pub render: &'a Arc<RenderContext>,
     /// Loaded game content (block/item registries), shared by every session.
     pub content: &'a Arc<GameContent>,
     /// egui handles for the block atlas and the player-model preview image.
     pub ui_tex: UiTextures,
+}
+
+/// Shared, per-frame context handed to states.
+pub struct StateContext<'a> {
+    pub settings: &'a mut Settings,
+    pub input: &'a InputState,
     /// Variable frame delta (seconds).
     pub dt: f32,
     /// Total elapsed time (seconds).
@@ -54,6 +66,8 @@ pub struct StateContext<'a> {
     /// Set by a state to request the OS cursor be locked/hidden (gameplay) or
     /// freed (menus).
     pub grab_cursor: bool,
+    /// App-owned assets and GPU handles.
+    pub resources: Resources<'a>,
 }
 
 /// What a state asks the stack to do after an update/UI pass.

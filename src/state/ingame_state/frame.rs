@@ -192,7 +192,7 @@ impl GameState for InGameState {
         self.update_arrows(ctx.dt.min(0.05));
 
         // Simulation for this frame is settled; bring the GPU state in line.
-        self.refresh_view(ctx.render, ctx.dt.min(0.05));
+        self.refresh_view(ctx.resources.render, ctx.dt.min(0.05));
         Transition::None
     }
 
@@ -232,10 +232,10 @@ impl GameState for InGameState {
                 &self.inventory,
                 &self.items,
                 &self.recipes,
-                &ctx.content.item_icons,
+                &ctx.resources.content.item_icons,
                 self.held,
                 self.player.mode,
-                ctx.ui_tex,
+                ctx.resources.ui_tex,
             );
             if let Some(look) = out.head_look {
                 self.view.preview.look = look;
@@ -258,8 +258,8 @@ impl GameState for InGameState {
             egui_ctx,
             &self.inventory,
             &self.items,
-            &ctx.content.item_icons,
-            ctx.ui_tex.atlas,
+            &ctx.resources.content.item_icons,
+            ctx.resources.ui_tex.atlas,
         );
         hud::draw_mode_indicator(egui_ctx, self.player.mode.label());
 

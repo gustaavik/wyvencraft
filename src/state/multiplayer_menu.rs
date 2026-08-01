@@ -144,7 +144,7 @@ impl GameState for MultiplayerMenuState {
                     .add_sized([220.0, 36.0], egui::Button::new("Host Game"))
                     .clicked()
                 {
-                    transition = self.host(ctx.content.clone());
+                    transition = self.host(ctx.resources.content.clone());
                 }
 
                 ui.add_space(16.0);
