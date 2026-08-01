@@ -119,6 +119,11 @@ impl DroppedItem {
             self.velocity.x *= damp;
             self.velocity.z *= damp;
         }
+        // A drop popped into a ceiling must fall back down, not hover there
+        // while its upward velocity bleeds off.
+        if result.hit_ceiling {
+            self.velocity.y = 0.0;
+        }
         self.age += dt;
         self.pickup_delay = (self.pickup_delay - dt).max(0.0);
     }

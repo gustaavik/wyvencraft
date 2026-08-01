@@ -175,6 +175,13 @@ pub struct InGameState {
     dead: bool,
     /// Time (s) since the last jump press, for creative double-tap-to-fly.
     jump_tap_timer: f32,
+    /// Unspent frame time owed to the fixed-rate player physics step. Keeping
+    /// player physics off the variable frame delta is what makes jump height
+    /// identical at every framerate.
+    physics_accum: f32,
+    /// Fraction `[0,1)` through the current physics step, for camera
+    /// interpolation between fixed steps.
+    render_alpha: f32,
     /// Throttle accumulator for sending stats over the network.
     stats_timer: f32,
     /// Networking role + remote players.

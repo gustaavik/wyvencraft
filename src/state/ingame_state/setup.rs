@@ -271,6 +271,8 @@ impl InGameState {
             elapsed: 0.0,
             dead: false,
             jump_tap_timer: DOUBLE_TAP_WINDOW * 2.0,
+            physics_accum: 0.0,
+            render_alpha: 0.0,
             stats_timer: 0.0,
             net,
             save: None,

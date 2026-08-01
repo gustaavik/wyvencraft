@@ -163,6 +163,11 @@ impl Mob {
         if result.on_ground && self.velocity.y < 0.0 {
             self.velocity.y = 0.0;
         }
+        // A hop under a low ceiling would otherwise keep pushing upward and pin
+        // the mob to the block for the rest of its ascent.
+        if result.hit_ceiling {
+            self.velocity.y = 0.0;
+        }
 
         // No step-up in the physics: when a walk is stopped by a ledge, hop.
         let intended = Vec3::new(step.x, 0.0, step.z).length();

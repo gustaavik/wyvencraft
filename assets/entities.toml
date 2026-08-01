@@ -8,7 +8,9 @@
 # Components:
 #   [entity.physics]   gravity, terminal_velocity, collision width/height,
 #                      ground_friction (exponential damping/s while grounded)
-#   [entity.movement]  walk/sprint/fly/jump speeds, eye_height, reach
+#   [entity.movement]  walk/sprint/fly/jump speeds, eye_height, reach,
+#                      air_control (airborne steering rate/s) and
+#                      min_jump_height (floor for the variable-height jump)
 #   [entity.vitals]    health/hunger model (see field names)
 #   [entity.item]      dropped-item behavior: despawn timer, pop/throw
 #                      speeds, pickup grace delays, pickup range
@@ -40,6 +42,8 @@ fly_speed = 12.0
 jump_speed = 9.0
 eye_height = 1.62
 reach = 5.0
+air_control = 6.0
+min_jump_height = 1.2
 
 [entity.vitals]
 max_health = 20.0

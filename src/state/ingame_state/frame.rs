@@ -106,8 +106,13 @@ impl GameState for InGameState {
             let dt = ctx.dt.min(0.05);
             self.player.defense = self.inventory.total_defense(&self.items);
             let health_before = self.player.health;
-            self.player
-                .update(movement, dt, |p| self.world.is_solid_for_collision(p));
+            // Player physics is stepped at a fixed rate, not on the frame delta,
+            // so jump height is the same at every framerate.
+            self.render_alpha =
+                self.player
+                    .step_fixed(movement, ctx.dt, &mut self.physics_accum, |p| {
+                        self.world.is_solid_for_collision(p)
+                    });
             // A health drop across `update` means fall damage landed; the health
             // delta is the only signal that escapes it, and it's enough.
             if self.player.health < health_before {
@@ -332,7 +337,9 @@ impl GameState for InGameState {
 
     fn scene_frame(&self, aspect: f32) -> Option<SceneFrame<'_>> {
         let mut camera = Camera::new(self.fov_degrees, aspect);
-        let eye = self.player.eye_position();
+        // Physics ticks at a fixed rate; blend between steps so the camera stays
+        // smooth when the display runs faster than the simulation.
+        let eye = self.player.interpolated_eye_position(self.render_alpha);
         let look = self.player.look_direction();
         match self.player.perspective {
             Perspective::First => {

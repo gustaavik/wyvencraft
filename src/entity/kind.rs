@@ -39,6 +39,24 @@ pub struct MovementParams {
     pub eye_height: f32,
     /// Block interaction distance.
     pub reach: f32,
+    /// Rate (per second) at which airborne horizontal velocity converges on the
+    /// wish velocity. Ground movement stays instant; in the air this is what
+    /// stops a mid-flight direction change from snapping.
+    #[serde(default = "default_air_control")]
+    pub air_control: f32,
+    /// Minimum height (blocks) a jump still reaches when the key is released
+    /// immediately. Floors the variable-height jump so a tap can always clear a
+    /// one-block step.
+    #[serde(default = "default_min_jump_height")]
+    pub min_jump_height: f32,
+}
+
+fn default_air_control() -> f32 {
+    6.0
+}
+
+fn default_min_jump_height() -> f32 {
+    1.2
 }
 
 /// Survival health/hunger model.

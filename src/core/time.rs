@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 /// Simulation runs at this fixed rate; rendering interpolates between ticks.
 pub const TICKS_PER_SECOND: u32 = 60;
-const FIXED_DT: f32 = 1.0 / TICKS_PER_SECOND as f32;
+pub const FIXED_DT: f32 = 1.0 / TICKS_PER_SECOND as f32;
 
 /// Tracks wall-clock delta time between frames and accumulates fixed-timestep
 /// updates so physics/networking advance at a stable rate regardless of FPS.

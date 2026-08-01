@@ -128,7 +128,7 @@ impl PlayerData {
     /// the missing armor entries read back as `None`, so old worlds load with an
     /// unarmored player instead of failing the version check.
     pub fn apply(&self, player: &mut Player, inventory: &mut Inventory, items: &ItemRegistry) {
-        player.position = Vec3::from_array(self.position);
+        player.teleport(Vec3::from_array(self.position));
         player.yaw = self.yaw;
         player.pitch = self.pitch;
         player.flying = self.flying;

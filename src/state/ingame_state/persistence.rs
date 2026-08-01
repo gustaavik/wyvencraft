@@ -13,7 +13,7 @@ impl InGameState {
     /// Apply the saved state the host handed back in its `Welcome` (this client
     /// played this world before). Replaces the starter kit wholesale.
     pub(super) fn apply_restore(&mut self, restore: &PlayerRestore) {
-        self.player.position = Vec3::from_array(restore.position);
+        self.player.teleport(Vec3::from_array(restore.position));
         self.player.yaw = restore.yaw;
         self.player.pitch = restore.pitch;
         self.player.health = restore.health;

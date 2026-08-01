@@ -5,10 +5,13 @@
 
 use glam::Vec3;
 
-use crate::core::{Aabb, BlockPos, GameMode};
+use crate::core::{Aabb, BlockPos, FIXED_DT, GameMode};
 use crate::entity::kind::{EntityKind, MovementParams, PhysicsParams, VitalsParams};
 use crate::entity::physics::{self};
 
+/// Max physics steps simulated in one frame, so a long stall (chunk load,
+/// alt-tab) can't spiral into a huge catch-up burst.
+const MAX_PHYSICS_STEPS: u32 = 5;
 /// Defense points beyond which armor stops helping (an 80% reduction).
 const MAX_DEFENSE: f32 = 20.0;
 /// Defense points that would absorb a hit entirely, were `MAX_DEFENSE` not lower.
@@ -72,6 +75,11 @@ pub struct Player {
     pub defense: f32,
     /// Highest Y reached since last leaving the ground; drives fall-damage.
     fall_peak_y: f32,
+    /// Feet Y at the moment the current jump was launched; the variable-height
+    /// jump measures its guaranteed rise from here.
+    jump_origin_y: f32,
+    /// Feet position before the last fixed step, for render interpolation.
+    prev_position: Vec3,
     // Static tuning, copied from the "player" entity kind at construction.
     physics: PhysicsParams,
     movement: MovementParams,
@@ -97,6 +105,8 @@ impl Player {
             saturation: vitals.max_hunger,
             defense: 0.0,
             fall_peak_y: position.y,
+            jump_origin_y: position.y,
+            prev_position: position,
             physics: kind.physics,
             movement: kind.movement.expect("player kind has movement"),
             vitals,
@@ -116,6 +126,15 @@ impl Player {
     /// Eye position used for the camera and raycasting.
     pub fn eye_position(&self) -> Vec3 {
         self.position + Vec3::new(0.0, self.movement.eye_height, 0.0)
+    }
+
+    /// Eye position blended `alpha` of the way from the previous fixed step to
+    /// the current one. Physics ticks at a fixed rate, so rendering above that
+    /// rate must interpolate or the camera visibly steps.
+    pub fn interpolated_eye_position(&self, alpha: f32) -> Vec3 {
+        self.prev_position
+            .lerp(self.position, alpha.clamp(0.0, 1.0))
+            + Vec3::new(0.0, self.movement.eye_height, 0.0)
     }
 
     /// Collision box in world space.
@@ -141,8 +160,33 @@ impl Player {
         self.pitch = (self.pitch + delta_pitch).clamp(-FRAC_PI_2 + 0.001, FRAC_PI_2 - 0.001);
     }
 
+    /// Advance the player at the fixed simulation rate, consuming `frame_dt` of
+    /// wall-clock time. `accum` is the caller's carry-over between frames.
+    /// Returns the fraction `[0,1)` through the next step, for interpolating the
+    /// camera in [`Player::interpolated_eye_position`].
+    ///
+    /// Physics must not run on the variable frame delta: with semi-implicit
+    /// Euler the jump apex is `v0²/2g + v0·dt/2`, so jump height would otherwise
+    /// change with framerate. Input is sampled once and replayed into each step.
+    pub fn step_fixed(
+        &mut self,
+        input: MovementInput,
+        frame_dt: f32,
+        accum: &mut f32,
+        is_solid: impl Fn(BlockPos) -> bool,
+    ) -> f32 {
+        *accum = (*accum + frame_dt).min(MAX_PHYSICS_STEPS as f32 * FIXED_DT);
+        while *accum >= FIXED_DT {
+            *accum -= FIXED_DT;
+            self.update(input, FIXED_DT, &is_solid);
+        }
+        *accum / FIXED_DT
+    }
+
     /// Advance one fixed simulation step.
     pub fn update(&mut self, input: MovementInput, dt: f32, is_solid: impl Fn(BlockPos) -> bool) {
+        self.prev_position = self.position;
+
         // Horizontal wish-direction relative to yaw (ignore pitch for walking).
         let (sy, cy) = self.yaw.sin_cos();
         let forward = Vec3::new(sy, 0.0, -cy);
@@ -163,8 +207,18 @@ impl Player {
             self.movement.walk_speed
         };
 
-        self.velocity.x = wish.x * speed;
-        self.velocity.z = wish.z * speed;
+        // On the ground (and in flight) steering is instant; in the air the
+        // velocity eases toward the wish so a mid-flight reversal ramps instead
+        // of snapping, and momentum carries through the arc.
+        let target = wish * speed;
+        if flying || self.on_ground {
+            self.velocity.x = target.x;
+            self.velocity.z = target.z;
+        } else {
+            let t = (self.movement.air_control * dt).clamp(0.0, 1.0);
+            self.velocity.x += (target.x - self.velocity.x) * t;
+            self.velocity.z += (target.z - self.velocity.z) * t;
+        }
 
         if flying {
             let vertical = (input.jump as i32 - input.sneak as i32) as f32;
@@ -174,6 +228,15 @@ impl Player {
                 (self.velocity.y - self.physics.gravity * dt).max(self.physics.terminal_velocity);
             if input.jump && self.on_ground {
                 self.velocity.y = self.movement.jump_speed;
+                self.jump_origin_y = self.position.y;
+            } else if !input.jump && !self.on_ground && self.velocity.y > 0.0 {
+                // Variable-height jump: releasing early cuts the ascent, but
+                // never below the speed still needed to reach `min_jump_height`
+                // above the launch point — a tap must always clear one block.
+                let risen = self.position.y - self.jump_origin_y;
+                let remaining = (self.movement.min_jump_height - risen).max(0.0);
+                let floor = (2.0 * self.physics.gravity * remaining).sqrt();
+                self.velocity.y = self.velocity.y.min(floor);
             }
         }
 
@@ -202,6 +265,19 @@ impl Player {
         if !flying {
             if result.on_ground && self.velocity.y < 0.0 {
                 self.velocity.y = 0.0;
+            }
+            // Without this the jump keeps pushing into the block overhead and
+            // the player hangs there until gravity eats the whole ascent.
+            if result.hit_ceiling {
+                self.velocity.y = 0.0;
+            }
+            // Horizontal momentum now survives between ticks, so a wall has to
+            // cancel it instead of letting it pile up against the block.
+            if result.blocked.x {
+                self.velocity.x = 0.0;
+            }
+            if result.blocked.z {
+                self.velocity.z = 0.0;
             }
         } else {
             self.velocity = Vec3::ZERO;
@@ -285,13 +361,22 @@ impl Player {
 
     /// Reset vitals and motion for a respawn at `position`.
     pub fn respawn_at(&mut self, position: Vec3) {
-        self.position = position;
+        self.teleport(position);
         self.velocity = Vec3::ZERO;
         self.health = self.vitals.max_health;
         self.hunger = self.vitals.max_hunger;
         self.saturation = self.vitals.max_hunger;
-        self.fall_peak_y = position.y;
         self.on_ground = false;
+    }
+
+    /// Move the player without simulating the trip (respawn, save load, host
+    /// restore). Resets the interpolation and fall-damage anchors so the camera
+    /// doesn't sweep across the world and the jump doesn't land as a fall.
+    pub fn teleport(&mut self, position: Vec3) {
+        self.position = position;
+        self.prev_position = position;
+        self.fall_peak_y = position.y;
+        self.jump_origin_y = position.y;
     }
 
     pub fn toggle_perspective(&mut self) {
@@ -311,6 +396,29 @@ mod tests {
     /// A test player built from the builtin entity definitions.
     fn test_player(position: Vec3, mode: GameMode) -> Player {
         Player::new(position, mode, EntityRegistry::builtin().player())
+    }
+
+    /// Flat ground filling everything below y = 65.
+    fn flat_ground(p: BlockPos) -> bool {
+        p.y < 65
+    }
+
+    /// Jump key held, no other intent.
+    fn holding_jump() -> MovementInput {
+        MovementInput {
+            jump: true,
+            ..Default::default()
+        }
+    }
+
+    /// Run a player until it is settled on the ground and ready to jump.
+    fn settled(position: Vec3, solid: impl Fn(BlockPos) -> bool + Copy) -> Player {
+        let mut player = test_player(position, GameMode::Survival);
+        for _ in 0..10 {
+            player.update(MovementInput::default(), FIXED_DT, solid);
+        }
+        assert!(player.on_ground, "test setup: player should be grounded");
+        player
     }
 
     /// Regression: a player spawned flush on the ground at an integer Y (as
@@ -404,6 +512,151 @@ mod tests {
             player.update(MovementInput::default(), dt, solid);
         }
         assert_eq!(player.health, MAX_HEALTH, "creative takes no fall damage");
+    }
+
+    /// Regression: hitting a block overhead must cancel the ascent. Before the
+    /// fix, `velocity.y` kept its full `+9.0` through the head bonk and the
+    /// player hung under the block for ~0.32 s while gravity ate the ascent.
+    #[test]
+    fn head_bonk_cancels_the_ascent() {
+        // A 2-block-tall pocket: floor below y = 65, ceiling from y = 67 up.
+        // The 1.8-tall player has 0.2 blocks of headroom, far less than a jump.
+        let solid = |p: BlockPos| p.y < 65 || p.y >= 67;
+        let mut player = settled(Vec3::new(0.5, 65.0, 0.5), solid);
+
+        let mut peak = player.position.y;
+        let mut stuck_rising: f32 = 0.0;
+        for _ in 0..20 {
+            let before = player.position.y;
+            player.update(holding_jump(), FIXED_DT, solid);
+            peak = peak.max(player.position.y);
+            // Pinned against the ceiling (no rise) while still pushing upward.
+            if player.position.y <= before + 1.0e-6 {
+                stuck_rising = stuck_rising.max(player.velocity.y);
+            }
+        }
+
+        assert!(
+            (65.15..65.25).contains(&peak),
+            "the player should rise into the ceiling and stop; peak = {peak}"
+        );
+        assert_eq!(
+            stuck_rising, 0.0,
+            "upward velocity survived the head bonk (v = {stuck_rising})"
+        );
+    }
+
+    /// Jump height must not depend on framerate — the reason player physics is
+    /// stepped at a fixed rate instead of on the frame delta.
+    #[test]
+    fn jump_height_is_independent_of_framerate() {
+        // Hold jump across half a second of wall-clock time and record the apex.
+        let peak_at = |frame_dt: f32, frames: usize| {
+            let mut player = settled(Vec3::new(0.5, 65.0, 0.5), flat_ground);
+            let mut accum = 0.0;
+            let mut peak = player.position.y;
+            for _ in 0..frames {
+                player.step_fixed(holding_jump(), frame_dt, &mut accum, flat_ground);
+                peak = peak.max(player.position.y);
+            }
+            peak
+        };
+
+        let slow = peak_at(1.0 / 30.0, 15);
+        let fast = peak_at(1.0 / 144.0, 72);
+        assert!(
+            (slow - fast).abs() < 0.02,
+            "apex differed with framerate: {slow} at 30 fps vs {fast} at 144 fps"
+        );
+        assert!(slow > 66.0, "the jump should clear a block; peak = {slow}");
+    }
+
+    /// The variable-height jump is floored: even the shortest possible tap must
+    /// still clear a one-block step, or stepping up would become a coin flip.
+    #[test]
+    fn a_tapped_jump_still_clears_a_one_block_step() {
+        let mut player = settled(Vec3::new(0.5, 65.0, 0.5), flat_ground);
+
+        // One tick of Space, then released for the rest of the arc.
+        player.update(holding_jump(), FIXED_DT, flat_ground);
+        let mut peak = player.position.y;
+        for _ in 0..60 {
+            player.update(MovementInput::default(), FIXED_DT, flat_ground);
+            peak = peak.max(player.position.y);
+        }
+
+        assert!(
+            peak >= 66.0,
+            "a tapped jump must still clear one block; peak = {peak}"
+        );
+        // ...but it must be visibly shorter than holding the key.
+        let mut held = settled(Vec3::new(0.5, 65.0, 0.5), flat_ground);
+        let mut held_peak = held.position.y;
+        for _ in 0..60 {
+            held.update(holding_jump(), FIXED_DT, flat_ground);
+            held_peak = held_peak.max(held.position.y);
+        }
+        assert!(
+            held_peak > peak + 0.15,
+            "holding jump should go higher: {held_peak} vs {peak}"
+        );
+    }
+
+    /// Mid-air steering ramps instead of snapping, so a direction change in the
+    /// air can't reverse the player's momentum inside a single tick.
+    #[test]
+    fn air_control_ramps_instead_of_snapping() {
+        let mut player = settled(Vec3::new(0.5, 65.0, 0.5), flat_ground);
+
+        // Sprint forward (yaw 0 faces -Z) and jump: ground movement is instant.
+        let forward = MovementInput {
+            forward: 1.0,
+            sprint: true,
+            jump: true,
+            ..Default::default()
+        };
+        player.update(forward, FIXED_DT, flat_ground);
+        let launch_speed = player.velocity.z;
+        assert!(launch_speed < -6.0, "should launch at sprint speed");
+
+        // Now reverse in mid-air.
+        let backward = MovementInput {
+            forward: -1.0,
+            ..forward
+        };
+        player.update(backward, FIXED_DT, flat_ground);
+        assert!(
+            player.velocity.z < 0.0,
+            "one airborne tick must not flip momentum; vz = {}",
+            player.velocity.z
+        );
+
+        for _ in 0..30 {
+            player.update(backward, FIXED_DT, flat_ground);
+        }
+        assert!(!player.on_ground, "test setup: still airborne");
+        assert!(
+            player.velocity.z > 5.0,
+            "air control should converge within ~0.5 s; vz = {}",
+            player.velocity.z
+        );
+    }
+
+    /// Ground movement stays instant — air control must not make walking mushy.
+    #[test]
+    fn ground_movement_stays_instant() {
+        let mut player = settled(Vec3::new(0.5, 65.0, 0.5), flat_ground);
+        let forward = MovementInput {
+            forward: 1.0,
+            ..Default::default()
+        };
+        player.update(forward, FIXED_DT, flat_ground);
+        let walk = player.movement().walk_speed;
+        assert!(
+            (player.velocity.z + walk).abs() < 1.0e-4,
+            "walking should reach full speed on the first tick; vz = {}",
+            player.velocity.z
+        );
     }
 
     #[test]
