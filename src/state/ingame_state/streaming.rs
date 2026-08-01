@@ -1,12 +1,11 @@
-//! Chunk streaming: request/insert/unload around the player and rebuild a
-//! budgeted number of chunk meshes per frame.
+//! Chunk streaming: request/insert/unload around the player, and feeding the
+//! renderer's mesh queue.
+//!
+//! This is pure simulation — it decides *which* chunks exist. Turning them into
+//! GPU meshes is [`SceneCache`](super::view::SceneCache)'s job.
 
-use std::sync::Arc;
-
-use super::{InGameState, MESH_BUDGET, REQUEST_BUDGET, UNLOAD_MARGIN};
+use super::{InGameState, REQUEST_BUDGET, UNLOAD_MARGIN};
 use crate::core::{BlockPos, ChunkPos};
-use crate::render::{GpuMesh, RenderContext};
-use crate::world::meshing::mesh_chunk;
 
 impl InGameState {
     /// Request/insert/unload chunks around the player using the worker pool.
@@ -52,61 +51,7 @@ impl InGameState {
             .collect();
         for pos in to_unload {
             self.world.unload_chunk(pos);
-            self.meshes.remove(&pos);
-            self.transparent_meshes.remove(&pos);
-        }
-    }
-
-    /// Move freshly-dirtied chunks into the mesh queue (deduped).
-    pub(super) fn enqueue_dirty(&mut self) {
-        for pos in self.world.take_dirty() {
-            if self.queued.insert(pos) {
-                self.mesh_queue.push_back(pos);
-            }
-        }
-    }
-
-    /// Rebuild up to [`MESH_BUDGET`] chunk meshes this frame.
-    pub(super) fn process_mesh_budget(&mut self, ctx: &Arc<RenderContext>) {
-        for _ in 0..MESH_BUDGET {
-            let Some(pos) = self.mesh_queue.pop_front() else {
-                break;
-            };
-            self.queued.remove(&pos);
-
-            let output = self
-                .world
-                .chunk(pos)
-                .map(|chunk| mesh_chunk(chunk, &self.blocks, |p| self.world.block_at(p)));
-            match output {
-                Some(output) => {
-                    match GpuMesh::upload(&ctx.memory_allocator, &output.opaque) {
-                        Ok(Some(mesh)) => {
-                            self.meshes.insert(pos, mesh);
-                        }
-                        Ok(None) => {
-                            self.meshes.remove(&pos);
-                        }
-                        Err(err) => log::error!("opaque mesh upload failed at {pos:?}: {err:?}"),
-                    }
-                    match GpuMesh::upload(&ctx.memory_allocator, &output.transparent) {
-                        Ok(Some(mesh)) => {
-                            self.transparent_meshes.insert(pos, mesh);
-                        }
-                        Ok(None) => {
-                            self.transparent_meshes.remove(&pos);
-                        }
-                        Err(err) => {
-                            log::error!("transparent mesh upload failed at {pos:?}: {err:?}")
-                        }
-                    }
-                }
-                // Chunk was unloaded before we got to it.
-                None => {
-                    self.meshes.remove(&pos);
-                    self.transparent_meshes.remove(&pos);
-                }
-            }
+            self.view.forget_chunk(pos);
         }
     }
 }

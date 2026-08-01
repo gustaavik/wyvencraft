@@ -37,10 +37,10 @@ impl InGameState {
         let duration = Duration::from_secs_f32(dt.max(1.0e-4));
 
         // Survival stats are low-frequency; throttle them to keep the wire quiet.
-        self.stats_timer += dt;
-        let send_stats = self.stats_timer >= STATS_INTERVAL;
+        self.peers.stats_timer += dt;
+        let send_stats = self.peers.stats_timer >= STATS_INTERVAL;
         if send_stats {
-            self.stats_timer = 0.0;
+            self.peers.stats_timer = 0.0;
         }
 
         for msg in self.session.poll(duration) {
@@ -73,7 +73,8 @@ impl InGameState {
     /// current gear (unchanging equipment isn't otherwise re-broadcast).
     fn welcome_player(&mut self, pid: PlayerId, identity: u64) {
         let restored = self
-            .player_records
+            .save
+            .records
             .0
             .get(&identity)
             .map(|record| record_to_restore(record, &self.items));
@@ -104,12 +105,14 @@ impl InGameState {
         };
         self.session.broadcast(&joined, Channel::Reliable);
 
-        self.remote_identities.insert(pid, identity);
-        self.remote_players
+        self.peers.identities.insert(pid, identity);
+        self.peers
+            .players
             .insert(pid, RemotePlayer::new(pid, name, Vec3::from_array(spawn)));
 
         let equipment: Vec<(PlayerId, [Option<u16>; ARMOR_SIZE])> = self
-            .equipment_broadcast
+            .peers
+            .equipment
             .iter()
             .map(|(&id, &armor)| (id, armor))
             .collect();
@@ -126,17 +129,14 @@ impl InGameState {
     /// every trace of them from this session.
     fn forget_player(&mut self, pid: PlayerId) {
         record_remote(
-            &mut self.player_records,
-            &self.remote_identities,
-            &self.remote_players,
-            &self.remote_inventories,
+            &mut self.save.records,
+            &self.peers.identities,
+            &self.peers.players,
+            &self.peers.inventories,
             &self.items,
             pid,
         );
-        self.remote_players.remove(&pid);
-        self.remote_identities.remove(&pid);
-        self.remote_inventories.remove(&pid);
-        self.equipment_broadcast.remove(&pid);
+        self.peers.remove(pid);
         self.session
             .broadcast(&ServerMessage::PlayerLeft { id: pid }, Channel::Reliable);
     }
@@ -152,7 +152,7 @@ impl InGameState {
                 yaw,
                 pitch,
             } => {
-                if let Some(rp) = self.remote_players.get_mut(&pid) {
+                if let Some(rp) = self.peers.players.get_mut(&pid) {
                     rp.push_snapshot(Vec3::from_array(position), yaw, pitch);
                 }
             }
@@ -163,22 +163,22 @@ impl InGameState {
                 hunger,
                 saturation,
             } => {
-                if let Some(rp) = self.remote_players.get_mut(&pid) {
+                if let Some(rp) = self.peers.players.get_mut(&pid) {
                     rp.health = health;
                     rp.hunger = hunger;
                     rp.saturation = saturation;
                 }
             }
             ClientMessage::SetMode(m) => {
-                if let Some(rp) = self.remote_players.get_mut(&pid) {
+                if let Some(rp) = self.peers.players.get_mut(&pid) {
                     rp.mode = m;
                 }
             }
             ClientMessage::SyncInventory { slots, selected } => {
-                if let Some(rp) = self.remote_players.get_mut(&pid) {
+                if let Some(rp) = self.peers.players.get_mut(&pid) {
                     rp.armor = armor_from_slots(&slots);
                 }
-                self.remote_inventories.insert(pid, (slots, selected));
+                self.peers.inventories.insert(pid, (slots, selected));
             }
             ClientMessage::Chat(_) => {}
             ClientMessage::RequestWorldState => self.replay_world_state(pid),
@@ -228,7 +228,7 @@ impl InGameState {
     /// Validate a client's melee swing against their last known position, then
     /// apply it with kill credit. The outcome reaches clients via `mob_events`.
     fn apply_client_attack(&mut self, pid: PlayerId, mob_id: u64) {
-        let Some(attacker) = self.remote_players.get(&pid).map(|rp| rp.position()) else {
+        let Some(attacker) = self.peers.players.get(&pid).map(|rp| rp.position()) else {
             return;
         };
         if let Some(mob) = self.mobs.iter_mut().find(|m| m.id.0 == mob_id)
@@ -241,7 +241,8 @@ impl InGameState {
             mob.damage(mobs::PLAYER_ATTACK_DAMAGE, push);
             mob.last_attacker = Some(pid.0);
             let health = mob.health;
-            self.mob_events
+            self.peers
+                .mob_events
                 .push(ServerMessage::MobHurt { id: mob_id, health });
         }
     }
@@ -255,12 +256,13 @@ impl InGameState {
             // The welcome is consumed during construction, not here.
             ServerMessage::Welcome { .. } => {}
             ServerMessage::PlayerJoined { id, name } if id != local_id => {
-                self.remote_players
+                self.peers
+                    .players
                     .entry(id)
                     .or_insert_with(|| RemotePlayer::new(id, name, Vec3::ZERO));
             }
             ServerMessage::PlayerLeft { id } => {
-                self.remote_players.remove(&id);
+                self.peers.players.remove(&id);
             }
             ServerMessage::PlayerState {
                 id,
@@ -268,7 +270,8 @@ impl InGameState {
                 yaw,
                 pitch,
             } if id != local_id => {
-                self.remote_player(id, Vec3::from_array(position))
+                self.peers
+                    .entry(id, Vec3::from_array(position))
                     .push_snapshot(Vec3::from_array(position), yaw, pitch);
             }
             ServerMessage::BlockChanged { pos, block } => {
@@ -289,11 +292,12 @@ impl InGameState {
                 hunger,
                 mode,
             } if id != local_id => {
-                self.remote_player(id, Vec3::ZERO)
+                self.peers
+                    .entry(id, Vec3::ZERO)
                     .set_stats(health, hunger, mode);
             }
             ServerMessage::PlayerEquipment { id, armor } if id != local_id => {
-                self.remote_player(id, Vec3::ZERO).armor = armor;
+                self.peers.entry(id, Vec3::ZERO).armor = armor;
             }
             ServerMessage::MobSpawned { id, kind, position } => match self.entities.find(&kind) {
                 Some(k) if k.mob.is_some() => {
@@ -350,14 +354,6 @@ impl InGameState {
         }
     }
 
-    /// The replica for `id`, created at `fallback` if this is the first we've
-    /// heard of them (an unreliable snapshot can outrun the reliable join).
-    fn remote_player(&mut self, id: PlayerId, fallback: Vec3) -> &mut RemotePlayer {
-        self.remote_players
-            .entry(id)
-            .or_insert_with(|| RemotePlayer::new(id, format!("Player {}", id.0), fallback))
-    }
-
     // --- Outgoing -------------------------------------------------------------------
 
     /// Host: publish this frame's authoritative state.
@@ -370,7 +366,8 @@ impl InGameState {
             self.player.pitch,
         )];
         snapshots.extend(
-            self.remote_players
+            self.peers
+                .players
                 .iter()
                 .map(|(pid, rp)| (*pid, rp.position().to_array(), rp.yaw, rp.pitch)),
         );
@@ -395,7 +392,8 @@ impl InGameState {
                 self.player.mode,
             )];
             stats.extend(
-                self.remote_players
+                self.peers
+                    .players
                     .values()
                     .map(|rp| (rp.id, rp.health, rp.hunger, rp.mode)),
             );
@@ -416,10 +414,10 @@ impl InGameState {
         // remote's from its last inventory sync).
         let mut equip: Vec<(PlayerId, [Option<u16>; ARMOR_SIZE])> =
             vec![(HOST_PLAYER_ID, armor_ids(&self.inventory))];
-        equip.extend(self.remote_players.iter().map(|(pid, rp)| (*pid, rp.armor)));
+        equip.extend(self.peers.players.iter().map(|(pid, rp)| (*pid, rp.armor)));
         for (id, armor) in equip {
-            if self.equipment_broadcast.get(&id) != Some(&armor) {
-                self.equipment_broadcast.insert(id, armor);
+            if self.peers.equipment.get(&id) != Some(&armor) {
+                self.peers.equipment.insert(id, armor);
                 self.session.broadcast(
                     &ServerMessage::PlayerEquipment { id, armor },
                     Channel::Reliable,
@@ -430,7 +428,7 @@ impl InGameState {
         // Mob lifecycle events queued by this frame's simulation (spawns,
         // hurts, deaths, arrows, remote-player damage), then one batched
         // unreliable movement snapshot for all live mobs.
-        for msg in std::mem::take(&mut self.mob_events) {
+        for msg in std::mem::take(&mut self.peers.mob_events) {
             self.session.broadcast(&msg, Channel::Reliable);
         }
         if !self.mobs.is_empty() {
@@ -448,10 +446,10 @@ impl InGameState {
     /// Client: report our own state to the host.
     fn report_to_host(&mut self, dt: f32, send_stats: bool) {
         // Ask the host to replay the world's existing edits, once connected.
-        if !self.world_state_requested && self.session.is_connected() {
+        if !self.peers.world_state_requested && self.session.is_connected() {
             self.session
                 .request(&ClientMessage::RequestWorldState, Channel::Reliable);
-            self.world_state_requested = true;
+            self.peers.world_state_requested = true;
         }
 
         self.session.request(
@@ -475,20 +473,24 @@ impl InGameState {
 
         // Report the inventory (throttled, only on change) so the host can
         // persist it in the world save.
-        self.inventory_sync_timer += dt;
-        if self.inventory_sync_timer >= INVENTORY_SYNC_INTERVAL {
-            self.inventory_sync_timer = 0.0;
-            let changed = self.last_synced_inventory.as_ref().is_none_or(|last| {
-                last.slots() != self.inventory.slots()
-                    || last.selected_index() != self.inventory.selected_index()
-            });
+        self.peers.inventory_sync_timer += dt;
+        if self.peers.inventory_sync_timer >= INVENTORY_SYNC_INTERVAL {
+            self.peers.inventory_sync_timer = 0.0;
+            let changed = self
+                .peers
+                .last_synced_inventory
+                .as_ref()
+                .is_none_or(|last| {
+                    last.slots() != self.inventory.slots()
+                        || last.selected_index() != self.inventory.selected_index()
+                });
             if changed {
                 let (slots, selected) = inventory_to_wire(&self.inventory);
                 self.session.request(
                     &ClientMessage::SyncInventory { slots, selected },
                     Channel::Reliable,
                 );
-                self.last_synced_inventory = Some(self.inventory.clone());
+                self.peers.last_synced_inventory = Some(self.inventory.clone());
             }
         }
     }
@@ -521,7 +523,7 @@ impl InGameState {
     }
 
     pub(super) fn net_status(&self) -> String {
-        self.session.status(self.remote_players.len())
+        self.session.status(self.peers.count())
     }
 
     /// Swap in a different networking role. Tests use this to drive host and
@@ -743,8 +745,8 @@ mod tests {
             "everyone is told about the join"
         );
         drop(net);
-        assert!(state.remote_players.contains_key(&pid));
-        assert_eq!(state.remote_identities.get(&pid), Some(&42));
+        assert!(state.peers.players.contains_key(&pid));
+        assert_eq!(state.peers.identities.get(&pid), Some(&42));
     }
 
     /// A returning identity gets its saved position and inventory handed back
@@ -762,7 +764,7 @@ mod tests {
             count: 5,
             durability: None,
         });
-        state.player_records.0.insert(
+        state.save.records.0.insert(
             identity,
             PlayerData {
                 position: [12.0, 65.0, -8.0],
@@ -829,12 +831,12 @@ mod tests {
         state.pump_network(1.0 / 60.0);
 
         assert!(
-            !state.remote_players.contains_key(&pid),
+            !state.peers.players.contains_key(&pid),
             "dropped from the session"
         );
-        assert!(!state.remote_identities.contains_key(&pid));
+        assert!(!state.peers.identities.contains_key(&pid));
         assert_eq!(
-            state.player_records.0.get(&99).map(|r| r.selected_slot),
+            state.save.records.0.get(&99).map(|r| r.selected_slot),
             Some(2),
             "their state is kept against their identity for a rejoin"
         );
@@ -919,7 +921,7 @@ mod tests {
         });
         state.pump_network(1.0 / 60.0);
         // The joiner is placed at the host's position (no saved record).
-        let attacker = state.remote_players[&pid].position();
+        let attacker = state.peers.players[&pid].position();
 
         // In reach: the swing lands.
         let near = state.spawn_mob("cow", attacker).expect("cow spawns");

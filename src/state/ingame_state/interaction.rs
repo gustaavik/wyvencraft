@@ -2,17 +2,14 @@
 //! breaking/placing, survival mining progress, dropped items, and the crack /
 //! selection overlays.
 
-use std::sync::Arc;
-
 use glam::Vec3;
 
-use super::{BreakState, InGameState, OUTLINE_COLOR};
+use super::{BreakState, InGameState};
 use crate::core::{Aabb, BlockId, BlockPos};
 use crate::entity::DroppedItem;
-use crate::inventory::{ItemId, ItemStack};
-use crate::render::{CpuMesh, GpuLines, GpuMesh, RenderContext, debug, tiles};
-use crate::world::block::{Drops, FaceTextures};
-use crate::world::meshing::{mesh_block_overlay, push_item_cube};
+use crate::inventory::{ItemId, ItemRegistry, ItemStack};
+use crate::render::tiles;
+use crate::world::block::{BlockRegistry, Drops, FaceTextures};
 
 impl InGameState {
     /// The block the player is currently looking at within reach, if any.
@@ -40,7 +37,7 @@ impl InGameState {
             && let Some(stack) = self.block_drop_stack(prev)
         {
             // Scatter direction varies with the animation clock — cheap pseudo-random.
-            let angle = self.elapsed * 9.73;
+            let angle = self.view.elapsed * 9.73;
             self.drops.push(DroppedItem::block_drop(
                 stack,
                 pos,
@@ -115,50 +112,6 @@ impl InGameState {
         });
     }
 
-    /// Atlas tiles for a dropped item's cube: the block's own faces for block
-    /// items; simple stand-in tiles for tools and food (no dedicated item art yet).
-    fn drop_textures(&self, item: ItemId) -> FaceTextures {
-        let def = self.items.get(item);
-        match def.place_block {
-            Some(block) => self.blocks.get(block).textures,
-            None if def.tool.is_some() => FaceTextures::uniform(tiles::WOOD_BARK),
-            None => FaceTextures::uniform(tiles::LEAVES),
-        }
-    }
-
-    /// Rebuild the combined drop meshes (opaque + transparent passes). Drops are
-    /// few and tiny, so a per-frame rebuild stays cheap, like remote players.
-    pub(super) fn update_drops_mesh(&mut self, ctx: &Arc<RenderContext>) {
-        let mut opaque = CpuMesh::new();
-        let mut transparent = CpuMesh::new();
-        for item in &self.drops {
-            let textures = self.drop_textures(item.stack.item);
-            let is_transparent = self
-                .items
-                .get(item.stack.item)
-                .place_block
-                .is_some_and(|b| self.blocks.get(b).is_transparent());
-            let target = if is_transparent {
-                &mut transparent
-            } else {
-                &mut opaque
-            };
-            push_item_cube(
-                target,
-                item.render_center(),
-                item.size(),
-                item.spin_yaw(),
-                &textures,
-            );
-        }
-        self.drops_mesh = GpuMesh::upload(&ctx.memory_allocator, &opaque)
-            .ok()
-            .flatten();
-        self.drops_mesh_transparent = GpuMesh::upload(&ctx.memory_allocator, &transparent)
-            .ok()
-            .flatten();
-    }
-
     /// Survival timed mining: accumulate break progress on the targeted block
     /// while the dig button is held, breaking it once progress reaches 1.0.
     pub(super) fn update_mining(&mut self, digging: bool, dt: f32) {
@@ -189,7 +142,7 @@ impl InGameState {
         };
         let progress = prior + dt / seconds.max(1.0e-3);
         if progress >= 1.0 {
-            self.player_anim.trigger_swing();
+            self.view.trigger_swing();
             if self.break_block_at(hit.block) {
                 self.inventory.damage_selected_tool();
             }
@@ -200,46 +153,6 @@ impl InGameState {
                 progress,
             });
         }
-    }
-
-    /// (Re)build the crack overlay for the block being mined; drop it when idle.
-    /// Cheap enough to rebuild every frame (six quads).
-    pub(super) fn update_break_overlay(&mut self, ctx: &Arc<RenderContext>) {
-        self.break_mesh = self.breaking.as_ref().and_then(|b| {
-            let overlay = mesh_block_overlay(b.block, tiles::crack_tile(b.progress));
-            match GpuMesh::upload(&ctx.memory_allocator, &overlay) {
-                Ok(mesh) => mesh,
-                Err(err) => {
-                    log::error!("break overlay upload failed at {:?}: {err:?}", b.block);
-                    None
-                }
-            }
-        });
-    }
-
-    /// (Re)build the selection outline on the targeted block. The geometry only
-    /// depends on the block position, so it's cached until the target changes.
-    pub(super) fn update_target_outline(&mut self, ctx: &Arc<RenderContext>) {
-        let target = if self.dead {
-            None
-        } else {
-            self.targeted_block().map(|hit| hit.block)
-        };
-        if target == self.outline_block {
-            return;
-        }
-        self.outline_block = target;
-        self.outline_mesh = target.and_then(|block| {
-            let mut vertices = Vec::new();
-            debug::push_block_outline(&mut vertices, block, OUTLINE_COLOR);
-            match GpuLines::upload(&ctx.memory_allocator, &vertices) {
-                Ok(lines) => lines,
-                Err(err) => {
-                    log::error!("selection outline upload failed at {block:?}: {err:?}");
-                    None
-                }
-            }
-        });
     }
 
     /// Right-click: eat the held food when hungry, otherwise place its block.
@@ -253,7 +166,7 @@ impl InGameState {
         {
             self.player.feed(food.hunger, food.saturation);
             self.inventory.consume_selected(1);
-            self.player_anim.trigger_swing();
+            self.view.trigger_swing();
             return;
         }
         self.place_block(item_id);
@@ -281,7 +194,22 @@ impl InGameState {
                 self.inventory.consume_selected(1);
             }
             self.broadcast_local_edit(target, block);
-            self.player_anim.trigger_swing();
+            self.view.trigger_swing();
         }
+    }
+}
+
+/// Atlas tiles for a dropped item's cube: the block's own faces for block
+/// items; simple stand-in tiles for tools and food (no dedicated item art yet).
+pub(super) fn drop_textures(
+    item: ItemId,
+    items: &ItemRegistry,
+    blocks: &BlockRegistry,
+) -> FaceTextures {
+    let def = items.get(item);
+    match def.place_block {
+        Some(block) => blocks.get(block).textures,
+        None if def.tool.is_some() => FaceTextures::uniform(tiles::WOOD_BARK),
+        None => FaceTextures::uniform(tiles::LEAVES),
     }
 }

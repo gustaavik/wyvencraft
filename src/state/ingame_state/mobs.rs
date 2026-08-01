@@ -5,8 +5,6 @@
 //! sim, `frame.rs` gates the tick on the session's authority. Clients hold
 //! interpolated replicas fed by the host instead of simulating.
 
-use std::sync::Arc;
-
 use glam::Vec3;
 
 use super::{HOST_PLAYER_ID, InGameState};
@@ -18,7 +16,7 @@ use crate::entity::{
 };
 use crate::inventory::ItemStack;
 use crate::net::{Channel, ClientMessage, PlayerId, ServerMessage};
-use crate::render::{GpuMesh, RenderContext, mobskin, skin};
+use crate::render::{mobskin, skin};
 
 /// Zombie shamble: both arms held straight out (≈ 80° forward of hanging).
 const ARMS_FORWARD_ANGLE: f32 = -1.4;
@@ -70,6 +68,27 @@ impl RemoteMob {
         }
     }
 
+    /// Advance the walk animation from the movement observed since the last
+    /// frame (the remote-player trick), clamped so a teleport can't drive an
+    /// absurd cadence. Returns the mesh inputs for this frame.
+    pub(super) fn animate(&mut self, dt: f32) -> (&VisualSpec, Vec3, f32, crate::entity::Pose) {
+        let speed = if dt > 0.0 {
+            (Vec3::new(
+                self.position.x - self.last_pos.x,
+                0.0,
+                self.position.z - self.last_pos.z,
+            )
+            .length()
+                / dt)
+                .min(super::REMOTE_MAX_SPEED)
+        } else {
+            0.0
+        };
+        self.anim.advance(speed, dt);
+        self.last_pos = self.position;
+        (&self.visual, self.position, self.yaw, self.anim.pose(0.0))
+    }
+
     pub(super) fn push_snapshot(&mut self, position: Vec3, yaw: f32) {
         self.position = position;
         self.yaw = yaw;
@@ -94,7 +113,7 @@ impl RemoteMob {
 
 /// Build the render mesh for a mob visual at `position` facing `yaw` (`None`
 /// for visuals with no model). Shared by simulated mobs and client replicas.
-fn mob_mesh(
+pub(super) fn mob_mesh(
     visual: &VisualSpec,
     position: Vec3,
     yaw: f32,
@@ -140,7 +159,7 @@ impl InGameState {
     /// singleplayer session has no listeners and clients never emit).
     fn emit_mob_event(&mut self, msg: ServerMessage) {
         if self.session.serves_peers() {
-            self.mob_events.push(msg);
+            self.peers.mob_events.push(msg);
         }
     }
 
@@ -178,7 +197,7 @@ impl InGameState {
             .movement
             .map(|m| m.eye_height)
             .unwrap_or(1.62);
-        for (id, remote) in &self.remote_players {
+        for (id, remote) in &self.peers.players {
             if remote.mode.takes_damage() {
                 targets.push(MobTarget {
                     player: Some(*id),
@@ -325,7 +344,7 @@ impl InGameState {
                 continue;
             }
             let stack = ItemStack::new(item, (count as u8).min(self.items.max_stack(item)));
-            let angle = self.elapsed * 9.73 + rng.range_f32(0.0, std::f32::consts::TAU);
+            let angle = self.view.elapsed * 9.73 + rng.range_f32(0.0, std::f32::consts::TAU);
             self.drops.push(crate::entity::DroppedItem::block_drop(
                 stack,
                 block,
@@ -405,7 +424,8 @@ impl InGameState {
             .then(|| self.player.aabb());
         let player_kind = self.entities.player().physics;
         let remote_boxes: Vec<(PlayerId, Aabb)> = if authority {
-            self.remote_players
+            self.peers
+                .players
                 .iter()
                 .filter(|(_, rp)| rp.mode.takes_damage())
                 .map(|(id, rp)| {
@@ -462,7 +482,7 @@ impl InGameState {
     pub(super) fn update_spawning(&mut self, dt: f32) {
         let cfg = self.spawning.clone();
         let mut anchors = vec![self.player.position];
-        anchors.extend(self.remote_players.values().map(|r| r.position()));
+        anchors.extend(self.peers.players.values().map(|r| r.position()));
         let is_night = self.day_cycle.is_night();
         // Cap the surface search near player height: caves far below the
         // surface aren't valid spawn floors for surface mobs (and there's no
@@ -537,60 +557,6 @@ impl InGameState {
                 None => log::warn!("WYVEN_DEBUG_SPAWN: unknown mob kind {kind:?}"),
             }
         }
-    }
-
-    /// Rebuild the GPU meshes for every visible mob (one per mob, like remote
-    /// players — cheap at the config-capped mob count): the authority's
-    /// simulated mobs plus a client's replicas, whose walk animation is
-    /// advanced here from the observed movement.
-    pub(super) fn update_mob_meshes(&mut self, ctx: &Arc<RenderContext>, dt: f32) {
-        self.mob_meshes.clear();
-        for mob in &self.mobs {
-            if let Some(mesh) = mob_mesh(&mob.visual, mob.position, mob.yaw, &mob.anim.pose(0.0))
-                && let Ok(Some(gpu)) = GpuMesh::upload(&ctx.memory_allocator, &mesh)
-            {
-                self.mob_meshes.push(gpu);
-            }
-        }
-        for rm in self.remote_mobs.values_mut() {
-            // Derive speed from the rendered position delta (the remote-player
-            // trick), clamped so a teleport can't drive an absurd cadence.
-            let speed = if dt > 0.0 {
-                (Vec3::new(
-                    rm.position.x - rm.last_pos.x,
-                    0.0,
-                    rm.position.z - rm.last_pos.z,
-                )
-                .length()
-                    / dt)
-                    .min(super::REMOTE_MAX_SPEED)
-            } else {
-                0.0
-            };
-            rm.anim.advance(speed, dt);
-            rm.last_pos = rm.position;
-            if let Some(mesh) = mob_mesh(&rm.visual, rm.position, rm.yaw, &rm.anim.pose(0.0))
-                && let Ok(Some(gpu)) = GpuMesh::upload(&ctx.memory_allocator, &mesh)
-            {
-                self.mob_meshes.push(gpu);
-            }
-        }
-
-        // Arrows: one combined mesh of small cubes, like the drops pass.
-        let mut arrows = crate::render::CpuMesh::new();
-        let shaft = crate::world::block::FaceTextures::uniform(crate::render::tiles::WOOD_BARK);
-        for arrow in &self.arrows {
-            crate::world::meshing::push_item_cube(
-                &mut arrows,
-                arrow.position,
-                0.15,
-                arrow.yaw(),
-                &shaft,
-            );
-        }
-        self.arrows_mesh = GpuMesh::upload(&ctx.memory_allocator, &arrows)
-            .ok()
-            .flatten();
     }
 
     /// Route damage to the authority's own player: armor mitigates inside

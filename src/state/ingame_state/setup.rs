@@ -1,19 +1,22 @@
 //! Construction of [`InGameState`] for each kind of session: fresh
 //! singleplayer/host, a world loaded from disk, or a client joining a host.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use glam::Vec3;
 
 use super::net::recipes_from_wire;
+use super::peers::Peers;
+use super::persistence::Persistence;
+use super::view::SceneCache;
 use super::{DOUBLE_TAP_WINDOW, InGameState, SPAWN_RADIUS};
 use crate::content::GameContent;
 use crate::core::{BlockPos, CHUNK_HEIGHT, ChunkPos, DayCycle, GameMode};
-use crate::entity::{AnimationState, HumanoidModel, Player, Spawner};
+use crate::entity::{Player, Spawner};
 use crate::inventory::{Inventory, RecipeBook};
 use crate::net::{Client, Host, NetVec3, PlayerId, PlayerRestore, RecipeData};
-use crate::save::{FileWorldRepository, NullWorldRepository, PlayerRecords, SavedGame};
+use crate::save::{FileWorldRepository, SavedGame};
 use crate::state::session::{ClientSession, HostSession, Session, SingleplayerSession};
 use crate::world::{ChunkLoader, FluidSim, NoiseGenerator, World, WorldGenerator};
 
@@ -127,8 +130,8 @@ impl InGameState {
                 "fresh"
             },
         );
-        state.player_records = players;
-        state.save = Box::new(FileWorldRepository::new(save));
+        state.save.records = players;
+        state.save.repository = Box::new(FileWorldRepository::new(save));
         state
     }
 
@@ -233,58 +236,27 @@ impl InGameState {
             inventory,
             recipes,
             show_debug: false,
+            view: SceneCache::new(),
             loader,
-            meshes: HashMap::new(),
-            transparent_meshes: HashMap::new(),
-            mesh_queue: VecDeque::new(),
-            queued: HashSet::new(),
-            player_model: HumanoidModel::player(),
-            player_mesh: None,
-            player_anim: AnimationState::new(),
-            preview_mesh: None,
-            preview_yaw: std::f32::consts::PI,
-            preview_look: (0.0, 0.0),
-            fov_degrees: 70.0,
             day_cycle,
             inventory_open: false,
             held: None,
             spawn,
             fluids: FluidSim::new(),
             breaking: None,
-            break_mesh: None,
-            outline_block: None,
-            outline_mesh: None,
             mobs: Vec::new(),
             next_mob_id: 0,
             spawning: content.spawning.clone(),
             spawner: Spawner::new(seed ^ 0x5EED_0F5B_A3B1_E5B0),
             remote_mobs: HashMap::new(),
-            mob_events: Vec::new(),
-            mob_meshes: Vec::new(),
             arrows: Vec::new(),
-            arrows_mesh: None,
             drops: Vec::new(),
-            drops_mesh: None,
-            drops_mesh_transparent: None,
-            elapsed: 0.0,
             dead: false,
             jump_tap_timer: DOUBLE_TAP_WINDOW * 2.0,
             physics_accum: 0.0,
-            render_alpha: 0.0,
-            stats_timer: 0.0,
             session,
-            save: Box::new(NullWorldRepository),
-            autosave_timer: 0.0,
-            player_records: PlayerRecords::default(),
-            remote_identities: HashMap::new(),
-            remote_inventories: HashMap::new(),
-            equipment_broadcast: HashMap::new(),
-            inventory_sync_timer: 0.0,
-            last_synced_inventory: None,
-            world_state_requested: false,
-            remote_players: HashMap::new(),
-            remote_meshes: Vec::new(),
-            remote_anims: HashMap::new(),
+            peers: Peers::default(),
+            save: Persistence::none(),
         };
         if state.session.is_authority() {
             state.debug_spawn_from_env();

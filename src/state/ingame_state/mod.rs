@@ -8,7 +8,7 @@
 //! - [`streaming`] — chunk request/insert/unload and mesh budgeting.
 //! - [`interaction`] — block break/place, mining, drops, target outline.
 //! - [`mobs`] — mob spawning, AI perception/updates, and their attacks.
-//! - [`models`] — player/preview/remote animated model meshes.
+//! - [`view`] — every GPU resource, the camera, and the animation clocks.
 //! - [`inventory`] — the inventory-screen click/craft handlers.
 //! - [`persistence`] — world save + restore.
 //! - [`frame`] — the [`GameState`] impl (update/ui/scene_frame/preview_frame).
@@ -17,28 +17,26 @@ mod frame;
 mod interaction;
 mod inventory;
 mod mobs;
-mod models;
 mod net;
+mod peers;
 mod persistence;
 mod setup;
 mod streaming;
+mod view;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use glam::Vec3;
 
-use crate::core::{BlockPos, ChunkPos, DayCycle};
-use crate::entity::{
-    AnimationState, Arrow, DroppedItem, EntityRegistry, HumanoidModel, Mob, Player, SpawnConfig,
-    Spawner,
-};
-use crate::inventory::{ARMOR_SIZE, Inventory, ItemRegistry, ItemStack, RecipeBook};
-use crate::net::{NetItemStack, PlayerId, RemotePlayer, ServerMessage};
-use crate::render::{GpuLines, GpuMesh};
-use crate::save::{PlayerRecords, WorldRepository};
+use crate::core::{BlockPos, DayCycle};
+use crate::entity::{Arrow, DroppedItem, EntityRegistry, Mob, Player, SpawnConfig, Spawner};
+use crate::inventory::{Inventory, ItemRegistry, ItemStack, RecipeBook};
 use crate::state::session::Session;
 use crate::world::{BlockRegistry, ChunkLoader, FluidSim, World};
+use peers::Peers;
+use persistence::Persistence;
+use view::SceneCache;
 
 /// The host's own player always has this id; clients are numbered from 1.
 pub(crate) use crate::state::session::HOST_PLAYER_ID;
@@ -92,28 +90,11 @@ pub struct InGameState {
     /// Crafting recipes, loaded from `assets/recipes.toml` at world start.
     pub recipes: RecipeBook,
     pub show_debug: bool,
+    /// Every GPU resource this session has uploaded, plus the camera
+    /// parameters and animation clocks that feed them.
+    view: SceneCache,
     /// Background terrain generation.
     loader: ChunkLoader,
-    /// Opaque GPU meshes for loaded chunks, keyed by chunk position.
-    meshes: HashMap<ChunkPos, GpuMesh>,
-    /// Transparent (water/glass) GPU meshes, drawn in a second blended pass.
-    transparent_meshes: HashMap<ChunkPos, GpuMesh>,
-    /// Pending mesh rebuilds (budgeted across frames), with a dedup set.
-    mesh_queue: VecDeque<ChunkPos>,
-    queued: HashSet<ChunkPos>,
-    /// Local player model + its GPU mesh (only built in third person).
-    player_model: HumanoidModel,
-    player_mesh: Option<GpuMesh>,
-    /// Procedural animation state for the local player's model.
-    player_anim: AnimationState,
-    /// Player-model mesh for the inventory preview (built only while the
-    /// inventory is open), and the yaw the preview is rotated to by dragging.
-    preview_mesh: Option<GpuMesh>,
-    preview_yaw: f32,
-    /// Where the preview model's head looks — (yaw, pitch) toward the cursor,
-    /// set by the inventory UI. Purely cosmetic; never affects the world player.
-    preview_look: (f32, f32),
-    fov_degrees: f32,
     /// Time-of-day clock driving the sky and world lighting.
     day_cycle: DayCycle,
     /// Inventory screen state.
@@ -127,11 +108,6 @@ pub struct InGameState {
     fluids: FluidSim,
     /// Progressive block-break state for survival timed mining.
     breaking: Option<BreakState>,
-    /// Crack overlay drawn on the block being mined (rebuilt as progress grows).
-    break_mesh: Option<GpuMesh>,
-    /// Selection outline on the targeted block, cached until the target changes.
-    outline_block: Option<BlockPos>,
-    outline_mesh: Option<GpuLines>,
     /// Live mobs, simulated by the authority (singleplayer/host) only.
     /// Clients keep interpolated replicas in `remote_mobs` instead.
     mobs: Vec<Mob>,
@@ -143,24 +119,11 @@ pub struct InGameState {
     spawner: Spawner,
     /// Client: replicas of the host's mobs, keyed by wire id.
     remote_mobs: HashMap<u64, mobs::RemoteMob>,
-    /// Host: reliable mob events (spawn/hurt/death/arrow/player-damage)
-    /// queued by the simulation this frame, drained into the broadcast by
-    /// `pump_network`. Kept as a field so mob code never borrows `net`.
-    mob_events: Vec<ServerMessage>,
-    /// One GPU mesh per visible mob, rebuilt each frame like remote players.
-    mob_meshes: Vec<GpuMesh>,
     /// Arrows in flight. Every peer simulates the ones it knows about; only
     /// the authority applies their damage.
     arrows: Vec<Arrow>,
-    /// Combined mesh for all arrows (rebuilt per frame, like drops).
-    arrows_mesh: Option<GpuMesh>,
     /// Item drops lying in the world. Local-only: not synced over the network.
     drops: Vec<DroppedItem>,
-    /// Combined GPU meshes for all drops, split by render pass (rebuilt per frame).
-    drops_mesh: Option<GpuMesh>,
-    drops_mesh_transparent: Option<GpuMesh>,
-    /// Seconds since entering the state; drives shader animation (water frames).
-    elapsed: f32,
     /// True while the player is dead and awaiting respawn (control frozen).
     dead: bool,
     /// Time (s) since the last jump press, for creative double-tap-to-fly.
@@ -169,48 +132,14 @@ pub struct InGameState {
     /// player physics off the variable frame delta is what makes jump height
     /// identical at every framerate.
     physics_accum: f32,
-    /// Fraction `[0,1)` through the current physics step, for camera
-    /// interpolation between fixed steps.
-    render_alpha: f32,
-    /// Throttle accumulator for sending stats over the network.
-    stats_timer: f32,
     /// This session's networking role: who has authority, and how messages
     /// reach the other peers (a no-op transport in singleplayer).
     session: Box<dyn Session>,
-    /// Where this session's world is persisted. A `FileWorldRepository` when
-    /// playing a named world as singleplayer or host; the null repository for
-    /// clients and ephemeral dev-boot worlds, which are never saved.
-    save: Box<dyn WorldRepository>,
-    /// Seconds accumulated toward the next periodic autosave.
-    autosave_timer: f32,
-    /// Host: saved per-identity player records for this world; handed back to
-    /// returning clients and written to `players.dat`.
-    player_records: PlayerRecords,
-    /// Host: stable identity (netcode client id) of each connected player.
-    remote_identities: HashMap<PlayerId, u64>,
-    /// Host: latest inventory each client reported (kept in wire form; converted
-    /// to the name-based disk form only when a record is written).
-    remote_inventories: HashMap<PlayerId, (Vec<Option<NetItemStack>>, u32)>,
-    /// Host: last equipment (armor item ids) broadcast for each player, so
-    /// `PlayerEquipment` is only re-sent on change and a joiner can be brought
-    /// up to date with everyone's current gear.
-    equipment_broadcast: HashMap<PlayerId, [Option<u16>; ARMOR_SIZE]>,
-    /// Client: throttle + change detection for inventory reports to the host.
-    inventory_sync_timer: f32,
-    last_synced_inventory: Option<Inventory>,
-    /// Client-only: whether we've asked the host for the initial world state yet.
-    world_state_requested: bool,
-    remote_players: HashMap<PlayerId, RemotePlayer>,
-    remote_meshes: Vec<GpuMesh>,
-    /// Per-remote-player animation, keyed by id. Speed is derived from the change in
-    /// their rendered position each frame (no extra protocol data needed).
-    remote_anims: HashMap<PlayerId, RemoteAnim>,
-}
-
-/// Animation state for a remote player plus the position used to derive their speed.
-struct RemoteAnim {
-    anim: AnimationState,
-    last_pos: Vec3,
+    /// The other peers in this session and what we still owe them.
+    peers: Peers,
+    /// Where this session's world is persisted, and what it still owes the
+    /// next save.
+    save: Persistence,
 }
 
 impl InGameState {

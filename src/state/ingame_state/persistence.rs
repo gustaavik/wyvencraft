@@ -33,7 +33,7 @@ impl InGameState {
         }
         self.inventory.set_selected(restore.selected as usize);
         // Don't immediately echo the restored inventory back to the host.
-        self.last_synced_inventory = Some(self.inventory.clone());
+        self.peers.last_synced_inventory = Some(self.inventory.clone());
         log::info!("restored player state from host at {:?}", restore.position);
     }
 
@@ -49,13 +49,13 @@ impl InGameState {
             "clients never hold a persistent repository"
         );
         // Fold currently connected players into the persistent records first.
-        let connected: Vec<PlayerId> = self.remote_players.keys().copied().collect();
+        let connected: Vec<PlayerId> = self.peers.players.keys().copied().collect();
         for pid in connected {
             record_remote(
-                &mut self.player_records,
-                &self.remote_identities,
-                &self.remote_players,
-                &self.remote_inventories,
+                &mut self.save.records,
+                &self.peers.identities,
+                &self.peers.players,
+                &self.peers.inventories,
                 &self.items,
                 pid,
             );
@@ -66,18 +66,18 @@ impl InGameState {
         let snapshot = WorldSnapshot {
             world: &world,
             player: &player,
-            players: &self.player_records,
+            players: &self.save.records,
             mobs: &mobs,
             game_mode: self.player.mode,
             spawn: self.spawn.to_array(),
             time_of_day: self.day_cycle.time_of_day(),
         };
-        match self.save.store(&snapshot) {
+        match self.save.repository.store(&snapshot) {
             Ok(()) => log::info!(
                 "saved world '{}' ({} edits, {} player records, {} mobs)",
                 self.save.world_name(),
                 world.edits.len(),
-                self.player_records.0.len(),
+                self.save.records.0.len(),
                 mobs.mobs.len()
             ),
             Err(err) => log::error!("failed to save world '{}': {err}", self.save.world_name()),
@@ -88,7 +88,42 @@ impl InGameState {
     /// save without a `saves/` directory; production wiring sets it in `setup`.
     #[cfg(test)]
     pub(super) fn set_repository(&mut self, repo: Box<dyn crate::save::WorldRepository>) {
-        self.save = repo;
+        self.save.repository = repo;
+    }
+}
+
+/// Where this session's world is persisted, and what it still owes the next
+/// save. Grouping these means the autosave clock and the per-identity records
+/// live with the destination they are written to, rather than as three loose
+/// fields on the in-game state.
+pub(super) struct Persistence {
+    /// A `FileWorldRepository` when playing a named world as singleplayer or
+    /// host; the null repository for clients and ephemeral dev-boot worlds,
+    /// which are never saved.
+    pub repository: Box<dyn crate::save::WorldRepository>,
+    /// Seconds accumulated toward the next periodic autosave.
+    pub autosave_timer: f32,
+    /// Host: saved per-identity player records for this world; handed back to
+    /// returning clients and written to `players.dat`.
+    pub records: crate::save::PlayerRecords,
+}
+
+impl Persistence {
+    /// A session that never writes anywhere (client or ephemeral world).
+    pub fn none() -> Self {
+        Self {
+            repository: Box::new(crate::save::NullWorldRepository),
+            autosave_timer: 0.0,
+            records: crate::save::PlayerRecords::default(),
+        }
+    }
+
+    pub fn is_persistent(&self) -> bool {
+        self.repository.is_persistent()
+    }
+
+    pub fn world_name(&self) -> &str {
+        self.repository.world_name()
     }
 }
 
