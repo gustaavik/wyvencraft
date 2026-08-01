@@ -64,12 +64,18 @@ ui        ← inventory, egui   HUD + inventory egui views
 net       ← core              renet host/client, protocol, remote-player interp
 save      ← core, world, inventory, entity   world/player persistence (saves/ dir)
 state     ← all of the above  game-state machine
-app       ← state, content, render     window + event loop (owns everything)
+boot      ← core, net, save   pure env → BootPlan (no window/GPU)
+app       ← state, boot, content, render   window + event loop (owns everything)
 ```
 
 Key rule: **`render` never depends on `world`.** The active game state builds plain
 `render::CpuMesh` data and hands the renderer a `SceneFrame` (camera + mesh
 references). This keeps the GPU layer decoupled from gameplay.
+
+Its mirror: **only `state::ingame_state::view` touches `RenderContext`.** Chunk
+streaming, mob AI, fluids and interaction are plain logic; `InGameState::refresh_view`
+is the single per-frame seam that turns their results into GPU meshes. That is why
+those systems are testable without a Vulkan device.
 
 ### Design patterns in use
 - **Data-driven content** — game content lives in TOML under `assets/`
@@ -82,6 +88,11 @@ references). This keeps the GPU layer decoupled from gameplay.
   with a logged warning (worldgen is strict: any bad name rejects the file).
 - **State pattern** — `state::GameState` trait + `StateStack` (menu → loading →
   in-game → pause overlay). `app` only drives the stack.
+- **Ports & adapters** (at I/O boundaries only — never in per-frame/per-voxel hot
+  paths): `content::ContentSource`, `save::WorldRepository`, `state::session::Session`,
+  `boot::Environment`. Each has a real impl, a null/embedded impl, and a test double,
+  which is what lets content loading, saving, session logic and startup be tested
+  without a filesystem, socket, or GPU.
 - **Registry** — `world::BlockRegistry`, `inventory::ItemRegistry`,
   `entity::EntityRegistry`, `render::TileRegistry` (texture name → atlas tile).
 - **Strategy** — `world::generation::WorldGenerator` (default `NoiseGenerator`).
@@ -110,9 +121,12 @@ references). This keeps the GPU layer decoupled from gameplay.
 | Crafting recipes        | `assets/recipes.toml` (data); logic in `inventory::crafting`; panel in `ui::inventory`     |
 | A new screen            | implement `state::GameState`, push/replace via `Transition`                                |
 | HUD / inventory UI      | `ui::hud`, `ui::inventory`                                                                 |
-| Networking              | `net::{server,client,protocol}`; orchestration in `state::ingame_state` (`NetRole`)        |
-| Saving / world files    | `save` module (formats, `saves/<slug>/`); triggers in `state::ingame_state::save_world`    |
+| Networking              | `net::{server,client,protocol}` transport; role behind `state::session::Session` (Singleplayer/Host/Client + `FakeSession`); message application in `state::ingame_state::net` |
+| Saving / world files    | `save` module (formats, `saves/<slug>/`) behind `save::WorldRepository` (File/Null/InMemory); triggers in `state::ingame_state::save_world` |
 | Pipelines / passes      | `render::pipeline`, `render::renderer`                                                     |
+| GPU meshes / camera     | `state::ingame_state::view` (`SceneCache`) — the only holder of `RenderContext`             |
+| Startup / dev env vars  | `boot::BootPlan::from_env` (pure, tested); effects in `app::initial_state`                  |
+| Loading `assets/*.toml` | `content::source::ContentSource` (Fs/Embedded/Map) + one `load_or_builtin` helper           |
 | Shaders                 | `assets/shaders/*.{vert,frag}`, declared in `render::shaders`                              |
 
 ## Conventions & gotchas
@@ -121,9 +135,9 @@ references). This keeps the GPU layer decoupled from gameplay.
   reserved keyword — don't use it as an identifier.
 - The module is named `core` — always reference it as `crate::core`; never write a
   bare `core::` path (it would resolve to the std `core` crate).
-- `lib.rs` has a crate-level `#![allow(dead_code)]` left over from scaffolding.
-  Prefer removing dead code over relying on it; drop the allow once the surface
-  stabilises.
+- The crate-level `#![allow(dead_code)]` is **gone** — `cargo build` is
+  warning-free and `cargo clippy --all-targets` is clean. Keep them that way
+  rather than re-adding a blanket allow.
 - **Vulkan correctness signal:** `vulkano`'s safe command-buffer/pipeline API
   validates state and *panics* on misuse (this is what catches bad pipelines even
   without Vulkan validation layers). A clean multi-frame run is strong evidence the
