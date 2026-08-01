@@ -1,8 +1,15 @@
-//! Per-frame network pump and wire (de)serialization for [`InGameState`].
+//! Networking for [`InGameState`]: applying what arrived, deciding what to say.
 //!
-//! The free functions convert between the in-memory model and the protocol's
-//! wire types; several are `pub(super)` so construction, persistence, and tests
-//! in sibling modules can reuse them.
+//! Transport itself lives behind [`Session`](crate::state::session::Session) —
+//! this module never touches a socket. It splits into three parts:
+//!
+//! - [`InGameState::pump_network`] drives one frame: drain, apply, speak, flush.
+//! - `apply_*` interpret one [`Inbound`] against the world, the players and the
+//!   mobs. They are ordinary `&mut self` methods, testable against a
+//!   [`FakeSession`](crate::state::session::FakeSession).
+//! - The free functions convert between the in-memory model and the protocol's
+//!   wire types; several are `pub(super)` so construction, persistence, and
+//!   tests in sibling modules can reuse them.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -11,7 +18,7 @@ use glam::Vec3;
 
 use super::mobs::{self, RemoteMob};
 use super::{
-    HOST_PLAYER_ID, INVENTORY_SYNC_INTERVAL, InGameState, NetRole, STATS_INTERVAL, WORLD_SYNC_BATCH,
+    HOST_PLAYER_ID, INVENTORY_SYNC_INTERVAL, InGameState, STATS_INTERVAL, WORLD_SYNC_BATCH,
 };
 use crate::core::{BlockId, BlockPos};
 use crate::entity::Arrow;
@@ -21,18 +28,13 @@ use crate::net::{
     ServerMessage,
 };
 use crate::save::{ItemStackData, PlayerData, PlayerRecords};
+use crate::state::session::Inbound;
 
 impl InGameState {
-    /// Drive networking for one frame: process incoming, broadcast local state.
+    /// Drive networking for one frame: drain the transport and apply what
+    /// arrived, then say this frame's piece and flush.
     pub(super) fn pump_network(&mut self, dt: f32) {
         let duration = Duration::from_secs_f32(dt.max(1.0e-4));
-        let position = self.player.position.to_array();
-        let yaw = self.player.yaw;
-        let pitch = self.player.pitch;
-        let mode = self.player.mode;
-        let health = self.player.health;
-        let hunger = self.player.hunger;
-        let saturation = self.player.saturation;
 
         // Survival stats are low-frequency; throttle them to keep the wire quiet.
         self.stats_timer += dt;
@@ -41,513 +43,493 @@ impl InGameState {
             self.stats_timer = 0.0;
         }
 
-        // Clients report their inventory (throttled, only on change) so the
-        // host can persist it in the world save.
-        let mut inventory_sync = None;
-        if matches!(self.net, NetRole::Client { .. }) {
-            self.inventory_sync_timer += dt;
-            if self.inventory_sync_timer >= INVENTORY_SYNC_INTERVAL {
-                self.inventory_sync_timer = 0.0;
-                let changed = self.last_synced_inventory.as_ref().is_none_or(|last| {
-                    last.slots() != self.inventory.slots()
-                        || last.selected_index() != self.inventory.selected_index()
-                });
-                if changed {
-                    inventory_sync = Some(inventory_to_wire(&self.inventory));
-                    self.last_synced_inventory = Some(self.inventory.clone());
-                }
-            }
+        for msg in self.session.poll(duration) {
+            self.apply_inbound(msg);
         }
 
-        // One-shot initial world-state request (client only). Captured here and
-        // written back after the match to avoid borrowing `self` while `self.net` is.
-        let need_world_request = !self.world_state_requested;
-        let mut requested_world_state_now = false;
-        // Client-side effects that need `&mut self` and so must run after the
-        // match releases its borrow of `self.net`: loot from mobs this player
-        // killed, and mob damage addressed to this player.
-        let mut my_kills: Vec<(String, u64, Vec3)> = Vec::new();
-        let mut incoming_damage = 0.0f32;
-
-        match &mut self.net {
-            NetRole::Singleplayer => {}
-            NetRole::Host(host) => {
-                host.pump(duration);
-                let seed = self.world.seed();
-                let time_of_day = self.day_cycle.time_of_day();
-
-                for cid in host.take_joined() {
-                    if let Some(pid) = host.player_id(cid) {
-                        // The netcode client id doubles as the player's stable
-                        // identity: returning players get their saved state back.
-                        let identity: u64 = cid;
-                        let restored = self
-                            .player_records
-                            .0
-                            .get(&identity)
-                            .map(|record| record_to_restore(record, &self.items));
-                        let spawn = restored.as_ref().map(|r| r.position).unwrap_or(position);
-                        if restored.is_some() {
-                            log::info!("player {} rejoined; restoring saved state", pid.0);
-                        }
-                        let name = format!("Player {}", pid.0);
-                        host.send(
-                            cid,
-                            &ServerMessage::Welcome {
-                                seed,
-                                your_id: pid,
-                                spawn,
-                                time_of_day,
-                                game_mode: mode,
-                                content_hash: self.content_hash,
-                                recipes: recipes_to_wire(&self.recipes, &self.items),
-                                restored,
-                            },
-                            Channel::Reliable,
-                        );
-                        host.broadcast(
-                            &ServerMessage::PlayerJoined {
-                                id: pid,
-                                name: name.clone(),
-                            },
-                            Channel::Reliable,
-                        );
-                        self.remote_identities.insert(pid, identity);
-                        self.remote_players
-                            .insert(pid, RemotePlayer::new(pid, name, Vec3::from_array(spawn)));
-                        // Bring the newcomer up to date on everyone's current gear
-                        // (unchanging equipment isn't otherwise re-broadcast).
-                        for (&id, &armor) in &self.equipment_broadcast {
-                            host.send(
-                                cid,
-                                &ServerMessage::PlayerEquipment { id, armor },
-                                Channel::Reliable,
-                            );
-                        }
-                    }
-                }
-                for pid in host.take_left() {
-                    // Snapshot the leaving player so their state survives a rejoin.
-                    record_remote(
-                        &mut self.player_records,
-                        &self.remote_identities,
-                        &self.remote_players,
-                        &self.remote_inventories,
-                        &self.items,
-                        pid,
-                    );
-                    self.remote_players.remove(&pid);
-                    self.remote_identities.remove(&pid);
-                    self.remote_inventories.remove(&pid);
-                    self.equipment_broadcast.remove(&pid);
-                    host.broadcast(&ServerMessage::PlayerLeft { id: pid }, Channel::Reliable);
-                }
-
-                for (pid, msg) in host.receive() {
-                    match msg {
-                        ClientMessage::Move {
-                            position,
-                            yaw,
-                            pitch,
-                        } => {
-                            if let Some(rp) = self.remote_players.get_mut(&pid) {
-                                rp.push_snapshot(Vec3::from_array(position), yaw, pitch);
-                            }
-                        }
-                        ClientMessage::Break { pos } => {
-                            if self.world.set_block(pos, BlockId::AIR).is_some() {
-                                self.fluids.block_changed(pos);
-                                host.broadcast(
-                                    &ServerMessage::BlockChanged {
-                                        pos,
-                                        block: BlockId::AIR,
-                                    },
-                                    Channel::Reliable,
-                                );
-                            }
-                        }
-                        ClientMessage::Place { pos, block } => {
-                            if self.world.set_block(pos, block).is_some() {
-                                self.fluids.block_changed(pos);
-                                host.broadcast(
-                                    &ServerMessage::BlockChanged { pos, block },
-                                    Channel::Reliable,
-                                );
-                            }
-                        }
-                        ClientMessage::Stats {
-                            health,
-                            hunger,
-                            saturation,
-                        } => {
-                            if let Some(rp) = self.remote_players.get_mut(&pid) {
-                                rp.health = health;
-                                rp.hunger = hunger;
-                                rp.saturation = saturation;
-                            }
-                        }
-                        ClientMessage::SetMode(m) => {
-                            if let Some(rp) = self.remote_players.get_mut(&pid) {
-                                rp.mode = m;
-                            }
-                        }
-                        ClientMessage::SyncInventory { slots, selected } => {
-                            if let Some(rp) = self.remote_players.get_mut(&pid) {
-                                rp.armor = armor_from_slots(&slots);
-                            }
-                            self.remote_inventories.insert(pid, (slots, selected));
-                        }
-                        ClientMessage::Chat(_) => {}
-                        ClientMessage::RequestWorldState => {
-                            let edits = self.world.collect_edits();
-                            log::debug!(
-                                "replaying {} world edits to player {}",
-                                edits.len(),
-                                pid.0
-                            );
-                            for batch in edits.chunks(WORLD_SYNC_BATCH) {
-                                host.send_to_player(
-                                    pid,
-                                    &ServerMessage::WorldEdits {
-                                        edits: batch.to_vec(),
-                                    },
-                                    Channel::Chunk,
-                                );
-                            }
-                            // ... and the current mob population, so the
-                            // joiner sees what already roams the world.
-                            for mob in &self.mobs {
-                                host.send_to_player(
-                                    pid,
-                                    &ServerMessage::MobSpawned {
-                                        id: mob.id.0,
-                                        kind: mob.kind_name.clone(),
-                                        position: mob.position.to_array(),
-                                    },
-                                    Channel::Reliable,
-                                );
-                            }
-                        }
-                        ClientMessage::Attack { id } => {
-                            // Validate reach against the attacker's last known
-                            // position, then apply with kill credit; the hurt
-                            // (or death) event reaches clients via mob_events.
-                            let Some(attacker) =
-                                self.remote_players.get(&pid).map(|rp| rp.position())
-                            else {
-                                continue;
-                            };
-                            if let Some(mob) = self.mobs.iter_mut().find(|m| m.id.0 == id)
-                                && mobs::attack_in_range(attacker, mob.position)
-                            {
-                                let to_mob = mob.position - attacker;
-                                let push = Vec3::new(to_mob.x, 0.0, to_mob.z).normalize_or_zero()
-                                    * mobs::KNOCKBACK_PUSH
-                                    + Vec3::Y * mobs::KNOCKBACK_LIFT;
-                                mob.damage(mobs::PLAYER_ATTACK_DAMAGE, push);
-                                mob.last_attacker = Some(pid.0);
-                                self.mob_events.push(ServerMessage::MobHurt {
-                                    id,
-                                    health: mob.health,
-                                });
-                            }
-                        }
-                    }
-                }
-
-                // Broadcast authoritative player snapshots.
-                host.broadcast(
-                    &ServerMessage::PlayerState {
-                        id: HOST_PLAYER_ID,
-                        position,
-                        yaw,
-                        pitch,
-                    },
-                    Channel::Unreliable,
-                );
-                let snapshots: Vec<_> = self
-                    .remote_players
-                    .iter()
-                    .map(|(pid, rp)| (*pid, rp.position().to_array(), rp.yaw, rp.pitch))
-                    .collect();
-                for (id, position, yaw, pitch) in snapshots {
-                    host.broadcast(
-                        &ServerMessage::PlayerState {
-                            id,
-                            position,
-                            yaw,
-                            pitch,
-                        },
-                        Channel::Unreliable,
-                    );
-                }
-
-                // Periodic authoritative vitals for the host and every remote player.
-                if send_stats {
-                    host.broadcast(
-                        &ServerMessage::PlayerStats {
-                            id: HOST_PLAYER_ID,
-                            health,
-                            hunger,
-                            mode,
-                        },
-                        Channel::Reliable,
-                    );
-                    let stats: Vec<_> = self
-                        .remote_players
-                        .values()
-                        .map(|rp| (rp.id, rp.health, rp.hunger, rp.mode))
-                        .collect();
-                    for (id, health, hunger, mode) in stats {
-                        host.broadcast(
-                            &ServerMessage::PlayerStats {
-                                id,
-                                health,
-                                hunger,
-                                mode,
-                            },
-                            Channel::Reliable,
-                        );
-                    }
-                }
-
-                // Broadcast armor whenever it changes (the host's own from its
-                // inventory, each remote's from its last inventory sync).
-                let mut equip: Vec<(PlayerId, [Option<u16>; ARMOR_SIZE])> =
-                    vec![(HOST_PLAYER_ID, armor_ids(&self.inventory))];
-                equip.extend(self.remote_players.iter().map(|(pid, rp)| (*pid, rp.armor)));
-                for (id, armor) in equip {
-                    if self.equipment_broadcast.get(&id) != Some(&armor) {
-                        self.equipment_broadcast.insert(id, armor);
-                        host.broadcast(
-                            &ServerMessage::PlayerEquipment { id, armor },
-                            Channel::Reliable,
-                        );
-                    }
-                }
-
-                // Mob lifecycle events queued by this frame's simulation
-                // (spawns, hurts, deaths, arrows, remote-player damage), then
-                // one batched unreliable movement snapshot for all live mobs.
-                for msg in std::mem::take(&mut self.mob_events) {
-                    host.broadcast(&msg, Channel::Reliable);
-                }
-                if !self.mobs.is_empty() {
-                    host.broadcast(
-                        &ServerMessage::MobStates {
-                            mobs: self
-                                .mobs
-                                .iter()
-                                .map(|m| (m.id.0, m.position.to_array(), m.yaw))
-                                .collect(),
-                        },
-                        Channel::Unreliable,
-                    );
-                }
-                host.flush();
-            }
-            NetRole::Client { client, local_id } => {
-                let local_id = *local_id;
-                if let Err(err) = client.pump(duration) {
-                    log::warn!("client pump error: {err}");
-                }
-                // Ask the host to replay the world's existing edits, once connected.
-                if need_world_request && client.is_connected() {
-                    client.send(&ClientMessage::RequestWorldState, Channel::Reliable);
-                    requested_world_state_now = true;
-                }
-                client.send(
-                    &ClientMessage::Move {
-                        position,
-                        yaw,
-                        pitch,
-                    },
-                    Channel::Unreliable,
-                );
-                if send_stats {
-                    client.send(
-                        &ClientMessage::Stats {
-                            health,
-                            hunger,
-                            saturation,
-                        },
-                        Channel::Reliable,
-                    );
-                }
-                if let Some((slots, selected)) = inventory_sync.take() {
-                    client.send(
-                        &ClientMessage::SyncInventory { slots, selected },
-                        Channel::Reliable,
-                    );
-                }
-                for msg in client.receive() {
-                    match msg {
-                        ServerMessage::Welcome { .. } => {}
-                        ServerMessage::PlayerJoined { id, name } if id != local_id => {
-                            self.remote_players
-                                .entry(id)
-                                .or_insert_with(|| RemotePlayer::new(id, name, Vec3::ZERO));
-                        }
-                        ServerMessage::PlayerLeft { id } => {
-                            self.remote_players.remove(&id);
-                        }
-                        ServerMessage::PlayerState {
-                            id,
-                            position,
-                            yaw,
-                            pitch,
-                        } if id != local_id => {
-                            self.remote_players
-                                .entry(id)
-                                .or_insert_with(|| {
-                                    RemotePlayer::new(
-                                        id,
-                                        format!("Player {}", id.0),
-                                        Vec3::from_array(position),
-                                    )
-                                })
-                                .push_snapshot(Vec3::from_array(position), yaw, pitch);
-                        }
-                        ServerMessage::BlockChanged { pos, block } => {
-                            // apply_edit (not set_block) so an edit whose chunk hasn't
-                            // streamed in yet is buffered and applied when it loads.
-                            self.world.apply_edit(pos, block);
-                        }
-                        ServerMessage::WorldEdits { edits } => {
-                            let count = edits.len();
-                            for (pos, block) in edits {
-                                self.world.apply_edit(pos, block);
-                            }
-                            log::debug!("applied {count} world-state edits on join");
-                        }
-                        ServerMessage::PlayerStats {
-                            id,
-                            health,
-                            hunger,
-                            mode,
-                        } if id != local_id => {
-                            self.remote_players
-                                .entry(id)
-                                .or_insert_with(|| {
-                                    RemotePlayer::new(id, format!("Player {}", id.0), Vec3::ZERO)
-                                })
-                                .set_stats(health, hunger, mode);
-                        }
-                        ServerMessage::PlayerEquipment { id, armor } if id != local_id => {
-                            self.remote_players
-                                .entry(id)
-                                .or_insert_with(|| {
-                                    RemotePlayer::new(id, format!("Player {}", id.0), Vec3::ZERO)
-                                })
-                                .armor = armor;
-                        }
-                        ServerMessage::MobSpawned { id, kind, position } => {
-                            match self.entities.find(&kind) {
-                                Some(k) if k.mob.is_some() => {
-                                    log::debug!("replicating mob {id} ({kind}) from host");
-                                    self.remote_mobs
-                                        .insert(id, RemoteMob::new(k, Vec3::from_array(position)));
-                                }
-                                // Shouldn't happen (the content hash gates
-                                // divergent builds), but degrade gracefully.
-                                _ => log::warn!("host spawned unknown mob kind {kind:?}; ignoring"),
-                            }
-                        }
-                        ServerMessage::MobStates { mobs } => {
-                            for (id, position, yaw) in mobs {
-                                // Unknown ids are fine: an unreliable snapshot
-                                // can outrun its reliable MobSpawned.
-                                if let Some(mob) = self.remote_mobs.get_mut(&id) {
-                                    mob.push_snapshot(Vec3::from_array(position), yaw);
-                                }
-                            }
-                        }
-                        ServerMessage::MobHurt { .. } => {
-                            // Reserved for hurt feedback (flash/sound); the
-                            // authoritative outcome arrives as MobDespawned.
-                        }
-                        ServerMessage::MobDespawned { id, killed_by } => {
-                            if let Some(mob) = self.remote_mobs.remove(&id)
-                                && killed_by == Some(local_id)
-                            {
-                                // This player made the kill: roll the loot
-                                // locally (deferred; needs &mut self).
-                                my_kills.push((mob.kind_name().to_string(), id, mob.position()));
-                            }
-                        }
-                        ServerMessage::ArrowSpawned {
-                            position,
-                            velocity,
-                            gravity,
-                            lifetime,
-                        } => {
-                            // Visual-only on clients: damage is host-side, so
-                            // the local copy carries none.
-                            self.arrows.push(Arrow::new(
-                                Vec3::from_array(position),
-                                Vec3::from_array(velocity),
-                                0.0,
-                                gravity,
-                                lifetime,
-                            ));
-                        }
-                        ServerMessage::PlayerDamaged { id, amount } if id == local_id => {
-                            incoming_damage += amount;
-                        }
-                        _ => {}
-                    }
-                }
-                let _ = client.flush();
-            }
+        if self.session.is_authority() {
+            self.broadcast_authority_state(send_stats);
+        } else {
+            self.report_to_host(dt, send_stats);
         }
+        self.session.flush();
+    }
 
-        if requested_world_state_now {
-            self.world_state_requested = true;
-        }
-        for (kind, id, position) in my_kills {
-            self.pop_drops_for(&kind, id, position);
-        }
-        if incoming_damage > 0.0 {
-            self.damage_local_player(incoming_damage);
+    /// Apply one message from the network. Requests arrive on the authority and
+    /// are validated here; updates arrive on a client and are already truth.
+    fn apply_inbound(&mut self, inbound: Inbound) {
+        match inbound {
+            Inbound::Joined { player, identity } => self.welcome_player(player, identity),
+            Inbound::Left { player } => self.forget_player(player),
+            Inbound::Request { player, msg } => self.apply_request(player, msg),
+            Inbound::Update(msg) => self.apply_update(msg),
         }
     }
 
-    /// Propagate a local block edit to the network (host broadcasts, client requests).
-    pub(super) fn broadcast_local_edit(&mut self, pos: BlockPos, block: BlockId) {
-        match &mut self.net {
-            NetRole::Singleplayer => {}
-            NetRole::Host(host) => {
-                host.broadcast(
-                    &ServerMessage::BlockChanged { pos, block },
+    // --- Host: connection lifecycle -------------------------------------------------
+
+    /// Admit a joining player: hand back their saved state if this world
+    /// remembers them, announce them, and bring them up to date on everyone's
+    /// current gear (unchanging equipment isn't otherwise re-broadcast).
+    fn welcome_player(&mut self, pid: PlayerId, identity: u64) {
+        let restored = self
+            .player_records
+            .0
+            .get(&identity)
+            .map(|record| record_to_restore(record, &self.items));
+        let spawn = restored
+            .as_ref()
+            .map(|r| r.position)
+            .unwrap_or_else(|| self.player.position.to_array());
+        if restored.is_some() {
+            log::info!("player {} rejoined; restoring saved state", pid.0);
+        }
+
+        let welcome = ServerMessage::Welcome {
+            seed: self.world.seed(),
+            your_id: pid,
+            spawn,
+            time_of_day: self.day_cycle.time_of_day(),
+            game_mode: self.player.mode,
+            content_hash: self.content_hash,
+            recipes: recipes_to_wire(&self.recipes, &self.items),
+            restored,
+        };
+        self.session.send_to(pid, &welcome, Channel::Reliable);
+
+        let name = format!("Player {}", pid.0);
+        let joined = ServerMessage::PlayerJoined {
+            id: pid,
+            name: name.clone(),
+        };
+        self.session.broadcast(&joined, Channel::Reliable);
+
+        self.remote_identities.insert(pid, identity);
+        self.remote_players
+            .insert(pid, RemotePlayer::new(pid, name, Vec3::from_array(spawn)));
+
+        let equipment: Vec<(PlayerId, [Option<u16>; ARMOR_SIZE])> = self
+            .equipment_broadcast
+            .iter()
+            .map(|(&id, &armor)| (id, armor))
+            .collect();
+        for (id, armor) in equipment {
+            self.session.send_to(
+                pid,
+                &ServerMessage::PlayerEquipment { id, armor },
+                Channel::Reliable,
+            );
+        }
+    }
+
+    /// Snapshot a leaving player so their state survives a rejoin, then drop
+    /// every trace of them from this session.
+    fn forget_player(&mut self, pid: PlayerId) {
+        record_remote(
+            &mut self.player_records,
+            &self.remote_identities,
+            &self.remote_players,
+            &self.remote_inventories,
+            &self.items,
+            pid,
+        );
+        self.remote_players.remove(&pid);
+        self.remote_identities.remove(&pid);
+        self.remote_inventories.remove(&pid);
+        self.equipment_broadcast.remove(&pid);
+        self.session
+            .broadcast(&ServerMessage::PlayerLeft { id: pid }, Channel::Reliable);
+    }
+
+    // --- Host: client requests ------------------------------------------------------
+
+    /// Validate and apply one client request. Everything a client can ask for
+    /// is checked here — this is the authority's only inbound surface.
+    fn apply_request(&mut self, pid: PlayerId, msg: ClientMessage) {
+        match msg {
+            ClientMessage::Move {
+                position,
+                yaw,
+                pitch,
+            } => {
+                if let Some(rp) = self.remote_players.get_mut(&pid) {
+                    rp.push_snapshot(Vec3::from_array(position), yaw, pitch);
+                }
+            }
+            ClientMessage::Break { pos } => self.apply_client_edit(pos, BlockId::AIR),
+            ClientMessage::Place { pos, block } => self.apply_client_edit(pos, block),
+            ClientMessage::Stats {
+                health,
+                hunger,
+                saturation,
+            } => {
+                if let Some(rp) = self.remote_players.get_mut(&pid) {
+                    rp.health = health;
+                    rp.hunger = hunger;
+                    rp.saturation = saturation;
+                }
+            }
+            ClientMessage::SetMode(m) => {
+                if let Some(rp) = self.remote_players.get_mut(&pid) {
+                    rp.mode = m;
+                }
+            }
+            ClientMessage::SyncInventory { slots, selected } => {
+                if let Some(rp) = self.remote_players.get_mut(&pid) {
+                    rp.armor = armor_from_slots(&slots);
+                }
+                self.remote_inventories.insert(pid, (slots, selected));
+            }
+            ClientMessage::Chat(_) => {}
+            ClientMessage::RequestWorldState => self.replay_world_state(pid),
+            ClientMessage::Attack { id } => self.apply_client_attack(pid, id),
+        }
+    }
+
+    /// Apply a client's block edit and echo the result to everyone.
+    fn apply_client_edit(&mut self, pos: BlockPos, block: BlockId) {
+        if self.world.set_block(pos, block).is_some() {
+            self.fluids.block_changed(pos);
+            self.session.broadcast(
+                &ServerMessage::BlockChanged { pos, block },
+                Channel::Reliable,
+            );
+        }
+    }
+
+    /// Replay the world's existing edits and current mob population to a
+    /// joining player, so they see what's already there.
+    fn replay_world_state(&mut self, pid: PlayerId) {
+        let edits = self.world.collect_edits();
+        log::debug!("replaying {} world edits to player {}", edits.len(), pid.0);
+        for batch in edits.chunks(WORLD_SYNC_BATCH) {
+            self.session.send_to(
+                pid,
+                &ServerMessage::WorldEdits {
+                    edits: batch.to_vec(),
+                },
+                Channel::Chunk,
+            );
+        }
+        let spawned: Vec<ServerMessage> = self
+            .mobs
+            .iter()
+            .map(|mob| ServerMessage::MobSpawned {
+                id: mob.id.0,
+                kind: mob.kind_name.clone(),
+                position: mob.position.to_array(),
+            })
+            .collect();
+        for msg in spawned {
+            self.session.send_to(pid, &msg, Channel::Reliable);
+        }
+    }
+
+    /// Validate a client's melee swing against their last known position, then
+    /// apply it with kill credit. The outcome reaches clients via `mob_events`.
+    fn apply_client_attack(&mut self, pid: PlayerId, mob_id: u64) {
+        let Some(attacker) = self.remote_players.get(&pid).map(|rp| rp.position()) else {
+            return;
+        };
+        if let Some(mob) = self.mobs.iter_mut().find(|m| m.id.0 == mob_id)
+            && mobs::attack_in_range(attacker, mob.position)
+        {
+            let to_mob = mob.position - attacker;
+            let push = Vec3::new(to_mob.x, 0.0, to_mob.z).normalize_or_zero()
+                * mobs::KNOCKBACK_PUSH
+                + Vec3::Y * mobs::KNOCKBACK_LIFT;
+            mob.damage(mobs::PLAYER_ATTACK_DAMAGE, push);
+            mob.last_attacker = Some(pid.0);
+            let health = mob.health;
+            self.mob_events
+                .push(ServerMessage::MobHurt { id: mob_id, health });
+        }
+    }
+
+    // --- Client: authoritative updates ----------------------------------------------
+
+    /// Apply one authoritative update from the host.
+    fn apply_update(&mut self, msg: ServerMessage) {
+        let local_id = self.session.local_id();
+        match msg {
+            // The welcome is consumed during construction, not here.
+            ServerMessage::Welcome { .. } => {}
+            ServerMessage::PlayerJoined { id, name } if id != local_id => {
+                self.remote_players
+                    .entry(id)
+                    .or_insert_with(|| RemotePlayer::new(id, name, Vec3::ZERO));
+            }
+            ServerMessage::PlayerLeft { id } => {
+                self.remote_players.remove(&id);
+            }
+            ServerMessage::PlayerState {
+                id,
+                position,
+                yaw,
+                pitch,
+            } if id != local_id => {
+                self.remote_player(id, Vec3::from_array(position))
+                    .push_snapshot(Vec3::from_array(position), yaw, pitch);
+            }
+            ServerMessage::BlockChanged { pos, block } => {
+                // apply_edit (not set_block) so an edit whose chunk hasn't
+                // streamed in yet is buffered and applied when it loads.
+                self.world.apply_edit(pos, block);
+            }
+            ServerMessage::WorldEdits { edits } => {
+                let count = edits.len();
+                for (pos, block) in edits {
+                    self.world.apply_edit(pos, block);
+                }
+                log::debug!("applied {count} world-state edits on join");
+            }
+            ServerMessage::PlayerStats {
+                id,
+                health,
+                hunger,
+                mode,
+            } if id != local_id => {
+                self.remote_player(id, Vec3::ZERO)
+                    .set_stats(health, hunger, mode);
+            }
+            ServerMessage::PlayerEquipment { id, armor } if id != local_id => {
+                self.remote_player(id, Vec3::ZERO).armor = armor;
+            }
+            ServerMessage::MobSpawned { id, kind, position } => match self.entities.find(&kind) {
+                Some(k) if k.mob.is_some() => {
+                    log::debug!("replicating mob {id} ({kind}) from host");
+                    self.remote_mobs
+                        .insert(id, RemoteMob::new(k, Vec3::from_array(position)));
+                }
+                // Shouldn't happen (the content hash gates divergent builds),
+                // but degrade gracefully.
+                _ => log::warn!("host spawned unknown mob kind {kind:?}; ignoring"),
+            },
+            ServerMessage::MobStates { mobs } => {
+                for (id, position, yaw) in mobs {
+                    // Unknown ids are fine: an unreliable snapshot can outrun
+                    // its reliable MobSpawned.
+                    if let Some(mob) = self.remote_mobs.get_mut(&id) {
+                        mob.push_snapshot(Vec3::from_array(position), yaw);
+                    }
+                }
+            }
+            ServerMessage::MobHurt { .. } => {
+                // Reserved for hurt feedback (flash/sound); the authoritative
+                // outcome arrives as MobDespawned.
+            }
+            ServerMessage::MobDespawned { id, killed_by } => {
+                if let Some(mob) = self.remote_mobs.remove(&id)
+                    && killed_by == Some(local_id)
+                {
+                    // This player made the kill: roll the loot locally.
+                    let (kind, position) = (mob.kind_name().to_string(), mob.position());
+                    self.pop_drops_for(&kind, id, position);
+                }
+            }
+            ServerMessage::ArrowSpawned {
+                position,
+                velocity,
+                gravity,
+                lifetime,
+            } => {
+                // Visual-only on clients: damage is host-side, so the local
+                // copy carries none.
+                self.arrows.push(Arrow::new(
+                    Vec3::from_array(position),
+                    Vec3::from_array(velocity),
+                    0.0,
+                    gravity,
+                    lifetime,
+                ));
+            }
+            ServerMessage::PlayerDamaged { id, amount } if id == local_id => {
+                self.damage_local_player(amount);
+            }
+            _ => {}
+        }
+    }
+
+    /// The replica for `id`, created at `fallback` if this is the first we've
+    /// heard of them (an unreliable snapshot can outrun the reliable join).
+    fn remote_player(&mut self, id: PlayerId, fallback: Vec3) -> &mut RemotePlayer {
+        self.remote_players
+            .entry(id)
+            .or_insert_with(|| RemotePlayer::new(id, format!("Player {}", id.0), fallback))
+    }
+
+    // --- Outgoing -------------------------------------------------------------------
+
+    /// Host: publish this frame's authoritative state.
+    fn broadcast_authority_state(&mut self, send_stats: bool) {
+        // Player snapshots: the host's own, then every remote's.
+        let mut snapshots = vec![(
+            HOST_PLAYER_ID,
+            self.player.position.to_array(),
+            self.player.yaw,
+            self.player.pitch,
+        )];
+        snapshots.extend(
+            self.remote_players
+                .iter()
+                .map(|(pid, rp)| (*pid, rp.position().to_array(), rp.yaw, rp.pitch)),
+        );
+        for (id, position, yaw, pitch) in snapshots {
+            self.session.broadcast(
+                &ServerMessage::PlayerState {
+                    id,
+                    position,
+                    yaw,
+                    pitch,
+                },
+                Channel::Unreliable,
+            );
+        }
+
+        // Periodic authoritative vitals for the host and every remote player.
+        if send_stats {
+            let mut stats = vec![(
+                HOST_PLAYER_ID,
+                self.player.health,
+                self.player.hunger,
+                self.player.mode,
+            )];
+            stats.extend(
+                self.remote_players
+                    .values()
+                    .map(|rp| (rp.id, rp.health, rp.hunger, rp.mode)),
+            );
+            for (id, health, hunger, mode) in stats {
+                self.session.broadcast(
+                    &ServerMessage::PlayerStats {
+                        id,
+                        health,
+                        hunger,
+                        mode,
+                    },
                     Channel::Reliable,
                 );
             }
-            NetRole::Client { client, .. } => {
-                let msg = if block.is_air() {
-                    ClientMessage::Break { pos }
-                } else {
-                    ClientMessage::Place { pos, block }
-                };
-                client.send(&msg, Channel::Reliable);
+        }
+
+        // Armor, only when it changes (the host's own from its inventory, each
+        // remote's from its last inventory sync).
+        let mut equip: Vec<(PlayerId, [Option<u16>; ARMOR_SIZE])> =
+            vec![(HOST_PLAYER_ID, armor_ids(&self.inventory))];
+        equip.extend(self.remote_players.iter().map(|(pid, rp)| (*pid, rp.armor)));
+        for (id, armor) in equip {
+            if self.equipment_broadcast.get(&id) != Some(&armor) {
+                self.equipment_broadcast.insert(id, armor);
+                self.session.broadcast(
+                    &ServerMessage::PlayerEquipment { id, armor },
+                    Channel::Reliable,
+                );
+            }
+        }
+
+        // Mob lifecycle events queued by this frame's simulation (spawns,
+        // hurts, deaths, arrows, remote-player damage), then one batched
+        // unreliable movement snapshot for all live mobs.
+        for msg in std::mem::take(&mut self.mob_events) {
+            self.session.broadcast(&msg, Channel::Reliable);
+        }
+        if !self.mobs.is_empty() {
+            let states = ServerMessage::MobStates {
+                mobs: self
+                    .mobs
+                    .iter()
+                    .map(|m| (m.id.0, m.position.to_array(), m.yaw))
+                    .collect(),
+            };
+            self.session.broadcast(&states, Channel::Unreliable);
+        }
+    }
+
+    /// Client: report our own state to the host.
+    fn report_to_host(&mut self, dt: f32, send_stats: bool) {
+        // Ask the host to replay the world's existing edits, once connected.
+        if !self.world_state_requested && self.session.is_connected() {
+            self.session
+                .request(&ClientMessage::RequestWorldState, Channel::Reliable);
+            self.world_state_requested = true;
+        }
+
+        self.session.request(
+            &ClientMessage::Move {
+                position: self.player.position.to_array(),
+                yaw: self.player.yaw,
+                pitch: self.player.pitch,
+            },
+            Channel::Unreliable,
+        );
+        if send_stats {
+            self.session.request(
+                &ClientMessage::Stats {
+                    health: self.player.health,
+                    hunger: self.player.hunger,
+                    saturation: self.player.saturation,
+                },
+                Channel::Reliable,
+            );
+        }
+
+        // Report the inventory (throttled, only on change) so the host can
+        // persist it in the world save.
+        self.inventory_sync_timer += dt;
+        if self.inventory_sync_timer >= INVENTORY_SYNC_INTERVAL {
+            self.inventory_sync_timer = 0.0;
+            let changed = self.last_synced_inventory.as_ref().is_none_or(|last| {
+                last.slots() != self.inventory.slots()
+                    || last.selected_index() != self.inventory.selected_index()
+            });
+            if changed {
+                let (slots, selected) = inventory_to_wire(&self.inventory);
+                self.session.request(
+                    &ClientMessage::SyncInventory { slots, selected },
+                    Channel::Reliable,
+                );
+                self.last_synced_inventory = Some(self.inventory.clone());
             }
         }
     }
 
-    /// Tell the host the local player's game mode changed (no-op for host /
-    /// singleplayer — the host advertises its mode via `PlayerStats`/`Welcome`).
+    /// Propagate a local block edit: the authority asserts it, a client asks.
+    pub(super) fn broadcast_local_edit(&mut self, pos: BlockPos, block: BlockId) {
+        if self.session.is_authority() {
+            self.session.broadcast(
+                &ServerMessage::BlockChanged { pos, block },
+                Channel::Reliable,
+            );
+        } else {
+            let msg = if block.is_air() {
+                ClientMessage::Break { pos }
+            } else {
+                ClientMessage::Place { pos, block }
+            };
+            self.session.request(&msg, Channel::Reliable);
+        }
+    }
+
+    /// Tell the host the local player's game mode changed (a no-op on the
+    /// authority — the host advertises its mode via `PlayerStats`/`Welcome`).
     pub(super) fn broadcast_mode_change(&mut self) {
         let mode = self.player.mode;
-        if let NetRole::Client { client, .. } = &mut self.net {
-            client.send(&ClientMessage::SetMode(mode), Channel::Reliable);
+        if !self.session.is_authority() {
+            self.session
+                .request(&ClientMessage::SetMode(mode), Channel::Reliable);
         }
     }
 
     pub(super) fn net_status(&self) -> String {
-        match &self.net {
-            NetRole::Singleplayer => "singleplayer".to_string(),
-            NetRole::Host(host) => format!("host ({} players)", host.player_count()),
-            NetRole::Client { .. } => format!("client ({} remote)", self.remote_players.len()),
-        }
+        self.session.status(self.remote_players.len())
+    }
+
+    /// Swap in a different networking role. Tests use this to drive host and
+    /// client logic through a fake transport; production wiring sets it in
+    /// `setup`.
+    #[cfg(test)]
+    pub(super) fn set_session(&mut self, session: Box<dyn crate::state::session::Session>) {
+        self.session = session;
     }
 }
 
@@ -697,4 +679,312 @@ pub(super) fn recipes_from_wire(data: &[RecipeData], items: &ItemRegistry) -> Re
         })
         .collect();
     RecipeBook::from_recipes(resolved)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::content::GameContent;
+    use crate::core::GameMode;
+    use crate::state::session::{FakeHandle, FakeSession};
+    use crate::world::block::blocks;
+
+    /// An in-game state driven by a fake session, plus the handle to script it.
+    fn host_session() -> (InGameState, FakeHandle) {
+        let mut state = InGameState::new(GameContent::builtin(), 5, GameMode::Survival);
+        let session = FakeSession::host();
+        let handle = session.handle();
+        state.set_session(Box::new(session));
+        (state, handle)
+    }
+
+    fn client_session(local: PlayerId) -> (InGameState, FakeHandle) {
+        let mut state = InGameState::new(GameContent::builtin(), 5, GameMode::Survival);
+        let session = FakeSession::client(local);
+        let handle = session.handle();
+        state.set_session(Box::new(session));
+        (state, handle)
+    }
+
+    /// A first-time joiner is welcomed with this world's seed and their new id,
+    /// announced to everyone, and registered as a remote player.
+    #[test]
+    fn a_joining_player_is_welcomed_and_announced() {
+        let (mut state, handle) = host_session();
+        let pid = PlayerId(1);
+        handle.deliver(Inbound::Joined {
+            player: pid,
+            identity: 42,
+        });
+
+        state.pump_network(1.0 / 60.0);
+
+        let net = handle.lock();
+        let welcome = net.messages_to(pid);
+        let Some(ServerMessage::Welcome {
+            seed,
+            your_id,
+            restored,
+            ..
+        }) = welcome.first()
+        else {
+            panic!("the joiner must receive a Welcome, got {welcome:?}");
+        };
+        assert_eq!(*seed, state.world.seed());
+        assert_eq!(*your_id, pid);
+        assert!(
+            restored.is_none(),
+            "a first-time joiner has nothing to restore"
+        );
+        assert!(
+            net.broadcasts()
+                .iter()
+                .any(|m| matches!(m, ServerMessage::PlayerJoined { id, .. } if *id == pid)),
+            "everyone is told about the join"
+        );
+        drop(net);
+        assert!(state.remote_players.contains_key(&pid));
+        assert_eq!(state.remote_identities.get(&pid), Some(&42));
+    }
+
+    /// A returning identity gets its saved position and inventory handed back
+    /// in the `Welcome`, rather than starting fresh.
+    #[test]
+    fn a_returning_player_gets_their_saved_state_back() {
+        let (mut state, handle) = host_session();
+        let bread = state.items.find("bread").unwrap();
+        let identity = 7;
+
+        // This world remembers them from a previous session.
+        let mut slots = vec![None; crate::inventory::TOTAL_SLOTS];
+        slots[3] = Some(ItemStackData {
+            name: "bread".to_string(),
+            count: 5,
+            durability: None,
+        });
+        state.player_records.0.insert(
+            identity,
+            PlayerData {
+                position: [12.0, 65.0, -8.0],
+                yaw: 1.5,
+                pitch: 0.2,
+                flying: false,
+                health: 14.0,
+                hunger: 11.0,
+                saturation: 2.0,
+                selected_slot: 3,
+                slots,
+            },
+        );
+
+        let pid = PlayerId(1);
+        handle.deliver(Inbound::Joined {
+            player: pid,
+            identity,
+        });
+        state.pump_network(1.0 / 60.0);
+
+        let net = handle.lock();
+        let welcome = net.messages_to(pid);
+        let Some(ServerMessage::Welcome {
+            spawn, restored, ..
+        }) = welcome.first()
+        else {
+            panic!("expected a Welcome");
+        };
+        let restored = restored.as_ref().expect("a returning player is restored");
+        assert_eq!(
+            *spawn,
+            [12.0, 65.0, -8.0],
+            "they resume where they left off"
+        );
+        assert_eq!(restored.health, 14.0);
+        assert_eq!(restored.selected, 3);
+        let stack = restored.slots[3].expect("their bread survives the round trip");
+        assert_eq!(stack.item, bread.0);
+        assert_eq!(stack.count, 5);
+    }
+
+    /// A leaving player is snapshotted into the persistent records (so a rejoin
+    /// restores them) and dropped from the live session.
+    #[test]
+    fn a_leaving_player_is_recorded_and_forgotten() {
+        let (mut state, handle) = host_session();
+        let pid = PlayerId(1);
+        handle.deliver(Inbound::Joined {
+            player: pid,
+            identity: 99,
+        });
+        state.pump_network(1.0 / 60.0);
+
+        // They report an inventory, then disconnect.
+        handle.deliver(Inbound::Request {
+            player: pid,
+            msg: ClientMessage::SyncInventory {
+                slots: vec![None; crate::inventory::TOTAL_SLOTS],
+                selected: 2,
+            },
+        });
+        handle.deliver(Inbound::Left { player: pid });
+        state.pump_network(1.0 / 60.0);
+
+        assert!(
+            !state.remote_players.contains_key(&pid),
+            "dropped from the session"
+        );
+        assert!(!state.remote_identities.contains_key(&pid));
+        assert_eq!(
+            state.player_records.0.get(&99).map(|r| r.selected_slot),
+            Some(2),
+            "their state is kept against their identity for a rejoin"
+        );
+        assert!(
+            handle
+                .lock()
+                .broadcasts()
+                .iter()
+                .any(|m| matches!(m, ServerMessage::PlayerLeft { id } if *id == pid)),
+            "everyone is told about the departure"
+        );
+    }
+
+    /// The host applies a client's edit to its own world and echoes it, which
+    /// is what makes the host authoritative over terrain.
+    #[test]
+    fn a_client_edit_request_is_applied_and_echoed() {
+        let (mut state, handle) = host_session();
+        let pos = BlockPos::new(1, 80, 1);
+        state.world.set_block(pos, blocks::STONE);
+
+        handle.deliver(Inbound::Request {
+            player: PlayerId(1),
+            msg: ClientMessage::Break { pos },
+        });
+        state.pump_network(1.0 / 60.0);
+
+        assert!(
+            state.world.block_at(pos).is_air(),
+            "the host applied the break"
+        );
+        assert!(
+            handle.lock().broadcasts().iter().any(|m| matches!(
+                m,
+                ServerMessage::BlockChanged { pos: p, block } if *p == pos && block.is_air()
+            )),
+            "and echoed it to every peer"
+        );
+    }
+
+    /// The same local edit means different things by role: the authority
+    /// asserts it, a client can only ask.
+    #[test]
+    fn a_local_edit_is_asserted_by_a_host_and_requested_by_a_client() {
+        let pos = BlockPos::new(4, 70, 4);
+
+        let (mut host, host_net) = host_session();
+        host.broadcast_local_edit(pos, blocks::STONE);
+        assert!(
+            host_net
+                .lock()
+                .broadcasts()
+                .iter()
+                .any(|m| matches!(m, ServerMessage::BlockChanged { pos: p, .. } if *p == pos)),
+            "a host asserts the edit"
+        );
+        assert!(host_net.lock().requests().is_empty(), "and asks no one");
+
+        let (mut client, client_net) = client_session(PlayerId(2));
+        client.broadcast_local_edit(pos, blocks::STONE);
+        let net = client_net.lock();
+        assert!(
+            net.requests()
+                .iter()
+                .any(|m| matches!(m, ClientMessage::Place { pos: p, .. } if *p == pos)),
+            "a client requests a placement, got {:?}",
+            net.requests()
+        );
+        assert!(net.broadcasts().is_empty(), "and asserts nothing");
+    }
+
+    /// Reach is validated host-side: a client's `Attack` lands only when they
+    /// were actually next to the mob. Both directions matter — a test that only
+    /// checked the rejection would pass even if attacks never applied at all.
+    #[test]
+    fn a_client_attack_is_reach_validated() {
+        let (mut state, handle) = host_session();
+        let pid = PlayerId(1);
+        handle.deliver(Inbound::Joined {
+            player: pid,
+            identity: 1,
+        });
+        state.pump_network(1.0 / 60.0);
+        // The joiner is placed at the host's position (no saved record).
+        let attacker = state.remote_players[&pid].position();
+
+        // In reach: the swing lands.
+        let near = state.spawn_mob("cow", attacker).expect("cow spawns");
+        let full_health = state.mobs[0].health;
+        handle.deliver(Inbound::Request {
+            player: pid,
+            msg: ClientMessage::Attack { id: near.0 },
+        });
+        state.pump_network(1.0 / 60.0);
+        assert!(
+            state.mobs[0].health < full_health,
+            "a swing from next to the mob lands"
+        );
+
+        // Out of reach: the same message does nothing.
+        let hurt_health = state.mobs[0].health;
+        state.mobs[0].position = attacker + Vec3::new(500.0, 0.0, 0.0);
+        handle.deliver(Inbound::Request {
+            player: pid,
+            msg: ClientMessage::Attack { id: near.0 },
+        });
+        state.pump_network(1.0 / 60.0);
+        assert_eq!(
+            state.mobs[0].health, hurt_health,
+            "the same swing from 500 blocks away is rejected"
+        );
+    }
+
+    /// A client applies the host's block edits verbatim — no validation, the
+    /// host is truth.
+    #[test]
+    fn a_client_applies_the_hosts_edits() {
+        let (mut state, handle) = client_session(PlayerId(2));
+        let pos = BlockPos::new(-3, 90, 7);
+
+        handle.deliver(Inbound::Update(ServerMessage::BlockChanged {
+            pos,
+            block: blocks::STONE,
+        }));
+        state.pump_network(1.0 / 60.0);
+
+        assert_eq!(state.world.block_at(pos), blocks::STONE);
+    }
+
+    /// A client tells the host where it is, so other players see it move.
+    #[test]
+    fn a_client_reports_its_position_to_the_host() {
+        let (mut state, handle) = client_session(PlayerId(2));
+        state.player.position = Vec3::new(3.0, 71.0, -5.0);
+        state.pump_network(1.0 / 60.0);
+
+        let net = handle.lock();
+        assert!(
+            net.requests().iter().any(|m| matches!(
+                m,
+                ClientMessage::Move { position, .. } if *position == [3.0, 71.0, -5.0]
+            )),
+            "the client reports its position"
+        );
+        assert!(
+            net.requests()
+                .iter()
+                .any(|m| matches!(m, ClientMessage::RequestWorldState)),
+            "and asks for the world's existing edits exactly once on connect"
+        );
+        assert_eq!(net.flushes, 1, "one flush per frame");
+    }
 }

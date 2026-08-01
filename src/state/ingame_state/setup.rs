@@ -7,13 +7,14 @@ use std::sync::Arc;
 use glam::Vec3;
 
 use super::net::recipes_from_wire;
-use super::{DOUBLE_TAP_WINDOW, InGameState, NetRole, SPAWN_RADIUS};
+use super::{DOUBLE_TAP_WINDOW, InGameState, SPAWN_RADIUS};
 use crate::content::GameContent;
 use crate::core::{BlockPos, CHUNK_HEIGHT, ChunkPos, DayCycle, GameMode};
 use crate::entity::{AnimationState, HumanoidModel, Player, Spawner};
 use crate::inventory::{Inventory, RecipeBook};
 use crate::net::{Client, Host, NetVec3, PlayerId, PlayerRestore, RecipeData};
 use crate::save::{FileWorldRepository, NullWorldRepository, PlayerRecords, SavedGame};
+use crate::state::session::{ClientSession, HostSession, Session, SingleplayerSession};
 use crate::world::{ChunkLoader, FluidSim, NoiseGenerator, World, WorldGenerator};
 
 impl InGameState {
@@ -22,7 +23,7 @@ impl InGameState {
         Self::build(
             content,
             seed,
-            NetRole::Singleplayer,
+            Box::new(SingleplayerSession),
             None,
             DayCycle::default(),
             mode,
@@ -35,7 +36,7 @@ impl InGameState {
         Self::build(
             content,
             seed,
-            NetRole::Host(Box::new(host)),
+            Box::new(HostSession::new(host)),
             None,
             DayCycle::default(),
             mode,
@@ -45,19 +46,19 @@ impl InGameState {
 
     /// Singleplayer session of a world loaded from (or just created on) disk.
     pub fn new_saved(content: Arc<GameContent>, game: SavedGame) -> Self {
-        Self::from_save(content, game, NetRole::Singleplayer)
+        Self::from_save(content, game, Box::new(SingleplayerSession))
     }
 
     /// Host a multiplayer session of a world loaded from (or created on) disk.
     pub fn new_host_saved(content: Arc<GameContent>, game: SavedGame, host: Host) -> Self {
-        Self::from_save(content, game, NetRole::Host(Box::new(host)))
+        Self::from_save(content, game, Box::new(HostSession::new(host)))
     }
 
     /// Build from a saved world: regenerate terrain from the saved seed, replay
     /// the edit overlay, and restore the player/inventory/clock. This runs
     /// before the first network pump, so restored edits are already in
     /// `World::edits` before any client can request world state.
-    fn from_save(content: Arc<GameContent>, game: SavedGame, net: NetRole) -> Self {
+    fn from_save(content: Arc<GameContent>, game: SavedGame, session: Box<dyn Session>) -> Self {
         let SavedGame {
             save,
             world,
@@ -74,7 +75,7 @@ impl InGameState {
         let mut state = Self::build(
             content,
             save.meta.seed,
-            net,
+            session,
             anchor,
             DayCycle::new(save.meta.time_of_day),
             save.meta.game_mode,
@@ -152,10 +153,7 @@ impl InGameState {
         let mut state = Self::build(
             content,
             seed,
-            NetRole::Client {
-                client: Box::new(client),
-                local_id,
-            },
+            Box::new(ClientSession::new(client, local_id)),
             Some(Vec3::from_array(spawn)),
             DayCycle::new(time_of_day),
             mode,
@@ -174,7 +172,7 @@ impl InGameState {
     fn build(
         content: Arc<GameContent>,
         seed: u64,
-        net: NetRole,
+        session: Box<dyn Session>,
         spawn_override: Option<Vec3>,
         day_cycle: DayCycle,
         mode: GameMode,
@@ -274,7 +272,7 @@ impl InGameState {
             physics_accum: 0.0,
             render_alpha: 0.0,
             stats_timer: 0.0,
-            net,
+            session,
             save: Box::new(NullWorldRepository),
             autosave_timer: 0.0,
             player_records: PlayerRecords::default(),
@@ -288,7 +286,7 @@ impl InGameState {
             remote_meshes: Vec::new(),
             remote_anims: HashMap::new(),
         };
-        if !matches!(state.net, NetRole::Client { .. }) {
+        if state.session.is_authority() {
             state.debug_spawn_from_env();
         }
         state

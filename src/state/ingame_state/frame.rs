@@ -5,7 +5,7 @@ use glam::Vec3;
 use winit::event::MouseButton;
 
 use super::{
-    AUTOSAVE_INTERVAL, DOUBLE_TAP_WINDOW, InGameState, NetRole, PREVIEW_DRAG_SENSITIVITY,
+    AUTOSAVE_INTERVAL, DOUBLE_TAP_WINDOW, InGameState, PREVIEW_DRAG_SENSITIVITY,
     THIRD_PERSON_DISTANCE,
 };
 use crate::core::{Aabb, CHUNK_HEIGHT, CHUNK_SIZE, ChunkPos};
@@ -184,7 +184,7 @@ impl GameState for InGameState {
         self.pump_network(ctx.dt);
         // Water flow: singleplayer/host simulate authoritatively and broadcast
         // each change; clients receive them as ordinary BlockChanged edits.
-        if !matches!(self.net, NetRole::Client { .. }) {
+        if self.session.is_authority() {
             for (pos, block) in self.fluids.tick(&mut self.world, ctx.dt) {
                 self.broadcast_local_edit(pos, block);
             }

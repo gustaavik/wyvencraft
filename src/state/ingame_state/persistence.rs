@@ -3,8 +3,8 @@
 
 use glam::Vec3;
 
+use super::InGameState;
 use super::net::record_remote;
-use super::{InGameState, NetRole};
 use crate::inventory::{ItemId, ItemStack, TOTAL_SLOTS};
 use crate::net::{PlayerId, PlayerRestore};
 use crate::save::{MobsData, PlayerData, WorldData, WorldSnapshot};
@@ -45,7 +45,7 @@ impl InGameState {
             return;
         }
         debug_assert!(
-            !matches!(self.net, NetRole::Client { .. }),
+            self.session.is_authority(),
             "clients never hold a persistent repository"
         );
         // Fold currently connected players into the persistent records first.

@@ -2,14 +2,14 @@
 //! updates, and applying the attacks mobs commit to.
 //!
 //! Only the authority (singleplayer/host) runs this — mirroring the fluid
-//! sim, `frame.rs` gates the tick on `!NetRole::Client`. Clients hold
+//! sim, `frame.rs` gates the tick on the session's authority. Clients hold
 //! interpolated replicas fed by the host instead of simulating.
 
 use std::sync::Arc;
 
 use glam::Vec3;
 
-use super::{HOST_PLAYER_ID, InGameState, NetRole};
+use super::{HOST_PLAYER_ID, InGameState};
 use crate::core::{Aabb, BlockPos, Rng64};
 use crate::entity::kind::VisualSpec;
 use crate::entity::{
@@ -139,7 +139,7 @@ impl InGameState {
     /// Queue a mob event for the host broadcast (dropped outside hosting; a
     /// singleplayer session has no listeners and clients never emit).
     fn emit_mob_event(&mut self, msg: ServerMessage) {
-        if matches!(self.net, NetRole::Host(_)) {
+        if self.session.serves_peers() {
             self.mob_events.push(msg);
         }
     }
@@ -354,7 +354,7 @@ impl InGameState {
                 .ray_hit(eye, look, reach)
             })
             .unwrap_or(reach);
-        if matches!(self.net, NetRole::Client { .. }) {
+        if !self.session.is_authority() {
             self.remote_mobs
                 .iter()
                 .filter_map(|(id, mob)| Some((*id, mob.aabb().ray_hit(eye, look, max_t)?)))
@@ -390,9 +390,9 @@ impl InGameState {
                 }
             }
             MobTargetRef::Remote(id) => {
-                if let NetRole::Client { client, .. } = &mut self.net {
-                    client.send(&ClientMessage::Attack { id }, Channel::Reliable);
-                }
+                // Only the host may apply damage; ask it to.
+                self.session
+                    .request(&ClientMessage::Attack { id }, Channel::Reliable);
             }
         }
     }
@@ -400,7 +400,7 @@ impl InGameState {
     /// Advance arrows on every peer (they're visual off the authority); the
     /// authority alone hit-tests players and applies damage.
     pub(super) fn update_arrows(&mut self, dt: f32) {
-        let authority = !matches!(self.net, super::NetRole::Client { .. });
+        let authority = self.session.is_authority();
         let local_box = (authority && !self.dead && self.player.mode.takes_damage())
             .then(|| self.player.aabb());
         let player_kind = self.entities.player().physics;

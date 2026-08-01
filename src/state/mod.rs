@@ -11,6 +11,7 @@ pub mod loading_state;
 pub mod menu_state;
 pub mod multiplayer_menu;
 pub mod pause_menu;
+pub mod session;
 pub mod singleplayer_menu;
 
 pub use connecting_state::ConnectingState;

@@ -34,24 +34,14 @@ use crate::entity::{
     Spawner,
 };
 use crate::inventory::{ARMOR_SIZE, Inventory, ItemRegistry, ItemStack, RecipeBook};
-use crate::net::{Client, Host, NetItemStack, PlayerId, RemotePlayer, ServerMessage};
+use crate::net::{NetItemStack, PlayerId, RemotePlayer, ServerMessage};
 use crate::render::{GpuLines, GpuMesh};
 use crate::save::{PlayerRecords, WorldRepository};
+use crate::state::session::Session;
 use crate::world::{BlockRegistry, ChunkLoader, FluidSim, World};
 
-/// The networking role of this in-game session. Host/client drivers are boxed
-/// to keep the enum near the size of its `Singleplayer` variant.
-enum NetRole {
-    Singleplayer,
-    Host(Box<Host>),
-    Client {
-        client: Box<Client>,
-        local_id: PlayerId,
-    },
-}
-
 /// The host's own player always has this id; clients are numbered from 1.
-const HOST_PLAYER_ID: PlayerId = PlayerId(0);
+pub(crate) use crate::state::session::HOST_PLAYER_ID;
 
 /// Chunks generated synchronously at startup so the player has ground to stand on.
 const SPAWN_RADIUS: i32 = 1;
@@ -184,8 +174,9 @@ pub struct InGameState {
     render_alpha: f32,
     /// Throttle accumulator for sending stats over the network.
     stats_timer: f32,
-    /// Networking role + remote players.
-    net: NetRole,
+    /// This session's networking role: who has authority, and how messages
+    /// reach the other peers (a no-op transport in singleplayer).
+    session: Box<dyn Session>,
     /// Where this session's world is persisted. A `FileWorldRepository` when
     /// playing a named world as singleplayer or host; the null repository for
     /// clients and ephemeral dev-boot worlds, which are never saved.
