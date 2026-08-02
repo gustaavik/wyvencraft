@@ -30,10 +30,16 @@ use crate::input::InputState;
 use crate::render::{PreviewFrame, RenderContext, SceneFrame};
 
 /// egui texture handles the app registers once and hands to the UI each frame:
-/// the block atlas (for item icons) and the offscreen player-model preview.
+/// the block atlas (for tile-based item icons), the sheet of pre-rendered 3D
+/// icons (for items with a model), and the offscreen player-model preview.
 #[derive(Clone, Copy)]
 pub struct UiTextures {
     pub atlas: egui::TextureId,
+    /// One cell per loaded model, indexed by `ModelId` — see
+    /// [`crate::render::icons`]. `model_count` is how many cells it holds,
+    /// which the UI needs to turn a cell index into UVs.
+    pub model_icons: egui::TextureId,
+    pub model_count: u32,
     pub preview: egui::TextureId,
 }
 

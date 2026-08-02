@@ -6,6 +6,7 @@
 use glam::Vec3;
 
 use crate::core::Direction;
+use crate::core::math::rotate_y as rot_y;
 use crate::entity::kind::QuadrupedVisual;
 use crate::inventory::{ARMOR_SIZE, ArmorSlot, ItemId, ItemRegistry};
 use crate::render::armor::ArmorKind;
@@ -37,6 +38,15 @@ pub struct Pose {
     pub right_arm: f32,
     pub left_leg: f32,
     pub right_leg: f32,
+}
+
+/// Where an item held in the right hand sits: the fist's world position, plus
+/// the rotations it inherits from the body turn and the arm swing.
+#[derive(Debug, Clone, Copy)]
+pub struct HandAnchor {
+    pub position: Vec3,
+    pub yaw: f32,
+    pub pitch: f32,
 }
 
 /// Static layout of the humanoid model parts.
@@ -293,6 +303,27 @@ impl HumanoidModel {
         }
     }
 
+    /// Where a held item sits, in world space, for a model standing at
+    /// `position` facing `yaw` in `pose`.
+    ///
+    /// The anchor is the centre of the right arm's bottom face — the fist —
+    /// carried through the same pivot-then-yaw chain [`push_box`] uses, so a
+    /// held model tracks the arm exactly as the arm swings. The returned yaw is
+    /// the model's, since the only articulation a hand inherits is the body
+    /// turn; the arm's own pitch comes back separately.
+    pub fn hand_anchor(&self, position: Vec3, yaw: f32, pose: &Pose) -> HandAnchor {
+        let arm = self.right_arm;
+        let pivot = top_pivot(arm);
+        // Fist: the far end of the arm, a little inside the cuff.
+        let fist = arm.center - Vec3::new(0.0, arm.size.y * 0.5 - 1.0 / 16.0, 0.0);
+        let local = rot_x(fist - pivot, pose.right_arm) + pivot;
+        HandAnchor {
+            position: rot_y(local, yaw) + position,
+            yaw,
+            pitch: pose.right_arm,
+        }
+    }
+
     /// The `index`-th body part (in `ARTICULATION` order) with its base skin
     /// unwrap, joint pivot, pitch, and head-turn (only the head turns).
     fn articulated_part(&self, index: usize, pose: &Pose) -> (ModelBox, SkinPart, Vec3, f32, f32) {
@@ -485,12 +516,6 @@ fn top_pivot(b: ModelBox) -> Vec3 {
 /// Joint pivot at the bottom centre of a box (neck).
 fn bottom_pivot(b: ModelBox) -> Vec3 {
     b.center - Vec3::new(0.0, b.size.y * 0.5, 0.0)
-}
-
-/// Rotate a point around the Y axis (matches `Player::look_direction`).
-fn rot_y(p: Vec3, yaw: f32) -> Vec3 {
-    let (s, c) = yaw.sin_cos();
-    Vec3::new(p.x * c - p.z * s, p.y, p.x * s + p.z * c)
 }
 
 /// Rotate a point around the X axis (limb swing / head tilt).
@@ -818,6 +843,62 @@ mod tests {
         assert!(
             (rot_foot.z - foot.z).abs() > 0.1,
             "foot z barely moved: {rot_foot:?}"
+        );
+    }
+
+    #[test]
+    fn hand_anchor_sits_at_the_end_of_the_right_arm() {
+        let model = HumanoidModel::player();
+        let at = Vec3::new(10.0, 64.0, -3.0);
+        let anchor = model.hand_anchor(at, 0.0, &Pose::default());
+
+        // On the character's right (+X at yaw 0, see `HumanoidModel::player`),
+        // and down near the cuff rather than up at the shoulder.
+        let local = anchor.position - at;
+        assert!(local.x > 0.0, "hand should be on the right, got {local}");
+        let shoulder = top_pivot(model.right_arm).y;
+        let cuff = model.right_arm.center.y - model.right_arm.size.y * 0.5;
+        assert!(
+            local.y < shoulder && local.y < cuff + 2.0 / 16.0,
+            "hand at {local} should be near the cuff ({cuff}), not the shoulder ({shoulder})"
+        );
+        assert_eq!(anchor.yaw, 0.0);
+        assert_eq!(anchor.pitch, 0.0, "rest pose has no arm swing");
+    }
+
+    #[test]
+    fn hand_anchor_follows_the_arm_swing_and_the_body_yaw() {
+        let model = HumanoidModel::player();
+        let rest = model.hand_anchor(Vec3::ZERO, 0.0, &Pose::default());
+
+        // Swinging the arm forward carries the hand with it, about the shoulder.
+        let swung = model.hand_anchor(
+            Vec3::ZERO,
+            0.0,
+            &Pose {
+                right_arm: -1.2,
+                ..Pose::default()
+            },
+        );
+        assert!(
+            (swung.position.z - rest.position.z).abs() > 0.2,
+            "hand should swing along Z, moved to {}",
+            swung.position
+        );
+        assert!(swung.position.y > rest.position.y, "and lift as it swings");
+        assert_eq!(swung.pitch, -1.2, "the held model inherits the arm pitch");
+
+        // Turning the body carries the hand around, keeping it the same
+        // distance from the model's centre line.
+        let turned = model.hand_anchor(Vec3::ZERO, std::f32::consts::FRAC_PI_2, &Pose::default());
+        assert!(
+            (turned.position.length() - rest.position.length()).abs() < 1e-5,
+            "yaw must not move the hand relative to the body"
+        );
+        assert!(
+            turned.position.z > 0.1 && turned.position.x.abs() < 1e-5,
+            "a quarter turn should send the right hand to +Z, got {}",
+            turned.position
         );
     }
 }

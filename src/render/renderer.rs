@@ -9,7 +9,6 @@ use vulkano::command_buffer::{
     AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer,
     RenderingAttachmentInfo, RenderingInfo,
 };
-use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
 use vulkano::format::{ClearValue, Format};
 use vulkano::image::view::ImageView;
 use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
@@ -21,10 +20,11 @@ use vulkano::render_pass::{AttachmentLoadOp, AttachmentStoreOp};
 use vulkano::sync::GpuFuture;
 
 use super::context::RenderContext;
+use super::icons;
 use super::mesh::{GpuLines, GpuMesh};
 use super::pipeline::{line, sky, voxel};
 use super::shaders;
-use super::texture::TextureAtlas;
+use super::texture::Texture;
 
 /// Fallback clear colour used as the menu background (when there is no scene to
 /// draw the procedural sky behind).
@@ -34,6 +34,16 @@ const DEPTH_FORMAT: Format = Format::D32_SFLOAT;
 /// the mockup's box. Opaque (not transparent) sidesteps premultiplied-alpha
 /// halos when egui composites the sampled image over the inventory panel.
 const PREVIEW_BG: [f32; 4] = [0.02, 0.02, 0.03, 1.0];
+
+/// Lighting for the item-icon sheet: mostly ambient, with a soft key from the
+/// upper front-left so a model still reads as solid. Fixed rather than tied to
+/// the day/night cycle — icons are rendered once, and a hotbar that dimmed at
+/// dusk would just look broken.
+const ICON_LIGHT: LightParams = LightParams {
+    light_dir: Vec3::new(-0.35, 0.75, 0.55),
+    light_color: Vec3::new(1.0, 1.0, 1.0),
+    ambient: 0.62,
+};
 
 /// Parameters for the procedural sky pass, derived from the day/night cycle.
 #[derive(Clone, Copy)]
@@ -58,6 +68,15 @@ pub struct LightParams {
     pub ambient: f32,
 }
 
+/// A mesh that samples its own texture instead of the shared block atlas — what
+/// geometry loaded from a model file needs, since its texture is authored
+/// alongside the model rather than allocated a slot in the atlas.
+#[derive(Clone, Copy)]
+pub struct TexturedMesh<'a> {
+    pub mesh: &'a GpuMesh,
+    pub texture: &'a Texture,
+}
+
 /// Everything the renderer needs to draw one frame of the 3D scene. Holds
 /// borrowed GPU meshes owned by the active game state.
 pub struct SceneFrame<'a> {
@@ -68,6 +87,8 @@ pub struct SceneFrame<'a> {
     pub time: f32,
     pub opaque: Vec<&'a GpuMesh>,
     pub transparent: Vec<&'a GpuMesh>,
+    /// Opaque geometry that brings its own texture, drawn after `opaque`.
+    pub textured: Vec<TexturedMesh<'a>>,
     /// Debug lines drawn on top of the world (block selection outline).
     pub lines: Option<&'a GpuLines>,
 }
@@ -79,6 +100,8 @@ pub struct PreviewFrame<'a> {
     pub view_proj: Mat4,
     pub light: LightParams,
     pub model: &'a GpuMesh,
+    /// The item model in the previewed player's hand, if they hold one.
+    pub held: Option<TexturedMesh<'a>>,
 }
 
 pub struct Renderer {
@@ -87,12 +110,11 @@ pub struct Renderer {
     voxel_pipeline: Arc<GraphicsPipeline>,
     transparent_pipeline: Arc<GraphicsPipeline>,
     line_pipeline: Arc<GraphicsPipeline>,
-    atlas_set: Arc<DescriptorSet>,
     /// Depth buffers keyed by size. The swapchain pass and the (differently
     /// sized) preview pass each keep their own entry, so alternating between
     /// them every frame doesn't thrash a single-slot cache.
     depth_cache: Vec<(Arc<ImageView>, [u32; 2])>,
-    atlas: TextureAtlas,
+    atlas: Texture,
 }
 
 impl Renderer {
@@ -104,20 +126,7 @@ impl Renderer {
         let transparent_pipeline =
             voxel::create(ctx.device().clone(), color_format, DEPTH_FORMAT, true);
         let line_pipeline = line::create(ctx.device().clone(), color_format, DEPTH_FORMAT);
-        let atlas = TextureAtlas::create(&ctx, atlas_pixels);
-
-        let set_layout = voxel_pipeline.layout().set_layouts()[0].clone();
-        let atlas_set = DescriptorSet::new(
-            ctx.descriptor_allocator.clone(),
-            set_layout,
-            [WriteDescriptorSet::image_view_sampler(
-                0,
-                atlas.image_view.clone(),
-                atlas.sampler.clone(),
-            )],
-            [],
-        )
-        .expect("atlas descriptor set");
+        let atlas = Texture::atlas(&ctx, atlas_pixels);
 
         Self {
             ctx,
@@ -125,7 +134,6 @@ impl Renderer {
             voxel_pipeline,
             transparent_pipeline,
             line_pipeline,
-            atlas_set,
             depth_cache: Vec::new(),
             atlas,
         }
@@ -179,31 +187,20 @@ impl Renderer {
         }
     }
 
-    /// Record draws for a list of meshes with the given pipeline.
-    fn record_meshes(
+    /// Bind `pipeline` and push the shared per-frame constants. Split out
+    /// because the two mesh recorders below differ only in how they bind
+    /// textures, not in how they set the frame up.
+    fn begin_pass(
         &self,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
         pipeline: &Arc<GraphicsPipeline>,
         view_proj: Mat4,
         light: &LightParams,
         time: f32,
-        meshes: &[&GpuMesh],
     ) {
-        if meshes.is_empty() {
-            return;
-        }
-        let layout = pipeline.layout().clone();
         builder
             .bind_pipeline_graphics(pipeline.clone())
             .expect("bind pipeline");
-        builder
-            .bind_descriptor_sets(
-                PipelineBindPoint::Graphics,
-                layout.clone(),
-                0,
-                self.atlas_set.clone(),
-            )
-            .expect("bind atlas set");
         let push = shaders::voxel_vs::PushConstants {
             view_proj: view_proj.to_cols_array_2d(),
             sun_dir: [
@@ -220,23 +217,86 @@ impl Renderer {
             ],
         };
         builder
-            .push_constants(layout, 0, push)
+            .push_constants(pipeline.layout().clone(), 0, push)
             .expect("push view_proj");
+    }
 
+    fn draw_mesh(
+        &self,
+        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+        mesh: &GpuMesh,
+    ) {
+        builder
+            .bind_vertex_buffers(0, mesh.vertex_buffer.clone())
+            .expect("bind vbuf");
+        builder
+            .bind_index_buffer(mesh.index_buffer.clone())
+            .expect("bind ibuf");
+        // SAFETY: pipeline, descriptor set, push constants and buffers are
+        // bound and match the shader interface.
+        unsafe {
+            builder
+                .draw_indexed(mesh.index_count, 1, 0, 0, 0)
+                .expect("draw mesh");
+        }
+    }
+
+    /// Record draws for meshes that all sample the block atlas — the world, and
+    /// every entity built from atlas tiles or skin sheets. One descriptor bind
+    /// covers the whole batch.
+    fn record_meshes(
+        &self,
+        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+        pipeline: &Arc<GraphicsPipeline>,
+        view_proj: Mat4,
+        light: &LightParams,
+        time: f32,
+        meshes: &[&GpuMesh],
+    ) {
+        if meshes.is_empty() {
+            return;
+        }
+        self.begin_pass(builder, pipeline, view_proj, light, time);
+        builder
+            .bind_descriptor_sets(
+                PipelineBindPoint::Graphics,
+                pipeline.layout().clone(),
+                0,
+                self.atlas.set.clone(),
+            )
+            .expect("bind atlas set");
         for mesh in meshes {
+            self.draw_mesh(builder, mesh);
+        }
+    }
+
+    /// Record draws for meshes that each carry their own texture — geometry
+    /// loaded from model files, whose textures are far too varied to live in the
+    /// block atlas. Same pipeline and push constants as [`Self::record_meshes`];
+    /// only the descriptor set is rebound per mesh.
+    fn record_textured(
+        &self,
+        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+        pipeline: &Arc<GraphicsPipeline>,
+        view_proj: Mat4,
+        light: &LightParams,
+        time: f32,
+        meshes: &[TexturedMesh<'_>],
+    ) {
+        if meshes.is_empty() {
+            return;
+        }
+        self.begin_pass(builder, pipeline, view_proj, light, time);
+        for textured in meshes {
             builder
-                .bind_vertex_buffers(0, mesh.vertex_buffer.clone())
-                .expect("bind vbuf");
-            builder
-                .bind_index_buffer(mesh.index_buffer.clone())
-                .expect("bind ibuf");
-            // SAFETY: pipeline, descriptor set, push constants and buffers are
-            // bound and match the shader interface.
-            unsafe {
-                builder
-                    .draw_indexed(mesh.index_count, 1, 0, 0, 0)
-                    .expect("draw mesh");
-            }
+                .bind_descriptor_sets(
+                    PipelineBindPoint::Graphics,
+                    pipeline.layout().clone(),
+                    0,
+                    textured.texture.set.clone(),
+                )
+                .expect("bind model texture set");
+            self.draw_mesh(builder, textured.mesh);
         }
     }
 
@@ -352,6 +412,16 @@ impl Renderer {
                 scene.time,
                 &scene.opaque,
             );
+            // Model geometry is opaque too (its cutouts are alpha-tested in the
+            // shader), so it goes in before the blended pass.
+            self.record_textured(
+                &mut builder,
+                &voxel_pipeline,
+                scene.view_proj,
+                &scene.light,
+                scene.time,
+                &scene.textured,
+            );
             self.record_meshes(
                 &mut builder,
                 &transparent_pipeline,
@@ -371,6 +441,83 @@ impl Renderer {
         before
             .then_execute(self.ctx.graphics_queue().clone(), command_buffer)
             .expect("execute scene cb")
+            .boxed()
+    }
+
+    /// Fill an icon sheet: render `icons[i]` into cell `i` of `target`, all in
+    /// one pass, and return a future that completes when the sheet is ready.
+    ///
+    /// Every cell shares the orthographic camera and light from
+    /// [`super::icons`] — the meshes arrive already framed into the unit box it
+    /// covers — so a cell change is only a viewport change. Cleared fully
+    /// transparent so the icons composite over inventory slots; the shader's
+    /// alpha test means every pixel is either opaque model or untouched clear,
+    /// with no partial-alpha edges to fringe.
+    pub fn draw_icons(
+        &mut self,
+        before: Box<dyn GpuFuture>,
+        target: Arc<ImageView>,
+        icons: &[TexturedMesh<'_>],
+    ) -> Box<dyn GpuFuture> {
+        let extent = target.image().extent();
+        let depth = self.ensure_depth([extent[0], extent[1]]);
+
+        let mut builder = AutoCommandBufferBuilder::primary(
+            self.ctx.command_allocator.clone(),
+            self.ctx.graphics_queue().queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )
+        .expect("icon command buffer");
+
+        builder
+            .begin_rendering(RenderingInfo {
+                color_attachments: vec![Some(RenderingAttachmentInfo {
+                    load_op: AttachmentLoadOp::Clear,
+                    store_op: AttachmentStoreOp::Store,
+                    clear_value: Some(ClearValue::Float([0.0; 4])),
+                    ..RenderingAttachmentInfo::image_view(target.clone())
+                })],
+                depth_attachment: Some(RenderingAttachmentInfo {
+                    load_op: AttachmentLoadOp::Clear,
+                    store_op: AttachmentStoreOp::DontCare,
+                    clear_value: Some(ClearValue::Depth(1.0)),
+                    ..RenderingAttachmentInfo::image_view(depth)
+                }),
+                ..Default::default()
+            })
+            .expect("begin icon rendering");
+
+        let pipeline = self.voxel_pipeline.clone();
+        let view_proj = icons::view_projection();
+        for (index, icon) in icons.iter().enumerate() {
+            let [x, y, w, h] = icons::cell_rect(index as u32);
+            builder
+                .set_viewport(
+                    0,
+                    [Viewport {
+                        offset: [x as f32, y as f32],
+                        extent: [w as f32, h as f32],
+                        depth_range: 0.0..=1.0,
+                    }]
+                    .into_iter()
+                    .collect(),
+                )
+                .expect("set icon viewport");
+            self.record_textured(
+                &mut builder,
+                &pipeline,
+                view_proj,
+                &ICON_LIGHT,
+                0.0,
+                std::slice::from_ref(icon),
+            );
+        }
+
+        builder.end_rendering().expect("end icon rendering");
+        let command_buffer = builder.build().expect("build icon cb");
+        before
+            .then_execute(self.ctx.graphics_queue().clone(), command_buffer)
+            .expect("execute icon cb")
             .boxed()
     }
 
@@ -431,6 +578,14 @@ impl Renderer {
             &preview.light,
             0.0,
             &[preview.model],
+        );
+        self.record_textured(
+            &mut builder,
+            &voxel_pipeline,
+            preview.view_proj,
+            &preview.light,
+            0.0,
+            preview.held.as_slice(),
         );
 
         builder.end_rendering().expect("end preview rendering");

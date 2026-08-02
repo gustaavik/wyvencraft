@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use vulkano::descriptor_set::layout::DescriptorSetLayout;
 use vulkano::device::Device;
 use vulkano::format::Format;
 use vulkano::pipeline::graphics::color_blend::{
@@ -17,9 +18,50 @@ use vulkano::pipeline::graphics::viewport::ViewportState;
 use vulkano::pipeline::graphics::{GraphicsPipeline, GraphicsPipelineCreateInfo};
 use vulkano::pipeline::layout::PipelineDescriptorSetLayoutCreateInfo;
 use vulkano::pipeline::{DynamicState, PipelineLayout, PipelineShaderStageCreateInfo};
+use vulkano::shader::EntryPoint;
 
 use crate::render::shaders;
 use crate::render::vertex::ChunkVertex;
+
+fn entry_points(device: &Arc<Device>) -> (EntryPoint, EntryPoint) {
+    let vs = shaders::voxel_vs::load(device.clone())
+        .unwrap()
+        .entry_point("main")
+        .unwrap();
+    let fs = shaders::voxel_fs::load(device.clone())
+        .unwrap()
+        .entry_point("main")
+        .unwrap();
+    (vs, fs)
+}
+
+/// The layout both voxel pipelines share, reflected from the shaders: set 0 is
+/// the sampled texture, plus the push-constant block.
+pub fn layout(device: &Arc<Device>) -> Arc<PipelineLayout> {
+    let (vs, fs) = entry_points(device);
+    let stages = [
+        PipelineShaderStageCreateInfo::new(vs),
+        PipelineShaderStageCreateInfo::new(fs),
+    ];
+    PipelineLayout::new(
+        device.clone(),
+        PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
+            .into_pipeline_layout_create_info(device.clone())
+            .expect("voxel pipeline layout info"),
+    )
+    .expect("voxel pipeline layout")
+}
+
+/// Descriptor-set layout for set 0 — the sampled texture.
+///
+/// Anything this pipeline can bind builds its descriptor set from here: the
+/// block atlas and every model's own texture alike. Deriving it from the same
+/// reflected [`layout`] the pipelines use is what guarantees the sets stay
+/// compatible, rather than a second hand-written copy of the binding drifting
+/// out of sync with the shader.
+pub fn texture_set_layout(device: &Arc<Device>) -> Arc<DescriptorSetLayout> {
+    layout(device).set_layouts()[0].clone()
+}
 
 /// Build a voxel pipeline targeting the given color/depth formats.
 ///
@@ -31,14 +73,7 @@ pub fn create(
     depth_format: Format,
     transparent: bool,
 ) -> Arc<GraphicsPipeline> {
-    let vs = shaders::voxel_vs::load(device.clone())
-        .unwrap()
-        .entry_point("main")
-        .unwrap();
-    let fs = shaders::voxel_fs::load(device.clone())
-        .unwrap()
-        .entry_point("main")
-        .unwrap();
+    let (vs, fs) = entry_points(&device);
 
     let vertex_input_state = ChunkVertex::per_vertex()
         .definition(&vs)
@@ -49,13 +84,7 @@ pub fn create(
         PipelineShaderStageCreateInfo::new(fs),
     ];
 
-    let layout = PipelineLayout::new(
-        device.clone(),
-        PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
-            .into_pipeline_layout_create_info(device.clone())
-            .expect("voxel pipeline layout info"),
-    )
-    .expect("voxel pipeline layout");
+    let layout = layout(&device);
 
     let subpass = PipelineRenderingCreateInfo {
         color_attachment_formats: vec![Some(color_format)],

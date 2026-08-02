@@ -7,6 +7,7 @@
 //! dispatches on — never on item identity.
 
 use crate::core::BlockId;
+use crate::model::ModelSpec;
 use crate::world::block::{BlockMaterial, BlockRegistry};
 
 /// Embedded copy of the shipped item definitions, used when
@@ -201,6 +202,10 @@ struct ItemDef {
     tool: Option<ToolSpec>,
     food: Option<FoodValue>,
     armor: Option<ArmorSpec>,
+    /// `[item.model]` — the 3D model this item is drawn as when it is held or
+    /// lying in the world. Purely visual, so it is handed back out of band
+    /// rather than stored on [`Item`]: see [`ItemRegistry::from_toml_with_models`].
+    model: Option<ModelSpec>,
 }
 
 #[derive(serde::Deserialize)]
@@ -249,8 +254,24 @@ impl ItemRegistry {
     /// back to [`ItemRegistry::from_blocks`]. Bad names inside entries only
     /// degrade that entry (warning), following the recipes-file precedent.
     pub fn from_toml(text: &str, blocks: &BlockRegistry) -> Result<Self, String> {
+        Self::from_toml_with_models(text, blocks, &mut Vec::new())
+    }
+
+    /// Like [`ItemRegistry::from_toml`], but also reports each item's
+    /// `[item.model]` in a vector indexed by [`ItemId`].
+    ///
+    /// Model assignment is visual-only and is kept off [`Item`] on purpose, for
+    /// the same reason as `content::ItemIcon`: `Item` feeds `content_hash`,
+    /// which gates multiplayer joins, and two players whose swords are drawn
+    /// differently have no reason to be refused a shared world.
+    pub fn from_toml_with_models(
+        text: &str,
+        blocks: &BlockRegistry,
+        models: &mut Vec<Option<ModelSpec>>,
+    ) -> Result<Self, String> {
         let file: ItemFile = toml::from_str(text).map_err(|e| e.to_string())?;
 
+        models.clear();
         let mut items: Vec<Item> = Vec::new();
         let mut block_to_item = vec![None; blocks.len()];
         for (block_id, block) in blocks.iter() {
@@ -271,7 +292,7 @@ impl ItemRegistry {
                 }
                 id
             });
-            match items.iter().position(|i| i.name == def.name) {
+            let index = match items.iter().position(|i| i.name == def.name) {
                 // Override an auto-generated block item: only the fields the
                 // entry specifies change.
                 Some(idx) => {
@@ -291,6 +312,7 @@ impl ItemRegistry {
                     if def.armor.is_some() {
                         item.armor = def.armor;
                     }
+                    idx
                 }
                 None => {
                     let single = def.tool.is_some() || def.armor.is_some();
@@ -303,9 +325,15 @@ impl ItemRegistry {
                         food: def.food,
                         armor: def.armor,
                     });
+                    items.len() - 1
                 }
+            };
+            if let Some(model) = def.model {
+                models.resize(items.len().max(models.len()), None);
+                models[index] = Some(model);
             }
         }
+        models.resize(items.len(), None);
 
         let mut reg = Self {
             items,
@@ -433,7 +461,7 @@ mod tests {
             "diamond ore",
         ];
         // (name, kind, dig_speed, durability, harvests)
-        let tools: [(&str, &str, f32, u16, &[BlockMaterial]); 4] = [
+        let tools: [(&str, &str, f32, u16, &[BlockMaterial]); 5] = [
             (
                 "wooden pickaxe",
                 "pickaxe",
@@ -450,6 +478,7 @@ mod tests {
                 &[BlockMaterial::Dirt, BlockMaterial::Sand],
             ),
             ("shears", "shears", 5.0, 120, &[BlockMaterial::Plant]),
+            ("vine sword", "sword", 1.5, 200, &[BlockMaterial::Plant]),
         ];
         // (name, hunger, saturation)
         let foods = [
@@ -531,26 +560,67 @@ mod tests {
             );
         }
 
-        // The starter kit resolves in hotbar order: three fresh tools, then
-        // the two foods with their counts.
+        // The starter kit resolves in hotbar order: four fresh tools, then the
+        // two foods with their counts.
         let kit = items.starter_kit_survival();
-        assert_eq!(kit.len(), 5, "starter kit size");
-        for (slot, name) in ["wooden pickaxe", "wooden axe", "wooden shovel"]
-            .iter()
-            .enumerate()
+        assert_eq!(kit.len(), 6, "starter kit size");
+        for (slot, name) in [
+            "wooden pickaxe",
+            "wooden axe",
+            "wooden shovel",
+            "vine sword",
+        ]
+        .iter()
+        .enumerate()
         {
             let id = items.find(name).unwrap();
             assert_eq!(kit[slot], items.full_stack(id), "kit slot {slot}");
         }
         assert_eq!(
-            kit[3],
+            kit[4],
             ItemStack::new(items.find("apple").unwrap(), 5),
             "kit apples"
         );
         assert_eq!(
-            kit[4],
+            kit[5],
             ItemStack::new(items.find("bread").unwrap(), 3),
             "kit bread"
+        );
+    }
+
+    /// `[item.model]` is reported alongside the registry rather than stored on
+    /// `Item`: it is visual-only and must not reach `content_hash`.
+    #[test]
+    fn item_models_are_reported_out_of_band() {
+        let blocks = BlockRegistry::with_builtins();
+        let mut models = Vec::new();
+        let items = ItemRegistry::from_toml_with_models(BUILTIN_ITEMS, &blocks, &mut models)
+            .expect("builtin items parse");
+
+        assert_eq!(models.len(), items.len(), "one entry per item");
+
+        let sword = items.find("vine sword").expect("vine sword");
+        let spec = models[sword.0 as usize]
+            .as_ref()
+            .expect("vine sword declares a model");
+        // Not the exact extension: either export of this object is valid here,
+        // and pinning one would make swapping formats a test failure.
+        assert!(
+            spec.path.starts_with("assets/models/sword_vine."),
+            "unexpected model path {:?}",
+            spec.path
+        );
+        assert_eq!(spec.scale, 0.35);
+        assert_eq!(spec.offset, [-0.5, 0.75, -0.5]);
+
+        // Everything else is model-less, and nothing about the model leaks onto
+        // the item itself.
+        let apple = items.find("apple").expect("apple");
+        assert!(models[apple.0 as usize].is_none());
+        assert!(
+            format!("{:?}", items.get(sword))
+                .find("sword_vine")
+                .is_none()
         );
     }
 }

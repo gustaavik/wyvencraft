@@ -210,30 +210,28 @@ fn embedded() -> Box<SkinRgba> {
     decode(EMBEDDED_SKIN).expect("embedded default skin decodes")
 }
 
-/// Decode a 64×64 skin/armor PNG (RGBA or RGB, 8-bit).
+/// Decode a 64×64 skin/armor PNG. The size is the only extra constraint on top
+/// of [`super::texture::decode_png`]: the part rects below index into a sheet of
+/// exactly this shape.
 pub fn decode(bytes: &[u8]) -> Result<Box<SkinRgba>, String> {
-    let mut decoder = png::Decoder::new(bytes);
-    decoder.set_transformations(png::Transformations::normalize_to_color8());
-    let mut reader = decoder.read_info().map_err(|e| e.to_string())?;
-    let mut buf = vec![0u8; reader.output_buffer_size()];
-    let info = reader.next_frame(&mut buf).map_err(|e| e.to_string())?;
-    if info.width != SKIN_SIZE || info.height != SKIN_SIZE {
+    let image = super::texture::decode_png(bytes)?;
+    if image.size != [SKIN_SIZE; 2] {
         return Err(format!(
             "must be {SKIN_SIZE}x{SKIN_SIZE}, got {}x{}",
-            info.width, info.height
+            image.width(),
+            image.height()
         ));
     }
-    let channels = match info.color_type {
-        png::ColorType::Rgba => 4,
-        png::ColorType::Rgb => 3,
-        other => return Err(format!("unsupported color type {other:?}")),
-    };
     let mut skin = Box::new([[[0u8; 4]; SKIN_SIZE as usize]; SKIN_SIZE as usize]);
     for (y, row) in skin.iter_mut().enumerate() {
         for (x, px) in row.iter_mut().enumerate() {
-            let i = (y * SKIN_SIZE as usize + x) * channels;
-            let a = if channels == 4 { buf[i + 3] } else { 255 };
-            *px = [buf[i], buf[i + 1], buf[i + 2], a];
+            let i = (y * SKIN_SIZE as usize + x) * 4;
+            *px = [
+                image.pixels[i],
+                image.pixels[i + 1],
+                image.pixels[i + 2],
+                image.pixels[i + 3],
+            ];
         }
     }
     Ok(skin)

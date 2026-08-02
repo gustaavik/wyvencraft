@@ -14,6 +14,7 @@ use vulkano::image::view::ImageView;
 use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
 use vulkano::memory::allocator::AllocationCreateInfo;
 use vulkano::swapchain::PresentMode;
+use vulkano::sync::GpuFuture;
 use vulkano_util::context::{VulkanoConfig, VulkanoContext};
 use vulkano_util::window::{VulkanoWindows, WindowDescriptor, WindowMode};
 use winit::application::ApplicationHandler;
@@ -27,8 +28,9 @@ use crate::config::Settings;
 use crate::content::GameContent;
 use crate::core::{Clock, GameMode};
 use crate::input::InputState;
+use crate::model::ModelRegistry;
 use crate::net::Host;
-use crate::render::{RenderContext, Renderer};
+use crate::render::{GpuMesh, RenderContext, Renderer, Texture, TexturedMesh, icons};
 use crate::save::{self, SaveError, SavedGame, WorldSave};
 use crate::state::{
     ConnectingState, GameState, InGameState, LoadingState, MainMenuState, Resources, StateContext,
@@ -100,6 +102,70 @@ fn initial_state(plan: BootPlan, content: &Arc<GameContent>) -> Box<dyn GameStat
 pub enum AppError {
     #[error("event loop error: {0}")]
     EventLoop(#[from] winit::error::EventLoopError),
+}
+
+/// Render every loaded model into its cell of an offscreen icon sheet, once.
+///
+/// Items with a file-loaded model can't be drawn as an atlas tile, so the UI
+/// samples this instead. It is built here, at startup, because it never changes:
+/// the alternative is an offscreen pass per visible inventory slot per frame.
+/// The meshes and textures are temporary — the GPU work is waited on before
+/// they drop, and only the rendered sheet survives.
+fn build_icon_sheet(
+    ctx: &Arc<RenderContext>,
+    renderer: &mut Renderer,
+    models: &ModelRegistry,
+    color_format: vulkano::format::Format,
+) -> Arc<ImageView> {
+    let count = models.len() as u32;
+    let [width, height] = icons::sheet_size(count);
+    let image = Image::new(
+        ctx.memory_allocator.clone(),
+        ImageCreateInfo {
+            image_type: ImageType::Dim2d,
+            format: color_format,
+            extent: [width, height, 1],
+            usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED,
+            ..Default::default()
+        },
+        AllocationCreateInfo::default(),
+    )
+    .expect("icon sheet image");
+    let view = ImageView::new_default(image).expect("icon sheet view");
+
+    // Bake each model into the unit box the icon camera frames, and upload it
+    // alongside its own texture. A model that fails either step is skipped: its
+    // cell stays empty rather than taking the whole sheet down with it.
+    let uploaded: Vec<(GpuMesh, Texture)> = (0..count)
+        .filter_map(|i| {
+            let model = models.get(crate::model::ModelId(i))?;
+            let mesh = model.mesh.bake(icons::frame(model.bounds));
+            let gpu = GpuMesh::upload(&ctx.memory_allocator, &mesh)
+                .ok()
+                .flatten()?;
+            let texture = Texture::create(ctx, &model.texture)
+                .map_err(|err| log::warn!("icon texture upload failed: {err}"))
+                .ok()?;
+            Some((gpu, texture))
+        })
+        .collect();
+    let batch: Vec<TexturedMesh<'_>> = uploaded
+        .iter()
+        .map(|(mesh, texture)| TexturedMesh { mesh, texture })
+        .collect();
+
+    let future = renderer.draw_icons(
+        vulkano::sync::now(ctx.device().clone()).boxed(),
+        view.clone(),
+        &batch,
+    );
+    future
+        .then_signal_fence_and_flush()
+        .expect("flush icon sheet")
+        .wait(None)
+        .expect("wait icon sheet");
+    log::info!("rendered {} item model icon(s)", batch.len());
+    view
 }
 
 /// Entry point invoked from `main`.
@@ -354,10 +420,18 @@ impl ApplicationHandler for App {
                 ..Default::default()
             },
         );
-        let renderer = Renderer::new(
+        let mut renderer = Renderer::new(
             self.render_context.clone(),
             color_format,
             self.content.tiles.atlas_rgba(),
+        );
+
+        // Pre-render the 3D icon for every model-backed item.
+        let icon_sheet = build_icon_sheet(
+            &self.render_context,
+            &mut renderer,
+            &self.content.models,
+            color_format,
         );
 
         // Offscreen colour target for the inventory's live player preview, in
@@ -399,11 +473,27 @@ impl ApplicationHandler for App {
                 ..Default::default()
             },
         );
+        // Linear, like the preview: an icon cell is rendered larger than the
+        // slot it lands in, so this is a downscale.
+        let model_icons = gui.register_user_image_view(
+            icon_sheet,
+            SamplerCreateInfo {
+                mag_filter: Filter::Linear,
+                min_filter: Filter::Linear,
+                address_mode: [SamplerAddressMode::ClampToEdge; 3],
+                ..Default::default()
+            },
+        );
 
         self.gui = Some(gui);
         self.renderer = Some(renderer);
         self.preview_image = Some(preview_view);
-        self.ui_textures = Some(UiTextures { atlas, preview });
+        self.ui_textures = Some(UiTextures {
+            atlas,
+            model_icons,
+            model_count: self.content.models.len() as u32,
+            preview,
+        });
         log::info!("Window, renderer and egui initialised");
     }
 
@@ -422,6 +512,8 @@ impl ApplicationHandler for App {
                 // closing the window never goes through StateStack::apply.
                 let ui_tex = self.ui_textures.unwrap_or(UiTextures {
                     atlas: egui::TextureId::default(),
+                    model_icons: egui::TextureId::default(),
+                    model_count: 0,
                     preview: egui::TextureId::default(),
                 });
                 let mut ctx = StateContext {

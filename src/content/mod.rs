@@ -17,8 +17,10 @@ pub mod source;
 use std::sync::Arc;
 
 use crate::core::Direction;
+use crate::entity::kind::VisualSpec;
 use crate::entity::{EntityRegistry, SpawnConfig};
 use crate::inventory::ItemRegistry;
+use crate::model::{ModelId, ModelRegistry, ModelSpec};
 use crate::render::TileRegistry;
 use crate::world::block::{BUILTIN_BLOCKS, BlockRegistry};
 use crate::world::generation::WorldGenConfig;
@@ -37,6 +39,19 @@ pub enum ItemIcon {
     Cube { top: u32, left: u32, right: u32 },
     /// Anything else (tools, food, armor, fluids), drawn as one flat tile.
     Flat(u32),
+    /// An item with a file-loaded model, drawn from its cell of the pre-rendered
+    /// icon sheet (see [`crate::render::icons`]). The cell index is the
+    /// [`ModelId`], so the sheet and the model registry share an ordering.
+    Model(ModelId),
+}
+
+/// A loaded model plus the placement its data file asked for. Resolving the
+/// path to a [`ModelId`] once at load keeps the per-frame path a plain index.
+#[derive(Debug, Clone, Copy)]
+pub struct ItemModel {
+    pub id: ModelId,
+    pub scale: f32,
+    pub offset: glam::Vec3,
 }
 
 /// All loaded content registries, shared across the app.
@@ -50,8 +65,14 @@ pub struct GameContent {
     pub worldgen: Arc<WorldGenConfig>,
     /// Mob spawn rules (`assets/spawning.toml`).
     pub spawning: Arc<SpawnConfig>,
+    /// Every model file referenced by an entity visual or an item, parsed once.
+    pub models: Arc<ModelRegistry>,
     /// 2D icon for each item, indexed by `ItemId` (see [`ItemIcon`]).
     pub item_icons: Vec<ItemIcon>,
+    /// 3D model for each item, indexed by `ItemId`: what a held or dropped
+    /// stack is drawn as. Like [`ItemIcon`], kept off `Item` so it never feeds
+    /// [`GameContent::hash`].
+    pub item_models: Vec<Option<ItemModel>>,
     /// Fingerprint of every gameplay-affecting definition. Exchanged in the
     /// multiplayer `Welcome`: raw block/item ids cross the wire, so a session
     /// between peers with divergent content would silently corrupt worlds —
@@ -97,13 +118,19 @@ impl GameContent {
             builtin_blocks,
             |reg| format!("{} blocks", reg.len()),
         ));
+        // Item models ride out on the `ctx` channel rather than on `Item`
+        // itself: they are visual-only and must stay out of `content_hash`.
+        let mut item_model_specs: Vec<Option<ModelSpec>> = Vec::new();
         let items = Arc::new(load_or_builtin(
             source,
             ITEMS_PATH,
             "items",
-            &mut (),
-            |text, _| ItemRegistry::from_toml(text, &blocks),
-            |_| ItemRegistry::from_blocks(&blocks),
+            &mut item_model_specs,
+            |text, specs| ItemRegistry::from_toml_with_models(text, &blocks, specs),
+            |specs| {
+                specs.clear();
+                ItemRegistry::from_blocks(&blocks)
+            },
             |reg| format!("{} items", reg.len()),
         ));
         let entities = Arc::new(load_or_builtin(
@@ -134,7 +161,31 @@ impl GameContent {
             |config| format!("{} spawn rules", config.entries.len()),
         ));
 
-        let item_icons = build_item_icons(&mut tiles, &blocks, &items);
+        // Models load last: they are named by the entity and item definitions,
+        // so the registries above have to exist first. Each path is parsed once
+        // however many definitions share it.
+        let mut models = ModelRegistry::new();
+        for kind in entities.iter() {
+            if let VisualSpec::Model(spec) = &kind.visual {
+                models.load(&spec.path, source);
+            }
+        }
+        // One entry per item, even if the items file fell back to its builtin
+        // and left the spec list empty — this vector is indexed by `ItemId`.
+        item_model_specs.resize(items.len(), None);
+        let item_models: Vec<Option<ItemModel>> = item_model_specs
+            .iter()
+            .map(|spec| {
+                let spec = spec.as_ref()?;
+                Some(ItemModel {
+                    id: models.load(&spec.path, source)?,
+                    scale: spec.scale,
+                    offset: spec.offset(),
+                })
+            })
+            .collect();
+
+        let item_icons = build_item_icons(&mut tiles, &blocks, &items, &item_models);
         let hash = content_hash(&blocks, &items, &entities, &worldgen, &spawning);
         Arc::new(Self {
             tiles,
@@ -143,7 +194,9 @@ impl GameContent {
             entities,
             worldgen,
             spawning,
+            models: Arc::new(models),
             item_icons,
+            item_models,
             hash,
         })
     }
@@ -156,10 +209,17 @@ fn build_item_icons(
     tiles: &mut TileRegistry,
     blocks: &BlockRegistry,
     items: &ItemRegistry,
+    item_models: &[Option<ItemModel>],
 ) -> Vec<ItemIcon> {
     items
         .iter()
-        .map(|(_, item)| {
+        .map(|(id, item)| {
+            // An item with a model is drawn as that model, rendered once into
+            // the icon sheet — it has geometry and a texture of its own, and no
+            // atlas tile could represent it.
+            if let Some(model) = item_models.get(id.0 as usize).copied().flatten() {
+                return ItemIcon::Model(model.id);
+            }
             // A cube reads wrong for fluids, so only truly solid blocks get one.
             if let Some(block_id) = item.place_block {
                 let block = blocks.get(block_id);
@@ -209,6 +269,91 @@ mod tests {
         let content = GameContent::builtin();
         assert!(!content.blocks.is_empty());
         assert!(!content.items.is_empty());
+    }
+
+    /// Models come off the real `assets/` tree: every path the shipped
+    /// definitions name must resolve to a real, non-empty model. Which export
+    /// they name is deliberately not asserted — the two formats describe the
+    /// same object and are meant to be swappable in the data files.
+    #[test]
+    fn models_named_by_definitions_are_loaded_and_resolved() {
+        let content = GameContent::load();
+        assert!(
+            !content.models.is_empty(),
+            "the shipped content names models"
+        );
+        for kind in content.entities.iter() {
+            if let VisualSpec::Model(spec) = &kind.visual {
+                let id = content
+                    .models
+                    .find(&spec.path)
+                    .unwrap_or_else(|| panic!("{} names an unloadable model", kind.name));
+                assert!(
+                    content
+                        .models
+                        .get(id)
+                        .is_some_and(|m| m.triangle_count() > 0)
+                );
+            }
+        }
+
+        let sword = content.items.find("vine sword").expect("vine sword item");
+        let model = content.item_models[sword.0 as usize].expect("vine sword has a model");
+        assert_eq!(model.scale, 0.35);
+        let loaded = content
+            .models
+            .get(model.id)
+            .expect("model is in the registry");
+        assert_eq!(loaded.triangle_count(), 252);
+
+        // `item_models` is indexed by `ItemId`, so it must cover every item even
+        // though almost none of them declare a model.
+        assert_eq!(content.item_models.len(), content.items.len());
+    }
+
+    /// The shipped items file with every model path pointed somewhere else.
+    /// Extension-agnostic on purpose: the data files are meant to be able to
+    /// name either export, and a fixture keyed to one of them would quietly
+    /// stop substituting anything the day the other is chosen.
+    fn items_with_repointed_models() -> String {
+        let base = crate::inventory::item::BUILTIN_ITEMS;
+        let repointed = base.replace("assets/models/sword_vine", "assets/models/elsewhere");
+        assert_ne!(base, repointed, "fixture substituted nothing");
+        repointed
+    }
+
+    /// A model is visual-only: swapping one must not change the fingerprint that
+    /// gates multiplayer joins, or two players with differently-drawn swords
+    /// would be refused a shared world.
+    #[test]
+    fn item_models_do_not_feed_the_content_hash() {
+        // Both sides come from the same source kind, so the model path is the
+        // only thing that differs between them.
+        let base = GameContent::from_source(
+            &MapSource::new().with(ITEMS_PATH, crate::inventory::item::BUILTIN_ITEMS),
+        );
+        let repointed = GameContent::from_source(
+            &MapSource::new().with(ITEMS_PATH, items_with_repointed_models()),
+        );
+        assert_eq!(
+            base.items.len(),
+            repointed.items.len(),
+            "the items themselves are unchanged"
+        );
+        assert_eq!(base.hash, repointed.hash);
+    }
+
+    /// A model path that does not resolve degrades that one item's appearance
+    /// and nothing else — the world still boots.
+    #[test]
+    fn an_unloadable_model_leaves_the_rest_of_the_content_intact() {
+        let content = GameContent::from_source(
+            &MapSource::new().with(ITEMS_PATH, items_with_repointed_models()),
+        );
+        let sword = content.items.find("vine sword").expect("item still exists");
+        assert!(content.item_models[sword.0 as usize].is_none());
+        assert!(!content.items.is_empty());
+        assert!(content.models.is_empty(), "nothing resolved");
     }
 
     /// An empty source serves no files, so every registry must fall back to its

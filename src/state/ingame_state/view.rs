@@ -21,13 +21,18 @@ use glam::Vec3;
 
 use super::mobs::{RemoteMob, mob_mesh};
 use super::{OUTLINE_COLOR, REMOTE_MAX_SPEED, THIRD_PERSON_DISTANCE};
+use crate::content::ItemModel;
 use crate::core::{Aabb, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, ChunkPos, DayCycle};
-use crate::entity::{AnimationState, Arrow, DroppedItem, HumanoidModel, Mob, Perspective, Player};
+use crate::entity::{
+    AnimationState, Arrow, DroppedItem, HandAnchor, HumanoidModel, Mob, Perspective, Player,
+};
 use crate::inventory::{ARMOR_SIZE, Inventory, ItemId, ItemRegistry};
+use crate::model::mesh as model_mesh;
+use crate::model::{ModelId, ModelRegistry};
 use crate::net::{PlayerId, RemotePlayer};
 use crate::render::{
     Camera, CpuMesh, GpuLines, GpuMesh, LightParams, PreviewFrame, RenderContext, SceneFrame,
-    SkyParams, debug, tiles,
+    SkyParams, Texture, TexturedMesh, debug, tiles,
 };
 use crate::world::World;
 use crate::world::block::{BlockRegistry, FaceTextures};
@@ -39,6 +44,28 @@ use crate::world::meshing::{mesh_block_overlay, mesh_chunk, push_item_cube};
 struct RemoteAnim {
     anim: AnimationState,
     last_pos: Vec3,
+}
+
+/// Everything the view needs to draw geometry loaded from model files: the
+/// parsed models, and which one each item uses. The two always travel together,
+/// so they are passed as one borrow rather than threaded separately through
+/// every mesh builder.
+#[derive(Clone, Copy)]
+pub(super) struct ModelContent<'a> {
+    pub models: &'a ModelRegistry,
+    pub item_models: &'a [Option<ItemModel>],
+}
+
+impl ModelContent<'_> {
+    /// The model of whatever is in the selected hotbar slot.
+    fn held(&self, inventory: &Inventory) -> Option<ItemModel> {
+        self.of(inventory.selected_stack()?.item)
+    }
+
+    /// The model an item is drawn as, if it declares one.
+    fn of(&self, item: ItemId) -> Option<ItemModel> {
+        *self.item_models.get(item.0 as usize)?
+    }
 }
 
 /// How the player model is posed for the inventory preview. Set by the UI,
@@ -75,7 +102,19 @@ pub(super) struct SceneCache {
     /// Per-remote-player animation, keyed by id.
     remote_anims: HashMap<PlayerId, RemoteAnim>,
     /// One GPU mesh per visible mob, rebuilt each frame like remote players.
-    mob_meshes: Vec<GpuMesh>,
+    /// Box-model mobs sample the block atlas (`None`); file-loaded models carry
+    /// the id of the texture they need bound.
+    mob_meshes: Vec<(GpuMesh, Option<ModelId>)>,
+    /// The item model in the local player's hand, drawn in third person.
+    held_mesh: Option<(GpuMesh, ModelId)>,
+    /// The same model in the inventory preview, posed for the preview camera.
+    preview_held_mesh: Option<(GpuMesh, ModelId)>,
+    /// Model geometry for dropped stacks, one mesh per distinct model.
+    drops_model_meshes: Vec<(GpuMesh, ModelId)>,
+    /// GPU textures for loaded models, indexed by [`ModelId`] and uploaded on
+    /// first use — states are constructed before the `Renderer` exists, so the
+    /// atlas's startup upload is not an option here.
+    model_textures: Vec<Option<Texture>>,
 
     /// Crack overlay drawn on the block being mined (rebuilt as progress grows).
     break_mesh: Option<GpuMesh>,
@@ -114,6 +153,10 @@ impl SceneCache {
             remote_meshes: Vec::new(),
             remote_anims: HashMap::new(),
             mob_meshes: Vec::new(),
+            held_mesh: None,
+            preview_held_mesh: None,
+            drops_model_meshes: Vec::new(),
+            model_textures: Vec::new(),
             break_mesh: None,
             outline_block: None,
             outline_mesh: None,
@@ -218,9 +261,11 @@ impl SceneCache {
         player: &Player,
         inventory: &Inventory,
         items: &ItemRegistry,
+        content: ModelContent<'_>,
     ) {
         if player.perspective.is_first_person() {
             self.player_mesh = None;
+            self.held_mesh = None;
             return;
         }
         let pose = self.player_anim.pose(player.pitch);
@@ -229,6 +274,30 @@ impl SceneCache {
             self.player_model
                 .build_mesh_armored(player.position, player.yaw, &pose, &armor, items);
         self.player_mesh = GpuMesh::upload(&ctx.memory_allocator, &mesh).ok().flatten();
+
+        let anchor = self
+            .player_model
+            .hand_anchor(player.position, player.yaw, &pose);
+        self.held_mesh = self.bake_held(ctx, content, inventory, anchor);
+    }
+
+    /// Bake the model of the item in `anchor`'s hand, if it has one.
+    fn bake_held(
+        &mut self,
+        ctx: &Arc<RenderContext>,
+        content: ModelContent<'_>,
+        inventory: &Inventory,
+        anchor: HandAnchor,
+    ) -> Option<(GpuMesh, ModelId)> {
+        let held = content.held(inventory)?;
+        let transform = model_mesh::placement(
+            anchor.position,
+            anchor.yaw,
+            anchor.pitch,
+            held.scale,
+            held.offset,
+        );
+        self.bake_model(ctx, content.models, held.id, transform)
     }
 
     /// Rebuild the inventory-preview player mesh: the model at the origin,
@@ -242,9 +311,11 @@ impl SceneCache {
         player: &Player,
         inventory: &Inventory,
         items: &ItemRegistry,
+        content: ModelContent<'_>,
     ) {
         if !inventory_open {
             self.preview_mesh = None;
+            self.preview_held_mesh = None;
             return;
         }
         // The preview head tracks the cursor (yaw + pitch), independent of the
@@ -261,6 +332,11 @@ impl SceneCache {
             items,
         );
         self.preview_mesh = GpuMesh::upload(&ctx.memory_allocator, &mesh).ok().flatten();
+
+        let anchor = self
+            .player_model
+            .hand_anchor(Vec3::ZERO, self.preview.yaw, &pose);
+        self.preview_held_mesh = self.bake_held(ctx, content, inventory, anchor);
     }
 
     /// Rebuild GPU meshes for remote players, advancing each one's animation
@@ -313,24 +389,88 @@ impl SceneCache {
         ctx: &Arc<RenderContext>,
         mobs: &[Mob],
         remote_mobs: &mut HashMap<u64, RemoteMob>,
+        models: &ModelRegistry,
         dt: f32,
     ) {
         self.mob_meshes.clear();
+        let mut visuals = Vec::new();
         for mob in mobs {
-            if let Some(mesh) = mob_mesh(&mob.visual, mob.position, mob.yaw, &mob.anim.pose(0.0))
-                && let Ok(Some(gpu)) = GpuMesh::upload(&ctx.memory_allocator, &mesh)
-            {
-                self.mob_meshes.push(gpu);
+            if let Some(visual) = mob_mesh(
+                &mob.visual,
+                mob.position,
+                mob.yaw,
+                &mob.anim.pose(0.0),
+                models,
+            ) {
+                visuals.push(visual);
             }
         }
         for rm in remote_mobs.values_mut() {
             let (visual, position, yaw, pose) = rm.animate(dt);
-            if let Some(mesh) = mob_mesh(visual, position, yaw, &pose)
-                && let Ok(Some(gpu)) = GpuMesh::upload(&ctx.memory_allocator, &mesh)
-            {
-                self.mob_meshes.push(gpu);
+            if let Some(visual) = mob_mesh(visual, position, yaw, &pose, models) {
+                visuals.push(visual);
             }
         }
+        for visual in visuals {
+            if let Some(id) = visual.model {
+                self.ensure_model_texture(ctx, models, id);
+            }
+            if let Ok(Some(gpu)) = GpuMesh::upload(&ctx.memory_allocator, &visual.mesh) {
+                self.mob_meshes.push((gpu, visual.model));
+            }
+        }
+    }
+
+    /// Upload a model's texture the first time something asks to draw it.
+    ///
+    /// Model textures cannot be built with the block atlas at startup: game
+    /// states are constructed before the `Renderer` (and its device) exists, so
+    /// the first frame that needs one is the earliest point this can happen.
+    fn ensure_model_texture(
+        &mut self,
+        ctx: &Arc<RenderContext>,
+        models: &ModelRegistry,
+        id: ModelId,
+    ) {
+        let index = id.0 as usize;
+        if self.model_textures.len() <= index {
+            self.model_textures.resize_with(index + 1, || None);
+        }
+        if self.model_textures[index].is_some() {
+            return;
+        }
+        let Some(model) = models.get(id) else {
+            return;
+        };
+        match Texture::create(ctx, &model.texture) {
+            Ok(texture) => self.model_textures[index] = Some(texture),
+            // Without a texture the mesh would sample whatever was bound last,
+            // so it is simply not drawn (see `textured_mesh`).
+            Err(err) => log::warn!("could not upload model texture: {err}"),
+        }
+    }
+
+    /// Pair a mesh with its model texture, or `None` if the texture is missing.
+    fn textured_mesh<'a>(&'a self, mesh: &'a GpuMesh, id: ModelId) -> Option<TexturedMesh<'a>> {
+        let texture = self.model_textures.get(id.0 as usize)?.as_ref()?;
+        Some(TexturedMesh { mesh, texture })
+    }
+
+    /// Bake a model under `transform` and upload it, keeping its id alongside so
+    /// the draw can bind the right texture.
+    fn bake_model(
+        &mut self,
+        ctx: &Arc<RenderContext>,
+        models: &ModelRegistry,
+        id: ModelId,
+        transform: glam::Mat4,
+    ) -> Option<(GpuMesh, ModelId)> {
+        self.ensure_model_texture(ctx, models, id);
+        let mesh = models.get(id)?.mesh.bake(transform);
+        let gpu = GpuMesh::upload(&ctx.memory_allocator, &mesh)
+            .ok()
+            .flatten()?;
+        Some((gpu, id))
     }
 
     /// Rebuild the combined arrow mesh (small cubes, like the drops pass).
@@ -352,10 +492,31 @@ impl SceneCache {
         ctx: &Arc<RenderContext>,
         drops: &[DroppedItem],
         textures: impl Fn(ItemId) -> (FaceTextures, bool),
+        content: ModelContent<'_>,
     ) {
         let mut opaque = CpuMesh::new();
         let mut transparent = CpuMesh::new();
+        // Drops whose item declares a model are drawn as that model instead of
+        // the default spinning cube. Those cannot join the merged cube meshes —
+        // each needs its own texture bound — so they are grouped by model, one
+        // mesh per model however many drops share it.
+        let mut by_model: HashMap<ModelId, CpuMesh> = HashMap::new();
         for item in drops {
+            if let Some(model) = content.of(item.stack.item)
+                && let Some(loaded) = content.models.get(model.id)
+            {
+                let transform = model_mesh::placement(
+                    item.render_center(),
+                    item.spin_yaw(),
+                    0.0,
+                    model.scale,
+                    model.offset,
+                );
+                let mesh = loaded.mesh.bake(transform);
+                let entry = by_model.entry(model.id).or_default();
+                entry.push_indexed(mesh.vertices, mesh.indices);
+                continue;
+            }
             let (faces, is_transparent) = textures(item.stack.item);
             let target = if is_transparent {
                 &mut transparent
@@ -376,6 +537,14 @@ impl SceneCache {
         self.drops_mesh_transparent = GpuMesh::upload(&ctx.memory_allocator, &transparent)
             .ok()
             .flatten();
+
+        self.drops_model_meshes.clear();
+        for (id, mesh) in by_model {
+            self.ensure_model_texture(ctx, content.models, id);
+            if let Ok(Some(gpu)) = GpuMesh::upload(&ctx.memory_allocator, &mesh) {
+                self.drops_model_meshes.push((gpu, id));
+            }
+        }
     }
 
     /// (Re)build the crack overlay for the block being mined; drop it when idle.
@@ -491,7 +660,11 @@ impl SceneCache {
             opaque.push(mesh);
         }
         opaque.extend(&self.remote_meshes);
-        opaque.extend(&self.mob_meshes);
+        opaque.extend(
+            self.mob_meshes
+                .iter()
+                .filter_map(|(mesh, model)| model.is_none().then_some(mesh)),
+        );
         if let Some(mesh) = &self.arrows_mesh {
             opaque.push(mesh);
         }
@@ -503,6 +676,23 @@ impl SceneCache {
         if let Some(mesh) = &self.drops_mesh_transparent {
             transparent.push(mesh);
         }
+
+        // Everything drawn from a model file, each with its own texture.
+        let textured: Vec<TexturedMesh<'_>> = self
+            .mob_meshes
+            .iter()
+            .filter_map(|(mesh, model)| self.textured_mesh(mesh, (*model)?))
+            .chain(
+                self.drops_model_meshes
+                    .iter()
+                    .filter_map(|(mesh, id)| self.textured_mesh(mesh, *id)),
+            )
+            .chain(
+                self.held_mesh
+                    .iter()
+                    .filter_map(|(mesh, id)| self.textured_mesh(mesh, *id)),
+            )
+            .collect();
 
         let atmo = day_cycle.atmosphere();
         SceneFrame {
@@ -524,6 +714,7 @@ impl SceneCache {
             time: self.elapsed,
             opaque,
             transparent,
+            textured,
             lines: self.outline_mesh.as_ref(),
         }
     }
@@ -547,6 +738,10 @@ impl SceneCache {
                 ambient: 0.55,
             },
             model,
+            held: self
+                .preview_held_mesh
+                .as_ref()
+                .and_then(|(mesh, id)| self.textured_mesh(mesh, *id)),
         })
     }
 }
@@ -587,18 +782,29 @@ impl super::InGameState {
 
         // Loose entities.
         let (items, blocks) = (&self.items, &self.blocks);
-        self.view.update_drops_mesh(ctx, &self.drops, |item| {
-            let is_transparent = items
-                .get(item)
-                .place_block
-                .is_some_and(|b| blocks.get(b).is_transparent());
-            (
-                super::interaction::drop_textures(item, items, blocks),
-                is_transparent,
-            )
-        });
+        let models = self.models.clone();
+        let item_models = self.item_models.clone();
+        let content = ModelContent {
+            models: &models,
+            item_models: &item_models,
+        };
+        self.view.update_drops_mesh(
+            ctx,
+            &self.drops,
+            |item| {
+                let is_transparent = items
+                    .get(item)
+                    .place_block
+                    .is_some_and(|b| blocks.get(b).is_transparent());
+                (
+                    super::interaction::drop_textures(item, items, blocks),
+                    is_transparent,
+                )
+            },
+            content,
+        );
         self.view
-            .update_mob_meshes(ctx, &self.mobs, &mut self.remote_mobs, dt);
+            .update_mob_meshes(ctx, &self.mobs, &mut self.remote_mobs, &models, dt);
         self.view.update_arrows_mesh(ctx, &self.arrows);
 
         // Animated humanoids. The local player settles to idle while the
@@ -611,13 +817,14 @@ impl super::InGameState {
         };
         self.view.advance_player_anim(local_speed, dt);
         self.view
-            .update_player_mesh(ctx, &self.player, &self.inventory, &self.items);
+            .update_player_mesh(ctx, &self.player, &self.inventory, &self.items, content);
         self.view.update_preview_mesh(
             ctx,
             self.inventory_open,
             &self.player,
             &self.inventory,
             &self.items,
+            content,
         );
         self.view
             .update_remote_meshes(ctx, &self.peers.players, &self.items, dt);

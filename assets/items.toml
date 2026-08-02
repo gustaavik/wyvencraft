@@ -24,6 +24,15 @@
 #                   boots, glove, cape. A piece only goes in its own slot.
 #       defense     defense points, summed across worn pieces
 #       durability  hits taken before the piece breaks
+#   [item.model] draws the item as a 3D model instead of the default cube,
+#                both in the holder's hand and where it lies in the world:
+#       path        a .gltf or .bbmodel under assets/models/
+#       scale       uniform scale (default 1.0)
+#       offset      shift in the model's own space, applied before scale
+#                   (Blockbench authors on a 0..1 block, so [-0.5, y, -0.5]
+#                   re-centres a model on the point it is drawn at)
+#   Models are visual only: unlike the components above they never affect
+#   gameplay, and never take part in the multiplayer content check.
 #
 # [starter_kit] lists what a fresh survival player spawns with, in hotbar
 # order. Tools and armor spawn fresh (full durability); `count` applies to
@@ -64,6 +73,22 @@ kind = "shears"
 dig_speed = 5.0
 durability = 120
 harvests = ["plant"]
+
+[[item]]
+name = "vine sword"
+
+[item.tool]
+kind = "sword"
+dig_speed = 1.5
+durability = 200
+harvests = ["plant"]
+
+# Drawn from a model file rather than as a textured cube. The offset drops the
+# grip (the model runs from y = -0.889 up to y = 1.471) onto the fist.
+[item.model]
+path = "assets/models/sword_vine.bbmodel"
+scale = 0.35
+offset = [-0.5, 0.75, -0.5]
 
 [[item]]
 name = "apple"
@@ -152,6 +177,7 @@ survival = [
     { item = "wooden pickaxe" },
     { item = "wooden axe" },
     { item = "wooden shovel" },
+    { item = "vine sword" },
     { item = "apple", count = 5 },
     { item = "bread", count = 3 },
 ]

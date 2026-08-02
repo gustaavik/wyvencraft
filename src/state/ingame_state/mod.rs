@@ -29,9 +29,11 @@ use std::sync::Arc;
 
 use glam::Vec3;
 
+use crate::content::ItemModel;
 use crate::core::{BlockPos, DayCycle};
 use crate::entity::{Arrow, DroppedItem, EntityRegistry, Mob, Player, SpawnConfig, Spawner};
 use crate::inventory::{Inventory, ItemRegistry, ItemStack, RecipeBook};
+use crate::model::ModelRegistry;
 use crate::state::session::Session;
 use crate::world::{BlockRegistry, ChunkLoader, FluidSim, World};
 use peers::Peers;
@@ -83,6 +85,11 @@ pub struct InGameState {
     pub blocks: Arc<BlockRegistry>,
     pub items: Arc<ItemRegistry>,
     pub entities: Arc<EntityRegistry>,
+    /// Geometry loaded from model files, referenced by entity visuals and items.
+    pub models: Arc<ModelRegistry>,
+    /// Which model each item is drawn as, indexed by `ItemId`. Visual-only, so
+    /// it lives beside the registries rather than inside `ItemRegistry`.
+    pub item_models: Arc<Vec<Option<ItemModel>>>,
     /// Fingerprint of the loaded content; hosts send it in `Welcome` so
     /// mismatched clients refuse the session (raw ids cross the wire).
     content_hash: u64,

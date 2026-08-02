@@ -1,16 +1,20 @@
-//! Drawing item icons into egui from the block atlas.
+//! Drawing item icons into egui.
 //!
-//! The atlas is registered with egui once (see [`crate::app`]) to get the
-//! [`egui::TextureId`] these helpers sample. A [`crate::content::ItemIcon`] is
-//! either a flat tile (tools, food, armor, fluids) or an isometric cube built
-//! from a block's own face tiles — both emit a single [`egui::Mesh`]. Consumed
-//! by the inventory screen and the HUD hotbar so they render items identically.
+//! The textures are registered with egui once (see [`crate::app`]) to get the
+//! [`egui::TextureId`]s these helpers sample. A [`crate::content::ItemIcon`] is
+//! one of three things — a flat atlas tile (tools, food, armor, fluids), an
+//! isometric cube built from a block's own face tiles, or a cell of the
+//! pre-rendered 3D sheet (items with a model file) — and each emits a single
+//! [`egui::Mesh`]. Consumed by the inventory screen and the HUD hotbar so they
+//! render items identically.
 
 use egui::epaint::{Mesh, Vertex};
-use egui::{Color32, Painter, Pos2, Rect, Shape, TextureId, pos2};
+use egui::{Color32, Painter, Pos2, Rect, Shape, pos2};
 
 use crate::content::ItemIcon;
+use crate::render::icons;
 use crate::render::texture::{ATLAS_COLUMNS, ATLAS_SIZE};
+use crate::state::UiTextures;
 
 /// Isometric cube face tints (gamma space — egui linearizes them). The lit top
 /// reads brightest, the two visible sides progressively darker, giving a small
@@ -19,9 +23,15 @@ const TOP_TINT: Color32 = Color32::from_gray(255);
 const LEFT_TINT: Color32 = Color32::from_gray(204);
 const RIGHT_TINT: Color32 = Color32::from_gray(153);
 
-/// Draw `icon` filling `rect`, sampling the block atlas at `atlas`.
-pub fn draw_item_icon(painter: &Painter, rect: Rect, icon: ItemIcon, atlas: TextureId) {
-    let mut mesh = Mesh::with_texture(atlas);
+/// Draw `icon` filling `rect`.
+///
+/// Which texture is sampled depends on the icon: tiles and cubes come from the
+/// block atlas, a model comes from its cell of the pre-rendered icon sheet.
+/// Taking the whole [`UiTextures`] rather than one id keeps that choice here,
+/// where the icon variant is already being matched on, instead of at all seven
+/// call sites.
+pub fn draw_item_icon(painter: &Painter, rect: Rect, icon: ItemIcon, tex: UiTextures) {
+    let mut mesh = Mesh::with_texture(tex.atlas);
     match icon {
         ItemIcon::Flat(tile) => {
             let [u0, v0, u1, v1] = tile_uv(tile);
@@ -38,6 +48,24 @@ pub fn draw_item_icon(painter: &Painter, rect: Rect, icon: ItemIcon, atlas: Text
             );
         }
         ItemIcon::Cube { top, left, right } => cube(&mut mesh, rect, top, left, right),
+        ItemIcon::Model(id) => {
+            mesh = Mesh::with_texture(tex.model_icons);
+            // The cell is already square and pre-shaded; draw it 1:1 into the
+            // slot. Sampling is linear, so the render is downscaled smoothly
+            // rather than aliased into the (usually smaller) slot.
+            let [u0, v0, u1, v1] = icons::cell_uv(id.0, tex.model_count);
+            quad(
+                &mut mesh,
+                [
+                    rect.left_top(),
+                    rect.right_top(),
+                    rect.right_bottom(),
+                    rect.left_bottom(),
+                ],
+                [pos2(u0, v0), pos2(u1, v0), pos2(u1, v1), pos2(u0, v1)],
+                Color32::WHITE,
+            );
+        }
     }
     painter.add(Shape::mesh(mesh));
 }

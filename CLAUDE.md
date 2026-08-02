@@ -30,7 +30,9 @@ Run with logging: `RUST_LOG=info,wyvencraft=debug cargo run`.
 - `WYVEN_SEED=…` → seed if `WYVEN_WORLD` creates a new world (number, hex, or text)
 - `WYVEN_CLIENT_ID=…` → override the profile identity (run two clients from one dir)
 - `WYVEN_DEBUG_SPAWN=cow,zombie,…` → spawn the named mobs next to the player at
-  boot (singleplayer/host), without waiting on the spawner
+  boot (singleplayer/host), without waiting on the spawner. `WYVEN_DEBUG_SPAWN="vine
+  sword"` places the file-loaded model prop (it has no `spawning.toml` entry, so
+  it never appears on its own).
 
 ## Toolchain prerequisites (important — non-obvious)
 
@@ -55,10 +57,11 @@ Domain modules with **one-directional dependencies** (do not introduce cycles):
 ```
 core      ← everything        coordinate/voxel types, AABB/Ray/Frustum, timing
 render    ← core              Vulkan: context, pipelines, mesh upload, camera, atlas, tile registry
+model     ← core, render      .gltf/.bbmodel files → ModelMesh + its own texture (pure, no GPU)
 world     ← core, render      blocks, chunks, generation, meshing, raycast, loader
-inventory ← core, world       item/stack/inventory data model (no rendering)
-entity    ← core, render, inventory   player, swept-AABB physics, humanoid/quadruped models, dropped items, mobs (brain/spawning/projectiles)
-content   ← render, world, inventory, entity   GameContent: registries loaded from assets/*.toml
+inventory ← core, world, model  item/stack/inventory data model (no rendering)
+entity    ← core, render, inventory, model   player, swept-AABB physics, humanoid/quadruped models, dropped items, mobs (brain/spawning/projectiles)
+content   ← render, world, inventory, entity, model   GameContent: registries loaded from assets/*.toml
 input     ← core, config, entity   winit events → frame-coherent input
 ui        ← inventory, egui   HUD + inventory egui views
 net       ← core              renet host/client, protocol, remote-player interp
@@ -71,6 +74,13 @@ app       ← state, boot, content, render   window + event loop (owns everythin
 Key rule: **`render` never depends on `world`.** The active game state builds plain
 `render::CpuMesh` data and hands the renderer a `SceneFrame` (camera + mesh
 references). This keeps the GPU layer decoupled from gameplay.
+
+All geometry — voxels, box models and file-loaded models alike — is `CpuMesh` of
+`ChunkVertex` on the one voxel pipeline (already `TriangleList` with culling off
+and an alpha-test `discard`). What differs is the texture: `SceneFrame::opaque`
+samples the shared block atlas, while `SceneFrame::textured` carries meshes that
+bring their own `render::Texture` and rebind descriptor set 0 per draw. There is
+still **no model matrix** — every transform is baked on the CPU.
 
 Its mirror: **only `state::ingame_state::view` touches `RenderContext`.** Chunk
 streaming, mob AI, fluids and interaction are plain logic; `InGameState::refresh_view`
@@ -92,7 +102,14 @@ those systems are testable without a Vulkan device.
   paths): `content::ContentSource`, `save::WorldRepository`, `state::session::Session`,
   `boot::Environment`. Each has a real impl, a null/embedded impl, and a test double,
   which is what lets content loading, saving, session logic and startup be tested
-  without a filesystem, socket, or GPU.
+  without a filesystem, socket, or GPU. `ContentSource` reads *bytes*, with text
+  derived from them, because model files carry PNGs and vertex buffers.
+- **File-loaded models** — `model::ModelLoader` is one impl per format (`.gltf`,
+  `.bbmodel`), all normalising to the same `ModelMesh` (Y-up, right-handed, one
+  block = 1.0, top-left UVs), so callers cannot tell them apart. Both shipped
+  exports of `assets/models/sword_vine` describe the same object, and a test
+  asserts the two loaders agree vertex-for-vertex — that is what pins the
+  bbmodel face-corner order, UV-rotation direction and 1/16 scale.
 - **Registry** — `world::BlockRegistry`, `inventory::ItemRegistry`,
   `entity::EntityRegistry`, `render::TileRegistry` (texture name → atlas tile).
 - **Strategy** — `world::generation::WorldGenerator` (default `NoiseGenerator`).
@@ -103,14 +120,17 @@ those systems are testable without a Vulkan device.
 | Task                    | Location                                                                                   |
 | ----------------------- | ------------------------------------------------------------------------------------------ |
 | Add a block type        | `assets/blocks.toml` (pure data); texture = PNG in `assets/textures/<name>.png` or a painter in `render::tiles::paint_named` |
-| Add an item / tool / food / armor | `assets/items.toml` (`[item.tool]` with `harvests`, `[item.food]`, `[item.armor]` with `slot`/`defense`/`durability`); starter kit in the same file |
+| Add an item / tool / food / armor | `assets/items.toml` (`[item.tool]` with `harvests`, `[item.food]`, `[item.armor]` with `slot`/`defense`/`durability`, `[item.model]` with `path`/`scale`/`offset`); starter kit in the same file |
+| Load a 3D model from a file | drop a `.gltf` or `.bbmodel` in `assets/models/`, then point at it: `[entity.visual] kind = "model"` in `assets/entities.toml`, or `[item.model]` in `assets/items.toml`. Parsing is `model::{gltf,bbmodel}` behind the `ModelLoader` trait (a new format = a new impl + one line in `ModelRegistry::LOADERS`); placement math in `model::mesh`; GPU textures uploaded lazily in `state::ingame_state::view` |
 | Armor (slots, defense, wear, render) | data in `assets/items.toml` `[item.armor]`; slots 36..42 in `inventory::inventory`; defense math in `entity::player::damage`; equip gate + wear in `state::ingame_state`; worn-model shells + cape in `entity::model::build_mesh_armored`; procedural sheets in `render::armor`; net via `ServerMessage::PlayerEquipment` |
-| Item icons (2D)         | painters in `render::tiles::paint_named` (PNG-overridable); `ItemIcon` computed in `content` (cube from block faces vs flat tile); drawn by `ui::icon::draw_item_icon` (atlas registered with egui in `app`) |
+| Item icons              | `ItemIcon` is computed in `content`: `Cube` (from block faces), `Flat` (painters in `render::tiles::paint_named`, PNG-overridable), or `Model` for items with `[item.model]`. Drawn by `ui::icon::draw_item_icon`; the atlas and the 3D icon sheet are registered with egui in `app` |
+| 3D item icons           | `render::icons` (cell layout, framing transform, ortho camera) + `Renderer::draw_icons`; the sheet is rendered **once** at startup by `app::build_icon_sheet`, one cell per `ModelId`. Tune presentation with `ICON_YAW`/`ICON_PITCH`/`ICON_ROLL`/`FILL` in `render::icons` |
 | Live player preview     | offscreen pass `render::Renderer::draw_model` + `PreviewFrame`; mesh/camera in `state::ingame_state::{update_preview_mesh,preview_frame}`; image + egui `TextureId` in `app` (runs *before* the world pass) |
 | Block drop rules        | `drops = ...` on the block in `assets/blocks.toml` (`"self"`, `"none"`, `{ requires_tool }`, `{ item, count }`) |
 | Entity tuning / new kind | `assets/entities.toml` (physics/movement/vitals/item/mob components); a new *behavior* = one new component in `entity::kind` + its code hook |
-| Add / tune a mob        | `assets/entities.toml` (`[entity.mob]`: health, speeds, hostility, `[entity.mob.ranged]`, `drops`; `[entity.visual]` humanoid `skin=`/`arms_forward` or quadruped) + a `[[spawn]]` entry in `assets/spawning.toml`; skin painter in `render::mobskin` (PNG override `assets/textures/mob_<name>.png`) |
-| Mob AI behavior         | `entity::brain` (pure state machine: Idle/Wander/Chase/Flee, perception → intent); body/physics in `entity::mob`; state-layer tick/perception/combat in `state::ingame_state::mobs` |
+| Add / tune a mob        | `assets/entities.toml` (`[entity.mob]`: health, speeds, `behavior`, `knockback_resistance`, `[entity.mob.ranged]`, `drops`; `[entity.visual]` humanoid `skin=`/`arms_forward` or quadruped) + a `[[spawn]]` entry in `assets/spawning.toml`; skin painter in `render::mobskin` (PNG override `assets/textures/mob_<name>.png`) |
+| Mob AI behavior         | `entity::brain` (pure state machine: Idle/Wander/Chase/Flee, perception → intent); body/physics in `entity::mob`; state-layer tick/perception/combat in `state::ingame_state::mobs`. Disposition is the `entity::kind::Behavior` enum (`passive`/`hostile`/`inert`) — a new disposition is a variant plus its arm in `MobBrain::think`, never a new boolean |
+| A static prop / statue  | an `[[entity]]` with `[entity.mob] behavior = "inert"` and no `spawning.toml` entry. `knockback_resistance` is the separate axis: `1.0` bolts it down, `0.0` lets a hit send it flying |
 | Mob spawning rules      | `assets/spawning.toml` (caps, ring distances, weights, groups, night rules — strict: unknown entity rejects the file); planner in `entity::spawning` (pure, seeded); world sampling in `state::ingame_state::mobs::update_spawning` |
 | Projectiles             | `entity::projectile` (ballistic `Arrow`); launch tuning in `[entity.mob.ranged]`; ticked in `state::ingame_state::mobs::update_arrows` |
 | Change terrain          | `assets/worldgen.toml` (blocks, ores, sea level, biome surfaces — ⚠ alters existing worlds); noise/climate/mesas stay in `world::generation::{noise,biome,generator}` |

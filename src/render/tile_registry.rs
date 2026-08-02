@@ -208,30 +208,26 @@ fn png_path(name: &str, frame: Option<u32>) -> String {
 /// falls through to the procedural art.
 fn load_png(name: &str, frame: Option<u32>) -> Option<TileRgba> {
     let path = png_path(name, frame);
-    let file = std::fs::File::open(&path).ok()?;
+    let bytes = std::fs::read(&path).ok()?;
     let decode = || -> Result<TileRgba, String> {
-        let mut decoder = png::Decoder::new(std::io::BufReader::new(file));
-        decoder.set_transformations(png::Transformations::normalize_to_color8());
-        let mut reader = decoder.read_info().map_err(|e| e.to_string())?;
-        let mut buf = vec![0u8; reader.output_buffer_size()];
-        let info = reader.next_frame(&mut buf).map_err(|e| e.to_string())?;
-        if info.width != TILE_SIZE || info.height != TILE_SIZE {
+        let image = super::texture::decode_png(&bytes)?;
+        if image.size != [TILE_SIZE; 2] {
             return Err(format!(
                 "must be {TILE_SIZE}x{TILE_SIZE}, got {}x{}",
-                info.width, info.height
+                image.width(),
+                image.height()
             ));
         }
-        let channels = match info.color_type {
-            png::ColorType::Rgba => 4,
-            png::ColorType::Rgb => 3,
-            other => return Err(format!("unsupported color type {other:?}")),
-        };
         let mut art: TileRgba = [[[0; 4]; TILE_SIZE as usize]; TILE_SIZE as usize];
         for (y, row) in art.iter_mut().enumerate() {
             for (x, px) in row.iter_mut().enumerate() {
-                let i = (y * TILE_SIZE as usize + x) * channels;
-                let a = if channels == 4 { buf[i + 3] } else { 255 };
-                *px = [buf[i], buf[i + 1], buf[i + 2], a];
+                let i = (y * TILE_SIZE as usize + x) * 4;
+                *px = [
+                    image.pixels[i],
+                    image.pixels[i + 1],
+                    image.pixels[i + 2],
+                    image.pixels[i + 3],
+                ];
             }
         }
         Ok(art)

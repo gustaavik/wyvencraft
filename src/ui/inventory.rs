@@ -64,7 +64,7 @@ struct View<'a> {
     inventory: &'a Inventory,
     items: &'a ItemRegistry,
     icons: &'a [ItemIcon],
-    atlas: egui::TextureId,
+    tex: UiTextures,
 }
 
 /// Draw the inventory window. Returns the frame's action and head-look.
@@ -83,7 +83,7 @@ pub fn draw_inventory(
         inventory,
         items,
         icons,
-        atlas: tex.atlas,
+        tex,
     };
     let frame = egui::Frame::new()
         .fill(PANEL_BG)
@@ -169,7 +169,7 @@ pub fn draw_inventory(
             egui::Id::new("held_item"),
         ));
         let rect = Rect::from_center_size(pos, vec2(40.0, 40.0));
-        draw_item_icon(&painter, rect, view.icon_of(stack.item), tex.atlas);
+        draw_item_icon(&painter, rect, view.icon_of(stack.item), tex);
         paint_count(&painter, rect, stack.count);
     }
 
@@ -231,14 +231,14 @@ impl View<'_> {
         let inner = rect.shrink(5.0);
         match self.inventory.slot(index) {
             Some(stack) => {
-                draw_item_icon(painter, inner, self.icon_of(stack.item), self.atlas);
+                draw_item_icon(painter, inner, self.icon_of(stack.item), self.tex);
                 paint_count(painter, rect, stack.count);
                 self.paint_durability(painter, rect, stack);
             }
             None => {
                 if let Some(tile) = ghost {
                     // Faded silhouette hinting what the slot holds.
-                    draw_item_icon(painter, inner, ItemIcon::Flat(tile), self.atlas);
+                    draw_item_icon(painter, inner, ItemIcon::Flat(tile), self.tex);
                     painter.rect_filled(
                         inner,
                         0.0,
@@ -370,7 +370,7 @@ impl View<'_> {
                         let (rect, resp) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::click());
                         let painter = ui.painter();
                         painter.rect_filled(rect, 3.0, SLOT_BG);
-                        draw_item_icon(painter, rect.shrink(4.0), self.icon_of(id), self.atlas);
+                        draw_item_icon(painter, rect.shrink(4.0), self.icon_of(id), self.tex);
                         let resp = resp.on_hover_text(&item.name);
                         if resp.clicked() {
                             a = a.or(Some(InvAction::Pick(id)));
@@ -433,7 +433,7 @@ impl View<'_> {
         let mut x = rect.left() + 8.0;
         for &(item, n) in &recipe.ingredients {
             let r = Rect::from_min_size(pos2(x, mid - icon / 2.0), vec2(icon, icon));
-            draw_item_icon(painter, r, self.icon_of(item), self.atlas);
+            draw_item_icon(painter, r, self.icon_of(item), self.tex);
             painter.text(
                 r.right_bottom(),
                 Align2::RIGHT_BOTTOM,
@@ -452,7 +452,7 @@ impl View<'_> {
         );
         x += 26.0;
         let out = Rect::from_min_size(pos2(x, mid - icon / 2.0), vec2(icon, icon));
-        draw_item_icon(painter, out, self.icon_of(recipe.output), self.atlas);
+        draw_item_icon(painter, out, self.icon_of(recipe.output), self.tex);
         x += icon + 8.0;
         let name = &self.items.get(recipe.output).name;
         let label = if recipe.count > 1 {

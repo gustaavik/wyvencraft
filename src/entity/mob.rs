@@ -54,6 +54,12 @@ pub struct Mob {
     pub yaw: f32,
     pub health: f32,
     pub on_ground: bool,
+    /// Horizontal velocity from external shoves (knockback), kept apart from
+    /// the steering velocity because [`Mob::update`] *overwrites* `velocity.x/z`
+    /// from the gait every frame — an impulse folded straight into `velocity`
+    /// would be erased on the very next tick. This bleeds off through ground
+    /// friction instead, the same way a [`crate::entity::DroppedItem`] settles.
+    impulse: Vec3,
     brain: MobBrain,
     /// Procedural walk/idle animation, advanced from actual speed.
     pub anim: AnimationState,
@@ -85,6 +91,7 @@ impl Mob {
             velocity: Vec3::ZERO,
             yaw: 0.0,
             on_ground: false,
+            impulse: Vec3::ZERO,
             brain: MobBrain::new(seed),
             anim: AnimationState::new(),
             attack_timer: 0.0,
@@ -116,7 +123,15 @@ impl Mob {
     /// hurt flag feeds the next perception so the brain can react.
     pub fn damage(&mut self, amount: f32, knockback: Vec3) {
         self.health = (self.health - amount).max(0.0);
-        self.velocity += knockback;
+        // Weight is a spectrum and is independent of disposition: a fixture can
+        // be bolted down (resistance 1) or sent flying (0), and so can a mob.
+        let taken = 1.0 - self.params.knockback_resistance.clamp(0.0, 1.0);
+        let shove = knockback * taken;
+        // The vertical pop goes straight into the velocity gravity integrates;
+        // the horizontal shove has to survive the gait overwriting `velocity`.
+        self.velocity.y += shove.y;
+        self.impulse.x += shove.x;
+        self.impulse.z += shove.z;
         self.hurt = true;
     }
 
@@ -151,8 +166,9 @@ impl Mob {
         let (sy, cy) = self.yaw.sin_cos();
         let forward = Vec3::new(sy, 0.0, -cy);
         let sign = if intent.backward { -1.0 } else { 1.0 };
-        self.velocity.x = forward.x * speed * sign;
-        self.velocity.z = forward.z * speed * sign;
+        // Where it wants to go, plus whatever shove is still bleeding off.
+        self.velocity.x = forward.x * speed * sign + self.impulse.x;
+        self.velocity.z = forward.z * speed * sign + self.impulse.z;
         self.velocity.y =
             (self.velocity.y - self.physics.gravity * dt).max(self.physics.terminal_velocity);
 
@@ -174,6 +190,14 @@ impl Mob {
         let achieved = Vec3::new(result.delta.x, 0.0, result.delta.z).length();
         if self.on_ground && intended > 1.0e-4 && achieved < intended * BLOCKED_FRACTION {
             self.velocity.y = self.params.jump_speed;
+        }
+
+        // A shove only bleeds off against the ground; in mid-air the mob keeps
+        // carrying it, so a hit launches it on an arc instead of stalling.
+        if self.on_ground {
+            let damp = (1.0 - self.physics.ground_friction * dt).max(0.0);
+            self.impulse.x *= damp;
+            self.impulse.z *= damp;
         }
 
         let horizontal = Vec3::new(self.velocity.x, 0.0, self.velocity.z).length();
@@ -328,10 +352,150 @@ mod tests {
         let mut cow = spawn("cow", Vec3::new(0.5, 64.0, 0.5));
         cow.damage(4.0, Vec3::new(3.0, 2.0, 0.0));
         assert_eq!(cow.health, 6.0);
-        assert!(cow.velocity.x > 0.0 && cow.velocity.y > 0.0);
+        // The pop goes into the velocity gravity integrates; the horizontal
+        // shove is held apart so the gait can't overwrite it next tick.
+        assert!(cow.velocity.y > 0.0, "vertical pop");
+        assert!(cow.impulse.x > 0.0, "horizontal shove");
         assert!(cow.take_hurt());
         assert!(!cow.take_hurt(), "hurt flag drains");
         cow.damage(100.0, Vec3::ZERO);
         assert!(cow.dead());
+    }
+
+    /// Knockback resistance is a dial, not a switch: the same impulse moves a
+    /// mob in proportion to what it does *not* resist.
+    #[test]
+    fn knockback_scales_with_resistance() {
+        let push = Vec3::new(6.0, 0.0, 0.0);
+        let speed_after = |resistance: f32| {
+            let mut mob = spawn("cow", Vec3::new(0.5, 64.0, 0.5));
+            mob.params.knockback_resistance = resistance;
+            mob.damage(1.0, push);
+            mob.impulse.x
+        };
+        assert_eq!(
+            speed_after(0.0),
+            push.x,
+            "no resistance takes the full shove"
+        );
+        assert_eq!(speed_after(1.0), 0.0, "full resistance is immovable");
+        assert_eq!(speed_after(0.5), push.x * 0.5, "and it scales in between");
+        // Out-of-range values clamp rather than inverting the shove.
+        assert_eq!(speed_after(2.0), 0.0);
+        assert_eq!(speed_after(-1.0), push.x);
+    }
+
+    /// Regression guard: `update` rewrites `velocity.x/z` from the gait every
+    /// frame, so an impulse folded straight into `velocity` is erased on the
+    /// next tick and knockback silently does nothing. It has to actually carry
+    /// the mob somewhere.
+    #[test]
+    fn knockback_survives_the_gait_overwriting_velocity() {
+        let solid = |p: BlockPos| p.y < 64;
+        let mut cow = spawn("cow", Vec3::new(0.5, 64.0, 0.5));
+        let start = cow.position;
+        let calm = Perception {
+            on_ground: true,
+            target: None,
+            hurt: false,
+        };
+        cow.damage(1.0, Vec3::new(6.0, 3.0, 0.0));
+        for _ in 0..40 {
+            cow.update(1.0 / 60.0, calm, solid);
+        }
+        assert!(
+            cow.position.x - start.x > 0.5,
+            "the shove should carry it: {} -> {}",
+            start,
+            cow.position
+        );
+        // …and then bleed off against the ground. Measured on the impulse
+        // rather than on position: a passive cow wanders off under its own
+        // power, which is movement but not the shove still acting.
+        for _ in 0..120 {
+            cow.update(1.0 / 60.0, calm, solid);
+        }
+        assert!(
+            cow.impulse.length() < 0.01,
+            "the shove should decay, not persist: {}",
+            cow.impulse
+        );
+    }
+
+    /// The case the two axes exist for: a fixture that decides nothing but is
+    /// *not* bolted down still gets sent flying by a hit — and still never
+    /// turns to face whoever threw it.
+    #[test]
+    fn an_inert_prop_can_still_be_knocked_back() {
+        let solid = |p: BlockPos| p.y < 64;
+        let mut prop = spawn("vine sword", Vec3::new(0.5, 64.0, 0.5));
+        prop.params.knockback_resistance = 0.0;
+        let start = prop.position;
+
+        prop.damage(1.0, Vec3::new(6.0, 3.0, 0.0));
+        for _ in 0..30 {
+            prop.update(
+                1.0 / 60.0,
+                Perception {
+                    on_ground: true,
+                    target: Some(PlayerSighting {
+                        offset: Vec3::new(-1.5, 0.0, 0.0),
+                        distance: 1.5,
+                        visible: true,
+                    }),
+                    hurt: true,
+                },
+                solid,
+            );
+        }
+        assert!(
+            prop.position.x - start.x > 0.5,
+            "an unresisting prop should be shoved: {} -> {}",
+            start,
+            prop.position
+        );
+        assert_eq!(prop.yaw, 0.0, "but it still must not turn");
+    }
+
+    /// A fixture that *is* bolted down can be broken, but not shoved or turned.
+    /// This is the whole-body version of the brain test: over a long run with a
+    /// player right next to it and repeated hits, it must not have budged.
+    #[test]
+    fn a_bolted_down_prop_is_never_moved_or_turned_by_being_hit() {
+        let solid = |p: BlockPos| p.y < 64;
+        let mut prop = spawn("vine sword", Vec3::new(0.5, 64.0, 0.5));
+        assert_eq!(prop.params.knockback_resistance, 1.0, "as shipped");
+        let start = prop.position;
+        let dt = 1.0 / 60.0;
+
+        for step in 0..600 {
+            // A player standing right beside it, hitting it every half second.
+            let mut p = Perception {
+                on_ground: true,
+                target: Some(PlayerSighting {
+                    offset: Vec3::new(1.5, 0.0, 0.5),
+                    distance: 1.6,
+                    visible: true,
+                }),
+                hurt: false,
+            };
+            if step % 30 == 0 {
+                prop.damage(0.01, Vec3::new(6.0, 3.0, 0.0));
+                p.hurt = true;
+            }
+            prop.update(dt, p, solid);
+        }
+
+        assert_eq!(prop.yaw, 0.0, "a prop must not rotate");
+        assert!(
+            (prop.position.x - start.x).abs() < 1e-3 && (prop.position.z - start.z).abs() < 1e-3,
+            "a prop must not be pushed: {} -> {}",
+            start,
+            prop.position
+        );
+        assert!(
+            prop.health < prop.params.max_health,
+            "but it can be damaged"
+        );
     }
 }

@@ -15,7 +15,7 @@
 use glam::Vec3;
 
 use crate::core::Rng64;
-use crate::entity::kind::MobParams;
+use crate::entity::kind::{Behavior, MobParams};
 
 /// Seconds a hostile keeps chasing after losing sight of its target.
 const CHASE_MEMORY: f32 = 4.0;
@@ -118,24 +118,35 @@ impl MobBrain {
         self.clock += dt;
 
         // Threat responses preempt whatever the mob was doing.
-        if cfg.hostile {
-            // Aggro on a visible player in range, or on whoever just hit us.
-            let aggro = p
-                .target
-                .is_some_and(|t| (t.visible && t.distance <= cfg.aggro_range) || p.hurt);
-            if aggro && !matches!(self.state, BrainState::Chase { .. }) {
-                self.state = BrainState::Chase { unseen: 0.0 };
+        match cfg.behavior {
+            // A fixture, not a creature: it makes no decisions at all.
+            // Returning before the state machine runs is what keeps it from
+            // picking a wander heading or spinning to face whoever hit it —
+            // `Intent::stand` leaves `yaw` as `None`, so the body never turns
+            // it. Being immovable is a separate question, answered by
+            // `knockback_resistance`.
+            Behavior::Inert => return Intent::stand(),
+            Behavior::Hostile => {
+                // Aggro on a visible player in range, or on whoever just hit us.
+                let aggro = p
+                    .target
+                    .is_some_and(|t| (t.visible && t.distance <= cfg.aggro_range) || p.hurt);
+                if aggro && !matches!(self.state, BrainState::Chase { .. }) {
+                    self.state = BrainState::Chase { unseen: 0.0 };
+                }
             }
-        } else if p.hurt {
-            // Passive mobs bolt directly away from the attacker.
-            let yaw = match p.target {
-                Some(t) => yaw_toward(-t.offset),
-                None => self.rng.range_f32(0.0, std::f32::consts::TAU),
-            };
-            self.state = BrainState::Flee {
-                yaw,
-                until: self.clock + FLEE_SECONDS,
-            };
+            Behavior::Passive if p.hurt => {
+                // Passive mobs bolt directly away from the attacker.
+                let yaw = match p.target {
+                    Some(t) => yaw_toward(-t.offset),
+                    None => self.rng.range_f32(0.0, std::f32::consts::TAU),
+                };
+                self.state = BrainState::Flee {
+                    yaw,
+                    until: self.clock + FLEE_SECONDS,
+                };
+            }
+            Behavior::Passive => {}
         }
 
         match self.state {
@@ -379,5 +390,44 @@ mod tests {
         p.hurt = true;
         let intent = brain.think(&p, &cfg, 0.1);
         assert_eq!(intent.gait, Gait::Run, "retaliates against the attacker");
+    }
+
+    /// An inanimate kind never decides anything: no wander heading, no turn
+    /// toward an attacker, no gait. `yaw: None` is the load-bearing part — the
+    /// body only rewrites its facing when the brain asks for one.
+    #[test]
+    fn inert_kinds_never_act() {
+        let cfg = params("vine sword");
+        assert_eq!(cfg.behavior, Behavior::Inert, "the prop should be inert");
+        let mut brain = MobBrain::new(7);
+
+        // Long enough to pass several idle/wander transitions for a live mob.
+        for intent in run(&mut brain, calm(), &cfg, 400) {
+            assert_eq!(intent.yaw, None, "must never turn");
+            assert_eq!(intent.gait, Gait::Stand);
+            assert!(!intent.attack);
+        }
+
+        // Being hit, with the attacker in plain view, changes nothing.
+        let mut hit = seen(1.5);
+        hit.hurt = true;
+        let intent = brain.think(&hit, &cfg, 0.1);
+        assert_eq!(intent.yaw, None, "must not spin to face the attacker");
+        assert_eq!(intent.gait, Gait::Stand);
+    }
+
+    /// The same brain with the flag cleared *does* wander, so the test above is
+    /// measuring the flag rather than a mob that happens to sit still.
+    #[test]
+    fn the_same_kind_wanders_once_it_is_animate() {
+        let mut cfg = params("vine sword");
+        cfg.behavior = Behavior::Passive;
+        cfg.walk_speed = 1.0;
+        let mut brain = MobBrain::new(7);
+        let intents = run(&mut brain, calm(), &cfg, 400);
+        assert!(
+            intents.iter().any(|i| i.yaw.is_some()),
+            "an animate kind picks wander headings"
+        );
     }
 }

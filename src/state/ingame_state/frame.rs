@@ -259,7 +259,7 @@ impl GameState for InGameState {
             &self.inventory,
             &self.items,
             &ctx.resources.content.item_icons,
-            ctx.resources.ui_tex.atlas,
+            ctx.resources.ui_tex,
         );
         hud::draw_mode_indicator(egui_ctx, self.player.mode.label());
 

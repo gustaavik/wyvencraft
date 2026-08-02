@@ -15,16 +15,25 @@
 #   [entity.item]      dropped-item behavior: despawn timer, pop/throw
 #                      speeds, pickup grace delays, pickup range
 #   [entity.mob]       makes the kind a mob: max_health, walk/run/jump
-#                      speeds, drops = [{ item, min, max }] death loot;
-#                      hostile = true adds aggro_range, attack_range,
-#                      attack_damage, attack_cooldown; [entity.mob.ranged]
-#                      (projectile_speed/damage, keep_distance) makes the
-#                      attack a projectile instead of melee.
-#                      Spawn rules live in spawning.toml, not here.
+#                      speeds, drops = [{ item, min, max }] death loot.
+#                      behavior = "passive" (default: wanders, flees when
+#                      hurt) | "hostile" (chases and attacks; adds
+#                      aggro_range, attack_range, attack_damage,
+#                      attack_cooldown) | "inert" (a fixture: never wanders,
+#                      turns, or reacts — just physics and a collision box).
+#                      knockback_resistance = 0.0..1.0 is separate from that:
+#                      0 (default) takes a full shove when hit, 1 cannot be
+#                      moved by one, in between is "heavy".
+#                      [entity.mob.ranged] (projectile_speed/damage,
+#                      keep_distance) makes the attack a projectile instead
+#                      of melee. Spawn rules live in spawning.toml.
 #   [entity.visual]    kind = "humanoid" (skinned box model; optional
 #                      skin = "<mob skin>", arms_forward = true),
 #                      kind = "quadruped" (skin + body/head/leg px sizes),
-#                      or kind = "item_cube" (spinning, bobbing cube)
+#                      kind = "item_cube" (spinning, bobbing cube),
+#                      or kind = "model" (geometry from a .gltf/.bbmodel file:
+#                      path = "assets/models/<name>.gltf", optional scale and
+#                      offset — the offset applies in the model's own space)
 
 [[entity]]
 name = "player"
@@ -148,7 +157,7 @@ max_health = 20.0
 walk_speed = 1.0
 run_speed = 3.4
 jump_speed = 9.0
-hostile = true
+behavior = "hostile"
 aggro_range = 16.0
 attack_range = 1.6
 attack_damage = 3.0
@@ -174,7 +183,7 @@ max_health = 16.0
 walk_speed = 1.0
 run_speed = 3.2
 jump_speed = 9.0
-hostile = true
+behavior = "hostile"
 aggro_range = 18.0
 attack_range = 12.0
 attack_cooldown = 1.6
@@ -187,3 +196,36 @@ keep_distance = 8.0
 [entity.visual]
 kind = "humanoid"
 skin = "skeleton"
+
+# A stationary prop drawn from a model file rather than from box parts. It has
+# no entry in spawning.toml, so it never appears on its own — spawn it with
+# `WYVEN_DEBUG_SPAWN="vine sword"` to see the model loader's output in-world.
+[[entity]]
+name = "vine sword"
+
+[entity.physics]
+gravity = 28.0
+terminal_velocity = -60.0
+width = 0.6
+height = 2.4
+ground_friction = 10.0
+
+[entity.mob]
+max_health = 20.0
+walk_speed = 0.0
+run_speed = 0.0
+jump_speed = 0.0
+# A fixture, not a creature: no wandering, no turning, no reaction to being hit.
+behavior = "inert"
+# ...and bolted down. Drop this line (or lower it) and the prop still never
+# acts, but a hit sends it tumbling — the two axes are independent.
+knockback_resistance = 1.0
+
+[entity.visual]
+kind = "model"
+# Either export of this object works and renders identically — swap the
+# extension to .gltf to exercise the other loader.
+path = "assets/models/sword_vine.bbmodel"
+# Blockbench authors on a 0..1 block; re-centre it horizontally and lift the
+# hilt (which dips to y = -0.889) up to the entity's feet.
+offset = [-0.5, 0.889, -0.5]

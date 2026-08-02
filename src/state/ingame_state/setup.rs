@@ -184,6 +184,8 @@ impl InGameState {
         let blocks = content.blocks.clone();
         let items = content.items.clone();
         let entities = content.entities.clone();
+        let models = content.models.clone();
+        let item_models = Arc::new(content.item_models.clone());
         let recipes = match recipe_data {
             Some(data) => {
                 let book = recipes_from_wire(&data, &items);
@@ -232,6 +234,8 @@ impl InGameState {
             blocks,
             items,
             entities,
+            models,
+            item_models,
             content_hash: content.hash,
             inventory,
             recipes,

@@ -5,6 +5,7 @@ use egui::{Align2, Color32, Context, Stroke};
 
 use crate::content::ItemIcon;
 use crate::inventory::{HOTBAR_SIZE, Inventory, ItemRegistry};
+use crate::state::UiTextures;
 use crate::ui::icon::draw_item_icon;
 
 /// Draw a simple crosshair at the screen centre.
@@ -31,7 +32,7 @@ pub fn draw_hotbar(
     inventory: &Inventory,
     items: &ItemRegistry,
     icons: &[ItemIcon],
-    atlas: egui::TextureId,
+    tex: UiTextures,
 ) {
     let slot = 48.0;
     let pad = 4.0;
@@ -63,12 +64,7 @@ pub fn draw_hotbar(
                 }
 
                 if let Some(stack) = inventory.slot(i) {
-                    draw_item_icon(
-                        painter,
-                        cell.shrink(6.0),
-                        icons[stack.item.0 as usize],
-                        atlas,
-                    );
+                    draw_item_icon(painter, cell.shrink(6.0), icons[stack.item.0 as usize], tex);
                     if stack.count > 1 {
                         painter.text(
                             cell.right_bottom() - egui::vec2(2.0, 1.0),

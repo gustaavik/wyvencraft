@@ -284,6 +284,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "base64"
+version = "0.23.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b25655df2c3cdd83c5e5b293b88acd880332b2ddadd7c30ac43144fdc0033da9"
+
+[[package]]
 name = "bincode"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3716,6 +3722,7 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 name = "wyvencraft"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "bincode",
  "bytemuck",
  "crossbeam-channel",
@@ -3731,6 +3738,7 @@ dependencies = [
  "renet",
  "renet_netcode",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "toml",
  "vulkano",

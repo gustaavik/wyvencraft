@@ -15,8 +15,9 @@ use crate::entity::{
     QuadrupedModel,
 };
 use crate::inventory::ItemStack;
+use crate::model::{ModelId, ModelRegistry};
 use crate::net::{Channel, ClientMessage, PlayerId, ServerMessage};
-use crate::render::{mobskin, skin};
+use crate::render::{CpuMesh, mobskin, skin};
 
 /// Zombie shamble: both arms held straight out (≈ 80° forward of hanging).
 const ARMS_FORWARD_ANGLE: f32 = -1.4;
@@ -111,6 +112,14 @@ impl RemoteMob {
     }
 }
 
+/// Renderable geometry for one entity, and which texture draws it.
+pub(super) struct VisualMesh {
+    pub mesh: CpuMesh,
+    /// `None` means the shared block atlas (box models sampling skin sheets);
+    /// `Some` means the model brings its own texture.
+    pub model: Option<ModelId>,
+}
+
 /// Build the render mesh for a mob visual at `position` facing `yaw` (`None`
 /// for visuals with no model). Shared by simulated mobs and client replicas.
 pub(super) fn mob_mesh(
@@ -118,7 +127,9 @@ pub(super) fn mob_mesh(
     position: Vec3,
     yaw: f32,
     pose: &crate::entity::Pose,
-) -> Option<crate::render::CpuMesh> {
+    models: &ModelRegistry,
+) -> Option<VisualMesh> {
+    let atlas = |mesh| Some(VisualMesh { mesh, model: None });
     match visual {
         VisualSpec::Humanoid(v) => {
             let origin = v
@@ -131,11 +142,23 @@ pub(super) fn mob_mesh(
                 pose.left_arm = ARMS_FORWARD_ANGLE;
                 pose.right_arm = ARMS_FORWARD_ANGLE;
             }
-            Some(HumanoidModel::player().build_mesh_sheet(position, yaw, &pose, origin))
+            atlas(HumanoidModel::player().build_mesh_sheet(position, yaw, &pose, origin))
         }
         VisualSpec::Quadruped(v) => {
             let origin = mobskin::origin_for(&v.skin).unwrap_or(skin::SKIN_ORIGIN);
-            Some(QuadrupedModel::new(v).build_mesh(position, yaw, pose, origin))
+            atlas(QuadrupedModel::new(v).build_mesh(position, yaw, pose, origin))
+        }
+        VisualSpec::Model(spec) => {
+            // A model that failed to load leaves the entity invisible rather
+            // than crashing the frame; `ModelRegistry::load` already warned.
+            let id = models.find(&spec.path)?;
+            let model = models.get(id)?;
+            Some(VisualMesh {
+                mesh: model
+                    .mesh
+                    .to_cpu_mesh(position, yaw, spec.scale, spec.offset()),
+                model: Some(id),
+            })
         }
         VisualSpec::ItemCube(_) => None,
     }

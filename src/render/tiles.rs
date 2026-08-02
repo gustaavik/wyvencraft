@@ -75,6 +75,7 @@ pub fn paint_named(name: &str) -> Option<TileRgba> {
         "wooden axe" => tool_icon(AXE, WOOD_HANDLE, STONE_HEAD),
         "wooden shovel" => tool_icon(SHOVEL, WOOD_HANDLE, STONE_HEAD),
         "shears" => sprite(SHEARS, SHEARS_PALETTE),
+        "vine sword" => sprite(VINE_SWORD, VINE_SWORD_PALETTE),
         "apple" => sprite(APPLE, APPLE_PALETTE),
         "bread" => sprite(BREAD, BREAD_PALETTE),
         "raw beef" => sprite(RAW_BEEF, RAW_BEEF_PALETTE),
@@ -576,6 +577,36 @@ const SHEARS_PALETTE: &Palette = &[
     ('m', [90, 96, 104, 255]),
 ];
 
+/// The 2D icon for the vine sword. Items drawn from a model file still need a
+/// flat icon for the hotbar and inventory grid — the 3D model is what the world
+/// shows, not what the UI does.
+const VINE_SWORD: Sprite = [
+    "              b ",
+    "             b.b",
+    "            b..b",
+    "           b..b ",
+    "          b..b  ",
+    "     v   b..b   ",
+    "      v b..b    ",
+    "     vvb..b     ",
+    "    v gbb       ",
+    "   ggggg  v     ",
+    "  gg  gg v      ",
+    " hh    ggg      ",
+    "hh              ",
+    "h               ",
+    "                ",
+    "                ",
+];
+
+const VINE_SWORD_PALETTE: &Palette = &[
+    ('b', [122, 132, 146, 255]),
+    ('.', [206, 216, 228, 255]),
+    ('g', [84, 132, 62, 255]),
+    ('v', [122, 172, 82, 255]),
+    ('h', [96, 70, 44, 255]),
+];
+
 const APPLE: Sprite = [
     "                ",
     "        s       ",
@@ -818,6 +849,7 @@ mod tests {
             "wooden axe",
             "wooden shovel",
             "shears",
+            "vine sword",
             "apple",
             "bread",
             "raw beef",

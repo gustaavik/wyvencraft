@@ -3,6 +3,24 @@
 
 use glam::{Mat4, Vec3, Vec4};
 
+/// Rotate a point about the Y axis by `yaw` radians.
+///
+/// This is the engine's yaw convention, matching `Player::look_direction`. It is
+/// the *opposite* sense to [`glam::Mat3::from_rotation_y`], so everything that
+/// turns geometry to face a yaw — box models and file-loaded models alike — must
+/// come through here, or the two disagree by a reflection.
+pub fn rotate_y(p: Vec3, yaw: f32) -> Vec3 {
+    let (s, c) = yaw.sin_cos();
+    Vec3::new(p.x * c - p.z * s, p.y, p.x * s + p.z * c)
+}
+
+/// [`rotate_y`] as a matrix, for geometry built by composing transforms rather
+/// than rotating point by point. The negated angle is what reconciles glam's
+/// rotation sense with the engine's yaw.
+pub fn yaw_matrix(yaw: f32) -> Mat4 {
+    Mat4::from_rotation_y(-yaw)
+}
+
 /// Axis-aligned bounding box. Used for entity collision and frustum culling.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Aabb {
@@ -213,5 +231,19 @@ mod tests {
             cube.ray_hit(Vec3::new(0.5, 3.0, -5.0), Vec3::Z, 20.0)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn yaw_matrix_agrees_with_rotate_y() {
+        // The two must stay interchangeable: box models rotate points with
+        // `rotate_y`, loaded models compose `yaw_matrix` into a transform, and
+        // a sign slip between them would mirror every imported model.
+        for yaw in [0.0, 0.7, -1.3, std::f32::consts::PI, 4.9] {
+            for p in [Vec3::X, Vec3::Z, Vec3::new(0.3, -2.0, 1.7)] {
+                let a = rotate_y(p, yaw);
+                let b = yaw_matrix(yaw).transform_point3(p);
+                assert!(a.abs_diff_eq(b, 1e-5), "yaw {yaw}, point {p}: {a} vs {b}");
+            }
+        }
     }
 }

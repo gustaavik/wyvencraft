@@ -10,19 +10,36 @@
 use std::collections::HashMap;
 use std::io;
 
-/// Supplies the text of a content file by its `assets/`-relative path.
+/// Supplies the contents of a content file by its `assets/`-relative path.
 ///
 /// Returning [`io::ErrorKind::NotFound`] is the normal "use the builtin" signal;
 /// every other error is reported the same way but is worth distinguishing in the
 /// log (a permission problem reads very differently from an absent file).
+///
+/// Bytes are the primitive and text is derived from them, rather than the other
+/// way round: the definition files are TOML, but model files bring PNG textures
+/// and binary vertex buffers along, and routing those through a `String` would
+/// mangle them. Implementors supply [`ContentSource::read_bytes`]; the TOML
+/// loaders keep calling [`ContentSource::read`] and are none the wiser.
 pub trait ContentSource {
-    fn read(&self, path: &str) -> io::Result<String>;
+    fn read_bytes(&self, path: &str) -> io::Result<Vec<u8>>;
+
+    /// The same file as UTF-8 text. Non-UTF-8 content reports `InvalidData`,
+    /// which the fail-soft loaders treat like any other read failure.
+    fn read(&self, path: &str) -> io::Result<String> {
+        let bytes = self.read_bytes(path)?;
+        String::from_utf8(bytes).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+    }
 }
 
 /// Reads from the working directory, exactly like `assets/` and `saves/`.
 pub struct FsSource;
 
 impl ContentSource for FsSource {
+    fn read_bytes(&self, path: &str) -> io::Result<Vec<u8>> {
+        std::fs::read(path)
+    }
+
     fn read(&self, path: &str) -> io::Result<String> {
         std::fs::read_to_string(path)
     }
@@ -33,7 +50,7 @@ impl ContentSource for FsSource {
 pub struct EmbeddedSource;
 
 impl ContentSource for EmbeddedSource {
-    fn read(&self, _path: &str) -> io::Result<String> {
+    fn read_bytes(&self, _path: &str) -> io::Result<Vec<u8>> {
         Err(io::Error::new(
             io::ErrorKind::NotFound,
             "no content files (embedded builtins only)",
@@ -44,7 +61,7 @@ impl ContentSource for EmbeddedSource {
 /// In-memory fixtures for tests: files present in the map are served, anything
 /// else falls back to the builtin.
 #[derive(Default)]
-pub struct MapSource(HashMap<String, String>);
+pub struct MapSource(HashMap<String, Vec<u8>>);
 
 impl MapSource {
     pub fn new() -> Self {
@@ -52,14 +69,19 @@ impl MapSource {
     }
 
     /// Serve `text` for `path`.
-    pub fn with(mut self, path: &str, text: impl Into<String>) -> Self {
-        self.0.insert(path.to_string(), text.into());
+    pub fn with(self, path: &str, text: impl Into<String>) -> Self {
+        self.with_bytes(path, text.into().into_bytes())
+    }
+
+    /// Serve raw `bytes` for `path` — model files and their textures.
+    pub fn with_bytes(mut self, path: &str, bytes: impl Into<Vec<u8>>) -> Self {
+        self.0.insert(path.to_string(), bytes.into());
         self
     }
 }
 
 impl ContentSource for MapSource {
-    fn read(&self, path: &str) -> io::Result<String> {
+    fn read_bytes(&self, path: &str) -> io::Result<Vec<u8>> {
         self.0.get(path).cloned().ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, format!("no fixture for {path}"))
         })

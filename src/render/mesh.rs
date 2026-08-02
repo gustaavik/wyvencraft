@@ -32,6 +32,19 @@ impl CpuMesh {
         self.indices
             .extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 3, base]);
     }
+
+    /// Append an indexed triangle list, rebasing `indices` onto the vertices
+    /// already here. This is the entry point for geometry that arrives as a
+    /// triangle soup — imported model files — rather than as voxel quads.
+    pub fn push_indexed(
+        &mut self,
+        vertices: impl IntoIterator<Item = ChunkVertex>,
+        indices: impl IntoIterator<Item = u32>,
+    ) {
+        let base = self.vertices.len() as u32;
+        self.vertices.extend(vertices);
+        self.indices.extend(indices.into_iter().map(|i| i + base));
+    }
 }
 
 /// Vertex + index buffers uploaded to the GPU. Dropping it frees the buffers

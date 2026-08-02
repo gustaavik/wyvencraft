@@ -6,10 +6,11 @@
 //! ```text
 //! core  ← (everything)
 //! render ← core
+//! model  ← core, render        (.gltf/.bbmodel files → geometry + texture)
 //! world  ← core, render(mesh/vertex)
-//! entity ← core
-//! inventory ← core, world
-//! content ← world, inventory   (registries loaded from assets/*.toml)
+//! entity ← core, model
+//! inventory ← core, world, model
+//! content ← world, inventory, model   (registries loaded from assets/*.toml)
 //! input  ← core, config, entity
 //! net    ← core
 //! save   ← core, world, inventory, entity   (world/player persistence)
@@ -33,6 +34,7 @@ pub mod core;
 pub mod entity;
 pub mod input;
 pub mod inventory;
+pub mod model;
 pub mod net;
 pub mod render;
 pub mod save;

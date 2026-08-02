@@ -7,6 +7,8 @@
 //! new `[[entity]]` entry plus, at most, one new component implemented once
 //! in Rust.
 
+use crate::model::ModelSpec;
+
 /// Embedded copy of the shipped entity definitions, used when
 /// `assets/entities.toml` is missing or invalid.
 pub const BUILTIN_ENTITIES: &str = include_str!("../../assets/entities.toml");
@@ -97,6 +99,32 @@ pub struct ItemEntityParams {
     pub pickup_range: f32,
 }
 
+/// What drives a mob's decisions.
+///
+/// One axis with named values rather than a flag per trait: "is it hostile",
+/// "does it act at all" and every future disposition are the *same* question,
+/// and answering it with independent booleans makes half their combinations
+/// meaningless (`hostile = true, inanimate = true`?). Adding a disposition is a
+/// variant here plus its arm in [`crate::entity::brain::MobBrain::think`], and
+/// the compiler names every site that has to account for it.
+///
+/// Deliberately *not* about physics: how hard something is to shove is
+/// [`MobParams::knockback_resistance`], so an inert prop can still be sent
+/// flying, and a boss can stand its ground while chasing you.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Behavior {
+    /// Wanders idly and bolts when hurt. The default disposition.
+    #[default]
+    Passive,
+    /// Chases visible players and attacks them; retaliates when hit.
+    Hostile,
+    /// Decides nothing at all: never wanders, never turns, never reacts. A
+    /// fixture — a statue or a placed model that wants physics and a collision
+    /// box but no behavior. The targeting ranges below are unused.
+    Inert,
+}
+
 /// Mob behavior tuning: health, locomotion speeds, and (for hostiles) how the
 /// mob acquires and attacks a target. Presence of this component is what makes
 /// an entity kind a mob (simulated by the AI brain and eligible for spawning).
@@ -108,9 +136,15 @@ pub struct MobParams {
     pub walk_speed: f32,
     pub run_speed: f32,
     pub jump_speed: f32,
-    /// Hostiles chase and attack players; passive mobs flee when hurt.
+    /// What the mob does with what it perceives.
     #[serde(default)]
-    pub hostile: bool,
+    pub behavior: Behavior,
+    /// Fraction of an incoming knockback impulse the mob shrugs off: `0.0`
+    /// (default) takes the full shove, `1.0` cannot be moved by a hit, and the
+    /// values between are "heavy". A scalar rather than an immovable flag,
+    /// because weight is a spectrum and it is independent of [`Behavior`].
+    #[serde(default)]
+    pub knockback_resistance: f32,
     /// Distance within which a hostile notices a visible player.
     #[serde(default)]
     pub aggro_range: f32,
@@ -215,6 +249,9 @@ pub enum VisualSpec {
     ItemCube(ItemCubeParams),
     /// The four-legged box model ([`crate::entity::QuadrupedModel`]).
     Quadruped(QuadrupedVisual),
+    /// Geometry loaded from a model file ([`crate::model`]), with its own
+    /// texture rather than a slot in the block atlas.
+    Model(ModelSpec),
 }
 
 /// One entity type: a name plus the components it carries.
@@ -323,7 +360,7 @@ mod tests {
     #[test]
     fn builtin_entities_golden() {
         let reg = EntityRegistry::builtin();
-        assert_eq!(reg.len(), 6);
+        assert_eq!(reg.len(), 7);
 
         let player = reg.player();
         assert_eq!(player.physics.gravity, 28.0);
@@ -377,7 +414,7 @@ mod tests {
         assert_eq!(mob.max_health, 10.0);
         assert_eq!((mob.walk_speed, mob.run_speed), (1.4, 3.0));
         assert_eq!(mob.jump_speed, 9.0);
-        assert!(!mob.hostile);
+        assert_eq!(mob.behavior, Behavior::Passive);
         assert!(mob.ranged.is_none());
         assert_eq!(mob.attack_cooldown, 1.0, "defaulted");
         assert_eq!(mob.drops.len(), 1);
@@ -396,7 +433,7 @@ mod tests {
         let sheep = reg.find("sheep").expect("sheep kind");
         let mob = sheep.mob.as_ref().expect("sheep mob params");
         assert_eq!(mob.max_health, 8.0);
-        assert!(!mob.hostile);
+        assert_eq!(mob.behavior, Behavior::Passive);
         assert_eq!(mob.drops[0].item, "raw mutton");
         assert_eq!((mob.drops[0].min, mob.drops[0].max), (1, 2));
         assert!(matches!(&sheep.visual, VisualSpec::Quadruped(v) if v.skin == "sheep"));
@@ -405,7 +442,7 @@ mod tests {
         let zombie = reg.find("zombie").expect("zombie kind");
         assert_eq!((zombie.physics.width, zombie.physics.height), (0.6, 1.8));
         let mob = zombie.mob.as_ref().expect("zombie mob params");
-        assert!(mob.hostile);
+        assert_eq!(mob.behavior, Behavior::Hostile);
         assert_eq!(mob.max_health, 20.0);
         assert_eq!((mob.aggro_range, mob.attack_range), (16.0, 1.6));
         assert_eq!((mob.attack_damage, mob.attack_cooldown), (3.0, 1.0));
@@ -421,7 +458,7 @@ mod tests {
 
         let skeleton = reg.find("skeleton").expect("skeleton kind");
         let mob = skeleton.mob.as_ref().expect("skeleton mob params");
-        assert!(mob.hostile);
+        assert_eq!(mob.behavior, Behavior::Hostile);
         assert_eq!(mob.max_health, 16.0);
         assert_eq!((mob.aggro_range, mob.attack_range), (18.0, 12.0));
         assert_eq!(mob.attack_cooldown, 1.6);
@@ -434,6 +471,21 @@ mod tests {
         assert!(
             matches!(&skeleton.visual, VisualSpec::Humanoid(v) if v.skin.as_deref() == Some("skeleton") && !v.arms_forward)
         );
+
+        // The file-model visual: a path plus placement, and nothing heavier —
+        // this spec is cloned onto every mob that uses it.
+        let prop = reg.find("vine sword").expect("vine sword kind");
+        let mob = prop.mob.as_ref().expect("vine sword mob params");
+        assert_eq!(mob.behavior, Behavior::Inert, "the prop must not act");
+        assert_eq!(mob.knockback_resistance, 1.0, "and cannot be shoved");
+        match &prop.visual {
+            VisualSpec::Model(spec) => {
+                assert_eq!(spec.path, "assets/models/sword_vine.bbmodel");
+                assert_eq!(spec.scale, 1.0, "defaulted");
+                assert_eq!(spec.offset, [-0.5, 0.889, -0.5]);
+            }
+            other => panic!("vine sword should use a model visual, got {other:?}"),
+        }
     }
 
     #[test]
