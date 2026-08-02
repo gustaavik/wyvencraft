@@ -6,6 +6,7 @@
 //! dedicated view modules (`main_menu`, `multiplayer_menu`, `inventory`,
 //! `pause_menu`) as those milestones land.
 
+pub mod chat;
 pub mod hud;
 pub mod icon;
 pub mod inventory;

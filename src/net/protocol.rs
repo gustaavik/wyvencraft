@@ -37,6 +37,19 @@ pub struct NetItemStack {
     pub durability: Option<u16>,
 }
 
+/// How a chat line reads: someone talking, command output, or a refusal.
+/// Lives here (rather than in `chat`) because it crosses the wire, for the same
+/// reason [`GameMode`] lives in `core`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChatKind {
+    /// A player said something.
+    Player,
+    /// Output from a command, or an announcement.
+    System,
+    /// A command was refused or didn't parse.
+    Error,
+}
+
 /// Saved state the host hands back to a returning player in the `Welcome`, so
 /// their position/vitals/inventory persist across sessions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -78,7 +91,11 @@ pub enum ClientMessage {
     },
     /// Notify the host the client switched game mode.
     SetMode(GameMode),
-    /// Chat message.
+    /// A line the player typed — ordinary chat *or* a `/command`, sent raw.
+    ///
+    /// A client deliberately does not parse or run commands itself: the host is
+    /// the only peer that knows who is authorized, so it is the only peer that
+    /// decides. See `InGameState::dispatch_chat`.
     Chat(String),
     /// Sent once after entering the world: "I'm in-game, send me the current world
     /// state." The host replies with the accumulated block edits as [`ServerMessage::WorldEdits`]
@@ -193,6 +210,36 @@ pub enum ServerMessage {
     PlayerDamaged {
         id: PlayerId,
         amount: f32,
+    },
+    /// A chat line to display. `from` is `None` for command output and system
+    /// announcements. Broadcast for ordinary chat; addressed to one player for
+    /// the reply to their command.
+    ///
+    /// The host sends the *raw* text and the speaker's id, not a pre-formatted
+    /// line, so each peer renders names its own way.
+    Chat {
+        from: Option<PlayerId>,
+        kind: ChatKind,
+        text: String,
+    },
+    /// The host hands items to the addressed player (the result of a `/give`).
+    ///
+    /// Clients own their inventory — the host only mirrors it for the save — so
+    /// a grant is an *instruction to add*, not a state overwrite. The receiver
+    /// applies it exactly as if it had picked the items up: whatever doesn't fit
+    /// lands on the ground.
+    GrantItems {
+        to: PlayerId,
+        stacks: Vec<NetItemStack>,
+    },
+    /// The host moves the addressed player (the result of a `/tp`).
+    ///
+    /// Like `GrantItems`, an instruction rather than an overwrite: clients own
+    /// their position and report it back with `Move`, so the host asks them to
+    /// go rather than asserting where they are.
+    Teleport {
+        to: PlayerId,
+        position: NetVec3,
     },
 }
 
@@ -431,6 +478,82 @@ mod tests {
                 amount,
             } if amount == 3.0
         ));
+    }
+
+    /// Both directions of chat, including the item grant that carries a
+    /// command's result back to a client.
+    #[test]
+    fn chat_messages_roundtrip() {
+        let said = decode::<ClientMessage>(&encode(&ClientMessage::Chat(
+            "/give raw beef 3".to_string(),
+        )))
+        .unwrap();
+        assert!(matches!(said, ClientMessage::Chat(text) if text == "/give raw beef 3"));
+
+        let relayed = ServerMessage::Chat {
+            from: Some(PlayerId(4)),
+            kind: ChatKind::Player,
+            text: "hello".to_string(),
+        };
+        match decode::<ServerMessage>(&encode(&relayed)).unwrap() {
+            ServerMessage::Chat { from, kind, text } => {
+                assert_eq!(from, Some(PlayerId(4)));
+                assert_eq!(kind, ChatKind::Player);
+                assert_eq!(text, "hello");
+            }
+            other => panic!("expected Chat, got {other:?}"),
+        }
+
+        let refused = ServerMessage::Chat {
+            from: None,
+            kind: ChatKind::Error,
+            text: "you are not authorized to use /give".to_string(),
+        };
+        match decode::<ServerMessage>(&encode(&refused)).unwrap() {
+            ServerMessage::Chat {
+                from: None,
+                kind: ChatKind::Error,
+                ..
+            } => {}
+            other => panic!("expected a system Error line, got {other:?}"),
+        }
+
+        let granted = ServerMessage::GrantItems {
+            to: PlayerId(2),
+            stacks: vec![
+                NetItemStack {
+                    item: 9,
+                    count: 64,
+                    durability: None,
+                },
+                NetItemStack {
+                    item: 17,
+                    count: 1,
+                    durability: Some(60),
+                },
+            ],
+        };
+        match decode::<ServerMessage>(&encode(&granted)).unwrap() {
+            ServerMessage::GrantItems { to, stacks } => {
+                assert_eq!(to, PlayerId(2));
+                assert_eq!(stacks.len(), 2);
+                assert_eq!(stacks[0].count, 64);
+                assert_eq!(stacks[1].durability, Some(60));
+            }
+            other => panic!("expected GrantItems, got {other:?}"),
+        }
+
+        let moved = ServerMessage::Teleport {
+            to: PlayerId(2),
+            position: [10.5, 72.0, -3.25],
+        };
+        match decode::<ServerMessage>(&encode(&moved)).unwrap() {
+            ServerMessage::Teleport { to, position } => {
+                assert_eq!(to, PlayerId(2));
+                assert_eq!(position, [10.5, 72.0, -3.25]);
+            }
+            other => panic!("expected Teleport, got {other:?}"),
+        }
     }
 
     #[test]

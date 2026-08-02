@@ -461,6 +461,35 @@ mod tests {
         );
     }
 
+    /// Teleporting down is not falling down. `/tp` and a save restore both move
+    /// the player without simulating the trip, so the fall anchor has to move
+    /// with them — otherwise arriving deals damage for a descent that never
+    /// happened, which is `long_fall_damages_in_survival` firing by mistake.
+    #[test]
+    fn teleporting_down_does_not_land_as_a_fall() {
+        let solid = |p: BlockPos| p.y < 65;
+        let mut player = test_player(Vec3::new(0.5, 250.0, 0.5), GameMode::Survival);
+        let dt = 1.0 / 60.0;
+
+        // Fall a while, so the anchor is far above the ground.
+        for _ in 0..120 {
+            player.update(MovementInput::default(), dt, solid);
+        }
+        assert!(player.position.y < 250.0, "the player should be falling");
+
+        player.teleport(Vec3::new(0.5, 66.0, 0.5));
+        player.velocity = Vec3::ZERO;
+        for _ in 0..120 {
+            player.update(MovementInput::default(), dt, solid);
+        }
+
+        assert!(player.on_ground, "player should settle");
+        assert_eq!(
+            player.health, MAX_HEALTH,
+            "the ~185 blocks skipped by the teleport must not be charged as a fall"
+        );
+    }
+
     /// A short fall (below the safe margin) deals no damage.
     #[test]
     fn short_fall_is_harmless() {

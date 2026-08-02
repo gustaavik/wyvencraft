@@ -180,7 +180,9 @@ impl InGameState {
                 }
                 self.peers.inventories.insert(pid, (slots, selected));
             }
-            ClientMessage::Chat(_) => {}
+            // The only place a command is ever parsed and run: the host knows
+            // who is authorized, so the host decides.
+            ClientMessage::Chat(text) => self.dispatch_chat(pid, text),
             ClientMessage::RequestWorldState => self.replay_world_state(pid),
             ClientMessage::Attack { id } => self.apply_client_attack(pid, id),
         }
@@ -349,6 +351,13 @@ impl InGameState {
             }
             ServerMessage::PlayerDamaged { id, amount } if id == local_id => {
                 self.damage_local_player(amount);
+            }
+            ServerMessage::Chat { from, kind, text } => self.show_remote_chat(from, kind, text),
+            ServerMessage::GrantItems { to, stacks } if to == local_id => {
+                self.apply_granted_items(&stacks);
+            }
+            ServerMessage::Teleport { to, position } if to == local_id => {
+                self.apply_teleport(position);
             }
             _ => {}
         }

@@ -65,6 +65,7 @@ content   ← render, world, inventory, entity, model   GameContent: registries 
 input     ← core, config, entity   winit events → frame-coherent input
 ui        ← inventory, egui   HUD + inventory egui views
 net       ← core              renet host/client, protocol, remote-player interp
+chat      ← core, net         message log, commands (one per file), ops.toml authorization
 save      ← core, world, inventory, entity   world/player persistence (saves/ dir)
 state     ← all of the above  game-state machine
 boot      ← core, net, save   pure env → BootPlan (no window/GPU)
@@ -104,6 +105,15 @@ those systems are testable without a Vulkan device.
   which is what lets content loading, saving, session logic and startup be tested
   without a filesystem, socket, or GPU. `ContentSource` reads *bytes*, with text
   derived from them, because model files carry PNGs and vertex buffers.
+  `chat::CommandContext` is a port for a different reason — not I/O, but to invert
+  a dependency: commands are policy and live in `chat`, but they act on registries
+  and inventories owned by `state`, which already depends on `chat`. Real impl
+  `SessionContext` in `state::ingame_state::chat`, double `chat::FakeContext`.
+- **Chat commands** — `chat::command::ChatCommand`, one impl per file, found
+  through the `COMMANDS` registry, exactly like `ModelLoader`. There is no
+  `Command` enum and no `match` over command kinds: both would need editing for
+  every addition. Each command parses its own arguments and phrases its own
+  messages; the dispatcher only resolves the name and checks `permission()`.
 - **File-loaded models** — `model::ModelLoader` is one impl per format (`.gltf`,
   `.bbmodel`), all normalising to the same `ModelMesh` (Y-up, right-handed, one
   block = 1.0, top-left UVs), so callers cannot tell them apart. Both shipped
@@ -141,6 +151,9 @@ those systems are testable without a Vulkan device.
 | Crafting recipes        | `assets/recipes.toml` (data); logic in `inventory::crafting`; panel in `ui::inventory`     |
 | A new screen            | implement `state::GameState`, push/replace via `Transition`                                |
 | HUD / inventory UI      | `ui::hud`, `ui::inventory`                                                                 |
+| Add a chat command      | **one new file in `src/chat/command/` + one entry in `COMMANDS`** — nothing else changes (the `ModelLoader::LOADERS` pattern). Implement `ChatCommand` (`name`/`usage`/`permission`/`run`); the command parses its own arguments and phrases its own messages. It reaches the world only through the `CommandContext` port, so it never sees a `PlayerId` and works identically for the local player and a remote client. Test it against `chat::FakeContext` with no world, socket or GPU. **Caveat:** a command needing a capability the port doesn't expose yet also grows `CommandContext` + its two impls — and if that capability must reach a *client*, a `ServerMessage` too (`GrantItems`, `Teleport`) |
+| Authorize a player      | `ops.toml` in the working directory (`ops = [{ id = "<client_id from profile.toml>", name = "…" }]`), parsed by `chat::ops`. The host/singleplayer player is always an op; only the authority loads the file |
+| Chat log / input bar    | `chat::{log,composer}` (pure state), drawn by `ui::chat::draw_chat`; keys `chat`/`chat_command` in `config::Keybinds` (T and /) |
 | Networking              | `net::{server,client,protocol}` transport; role behind `state::session::Session` (Singleplayer/Host/Client + `FakeSession`); message application in `state::ingame_state::net` |
 | Saving / world files    | `save` module (formats, `saves/<slug>/`) behind `save::WorldRepository` (File/Null/InMemory); triggers in `state::ingame_state::save_world` |
 | Pipelines / passes      | `render::pipeline`, `render::renderer`                                                     |
@@ -169,6 +182,19 @@ those systems are testable without a Vulkan device.
 - **Multiplayer testing:** launch two processes with `WYVEN_HOST=1` and
   `WYVEN_JOIN=127.0.0.1:25565`; the client logs `connected; world seed … player id …`
   on a successful handshake.
+- **Commands run on the authority, never on the client.** A client sends its
+  raw chat line (command or not) as `ClientMessage::Chat`; the host parses it,
+  checks `ops.toml`, and answers with `ServerMessage::Chat` / `GrantItems`. There
+  is deliberately no client-side execution path to skip, which is what makes the
+  ops list an actual permission rather than a suggestion. `ops.toml` is
+  CWD-relative and gitignored like `profile.toml`, keyed by the same stable
+  `save::client_identity()` u64 (player ids are per-session and can't carry a
+  permission).
+- **Typing in chat is safe by construction.** `app::window_event` gives egui
+  every event first and only forwards what egui didn't consume, so a focused
+  `TextEdit` means gameplay keys never reach `InputState`. The `!typing` guards
+  in `ingame_state::frame` only cover the frame between opening the bar and the
+  widget taking focus.
 - **Saves are name-based, not id-based.** `saves/<slug>/` stores blocks/items by
   registry *name* (numeric ids are insertion-order indices and shift across code
   changes). `saves/` and `profile.toml` are CWD-relative (like `assets/`) and

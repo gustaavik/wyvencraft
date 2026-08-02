@@ -80,6 +80,10 @@ pub struct Keybinds {
     pub sprint: KeyCode,
     pub inventory: KeyCode,
     pub drop_item: KeyCode,
+    /// Open the chat input line.
+    pub chat: KeyCode,
+    /// Open the chat input line pre-filled with `/`, ready for a command.
+    pub chat_command: KeyCode,
     pub toggle_perspective: KeyCode,
     pub toggle_debug: KeyCode,
     pub toggle_gamemode: KeyCode,
@@ -100,6 +104,8 @@ impl Default for Keybinds {
             sprint: KeyCode::ControlLeft,
             inventory: KeyCode::KeyE,
             drop_item: KeyCode::KeyQ,
+            chat: KeyCode::KeyT,
+            chat_command: KeyCode::Slash,
             toggle_perspective: KeyCode::F5,
             toggle_debug: KeyCode::F3,
             toggle_gamemode: KeyCode::F4,

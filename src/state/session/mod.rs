@@ -31,7 +31,7 @@ use std::time::Duration;
 use crate::net::{Channel, ClientMessage, PlayerId, ServerMessage};
 
 pub use client::ClientSession;
-pub use fake::{FakeHandle, FakeSession};
+pub use fake::{FakeHandle, FakeSession, FakeState, Sent};
 pub use host::{HOST_PLAYER_ID, HostSession};
 pub use singleplayer::SingleplayerSession;
 

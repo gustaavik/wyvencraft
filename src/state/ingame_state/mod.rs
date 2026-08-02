@@ -4,6 +4,7 @@
 //! The implementation is split across sibling modules by concern; each adds
 //! `impl` blocks to [`InGameState`] defined here:
 //! - [`setup`] — construction from new/saved/host/client sessions.
+//! - [`chat`] — chat relay, command authorization, and what a command does.
 //! - [`net`] — the per-frame network pump and wire (de)serialization.
 //! - [`streaming`] — chunk request/insert/unload and mesh budgeting.
 //! - [`interaction`] — block break/place, mining, drops, target outline.
@@ -13,6 +14,7 @@
 //! - [`persistence`] — world save + restore.
 //! - [`frame`] — the [`GameState`] impl (update/ui/scene_frame/preview_frame).
 
+mod chat;
 mod frame;
 mod interaction;
 mod inventory;
@@ -29,6 +31,7 @@ use std::sync::Arc;
 
 use glam::Vec3;
 
+use crate::chat::{ChatState, OpsList};
 use crate::content::ItemModel;
 use crate::core::{BlockPos, DayCycle};
 use crate::entity::{Arrow, DroppedItem, EntityRegistry, Mob, Player, SpawnConfig, Spawner};
@@ -106,6 +109,13 @@ pub struct InGameState {
     day_cycle: DayCycle,
     /// Inventory screen state.
     inventory_open: bool,
+    /// The chat history this peer has seen and the line it is typing. Purely
+    /// local: only the messages travel, never this.
+    chat: ChatState,
+    /// Who may run op-only commands, by stable client identity. Loaded from
+    /// `ops.toml` on the authority; always empty on a client, which never
+    /// decides anything.
+    ops: OpsList,
     /// Stack currently "held" by the cursor in the inventory screen.
     held: Option<ItemStack>,
     /// Where the player (re)spawns on death.

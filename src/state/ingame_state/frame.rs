@@ -21,12 +21,24 @@ impl GameState for InGameState {
 
     fn update(&mut self, ctx: &mut StateContext) -> Transition {
         let kb = ctx.settings.controls.keybinds.clone();
+        // While the chat bar is open, egui owns the keyboard and gameplay keys
+        // never reach `InputState` at all. These guards cover the one frame
+        // between opening the bar and the widget taking focus.
+        let typing = self.chat.composer.open;
 
-        if !self.dead && ctx.input.just_pressed(kb.inventory) {
+        if !typing && !self.dead && !self.inventory_open {
+            if ctx.input.just_pressed(kb.chat) {
+                self.chat.composer.begin("");
+            } else if ctx.input.just_pressed(kb.chat_command) {
+                self.chat.composer.begin("/");
+            }
+        }
+
+        if !typing && !self.dead && ctx.input.just_pressed(kb.inventory) {
             self.toggle_inventory();
         }
         // Esc closes the inventory if open, otherwise opens the pause overlay.
-        if ctx.input.just_pressed(kb.pause) {
+        if !typing && ctx.input.just_pressed(kb.pause) {
             if self.inventory_open {
                 self.toggle_inventory();
             } else {
@@ -34,7 +46,7 @@ impl GameState for InGameState {
             }
         }
 
-        if self.inventory_open || self.dead {
+        if self.inventory_open || self.dead || self.chat.composer.open {
             // Inventory screen / death screen: free cursor, freeze player control,
             // and abandon any in-progress mining.
             ctx.grab_cursor = false;
@@ -164,6 +176,8 @@ impl GameState for InGameState {
         // sessions. The period must stay a whole multiple of the water loop
         // (WATER_FRAMES / WATER_FPS = 0.8 s in voxel.frag) to wrap seamlessly.
         self.view.elapsed = (self.view.elapsed + ctx.dt) % 3600.0;
+        // Ages the chat lines so old ones fade off the HUD.
+        self.chat.log.tick(ctx.dt);
         self.day_cycle.advance(ctx.dt);
         // Periodic autosave for persistent worlds (also fires on pause/exit).
         if self.save.is_persistent() {
@@ -252,6 +266,8 @@ impl GameState for InGameState {
             }
             return Transition::None;
         }
+
+        self.draw_chat(egui_ctx);
 
         hud::draw_crosshair(egui_ctx);
         hud::draw_hotbar(

@@ -11,6 +11,7 @@ use super::peers::Peers;
 use super::persistence::Persistence;
 use super::view::SceneCache;
 use super::{DOUBLE_TAP_WINDOW, InGameState, SPAWN_RADIUS};
+use crate::chat::{ChatState, OpsList};
 use crate::content::GameContent;
 use crate::core::{BlockPos, CHUNK_HEIGHT, ChunkPos, DayCycle, GameMode};
 use crate::entity::{Player, Spawner};
@@ -228,6 +229,9 @@ impl InGameState {
             }
         }
 
+        // Read before `session` is moved into the struct below.
+        let session_is_authority = session.is_authority();
+
         let mut state = Self {
             world,
             player: Player::new(spawn, mode, entities.player()),
@@ -244,6 +248,13 @@ impl InGameState {
             loader,
             day_cycle,
             inventory_open: false,
+            chat: ChatState::default(),
+            // A client never authorizes anything, so it never reads the file.
+            ops: if session_is_authority {
+                OpsList::load()
+            } else {
+                OpsList::default()
+            },
             held: None,
             spawn,
             fluids: FluidSim::new(),

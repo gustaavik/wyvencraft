@@ -13,6 +13,7 @@
 //! content ← world, inventory, model   (registries loaded from assets/*.toml)
 //! input  ← core, config, entity
 //! net    ← core
+//! chat   ← core, net           (message log, command parsing, the ops list)
 //! save   ← core, world, inventory, entity   (world/player persistence)
 //! ui     ← inventory, net, (egui)
 //! state  ← all of the above
@@ -25,9 +26,15 @@
 //! [`state::session::Session`], [`boot::Environment`]. Hot paths (meshing, chunk
 //! generation, fluid ticking) deliberately use none — the indirection buys
 //! nothing there and would cost frame time.
+//!
+//! [`chat::CommandContext`] is a port for a different reason: not I/O, but to
+//! invert a dependency. Chat commands are policy and belong in `chat`, yet they
+//! act on registries and inventories owned by `state` — which already depends on
+//! `chat`. Commands depend on the port; `state` implements it.
 
 pub mod app;
 pub mod boot;
+pub mod chat;
 pub mod config;
 pub mod content;
 pub mod core;
