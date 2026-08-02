@@ -117,7 +117,7 @@ those systems are testable without a Vulkan device.
 - **File-loaded models** — `model::ModelLoader` is one impl per format (`.gltf`,
   `.bbmodel`), all normalising to the same `ModelMesh` (Y-up, right-handed, one
   block = 1.0, top-left UVs), so callers cannot tell them apart. Both shipped
-  exports of `assets/models/sword_vine` describe the same object, and a test
+  exports of `assets/models/vine_sword` describe the same object, and a test
   asserts the two loaders agree vertex-for-vertex — that is what pins the
   bbmodel face-corner order, UV-rotation direction and 1/16 scale.
 - **Registry** — `world::BlockRegistry`, `inventory::ItemRegistry`,

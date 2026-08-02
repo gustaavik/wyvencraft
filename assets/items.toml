@@ -86,7 +86,7 @@ harvests = ["plant"]
 # Drawn from a model file rather than as a textured cube. The offset drops the
 # grip (the model runs from y = -0.889 up to y = 1.471) onto the fist.
 [item.model]
-path = "assets/models/sword_vine.bbmodel"
+path = "assets/models/vine_sword.bbmodel"
 scale = 0.35
 offset = [-0.5, 0.75, -0.5]
 

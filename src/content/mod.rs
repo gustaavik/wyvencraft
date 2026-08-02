@@ -317,7 +317,7 @@ mod tests {
     /// stop substituting anything the day the other is chosen.
     fn items_with_repointed_models() -> String {
         let base = crate::inventory::item::BUILTIN_ITEMS;
-        let repointed = base.replace("assets/models/sword_vine", "assets/models/elsewhere");
+        let repointed = base.replace("assets/models/vine_sword", "assets/models/elsewhere");
         assert_ne!(base, repointed, "fixture substituted nothing");
         repointed
     }

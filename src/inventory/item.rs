@@ -606,7 +606,7 @@ mod tests {
         // Not the exact extension: either export of this object is valid here,
         // and pinning one would make swapping formats a test failure.
         assert!(
-            spec.path.starts_with("assets/models/sword_vine."),
+            spec.path.starts_with("assets/models/vine_sword."),
             "unexpected model path {:?}",
             spec.path
         );
@@ -619,7 +619,7 @@ mod tests {
         assert!(models[apple.0 as usize].is_none());
         assert!(
             format!("{:?}", items.get(sword))
-                .find("sword_vine")
+                .find("vine_sword")
                 .is_none()
         );
     }

@@ -225,7 +225,7 @@ knockback_resistance = 1.0
 kind = "model"
 # Either export of this object works and renders identically — swap the
 # extension to .gltf to exercise the other loader.
-path = "assets/models/sword_vine.bbmodel"
+path = "assets/models/vine_sword.bbmodel"
 # Blockbench authors on a 0..1 block; re-centre it horizontally and lift the
 # hilt (which dips to y = -0.889) up to the entity's feet.
 offset = [-0.5, 0.889, -0.5]

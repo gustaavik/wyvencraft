@@ -50,7 +50,7 @@ pub struct ModelId(pub u32);
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelSpec {
-    /// `assets/`-relative path, e.g. `"assets/models/sword_vine.gltf"`.
+    /// `assets/`-relative path, e.g. `"assets/models/vine_sword.gltf"`.
     pub path: String,
     /// Uniform scale applied to the model's own units.
     #[serde(default = "unit_scale")]
@@ -234,10 +234,10 @@ mod tests {
     use super::*;
     use crate::content::{FsSource, MapSource};
 
-    const GLTF: &str = "assets/models/sword_vine.gltf";
-    const BBMODEL: &str = "assets/models/sword_vine.bbmodel";
+    const GLTF: &str = "assets/models/vine_sword.gltf";
+    const BBMODEL: &str = "assets/models/vine_sword.bbmodel";
 
-    /// Measured from the two exports of `sword_vine`, which describe the same
+    /// Measured from the two exports of `vine_sword`, which describe the same
     /// object: 21 cubes, 6 faces each, 4 unwelded vertices per face.
     const EXPECTED_VERTS: usize = 504;
     const EXPECTED_TRIS: usize = 252;
@@ -259,8 +259,8 @@ mod tests {
     #[test]
     fn resolve_sibling_joins_against_the_models_directory() {
         assert_eq!(
-            resolve_sibling("assets/models/sword_vine", "vine.png"),
-            "assets/models/sword_vine/vine.png"
+            resolve_sibling("assets/models/vine_sword", "vine.png"),
+            "assets/models/vine_sword/vine.png"
         );
         assert_eq!(
             resolve_sibling("assets/models", "./t.png"),

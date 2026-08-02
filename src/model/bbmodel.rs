@@ -406,7 +406,7 @@ mod tests {
             "u1,v1 lands on corner 0"
         );
 
-        // Verified against element 7 of assets/models/sword_vine.gltf: at 270°
+        // Verified against element 7 of assets/models/vine_sword.gltf: at 270°
         // the first corner takes (u2, v1).
         let turned = face_uvs(rect, 270.0, res);
         assert_eq!(turned[0], [18.0 / 32.0, 18.0 / 32.0]);
