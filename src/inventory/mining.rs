@@ -39,6 +39,7 @@ mod tests {
             dig_speed,
             durability: 60,
             harvests: harvests.to_vec(),
+            damage: None,
         }
     }
 
@@ -64,6 +65,25 @@ mod tests {
         let with_shears = break_seconds(0.2, BlockMaterial::Plant, Some(&shears));
         let by_hand = break_seconds(0.2, BlockMaterial::Plant, None);
         assert!(with_shears < by_hand);
+    }
+
+    /// The whole point of a tier: the same block, the same material, strictly
+    /// less time per tier.
+    #[test]
+    fn a_higher_tier_pickaxe_digs_stone_faster() {
+        let times: Vec<f32> = [2.0, 4.0, 6.0]
+            .iter()
+            .map(|&dig_speed| {
+                let pick = tool("pickaxe", dig_speed, &[BlockMaterial::Stone]);
+                break_seconds(1.5, BlockMaterial::Stone, Some(&pick))
+            })
+            .collect();
+        assert!(times[0] > times[1], "stone beats wooden");
+        assert!(times[1] > times[2], "iron beats stone");
+        assert!(
+            times[0] < break_seconds(1.5, BlockMaterial::Stone, None),
+            "even the worst pickaxe beats a bare hand"
+        );
     }
 
     #[test]

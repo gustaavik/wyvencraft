@@ -76,6 +76,9 @@ pub fn paint_named(name: &str) -> Option<TileRgba> {
         "wooden shovel" => tool_icon(SHOVEL, WOOD_HANDLE, STONE_HEAD),
         "shears" => sprite(SHEARS, SHEARS_PALETTE),
         "vine sword" => sprite(VINE_SWORD, VINE_SWORD_PALETTE),
+        // The tiered tools draw from their .bbmodel files instead, so they need
+        // no painter here — only `stick`, which has no model, does.
+        "stick" => sprite(STICK, STICK_PALETTE),
         "apple" => sprite(APPLE, APPLE_PALETTE),
         "bread" => sprite(BREAD, BREAD_PALETTE),
         "raw beef" => sprite(RAW_BEEF, RAW_BEEF_PALETTE),
@@ -607,6 +610,29 @@ const VINE_SWORD_PALETTE: &Palette = &[
     ('h', [96, 70, 44, 255]),
 ];
 
+/// A bare stick: the same bottom-left-to-top-right diagonal the tool handles
+/// run along, drawn two pixels thick so it reads on its own.
+const STICK: Sprite = [
+    "                ",
+    "                ",
+    "            ww  ",
+    "           ww.  ",
+    "          ww.   ",
+    "         ww.    ",
+    "        ww.     ",
+    "       ww.      ",
+    "      ww.       ",
+    "     ww.        ",
+    "    ww.         ",
+    "   ww.          ",
+    "   w.           ",
+    "                ",
+    "                ",
+    "                ",
+];
+
+const STICK_PALETTE: &Palette = &[('w', [140, 100, 58, 255]), ('.', [104, 74, 42, 255])];
+
 const APPLE: Sprite = [
     "                ",
     "        s       ",
@@ -850,6 +876,7 @@ mod tests {
             "wooden shovel",
             "shears",
             "vine sword",
+            "stick",
             "apple",
             "bread",
             "raw beef",

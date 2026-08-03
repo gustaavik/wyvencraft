@@ -31,6 +31,12 @@ pub struct ToolSpec {
     pub durability: u16,
     /// Block materials this tool mines at full speed.
     pub harvests: Vec<BlockMaterial>,
+    /// Melee damage per swing. `None` means this tool is no better than a bare
+    /// fist, so the fist's damage stays defined in exactly one place
+    /// (`state::ingame_state::mobs::PLAYER_ATTACK_DAMAGE`) instead of being
+    /// duplicated as a default here.
+    #[serde(default)]
+    pub damage: Option<f32>,
 }
 
 /// Food behavior component: what eating the item restores.
@@ -460,25 +466,34 @@ mod tests {
             "gold ore",
             "diamond ore",
         ];
-        // (name, kind, dig_speed, durability, harvests)
-        let tools: [(&str, &str, f32, u16, &[BlockMaterial]); 5] = [
-            (
-                "wooden pickaxe",
-                "pickaxe",
-                2.0,
-                60,
-                &[BlockMaterial::Stone],
-            ),
-            ("wooden axe", "axe", 2.0, 60, &[BlockMaterial::Wood]),
-            (
-                "wooden shovel",
-                "shovel",
-                2.0,
-                60,
-                &[BlockMaterial::Dirt, BlockMaterial::Sand],
-            ),
-            ("shears", "shears", 5.0, 120, &[BlockMaterial::Plant]),
-            ("vine sword", "sword", 1.5, 200, &[BlockMaterial::Plant]),
+        const STONE: &[BlockMaterial] = &[BlockMaterial::Stone];
+        const WOOD: &[BlockMaterial] = &[BlockMaterial::Wood];
+        const PLANT: &[BlockMaterial] = &[BlockMaterial::Plant];
+        const DIGGABLE: &[BlockMaterial] = &[BlockMaterial::Dirt, BlockMaterial::Sand];
+        /// One expected tool: name, kind, dig_speed, durability, harvests, damage.
+        type ToolRow = (
+            &'static str,
+            &'static str,
+            f32,
+            u16,
+            &'static [BlockMaterial],
+            Option<f32>,
+        );
+        let tools: [ToolRow; 14] = [
+            ("wooden pickaxe", "pickaxe", 2.0, 60, STONE, None),
+            ("wooden axe", "axe", 2.0, 60, WOOD, Some(3.0)),
+            ("wooden shovel", "shovel", 2.0, 60, DIGGABLE, None),
+            ("shears", "shears", 5.0, 120, PLANT, None),
+            ("vine sword", "sword", 1.5, 200, PLANT, Some(4.0)),
+            ("wooden sword", "sword", 1.5, 60, PLANT, Some(4.0)),
+            ("stone pickaxe", "pickaxe", 4.0, 132, STONE, None),
+            ("stone axe", "axe", 4.0, 132, WOOD, Some(4.0)),
+            ("stone shovel", "shovel", 4.0, 132, DIGGABLE, None),
+            ("stone sword", "sword", 1.5, 132, PLANT, Some(5.0)),
+            ("iron pickaxe", "pickaxe", 6.0, 250, STONE, None),
+            ("iron axe", "axe", 6.0, 250, WOOD, Some(5.0)),
+            ("iron shovel", "shovel", 6.0, 250, DIGGABLE, None),
+            ("iron sword", "sword", 1.5, 250, PLANT, Some(6.0)),
         ];
         // (name, hunger, saturation)
         let foods = [
@@ -497,9 +512,12 @@ mod tests {
             ("cape", ArmorSlot::Cape, 1.0, 80),
         ];
 
+        // Plain stackables with no components at all, declared after the armor.
+        let plain = ["stick"];
+
         assert_eq!(
             items.len(),
-            block_items.len() + tools.len() + foods.len() + armors.len(),
+            block_items.len() + tools.len() + foods.len() + armors.len() + plain.len(),
             "item count changed"
         );
 
@@ -518,7 +536,9 @@ mod tests {
             );
         }
 
-        for (offset, &(name, kind, dig_speed, durability, harvests)) in tools.iter().enumerate() {
+        for (offset, &(name, kind, dig_speed, durability, harvests, damage)) in
+            tools.iter().enumerate()
+        {
             let id = ItemId((block_items.len() + offset) as u16);
             let item = items.get(id);
             assert_eq!(item.name, name, "tool: name");
@@ -528,6 +548,7 @@ mod tests {
             assert_eq!(tool.dig_speed, dig_speed, "{name}: dig_speed");
             assert_eq!(tool.durability, durability, "{name}: durability");
             assert_eq!(tool.harvests, harvests, "{name}: harvests");
+            assert_eq!(tool.damage, damage, "{name}: damage");
             assert_eq!(items.find(name), Some(id), "{name}: find");
         }
 
@@ -558,6 +579,23 @@ mod tests {
                 ItemStack::with_durability(id, durability),
                 "{name}: full_stack"
             );
+        }
+
+        for (offset, &name) in plain.iter().enumerate() {
+            let id = ItemId(
+                (block_items.len() + tools.len() + foods.len() + armors.len() + offset) as u16,
+            );
+            let item = items.get(id);
+            assert_eq!(item.name, name, "plain: name");
+            assert_eq!(item.max_stack, 64, "{name}: max_stack");
+            assert!(
+                item.tool.is_none()
+                    && item.food.is_none()
+                    && item.armor.is_none()
+                    && item.place_block.is_none(),
+                "{name}: carries no components"
+            );
+            assert_eq!(items.find(name), Some(id), "{name}: find");
         }
 
         // The starter kit resolves in hotbar order: four fresh tools, then the
@@ -622,5 +660,98 @@ mod tests {
                 .find("vine_sword")
                 .is_none()
         );
+    }
+
+    /// The tiered tools are flat in the XY plane, unlike `vine_sword`, so they
+    /// all carry the quarter-turn that stands them broadside in the fist. A
+    /// tool that silently lost it would render edge-on and near-invisible.
+    #[test]
+    fn tiered_tool_models_are_turned_broadside() {
+        let blocks = BlockRegistry::with_builtins();
+        let mut models = Vec::new();
+        let items = ItemRegistry::from_toml_with_models(BUILTIN_ITEMS, &blocks, &mut models)
+            .expect("builtin items parse");
+
+        for tier in ["wooden", "stone", "iron"] {
+            for shape in ["pickaxe", "axe", "shovel", "sword"] {
+                let name = format!("{tier} {shape}");
+                let id = items.find(&name).unwrap_or_else(|| panic!("{name} exists"));
+                let spec = models[id.0 as usize]
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("{name} declares a model"));
+                assert_eq!(
+                    spec.path,
+                    format!("assets/models/{tier}_{shape}.bbmodel"),
+                    "{name}: model path"
+                );
+                assert_eq!(spec.rotation, [0.0, 90.0, 0.0], "{name}: rotation");
+            }
+        }
+    }
+
+    /// A tier is only worth crafting if it strictly beats the one below it. The
+    /// gradient lives in `dig_speed` and `durability` for the digging shapes,
+    /// and in `damage` and `durability` for swords (which never dig).
+    #[test]
+    fn each_tool_shape_improves_with_every_tier() {
+        let blocks = BlockRegistry::with_builtins();
+        let items = ItemRegistry::from_blocks(&blocks);
+
+        let spec = |name: &str| {
+            let id = items.find(name).unwrap_or_else(|| panic!("{name} exists"));
+            items.tool(id).expect("tool spec").clone()
+        };
+
+        for shape in ["pickaxe", "axe", "shovel"] {
+            let tiers: Vec<_> = ["wooden", "stone", "iron"]
+                .iter()
+                .map(|tier| spec(&format!("{tier} {shape}")))
+                .collect();
+            for pair in tiers.windows(2) {
+                let (lo, hi) = (&pair[0], &pair[1]);
+                assert!(hi.dig_speed > lo.dig_speed, "{shape}: dig_speed");
+                assert!(hi.durability > lo.durability, "{shape}: durability");
+                assert_eq!(
+                    hi.harvests, lo.harvests,
+                    "{shape}: harvests are the tier-independent part"
+                );
+                assert_eq!(hi.kind, lo.kind, "{shape}: kind");
+            }
+        }
+
+        let swords: Vec<_> = ["wooden", "stone", "iron"]
+            .iter()
+            .map(|tier| spec(&format!("{tier} sword")))
+            .collect();
+        for pair in swords.windows(2) {
+            let (lo, hi) = (&pair[0], &pair[1]);
+            assert!(hi.damage > lo.damage, "sword: damage");
+            assert!(hi.durability > lo.durability, "sword: durability");
+            assert_eq!(hi.dig_speed, lo.dig_speed, "sword: dig_speed is flat");
+        }
+    }
+
+    /// Digging tools deliberately do *not* fight better than a fist — only the
+    /// shapes with an edge declare `damage`.
+    #[test]
+    fn only_the_fighting_shapes_carry_damage() {
+        let blocks = BlockRegistry::with_builtins();
+        let items = ItemRegistry::from_blocks(&blocks);
+
+        for tier in ["wooden", "stone", "iron"] {
+            for shape in ["pickaxe", "shovel"] {
+                let name = format!("{tier} {shape}");
+                let id = items.find(&name).expect("tool exists");
+                assert_eq!(items.tool(id).unwrap().damage, None, "{name}: no damage");
+            }
+            for shape in ["sword", "axe"] {
+                let name = format!("{tier} {shape}");
+                let id = items.find(&name).expect("tool exists");
+                assert!(
+                    items.tool(id).unwrap().damage.is_some(),
+                    "{name}: declares damage"
+                );
+            }
+        }
     }
 }

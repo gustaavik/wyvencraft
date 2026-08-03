@@ -7,7 +7,7 @@
 //! per unit, with UVs in `[0,1]` measured from the texture's top-left corner.
 //! Nothing downstream can tell which file a model came from.
 
-use glam::{Mat3, Mat4, Vec3};
+use glam::{EulerRot, Mat3, Mat4, Vec3};
 
 use crate::core::math::yaw_matrix;
 use crate::render::mesh::CpuMesh;
@@ -97,23 +97,42 @@ impl ModelMesh {
     }
 
     /// Bake this model standing at `origin` and turned to face `yaw`.
-    pub fn to_cpu_mesh(&self, origin: Vec3, yaw: f32, scale: f32, offset: Vec3) -> CpuMesh {
-        self.bake(placement(origin, yaw, 0.0, scale, offset))
+    pub fn to_cpu_mesh(
+        &self,
+        origin: Vec3,
+        yaw: f32,
+        scale: f32,
+        rotation: Vec3,
+        offset: Vec3,
+    ) -> CpuMesh {
+        self.bake(placement(origin, yaw, 0.0, scale, rotation, offset))
     }
 }
 
-/// Model→world transform: shift by `offset` and scale in the model's own space,
-/// pitch about X, turn by the engine's `yaw`, then translate to `origin`.
+/// Model→world transform: shift by `offset`, turn about the model's own axes by
+/// `rotation`, and scale — all in the model's own space — then pitch about X,
+/// turn by the engine's `yaw`, and translate to `origin`.
 ///
-/// `offset` applies before `scale` so a Blockbench author can re-centre a model
-/// within its own frame without the correction changing when they rescale it.
-/// `pitch` exists for geometry that rides an articulated joint — an item held in
-/// a swinging hand.
-pub fn placement(origin: Vec3, yaw: f32, pitch: f32, scale: f32, offset: Vec3) -> Mat4 {
+/// `offset` applies before `rotation` and `scale` so a Blockbench author can
+/// re-centre a model within its own frame without the correction changing when
+/// they rescale or re-orient it — and so `rotation` turns the model about
+/// itself rather than about the point it is drawn at. `rotation` is in radians
+/// (`ModelSpec` authors it in degrees) and exists because exports disagree on
+/// which plane a flat object lies in. `pitch` is separate: it belongs to
+/// geometry riding an articulated joint — an item held in a swinging hand.
+pub fn placement(
+    origin: Vec3,
+    yaw: f32,
+    pitch: f32,
+    scale: f32,
+    rotation: Vec3,
+    offset: Vec3,
+) -> Mat4 {
     Mat4::from_translation(origin)
         * yaw_matrix(yaw)
         * Mat4::from_rotation_x(pitch)
         * Mat4::from_scale(Vec3::splat(scale))
+        * Mat4::from_euler(EulerRot::YXZ, rotation.y, rotation.x, rotation.z)
         * Mat4::from_translation(offset)
 }
 
@@ -173,7 +192,7 @@ mod tests {
     #[test]
     fn baking_translates_scales_and_turns_the_model() {
         let origin = Vec3::new(10.0, 2.0, -4.0);
-        let mesh = tri().to_cpu_mesh(origin, 0.0, 2.0, Vec3::ZERO);
+        let mesh = tri().to_cpu_mesh(origin, 0.0, 2.0, Vec3::ZERO, Vec3::ZERO);
         assert_eq!(mesh.vertices.len(), 3);
         assert_eq!(mesh.indices, vec![0, 1, 2]);
         assert_eq!(mesh.vertices[0].position, origin.to_array());
@@ -186,14 +205,14 @@ mod tests {
 
     #[test]
     fn offset_applies_in_model_space_before_scale() {
-        let mesh = tri().to_cpu_mesh(Vec3::ZERO, 0.0, 3.0, Vec3::X);
+        let mesh = tri().to_cpu_mesh(Vec3::ZERO, 0.0, 3.0, Vec3::ZERO, Vec3::X);
         // (0 + 1) * 3 = 3, not 0 * 3 + 1 = 1.
         assert_eq!(mesh.vertices[0].position[0], 3.0);
     }
 
     #[test]
     fn yaw_turns_geometry_and_normals_together() {
-        let mesh = tri().to_cpu_mesh(Vec3::ZERO, FRAC_PI_2, 1.0, Vec3::ZERO);
+        let mesh = tri().to_cpu_mesh(Vec3::ZERO, FRAC_PI_2, 1.0, Vec3::ZERO, Vec3::ZERO);
         // The engine's yaw convention sends +X to +Z (see core::math::rotate_y).
         let p = mesh.vertices[1].position;
         assert!(p[0].abs() < 1e-6 && (p[2] - 1.0).abs() < 1e-6, "got {p:?}");
@@ -201,9 +220,55 @@ mod tests {
         assert!((n[0] + 1.0).abs() < 1e-6 && n[2].abs() < 1e-6, "got {n:?}");
     }
 
+    /// A zero rotation must compose to exactly what `placement` produced before
+    /// the parameter existed — every entity prop and the vine sword depend on
+    /// that, and a sign or ordering slip here would move all of them at once.
+    #[test]
+    fn a_zero_rotation_leaves_the_transform_untouched() {
+        let expected = Mat4::from_translation(Vec3::new(3.0, 1.0, -2.0))
+            * yaw_matrix(0.9)
+            * Mat4::from_rotation_x(-0.4)
+            * Mat4::from_scale(Vec3::splat(0.35))
+            * Mat4::from_translation(Vec3::new(-0.5, 0.75, -0.5));
+        let actual = placement(
+            Vec3::new(3.0, 1.0, -2.0),
+            0.9,
+            -0.4,
+            0.35,
+            Vec3::ZERO,
+            Vec3::new(-0.5, 0.75, -0.5),
+        );
+        assert!(expected.abs_diff_eq(actual, 1e-6), "{expected} vs {actual}");
+    }
+
+    /// The quarter-turn the tool models carry: a model flat in XY is stood up
+    /// flat in YZ, which is what puts a blade broadside in the fist.
+    #[test]
+    fn a_model_rotation_turns_geometry_about_the_models_own_axis() {
+        let quarter = Vec3::new(0.0, FRAC_PI_2, 0.0);
+        let mesh = tri().to_cpu_mesh(Vec3::ZERO, 0.0, 1.0, quarter, Vec3::ZERO);
+        // The +X corner swings onto -Z; the model is turned, not displaced.
+        let p = mesh.vertices[1].position;
+        assert!(p[0].abs() < 1e-6 && (p[2] + 1.0).abs() < 1e-6, "got {p:?}");
+        // The vertex at the model's own origin does not move.
+        assert_eq!(mesh.vertices[0].position, [0.0, 0.0, 0.0]);
+    }
+
+    /// `offset` re-centres first, so the rotation pivots about the re-centred
+    /// model rather than sweeping it around the point it is drawn at.
+    #[test]
+    fn rotation_pivots_after_the_offset_recentres_the_model() {
+        let quarter = Vec3::new(0.0, FRAC_PI_2, 0.0);
+        // Offset puts the model's origin vertex at (-1, 0, 0); a quarter turn
+        // about the model's axis sends that to (0, 0, 1).
+        let mesh = tri().to_cpu_mesh(Vec3::ZERO, 0.0, 1.0, quarter, Vec3::new(-1.0, 0.0, 0.0));
+        let p = mesh.vertices[0].position;
+        assert!(p[0].abs() < 1e-6 && (p[2] - 1.0).abs() < 1e-6, "got {p:?}");
+    }
+
     #[test]
     fn uvs_survive_the_bake_untouched() {
-        let mesh = tri().to_cpu_mesh(Vec3::ONE, 1.2, 0.5, Vec3::Y);
+        let mesh = tri().to_cpu_mesh(Vec3::ONE, 1.2, 0.5, Vec3::ZERO, Vec3::Y);
         assert_eq!(mesh.vertices[1].uv, [1.0, 0.0]);
         assert_eq!(mesh.vertices[2].uv, [0.0, 1.0]);
     }

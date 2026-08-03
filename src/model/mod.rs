@@ -60,6 +60,12 @@ pub struct ModelSpec {
     /// entity position it is drawn at.
     #[serde(default)]
     pub offset: [f32; 3],
+    /// Rotation in degrees about the model's own axes, applied *after* `offset`
+    /// has re-centred it — so a model turns about itself, not about the point it
+    /// is drawn at. Exists because exports disagree on which plane a flat object
+    /// lies in: the tool models are flat in XY, `vine_sword` in YZ.
+    #[serde(default)]
+    pub rotation: [f32; 3],
 }
 
 fn unit_scale() -> f32 {
@@ -69,6 +75,11 @@ fn unit_scale() -> f32 {
 impl ModelSpec {
     pub fn offset(&self) -> Vec3 {
         Vec3::from(self.offset)
+    }
+
+    /// The authored rotation, converted from degrees to radians.
+    pub fn rotation(&self) -> Vec3 {
+        Vec3::from(self.rotation.map(f32::to_radians))
     }
 }
 

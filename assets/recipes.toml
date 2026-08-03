@@ -16,17 +16,68 @@
 # In multiplayer the HOST's recipes are authoritative: they are sent to every
 # client on join, and a client's own copy of this file is ignored.
 
+# The handle every tool is built around.
+[[recipe]]
+output = "stick"
+count = 4
+ingredients = { wood = 1 }
+
+# Tools. The shape fixes the sticks and the head count; the tier only changes
+# which material the head is beaten from — wood, stone, or (as with the armor
+# below) raw iron ore, until smelting exists.
+#
+#   pickaxe  3 material + 2 sticks
+#   axe      3 material + 2 sticks
+#   shovel   1 material + 2 sticks
+#   sword    2 material + 1 stick
+
 [[recipe]]
 output = "wooden pickaxe"
-ingredients = { wood = 3 }
+ingredients = { wood = 3, stick = 2 }
 
 [[recipe]]
 output = "wooden axe"
-ingredients = { wood = 3 }
+ingredients = { wood = 3, stick = 2 }
 
 [[recipe]]
 output = "wooden shovel"
-ingredients = { wood = 2 }
+ingredients = { wood = 1, stick = 2 }
+
+[[recipe]]
+output = "wooden sword"
+ingredients = { wood = 2, stick = 1 }
+
+[[recipe]]
+output = "stone pickaxe"
+ingredients = { stone = 3, stick = 2 }
+
+[[recipe]]
+output = "stone axe"
+ingredients = { stone = 3, stick = 2 }
+
+[[recipe]]
+output = "stone shovel"
+ingredients = { stone = 1, stick = 2 }
+
+[[recipe]]
+output = "stone sword"
+ingredients = { stone = 2, stick = 1 }
+
+[[recipe]]
+output = "iron pickaxe"
+ingredients = { "iron ore" = 3, stick = 2 }
+
+[[recipe]]
+output = "iron axe"
+ingredients = { "iron ore" = 3, stick = 2 }
+
+[[recipe]]
+output = "iron shovel"
+ingredients = { "iron ore" = 1, stick = 2 }
+
+[[recipe]]
+output = "iron sword"
+ingredients = { "iron ore" = 2, stick = 1 }
 
 # Shears: the only way to harvest leaf blocks.
 [[recipe]]

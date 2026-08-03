@@ -21,7 +21,9 @@ use crate::render::{CpuMesh, mobskin, skin};
 
 /// Zombie shamble: both arms held straight out (≈ 80° forward of hanging).
 const ARMS_FORWARD_ANGLE: f32 = -1.4;
-/// Damage per player melee swing (per-tool damage is a future item component).
+/// Damage a bare-fisted player melee swing lands. A held tool overrides it with
+/// its `[item.tool] damage` component; this is the floor everything falls back
+/// to (see `InGameState::melee_damage`).
 pub(super) const PLAYER_ATTACK_DAMAGE: f32 = 2.0;
 /// Knockback impulse a player hit imparts: horizontal shove + a small pop.
 pub(super) const KNOCKBACK_PUSH: f32 = 6.0;
@@ -154,9 +156,13 @@ pub(super) fn mob_mesh(
             let id = models.find(&spec.path)?;
             let model = models.get(id)?;
             Some(VisualMesh {
-                mesh: model
-                    .mesh
-                    .to_cpu_mesh(position, yaw, spec.scale, spec.offset()),
+                mesh: model.mesh.to_cpu_mesh(
+                    position,
+                    yaw,
+                    spec.scale,
+                    spec.rotation(),
+                    spec.offset(),
+                ),
                 model: Some(id),
             })
         }
@@ -377,6 +383,17 @@ impl InGameState {
         }
     }
 
+    /// Damage the local player's swing lands, from whatever is in the selected
+    /// hotbar slot. A tool without a `damage` component — a pickaxe, a shovel —
+    /// hits exactly as hard as a bare fist.
+    pub(super) fn melee_damage(&self) -> f32 {
+        self.inventory
+            .item_in_selected()
+            .and_then(|id| self.items.tool(id))
+            .and_then(|tool| tool.damage)
+            .unwrap_or(PLAYER_ATTACK_DAMAGE)
+    }
+
     /// The mob under the crosshair within melee reach, if any — and only if
     /// no solid block is closer (no punching mobs through walls). The
     /// authority scans its own mobs; a client scans its replicas.
@@ -421,8 +438,9 @@ impl InGameState {
                 let look = self.player.look_direction();
                 let push = Vec3::new(look.x, 0.0, look.z).normalize_or_zero() * KNOCKBACK_PUSH
                     + Vec3::Y * KNOCKBACK_LIFT;
+                let damage = self.melee_damage();
                 if let Some(mob) = self.mobs.get_mut(index) {
-                    mob.damage(PLAYER_ATTACK_DAMAGE, push);
+                    mob.damage(damage, push);
                     mob.last_attacker = Some(HOST_PLAYER_ID.0);
                     let hurt = ServerMessage::MobHurt {
                         id: mob.id.0,

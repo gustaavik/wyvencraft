@@ -295,6 +295,7 @@ impl SceneCache {
             anchor.yaw,
             anchor.pitch,
             held.scale,
+            held.rotation,
             held.offset,
         );
         self.bake_model(ctx, content.models, held.id, transform)
@@ -510,6 +511,7 @@ impl SceneCache {
                     item.spin_yaw(),
                     0.0,
                     model.scale,
+                    model.rotation,
                     model.offset,
                 );
                 let mesh = loaded.mesh.bake(transform);

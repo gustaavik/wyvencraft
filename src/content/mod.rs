@@ -51,6 +51,8 @@ pub enum ItemIcon {
 pub struct ItemModel {
     pub id: ModelId,
     pub scale: f32,
+    /// Model-space rotation in radians (`ModelSpec` authors it in degrees).
+    pub rotation: glam::Vec3,
     pub offset: glam::Vec3,
 }
 
@@ -180,6 +182,7 @@ impl GameContent {
                 Some(ItemModel {
                     id: models.load(&spec.path, source)?,
                     scale: spec.scale,
+                    rotation: spec.rotation(),
                     offset: spec.offset(),
                 })
             })
@@ -309,6 +312,45 @@ mod tests {
         // `item_models` is indexed by `ItemId`, so it must cover every item even
         // though almost none of them declare a model.
         assert_eq!(content.item_models.len(), content.items.len());
+    }
+
+    /// Every `[item.model]` in the shipped data must resolve to real geometry.
+    ///
+    /// This reads the actual `assets/` tree, so it is the check that catches a
+    /// mistyped path, a Blockbench export the loader cannot read, or a model
+    /// saved without its texture — all of which otherwise degrade quietly to a
+    /// magenta icon at runtime.
+    #[test]
+    fn every_item_model_in_the_shipped_data_loads() {
+        let content = GameContent::load();
+        let mut declared = Vec::new();
+
+        for (id, item) in content.items.iter() {
+            let index = id.0 as usize;
+            let Some(model) = content.item_models[index] else {
+                continue;
+            };
+            let loaded = content
+                .models
+                .get(model.id)
+                .unwrap_or_else(|| panic!("{}: model id is not in the registry", item.name));
+            assert!(
+                loaded.triangle_count() > 0,
+                "{}: model has no geometry",
+                item.name
+            );
+            assert!(model.scale > 0.0, "{}: non-positive scale", item.name);
+            // An item with a model always icons as that model.
+            assert!(
+                matches!(content.item_icons[index], ItemIcon::Model(drawn) if drawn == model.id),
+                "{}: does not icon as its model",
+                item.name
+            );
+            declared.push(item.name.clone());
+        }
+
+        // The twelve tiered tools plus the vine sword.
+        assert_eq!(declared.len(), 13, "declared item models: {declared:?}");
     }
 
     /// The shipped items file with every model path pointed somewhere else.

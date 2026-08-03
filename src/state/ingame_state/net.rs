@@ -227,12 +227,30 @@ impl InGameState {
         }
     }
 
+    /// Damage a client's swing lands, from the item in the hotbar slot they
+    /// last reported selected.
+    ///
+    /// `SyncInventory` is throttled and client-reported, so this can lag a
+    /// weapon swap by a beat and a dishonest client could claim a better sword.
+    /// That is the same trust the host already extends to `ClientMessage::Stats`
+    /// for health and hunger; an unknown or empty slot falls back to the fist.
+    fn client_melee_damage(&self, pid: PlayerId) -> f32 {
+        self.peers
+            .inventories
+            .get(&pid)
+            .and_then(|(slots, selected)| slots.get(*selected as usize)?.as_ref())
+            .and_then(|stack| self.items.tool(ItemId(stack.item)))
+            .and_then(|tool| tool.damage)
+            .unwrap_or(mobs::PLAYER_ATTACK_DAMAGE)
+    }
+
     /// Validate a client's melee swing against their last known position, then
     /// apply it with kill credit. The outcome reaches clients via `mob_events`.
     fn apply_client_attack(&mut self, pid: PlayerId, mob_id: u64) {
         let Some(attacker) = self.peers.players.get(&pid).map(|rp| rp.position()) else {
             return;
         };
+        let damage = self.client_melee_damage(pid);
         if let Some(mob) = self.mobs.iter_mut().find(|m| m.id.0 == mob_id)
             && mobs::attack_in_range(attacker, mob.position)
         {
@@ -240,7 +258,7 @@ impl InGameState {
             let push = Vec3::new(to_mob.x, 0.0, to_mob.z).normalize_or_zero()
                 * mobs::KNOCKBACK_PUSH
                 + Vec3::Y * mobs::KNOCKBACK_LIFT;
-            mob.damage(mobs::PLAYER_ATTACK_DAMAGE, push);
+            mob.damage(damage, push);
             mob.last_attacker = Some(pid.0);
             let health = mob.health;
             self.peers
@@ -715,6 +733,87 @@ mod tests {
         let handle = session.handle();
         state.set_session(Box::new(session));
         (state, handle)
+    }
+
+    /// Put `name` in the first hotbar slot and select it.
+    fn hold(state: &mut InGameState, name: &str) {
+        let id = state.items.find(name).unwrap_or_else(|| panic!("{name}"));
+        state
+            .inventory
+            .set_slot(0, Some(state.items.full_stack(id)));
+        state.inventory.set_selected(0);
+    }
+
+    /// A swing is worth whatever the held item says, and a tool with no
+    /// `damage` component — or an empty hand — is worth a bare fist.
+    #[test]
+    fn a_local_swing_takes_its_damage_from_the_held_item() {
+        let (mut state, _handle) = host_session();
+
+        hold(&mut state, "iron sword");
+        assert_eq!(state.melee_damage(), 6.0, "iron sword");
+        hold(&mut state, "wooden sword");
+        assert_eq!(state.melee_damage(), 4.0, "wooden sword");
+        hold(&mut state, "iron axe");
+        assert_eq!(state.melee_damage(), 5.0, "iron axe");
+
+        hold(&mut state, "iron pickaxe");
+        assert_eq!(
+            state.melee_damage(),
+            mobs::PLAYER_ATTACK_DAMAGE,
+            "a pickaxe is no better than a fist"
+        );
+
+        state.inventory.set_slot(0, None);
+        assert_eq!(
+            state.melee_damage(),
+            mobs::PLAYER_ATTACK_DAMAGE,
+            "an empty hand is a fist"
+        );
+    }
+
+    /// The host resolves a client's swing against the inventory that client
+    /// last reported, not against the host's own held item.
+    #[test]
+    fn a_clients_swing_takes_its_damage_from_their_reported_inventory() {
+        let (mut state, handle) = host_session();
+        let pid = PlayerId(1);
+        handle.deliver(Inbound::Joined {
+            player: pid,
+            identity: 42,
+        });
+        state.pump_network(1.0 / 60.0);
+
+        // The host is holding nothing special; the client reports an iron sword.
+        assert_eq!(
+            state.client_melee_damage(pid),
+            mobs::PLAYER_ATTACK_DAMAGE,
+            "nothing reported yet, so a fist"
+        );
+
+        let sword = state.items.find("iron sword").expect("iron sword");
+        let mut slots = vec![None; 3];
+        slots[2] = Some(NetItemStack {
+            item: sword.0,
+            count: 1,
+            durability: state.items.max_durability(sword),
+        });
+        handle.deliver(Inbound::Request {
+            player: pid,
+            msg: ClientMessage::SyncInventory { slots, selected: 2 },
+        });
+        state.pump_network(1.0 / 60.0);
+
+        assert_eq!(
+            state.client_melee_damage(pid),
+            6.0,
+            "the client's iron sword"
+        );
+        assert_eq!(
+            state.melee_damage(),
+            mobs::PLAYER_ATTACK_DAMAGE,
+            "the host's own swing is unaffected"
+        );
     }
 
     /// A first-time joiner is welcomed with this world's seed and their new id,

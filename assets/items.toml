@@ -18,6 +18,8 @@
 #       dig_speed   mining-speed multiplier when the tool matches (hand = 1.0)
 #       durability  uses before the tool breaks
 #       harvests    block materials this tool mines at full speed
+#       damage      melee damage per swing; omit for a tool that hits no harder
+#                   than a bare fist (pickaxes, shovels)
 #   [item.food] makes the item edible: hunger + saturation restored
 #   [item.armor] makes the item wearable:
 #       slot        which equipment slot it fits: helmet, chestplate, leggings,
@@ -31,12 +33,32 @@
 #       offset      shift in the model's own space, applied before scale
 #                   (Blockbench authors on a 0..1 block, so [-0.5, y, -0.5]
 #                   re-centres a model on the point it is drawn at)
+#       rotation    degrees about the model's own axes, applied after offset
+#                   (exports disagree on which plane a flat object lies in:
+#                   the tool models are flat in XY, vine_sword in YZ)
 #   Models are visual only: unlike the components above they never affect
 #   gameplay, and never take part in the multiplayer content check.
 #
 # [starter_kit] lists what a fresh survival player spawns with, in hotbar
 # order. Tools and armor spawn fresh (full durability); `count` applies to
 # stackables.
+
+# Tools come in three tiers. A tier is expressed purely as dig_speed +
+# durability (+ damage on the shapes that fight) — there is deliberately no
+# harvest-level gate, so every block stays mineable by hand and a better
+# pickaxe only means a faster one:
+#
+#   wooden  dig_speed 2.0   durability  60
+#   stone   dig_speed 4.0   durability 132
+#   iron    dig_speed 6.0   durability 250
+#
+# Swords are the exception: they only harvest plants, so their tier gradient
+# lives in `damage` and `durability` and their dig_speed stays flat.
+#
+# The tool models are all flat in the XY plane, so they carry
+# rotation = [0, 90, 0] to sit broadside in the fist the way vine_sword does.
+# Their grips sit at y ≈ 0 (vine_sword's dips to -0.889), which is why they need
+# no vertical offset correction.
 
 [[item]]
 name = "wooden pickaxe"
@@ -47,6 +69,12 @@ dig_speed = 2.0
 durability = 60
 harvests = ["stone"]
 
+[item.model]
+path = "assets/models/wooden_pickaxe.bbmodel"
+scale = 0.55
+offset = [-0.5, 0.0, -0.5]
+rotation = [0.0, 90.0, 0.0]
+
 [[item]]
 name = "wooden axe"
 
@@ -55,6 +83,13 @@ kind = "axe"
 dig_speed = 2.0
 durability = 60
 harvests = ["wood"]
+damage = 3.0
+
+[item.model]
+path = "assets/models/wooden_axe.bbmodel"
+scale = 0.55
+offset = [-0.5, 0.0, -0.5]
+rotation = [0.0, 90.0, 0.0]
 
 [[item]]
 name = "wooden shovel"
@@ -64,6 +99,12 @@ kind = "shovel"
 dig_speed = 2.0
 durability = 60
 harvests = ["dirt", "sand"]
+
+[item.model]
+path = "assets/models/wooden_shovel.bbmodel"
+scale = 0.5
+offset = [-0.5, 0.0, -0.5]
+rotation = [0.0, 90.0, 0.0]
 
 [[item]]
 name = "shears"
@@ -82,6 +123,7 @@ kind = "sword"
 dig_speed = 1.5
 durability = 200
 harvests = ["plant"]
+damage = 4.0
 
 # Drawn from a model file rather than as a textured cube. The offset drops the
 # grip (the model runs from y = -0.889 up to y = 1.471) onto the fist.
@@ -89,6 +131,146 @@ harvests = ["plant"]
 path = "assets/models/vine_sword.bbmodel"
 scale = 0.35
 offset = [-0.5, 0.75, -0.5]
+
+[[item]]
+name = "wooden sword"
+
+[item.tool]
+kind = "sword"
+dig_speed = 1.5
+durability = 60
+harvests = ["plant"]
+damage = 4.0
+
+[item.model]
+path = "assets/models/wooden_sword.bbmodel"
+scale = 0.45
+offset = [-0.5, 0.0, -0.5]
+rotation = [0.0, 90.0, 0.0]
+
+[[item]]
+name = "stone pickaxe"
+
+[item.tool]
+kind = "pickaxe"
+dig_speed = 4.0
+durability = 132
+harvests = ["stone"]
+
+[item.model]
+path = "assets/models/stone_pickaxe.bbmodel"
+scale = 0.55
+offset = [-0.5, 0.0, -0.5]
+rotation = [0.0, 90.0, 0.0]
+
+[[item]]
+name = "stone axe"
+
+[item.tool]
+kind = "axe"
+dig_speed = 4.0
+durability = 132
+harvests = ["wood"]
+damage = 4.0
+
+[item.model]
+path = "assets/models/stone_axe.bbmodel"
+scale = 0.55
+offset = [-0.5, 0.0, -0.5]
+rotation = [0.0, 90.0, 0.0]
+
+[[item]]
+name = "stone shovel"
+
+[item.tool]
+kind = "shovel"
+dig_speed = 4.0
+durability = 132
+harvests = ["dirt", "sand"]
+
+[item.model]
+path = "assets/models/stone_shovel.bbmodel"
+scale = 0.5
+offset = [-0.5, 0.0, -0.5]
+rotation = [0.0, 90.0, 0.0]
+
+[[item]]
+name = "stone sword"
+
+[item.tool]
+kind = "sword"
+dig_speed = 1.5
+durability = 132
+harvests = ["plant"]
+damage = 5.0
+
+[item.model]
+path = "assets/models/stone_sword.bbmodel"
+scale = 0.45
+offset = [-0.5, 0.0, -0.5]
+rotation = [0.0, 90.0, 0.0]
+
+[[item]]
+name = "iron pickaxe"
+
+[item.tool]
+kind = "pickaxe"
+dig_speed = 6.0
+durability = 250
+harvests = ["stone"]
+
+[item.model]
+path = "assets/models/iron_pickaxe.bbmodel"
+scale = 0.55
+offset = [-0.5, 0.0, -0.5]
+rotation = [0.0, 90.0, 0.0]
+
+[[item]]
+name = "iron axe"
+
+[item.tool]
+kind = "axe"
+dig_speed = 6.0
+durability = 250
+harvests = ["wood"]
+damage = 5.0
+
+[item.model]
+path = "assets/models/iron_axe.bbmodel"
+scale = 0.55
+offset = [-0.5, 0.0, -0.5]
+rotation = [0.0, 90.0, 0.0]
+
+[[item]]
+name = "iron shovel"
+
+[item.tool]
+kind = "shovel"
+dig_speed = 6.0
+durability = 250
+harvests = ["dirt", "sand"]
+
+[item.model]
+path = "assets/models/iron_shovel.bbmodel"
+scale = 0.5
+offset = [-0.5, 0.0, -0.5]
+rotation = [0.0, 90.0, 0.0]
+
+[[item]]
+name = "iron sword"
+
+[item.tool]
+kind = "sword"
+dig_speed = 1.5
+durability = 250
+harvests = ["plant"]
+damage = 6.0
+
+[item.model]
+path = "assets/models/iron_sword.bbmodel"
+scale = 0.45
+offset = [-0.5, 0.0, -0.5]
+rotation = [0.0, 90.0, 0.0]
 
 [[item]]
 name = "apple"
@@ -171,6 +353,13 @@ name = "cape"
 slot = "cape"
 defense = 1.0
 durability = 80
+
+# Crafting intermediate: the handle every tool is built around. No components,
+# so it is a plain stackable and its icon comes from the painter in
+# `render::tiles::paint_named`.
+
+[[item]]
+name = "stick"
 
 [starter_kit]
 survival = [
