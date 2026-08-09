@@ -7,7 +7,10 @@
 //! name. Behavior is expressed as components on the block ([`Drops`],
 //! [`FluidInfo`]) rather than hard-coded `match` arms on identity.
 
-use crate::core::{BlockId, Direction};
+use glam::Vec3;
+
+use crate::core::{Aabb, BlockId, Direction};
+use crate::model::{ModelId, ModelSpec};
 use crate::render::TileRegistry;
 
 /// Embedded copy of the shipped block definitions, used when
@@ -106,6 +109,63 @@ impl FluidInfo {
     }
 }
 
+/// A block's `[block.model]`, still unresolved: the model registry does not
+/// exist yet when blocks are parsed, so the spec is reported out of the loader
+/// and turned into a [`BlockModel`] afterwards (exactly how `[item.model]`
+/// reaches `content::ItemModel`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct BlockModelSpec {
+    pub spec: ModelSpec,
+    pub random_yaw: bool,
+}
+
+/// Geometry loaded from a model file instead of the six atlas-textured cube
+/// faces. A block carrying one is meshed by baking the model into its cell and
+/// emits no cube faces at all.
+///
+/// Like `content::ItemModel` this is kept *off* [`Block`] on purpose: `Block`
+/// feeds `content_hash`, which gates multiplayer joins, and two players whose
+/// flowers are drawn differently have no reason to be refused a shared world.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BlockModel {
+    pub id: ModelId,
+    pub scale: f32,
+    pub rotation: Vec3,
+    pub offset: Vec3,
+    /// Turn each instance by a hash of its position, so a field of plants does
+    /// not read as a grid of clones.
+    pub random_yaw: bool,
+    /// What the crosshair actually hits, in block-local `0..1` coordinates —
+    /// measured from the model rather than authored, so it always matches what
+    /// is drawn. A mushroom filling a fifth of its cell should not be
+    /// targetable from the far corner of that cell.
+    pub hitbox: Aabb,
+}
+
+/// The tightest sensible targeting box for a model occupying `bounds` (in
+/// block-local `0..1` space, the model already placed).
+///
+/// Square in plan and centred, because `random_yaw` turns each instance and a
+/// box that hugged one orientation would be wrong for every other. Clamped into
+/// the cell, and never smaller than [`MIN_HITBOX`] so a flat or degenerate model
+/// stays clickable.
+pub fn model_hitbox(bounds: (Vec3, Vec3)) -> Aabb {
+    /// Floor on either dimension of a derived hitbox, in blocks.
+    const MIN_HITBOX: f32 = 0.1;
+
+    let (lo, hi) = bounds;
+    let radius = [lo.x - 0.5, hi.x - 0.5, lo.z - 0.5, hi.z - 0.5]
+        .into_iter()
+        .fold(0.0f32, |r, d| r.max(d.abs()))
+        .clamp(MIN_HITBOX * 0.5, 0.5);
+    let bottom = lo.y.clamp(0.0, 1.0);
+    let top = hi.y.clamp(bottom + MIN_HITBOX, 1.0);
+    Aabb::new(
+        Vec3::new(0.5 - radius, bottom, 0.5 - radius),
+        Vec3::new(0.5 + radius, top, 0.5 + radius),
+    )
+}
+
 /// Static description of a block type.
 #[derive(Debug, Clone)]
 pub struct Block {
@@ -162,6 +222,14 @@ impl Block {
     pub fn is_breakable(&self) -> bool {
         self.hardness.is_finite()
     }
+
+    /// Whether placing a block *at* this one replaces it rather than stacking
+    /// on its face. True for breakable decoration you can walk through (a
+    /// flower); never for fluids, which the crosshair sees straight through.
+    #[inline]
+    pub fn is_replaceable(&self) -> bool {
+        !self.solid && self.is_breakable() && self.fluid.is_none() && self.is_visible()
+    }
 }
 
 /// Ids of the *builtin* block set, in its declared order — a convenience for
@@ -187,10 +255,14 @@ pub mod blocks {
     pub const IRON_ORE: BlockId = BlockId(14);
     pub const GOLD_ORE: BlockId = BlockId(15);
     pub const DIAMOND_ORE: BlockId = BlockId(16);
+    pub const BLUE_BELLS: BlockId = BlockId(17);
+    pub const RED_FLOWER: BlockId = BlockId(18);
+    pub const RED_MUSHROOM: BlockId = BlockId(19);
+    pub const BROWN_MUSHROOM: BlockId = BlockId(20);
     /// Flowing water levels 1 (shallowest) through 7: auto-registered after
     /// all declared blocks; the source block [`WATER`] is level 8.
-    pub const WATER_FLOW_1: BlockId = BlockId(17);
-    pub const WATER_FLOW_7: BlockId = BlockId(23);
+    pub const WATER_FLOW_1: BlockId = BlockId(21);
+    pub const WATER_FLOW_7: BlockId = BlockId(27);
 }
 
 // ---- TOML schema -----------------------------------------------------------
@@ -209,9 +281,15 @@ struct BlockDef {
     solid: bool,
     hardness: f32,
     material: BlockMaterial,
-    textures: TexturesDef,
+    /// Optional only for a block with a `[block.model]`, whose geometry brings
+    /// its own texture and never samples the atlas.
+    textures: Option<TexturesDef>,
     drops: Option<DropsDef>,
     fluid: Option<FluidDef>,
+    model: Option<ModelSpec>,
+    /// Only meaningful alongside `[block.model]`; see [`BlockModel::random_yaw`].
+    #[serde(default)]
+    random_yaw: bool,
 }
 
 /// `textures = "stone"`, the top/bottom/side shorthand, or all six faces.
@@ -336,11 +414,26 @@ impl BlockRegistry {
     /// file — the caller falls back to [`BlockRegistry::with_builtins`].
     /// Unknown texture names only degrade that block (tile 0 + a warning).
     pub fn from_toml(text: &str, tiles: &mut TileRegistry) -> Result<Self, String> {
+        Self::from_toml_with_models(text, tiles, &mut Vec::new())
+    }
+
+    /// Like [`BlockRegistry::from_toml`], but also reports each block's
+    /// `[block.model]` in a vector indexed by [`BlockId`].
+    ///
+    /// Model assignment rides out of band because it cannot be resolved yet —
+    /// blocks are parsed before the model registry exists — and because it must
+    /// stay off [`Block`], which feeds `content_hash`. See [`BlockModel`].
+    pub fn from_toml_with_models(
+        text: &str,
+        tiles: &mut TileRegistry,
+        models: &mut Vec<Option<BlockModelSpec>>,
+    ) -> Result<Self, String> {
         let file: BlockFile = toml::from_str(text).map_err(|e| e.to_string())?;
         if file.block.is_empty() {
             return Err("no [[block]] entries".into());
         }
 
+        models.clear();
         let mut reg = Self {
             blocks: Vec::new(),
             fluid_flow: Vec::new(),
@@ -356,6 +449,7 @@ impl BlockRegistry {
             drops: Drops::None,
             fluid: None,
         });
+        models.push(None); // air
 
         // Fluid sources, in declaration order: (source id, flow_levels).
         let mut fluids: Vec<(BlockId, u8)> = Vec::new();
@@ -385,7 +479,21 @@ impl BlockRegistry {
                 }
                 None => None,
             };
-            let (textures, animated_faces) = def.textures.resolve(tiles);
+            // A model block's geometry carries its own texture, so it needs no
+            // atlas tiles; anything else without `textures` would silently
+            // render as the magenta marker, which is worth rejecting loudly.
+            let (textures, animated_faces) = match (&def.textures, &def.model) {
+                (Some(t), _) => t.resolve(tiles),
+                (None, Some(_)) => (FaceTextures::uniform(0), 0),
+                (None, None) => {
+                    return Err(format!(
+                        "block {:?}: needs `textures` or a `[block.model]`",
+                        def.name
+                    ));
+                }
+            };
+            let random_yaw = def.random_yaw;
+            let model = def.model.map(|spec| BlockModelSpec { spec, random_yaw });
             let id = reg.register(Block {
                 name: def.name,
                 render: def.render,
@@ -397,6 +505,7 @@ impl BlockRegistry {
                 drops,
                 fluid,
             });
+            models.push(model);
             if let Some(f) = &def.fluid {
                 fluids.push((id, f.flow_levels));
             }
@@ -428,6 +537,9 @@ impl BlockRegistry {
                 .collect();
             reg.fluid_flow.push(flow);
         }
+        // The auto-registered flowing blocks never carry a model, but the
+        // vector is indexed by `BlockId` and so must cover every block.
+        models.resize(reg.len(), None);
         Ok(reg)
     }
 
@@ -514,7 +626,7 @@ mod tests {
         use BlockMaterial as M;
         use RenderType as R;
         const INF: f32 = f32::INFINITY;
-        let expected: [(&str, R, bool, f32, M); 24] = [
+        let expected: [(&str, R, bool, f32, M); 28] = [
             ("air", R::Invisible, false, 0.0, M::Other),
             ("stone", R::Opaque, true, 1.5, M::Stone),
             ("dirt", R::Opaque, true, 0.5, M::Dirt),
@@ -532,6 +644,10 @@ mod tests {
             ("iron ore", R::Opaque, true, 3.0, M::Stone),
             ("gold ore", R::Opaque, true, 3.0, M::Stone),
             ("diamond ore", R::Opaque, true, 3.0, M::Stone),
+            ("blue bells", R::Cutout, false, 0.0, M::Plant),
+            ("red flower", R::Cutout, false, 0.0, M::Plant),
+            ("red mushroom", R::Cutout, false, 0.0, M::Plant),
+            ("brown mushroom", R::Cutout, false, 0.0, M::Plant),
             ("water flow 1", R::Transparent, false, INF, M::Other),
             ("water flow 2", R::Transparent, false, INF, M::Other),
             ("water flow 3", R::Transparent, false, INF, M::Other),

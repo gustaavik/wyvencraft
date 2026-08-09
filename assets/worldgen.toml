@@ -77,17 +77,27 @@ chance_per_mille = 300
 # mesas) stays in code. `tree` names a [[tree] ] entry; omit for no trees.
 # `tree_chance_per_mille` is the per-candidate-cell chance before vegetation
 # clumping scales it.
+#
+# `plants` is ground cover: single blocks dropped one above the surface, picked
+# uniformly from the list, on a much denser candidate grid than trees. Omit
+# both keys for a bare biome. Like every other name here these are strict — a
+# typo rejects the whole file.
 [biome.plains]
 surface = "grass"
 subsurface = "dirt"
 tree = "oak"
 tree_chance_per_mille = 550
+plants = ["blue bells", "red flower", "red mushroom", "brown mushroom"]
+plant_chance_per_mille = 90
 
 [biome.snowy]
 surface = "snow"
 subsurface = "dirt"
 tree = "spruce"
 tree_chance_per_mille = 400
+# Only fungi survive the cold, and sparsely.
+plants = ["red mushroom", "brown mushroom"]
+plant_chance_per_mille = 15
 
 [biome.desert]
 surface = "sand"

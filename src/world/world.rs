@@ -110,9 +110,27 @@ impl World {
         }
     }
 
-    /// Whether the block at `pos` collides with entities / can be targeted.
+    /// Whether the block at `pos` collides with entities.
     pub fn is_solid(&self, pos: BlockPos) -> bool {
         self.registry.get(self.block_at(pos)).solid
+    }
+
+    /// Whether the block at `pos` can be put in the crosshair.
+    ///
+    /// Deliberately wider than [`is_solid`](Self::is_solid): decoration you can
+    /// walk through (a flower) must still be breakable. Fluids stay out — the
+    /// crosshair reaches through water — and so does air, which is invisible.
+    pub fn is_targetable(&self, pos: BlockPos) -> bool {
+        let block = self.registry.get(self.block_at(pos));
+        block.solid || (block.is_visible() && block.fluid.is_none())
+    }
+
+    /// Whether placing a block at `pos` should swallow what is already there
+    /// rather than stack on its face. See [`Block::is_replaceable`].
+    ///
+    /// [`Block::is_replaceable`]: crate::world::block::Block::is_replaceable
+    pub fn is_replaceable(&self, pos: BlockPos) -> bool {
+        self.registry.get(self.block_at(pos)).is_replaceable()
     }
 
     /// Like [`is_solid`](Self::is_solid), but treats *unloaded* chunks as solid so

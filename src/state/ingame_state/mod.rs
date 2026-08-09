@@ -38,6 +38,7 @@ use crate::entity::{Arrow, DroppedItem, EntityRegistry, Mob, Player, SpawnConfig
 use crate::inventory::{Inventory, ItemRegistry, ItemStack, RecipeBook};
 use crate::model::ModelRegistry;
 use crate::state::session::Session;
+use crate::world::block::BlockModel;
 use crate::world::{BlockRegistry, ChunkLoader, FluidSim, World};
 use peers::Peers;
 use persistence::Persistence;
@@ -93,6 +94,9 @@ pub struct InGameState {
     /// Which model each item is drawn as, indexed by `ItemId`. Visual-only, so
     /// it lives beside the registries rather than inside `ItemRegistry`.
     pub item_models: Arc<Vec<Option<ItemModel>>>,
+    /// Which model each *block* is drawn as, indexed by `BlockId`. Visual-only
+    /// for the same reason, and read by the chunk mesher.
+    pub block_models: Arc<Vec<Option<BlockModel>>>,
     /// Fingerprint of the loaded content; hosts send it in `Welcome` so
     /// mismatched clients refuse the session (raw ids cross the wire).
     content_hash: u64,
@@ -258,6 +262,117 @@ mod tests {
             (1..=3).contains(&dropped),
             "cow drops 1..=3 raw beef, got {dropped}"
         );
+    }
+
+    /// End-to-end: place a plant in front of the player, break it, and confirm
+    /// its own item pops out. Ground cover is `solid = false`, so this also
+    /// pins the split between "collides" and "can be put in the crosshair" —
+    /// before that split a walk-through block was simply unbreakable.
+    #[test]
+    fn breaking_ground_cover_drops_its_own_item() {
+        use crate::world::block::blocks;
+
+        let mut state = InGameState::new(GameContent::builtin(), 7, GameMode::Survival);
+        // Two blocks ahead at eye level, well inside reach.
+        let look = state.player.look_direction();
+        let at = BlockPos::from_world(state.player.eye_position() + look * 2.0);
+        state.world.set_block(at, blocks::RED_MUSHROOM);
+
+        assert!(
+            !state.world.is_solid(at),
+            "ground cover must not collide with the player"
+        );
+        let hit = state.targeted_block().expect("plant is in the crosshair");
+        assert_eq!(hit.block, at, "the crosshair stops at the plant");
+
+        assert!(state.break_block_at(at));
+        assert!(state.world.block_at(at).is_air(), "the plant is gone");
+
+        let expected = state.items.find("red mushroom").expect("shipped item");
+        let dropped: u32 = state
+            .drops
+            .iter()
+            .filter(|d| d.stack.item == expected)
+            .map(|d| u32::from(d.stack.count))
+            .sum();
+        assert_eq!(
+            dropped, 1,
+            "breaking a plant yields exactly one of its item"
+        );
+    }
+
+    /// The crosshair must hit ground cover on the plant, not on the cell around
+    /// it: a ray through the top corner of a mushroom's block passes over the
+    /// mushroom, while one through its middle stops on it.
+    #[test]
+    fn the_crosshair_hits_the_plant_not_the_cell_around_it() {
+        use crate::world::Target;
+        use crate::world::block::blocks;
+
+        let mut state = InGameState::new(GameContent::load(), 7, GameMode::Survival);
+        // High above the terrain, inside the chunks loaded around spawn, so the
+        // rays below travel through nothing but air and the two test blocks.
+        let at = BlockPos::new(2, 200, 2);
+        assert!(state.world.set_block(at, blocks::RED_MUSHROOM).is_some());
+
+        let Some(Target::Box(box_)) = state.target_at(at) else {
+            panic!("ground cover must offer a box, not a whole cell");
+        };
+        let size = box_.max - box_.min;
+        assert!(
+            size.x < 0.5 && size.y < 0.7,
+            "hitbox {size:?} is cell-sized"
+        );
+        assert_eq!(state.hitbox_at(at), box_, "the outline uses the same box");
+
+        // A plain block behind it still fills its cell.
+        let stone = BlockPos::new(6, 200, 2);
+        assert!(state.world.set_block(stone, blocks::STONE).is_some());
+        assert!(matches!(state.target_at(stone), Some(Target::Cell)));
+
+        // Fire along +X through the middle of the mushroom: hits it.
+        let mid = Vec3::new(-2.0, 200.3, 2.5);
+        let hit = crate::world::raycast(mid, Vec3::X, 20.0, |p| state.target_at(p));
+        assert_eq!(hit.expect("hit").block, at, "aimed at the cap");
+
+        // The same ray nudged sideways still crosses the mushroom's *cell*, but
+        // misses the mushroom — so it carries on to the stone behind.
+        let corner = Vec3::new(-2.0, 200.3, 2.95);
+        let past = crate::world::raycast(corner, Vec3::X, 20.0, |p| state.target_at(p));
+        assert_eq!(
+            past.expect("hit").block,
+            stone,
+            "the corner of the cell is not the mushroom"
+        );
+    }
+
+    /// The crosshair reaches *through* water but stops on ground cover: both
+    /// are `solid = false`, and only the fluid check separates them.
+    #[test]
+    fn water_stays_untargetable_while_ground_cover_does_not() {
+        use crate::world::block::blocks;
+
+        let state = InGameState::new(GameContent::builtin(), 7, GameMode::Survival);
+        let probe = BlockPos::new(0, 200, 0); // empty sky, nothing generated
+        assert!(!state.world.is_targetable(probe), "air");
+
+        let registry = &state.blocks;
+        assert!(registry.get(blocks::STONE).solid);
+        for (id, name) in [
+            (blocks::WATER, "water"),
+            (blocks::WATER_FLOW_1, "flowing water"),
+        ] {
+            let block = registry.get(id);
+            assert!(
+                !block.solid && !block.is_replaceable(),
+                "{name} must stay out of the crosshair"
+            );
+        }
+        for id in [blocks::BLUE_BELLS, blocks::RED_MUSHROOM] {
+            let block = registry.get(id);
+            assert!(!block.solid, "{} walks through", block.name);
+            assert!(block.is_replaceable(), "{} is built over", block.name);
+        }
     }
 
     /// End-to-end persistence: create a world, play (edit terrain, move, change

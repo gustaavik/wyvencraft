@@ -186,4 +186,18 @@ impl Direction {
     pub fn normal(self) -> Vec3 {
         self.offset().as_vec3()
     }
+
+    /// The face on `axis` (0 = X, 1 = Y, 2 = Z) pointing the positive way when
+    /// `positive`. Used to name the box face a ray crossed from its slab index.
+    #[inline]
+    pub fn facing(axis: usize, positive: bool) -> Direction {
+        match (axis, positive) {
+            (0, false) => Direction::NegX,
+            (0, true) => Direction::PosX,
+            (1, false) => Direction::NegY,
+            (1, true) => Direction::PosY,
+            (2, false) => Direction::NegZ,
+            _ => Direction::PosZ,
+        }
+    }
 }

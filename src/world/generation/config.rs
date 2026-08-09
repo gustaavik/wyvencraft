@@ -67,6 +67,11 @@ pub struct BiomeGen {
     pub subsurface: BlockId,
     /// Index into [`WorldGenConfig::trees`] + per-mille candidate chance.
     pub tree: Option<(usize, f32)>,
+    /// Ground cover scattered one block above the surface, picked uniformly.
+    /// Empty means a bare biome; the chance is per candidate cell, before the
+    /// same vegetation clumping that groups trees into groves.
+    pub plants: Vec<BlockId>,
+    pub plant_chance_per_mille: f32,
 }
 
 #[derive(Debug)]
@@ -133,6 +138,12 @@ impl WorldGenConfig {
                 surface: resolve(&def.surface)?,
                 subsurface: resolve(&def.subsurface)?,
                 tree,
+                plants: def
+                    .plants
+                    .iter()
+                    .map(|name| resolve(name))
+                    .collect::<Result<_, String>>()?,
+                plant_chance_per_mille: def.plant_chance_per_mille.unwrap_or(0.0),
             })
         };
 
@@ -271,6 +282,10 @@ struct BiomeDef {
     subsurface: String,
     tree: Option<String>,
     tree_chance_per_mille: Option<f32>,
+    #[serde(default)]
+    plants: Vec<String>,
+    #[serde(default)]
+    plant_chance_per_mille: Option<f32>,
 }
 
 #[cfg(test)]

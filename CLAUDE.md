@@ -58,7 +58,7 @@ Domain modules with **one-directional dependencies** (do not introduce cycles):
 core      ← everything        coordinate/voxel types, AABB/Ray/Frustum, timing
 render    ← core              Vulkan: context, pipelines, mesh upload, camera, atlas, tile registry
 model     ← core, render      .gltf/.bbmodel files → ModelMesh + its own texture (pure, no GPU)
-world     ← core, render      blocks, chunks, generation, meshing, raycast, loader
+world     ← core, render, model   blocks, chunks, generation, meshing, raycast, loader
 inventory ← core, world, model  item/stack/inventory data model (no rendering)
 entity    ← core, render, inventory, model   player, swept-AABB physics, humanoid/quadruped models, dropped items, mobs (brain/spawning/projectiles)
 content   ← render, world, inventory, entity, model   GameContent: registries loaded from assets/*.toml
@@ -81,7 +81,11 @@ All geometry — voxels, box models and file-loaded models alike — is `CpuMesh
 and an alpha-test `discard`). What differs is the texture: `SceneFrame::opaque`
 samples the shared block atlas, while `SceneFrame::textured` carries meshes that
 bring their own `render::Texture` and rebind descriptor set 0 per draw. There is
-still **no model matrix** — every transform is baked on the CPU.
+still **no model matrix** — every transform is baked on the CPU. Chunks straddle
+both: a `[block.model]` block (ground cover) is baked into its cell and grouped by
+`ModelId` into `ChunkMeshOutput::models`, which `SceneCache` uploads per chunk and
+feeds to `SceneFrame::textured` — so one chunk can contribute an atlas mesh, a
+blended mesh, and one textured mesh per distinct model it contains.
 
 Its mirror: **only `state::ingame_state::view` touches `RenderContext`.** Chunk
 streaming, mob AI, fluids and interaction are plain logic; `InGameState::refresh_view`
@@ -130,6 +134,8 @@ those systems are testable without a Vulkan device.
 | Task                    | Location                                                                                   |
 | ----------------------- | ------------------------------------------------------------------------------------------ |
 | Add a block type        | `assets/blocks.toml` (pure data); texture = PNG in `assets/textures/<name>.png` or a painter in `render::tiles::paint_named` |
+| A non-cube block (plant, prop) | `[block.model]` in `assets/blocks.toml` — same `path`/`scale`/`offset`/`rotation` spelling as `[item.model]`, plus `random_yaw`. The block then emits **no** cube faces (`textures` becomes optional) and is baked into its cell by `world::meshing::culled`. Give it `solid = false` to walk through: `World::is_solid` is collision only, `is_targetable` is what the crosshair uses, and `is_replaceable` decides whether placing swallows it. Add a matching `[item.model]` on the same path so the drop, the hand and the icon agree — the registry memoises by path, so both share one `ModelId` |
+| Block hitbox (crosshair, outline, cracks) | Not authored — `content::placed_bounds` measures the placed model and `world::block::model_hitbox` turns it into a square, centred, cell-clamped box on `BlockModel::hitbox`, so it can never drift from what is drawn. The raycast predicate returns `world::Target::{Cell,Box}`; a `Box` the ray misses does **not** stop the march. `InGameState::{target_at,hitbox_at}` are the single source for targeting *and* both overlays. Mob line-of-sight deliberately stays `is_solid` + `Target::Cell` — a flower must not hide you |
 | Add an item / tool / food / armor | `assets/items.toml` (`[item.tool]` with `harvests`/`dig_speed`/`durability` and optional `damage`, `[item.food]`, `[item.armor]` with `slot`/`defense`/`durability`, `[item.model]` with `path`/`scale`/`offset`/`rotation`); starter kit in the same file |
 | Tool tiers / melee damage | Tiers are data only — `dig_speed` + `durability` (+ `damage` on swords and axes) in `assets/items.toml`. There is deliberately **no** harvest-level gate: `harvests` decides *what* a tool is for, never *whether* a block drops. A tool without `damage` swings for `mobs::PLAYER_ATTACK_DAMAGE` (the fist); the local swing resolves in `InGameState::melee_damage`, a client's in `client_melee_damage`, which reads the inventory that client last reported |
 | Load a 3D model from a file | drop a `.gltf` or `.bbmodel` in `assets/models/`, then point at it: `[entity.visual] kind = "model"` in `assets/entities.toml`, or `[item.model]` in `assets/items.toml`. Parsing is `model::{gltf,bbmodel}` behind the `ModelLoader` trait (a new format = a new impl + one line in `ModelRegistry::LOADERS`); placement math in `model::mesh`; GPU textures uploaded lazily in `state::ingame_state::view`. Exports disagree on which plane a flat object lies in (the tiered tools are flat in XY, `vine_sword` in YZ), so `ModelSpec::rotation` turns a model about its own axes — applied after `offset` re-centres it |
@@ -146,6 +152,7 @@ those systems are testable without a Vulkan device.
 | Projectiles             | `entity::projectile` (ballistic `Arrow`); launch tuning in `[entity.mob.ranged]`; ticked in `state::ingame_state::mobs::update_arrows` |
 | Change terrain          | `assets/worldgen.toml` (blocks, ores, sea level, biome surfaces — ⚠ alters existing worlds); noise/climate/mesas stay in `world::generation::{noise,biome,generator}` |
 | Trees/boulders/features | shapes+chances in `assets/worldgen.toml`; canopy strategies in `world::generation::features` (jittered-grid anchors) |
+| Ground cover / scatter  | per-biome `plants = [...]` + `plant_chance_per_mille` in `assets/worldgen.toml`; placement in `world::generation::features::try_plant`, which runs **after** trees and only into air so it can never punch a hole in a trunk |
 | Meshing                 | `world::meshing::culled` (face culling; greedy is a TODO)                                  |
 | Water / fluids          | `[block.fluid]` component in `assets/blocks.toml` (auto-registers flow blocks); sim in `world::fluid` (fluid-agnostic, ticked from `state::ingame_state`) |
 | Player movement/physics | numbers in `assets/entities.toml`; formulas in `entity::player`, `entity::physics`         |

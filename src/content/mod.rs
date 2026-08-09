@@ -22,7 +22,9 @@ use crate::entity::{EntityRegistry, SpawnConfig};
 use crate::inventory::ItemRegistry;
 use crate::model::{ModelId, ModelRegistry, ModelSpec};
 use crate::render::TileRegistry;
-use crate::world::block::{BUILTIN_BLOCKS, BlockRegistry};
+use crate::world::block::{
+    BUILTIN_BLOCKS, BlockModel, BlockModelSpec, BlockRegistry, model_hitbox,
+};
 use crate::world::generation::WorldGenConfig;
 
 use source::load_or_builtin;
@@ -75,6 +77,10 @@ pub struct GameContent {
     /// stack is drawn as. Like [`ItemIcon`], kept off `Item` so it never feeds
     /// [`GameContent::hash`].
     pub item_models: Vec<Option<ItemModel>>,
+    /// 3D model for each block, indexed by `BlockId`: a block with one is
+    /// meshed by baking that model into its cell instead of six atlas-textured
+    /// cube faces. Kept off `Block` for the same reason as [`ItemModel`].
+    pub block_models: Vec<Option<BlockModel>>,
     /// Fingerprint of every gameplay-affecting definition. Exchanged in the
     /// multiplayer `Welcome`: raw block/item ids cross the wire, so a session
     /// between peers with divergent content would silently corrupt worlds —
@@ -111,15 +117,23 @@ impl GameContent {
         // Blocks own the tile registry: both the parsed and the builtin path
         // must register their textures into the *same* `tiles`, or the tile
         // indices baked into block faces won't match the atlas built below.
+        // Block models ride out on the same `ctx` channel as the tile registry,
+        // and for the same reason item models do: they are visual-only and must
+        // stay out of `content_hash`.
+        let mut block_ctx = BlockCtx {
+            tiles: &mut tiles,
+            models: Vec::new(),
+        };
         let blocks = Arc::new(load_or_builtin(
             source,
             BLOCKS_PATH,
             "blocks",
-            &mut tiles,
-            BlockRegistry::from_toml,
+            &mut block_ctx,
+            |text, ctx| BlockRegistry::from_toml_with_models(text, ctx.tiles, &mut ctx.models),
             builtin_blocks,
             |reg| format!("{} blocks", reg.len()),
         ));
+        let block_model_specs = block_ctx.models;
         // Item models ride out on the `ctx` channel rather than on `Item`
         // itself: they are visual-only and must stay out of `content_hash`.
         let mut item_model_specs: Vec<Option<ModelSpec>> = Vec::new();
@@ -172,6 +186,29 @@ impl GameContent {
                 models.load(&spec.path, source);
             }
         }
+        // A block and the item that places it typically name the same file;
+        // `ModelRegistry::load` memoises by path, so they share one parse, one
+        // `ModelId`, one GPU texture and one 3D-icon cell.
+        let block_models: Vec<Option<BlockModel>> = block_model_specs
+            .iter()
+            .map(|entry| {
+                let entry = entry.as_ref()?;
+                let id = models.load(&entry.spec.path, source)?;
+                // The hitbox is measured from the placed geometry, so it can
+                // never drift from what the block actually looks like. The
+                // model registry is borrowed here, before it is wrapped in an
+                // `Arc`, which is the only reason this can't live in `world`.
+                let placed = placed_bounds(models.get(id)?, entry);
+                Some(BlockModel {
+                    id,
+                    scale: entry.spec.scale,
+                    rotation: entry.spec.rotation(),
+                    offset: entry.spec.offset(),
+                    random_yaw: entry.random_yaw,
+                    hitbox: model_hitbox(placed),
+                })
+            })
+            .collect();
         // One entry per item, even if the items file fell back to its builtin
         // and left the spec list empty — this vector is indexed by `ItemId`.
         item_model_specs.resize(items.len(), None);
@@ -200,6 +237,7 @@ impl GameContent {
             models: Arc::new(models),
             item_icons,
             item_models,
+            block_models,
             hash,
         })
     }
@@ -259,8 +297,55 @@ fn content_hash(
     hash
 }
 
-fn builtin_blocks(tiles: &mut TileRegistry) -> BlockRegistry {
-    BlockRegistry::from_toml(BUILTIN_BLOCKS, tiles).expect("embedded blocks.toml must parse")
+/// A model's bounds after its `[block.model]` placement, in block-local `0..1`
+/// coordinates — the same transform `world::meshing` bakes with, minus the yaw
+/// and the translation to the cell (which `model_hitbox` handles by staying
+/// square and centred).
+fn placed_bounds(model: &crate::model::Model, spec: &BlockModelSpec) -> (glam::Vec3, glam::Vec3) {
+    let transform = crate::model::mesh::placement(
+        // The cell's horizontal centre but its *floor* — exactly the origin
+        // `world::meshing::culled` bakes at, or the box would sit half a block
+        // above the geometry.
+        glam::Vec3::new(0.5, 0.0, 0.5),
+        0.0,
+        0.0,
+        spec.spec.scale,
+        spec.spec.rotation(),
+        spec.spec.offset(),
+    );
+    let (lo, hi) = model.bounds;
+    // Transform all eight corners: a rotation can turn the box, so the extremes
+    // are not simply the transformed `lo`/`hi`.
+    let corners = [
+        glam::Vec3::new(lo.x, lo.y, lo.z),
+        glam::Vec3::new(hi.x, lo.y, lo.z),
+        glam::Vec3::new(lo.x, hi.y, lo.z),
+        glam::Vec3::new(hi.x, hi.y, lo.z),
+        glam::Vec3::new(lo.x, lo.y, hi.z),
+        glam::Vec3::new(hi.x, lo.y, hi.z),
+        glam::Vec3::new(lo.x, hi.y, hi.z),
+        glam::Vec3::new(hi.x, hi.y, hi.z),
+    ];
+    corners
+        .iter()
+        .map(|&c| transform.transform_point3(c))
+        .fold(None, |acc: Option<(glam::Vec3, glam::Vec3)>, p| match acc {
+            Some((lo, hi)) => Some((lo.min(p), hi.max(p))),
+            None => Some((p, p)),
+        })
+        .expect("eight corners")
+}
+
+/// What the block loader mutates on both the parse and the fallback path: the
+/// shared tile registry, plus the `[block.model]` specs it reports back.
+struct BlockCtx<'a> {
+    tiles: &'a mut TileRegistry,
+    models: Vec<Option<BlockModelSpec>>,
+}
+
+fn builtin_blocks(ctx: &mut BlockCtx<'_>) -> BlockRegistry {
+    BlockRegistry::from_toml_with_models(BUILTIN_BLOCKS, ctx.tiles, &mut ctx.models)
+        .expect("embedded blocks.toml must parse")
 }
 
 #[cfg(test)]
@@ -314,6 +399,119 @@ mod tests {
         assert_eq!(content.item_models.len(), content.items.len());
     }
 
+    /// Every `[block.model]` in the shipped data must resolve to real geometry,
+    /// and — because a block and the item that places it name the same file —
+    /// both must land on the *same* `ModelId`, so the pair costs one parse, one
+    /// GPU texture and one icon cell rather than two.
+    #[test]
+    fn block_models_load_and_share_their_items_model_id() {
+        let content = GameContent::load();
+
+        // Indexed by `BlockId`, so it must cover every block.
+        assert_eq!(content.block_models.len(), content.blocks.len());
+
+        let mut declared = Vec::new();
+        for (id, block) in content.blocks.iter() {
+            let Some(model) = content.block_models[id.0 as usize] else {
+                continue;
+            };
+            let loaded = content
+                .models
+                .get(model.id)
+                .unwrap_or_else(|| panic!("{}: model id is not in the registry", block.name));
+            assert!(
+                loaded.triangle_count() > 0,
+                "{}: model has no geometry",
+                block.name
+            );
+            assert!(model.scale > 0.0, "{}: non-positive scale", block.name);
+
+            let item = content
+                .items
+                .find(&block.name)
+                .unwrap_or_else(|| panic!("{}: no placeable item", block.name));
+            let item_model = content.item_models[item.0 as usize]
+                .unwrap_or_else(|| panic!("{}: item declares no model", block.name));
+            assert_eq!(
+                item_model.id, model.id,
+                "{}: block and item parsed the file twice",
+                block.name
+            );
+            declared.push(block.name.clone());
+        }
+
+        assert_eq!(
+            declared,
+            ["blue bells", "red flower", "red mushroom", "brown mushroom"],
+            "shipped model-backed blocks"
+        );
+    }
+
+    /// Ground cover must not be targetable across the whole cell it stands in.
+    /// The boxes are derived from the models, so this also catches a model
+    /// re-export that quietly changed size.
+    #[test]
+    fn ground_cover_hitboxes_are_smaller_than_their_cells() {
+        let content = GameContent::load();
+        // (name, width, height) as measured off the shipped models. A golden:
+        // a re-export that changes a plant's size should show up here rather
+        // than as a crosshair that quietly stops feeling right.
+        let expected = [
+            ("blue bells", 0.83, 0.99),
+            ("red flower", 0.49, 0.63),
+            ("red mushroom", 0.41, 0.56),
+            ("brown mushroom", 0.83, 0.63),
+        ];
+        for (name, width, height) in expected {
+            let id = content.blocks.find(name).expect("shipped block");
+            let hitbox = content.block_models[id.0 as usize]
+                .expect("has a model")
+                .hitbox;
+            let size = hitbox.max - hitbox.min;
+            assert!(
+                (size.x - width).abs() < 0.02 && (size.y - height).abs() < 0.02,
+                "{name}: {size:?} is not {width} x {height}"
+            );
+            // Square in plan, so `random_yaw` cannot leave it lopsided...
+            assert!((size.x - size.z).abs() < 1e-5, "{name}: not square in plan");
+            // ...centred, standing on the cell floor, and inside the cell...
+            assert!(
+                (size.x * 0.5 + hitbox.min.x - 0.5).abs() < 1e-5,
+                "{name}: off-centre"
+            );
+            assert_eq!(hitbox.min.y, 0.0, "{name}: floating");
+            assert!(
+                hitbox.min.x >= 0.0 && hitbox.max.x <= 1.0,
+                "{name}: escapes its cell"
+            );
+            // ...smaller than the cell it stands in, which is the whole point...
+            assert!(size.x < 1.0 && size.y < 1.0, "{name}: fills its cell");
+            // ...and big enough to actually click on.
+            assert!(
+                size.x >= 0.1 && size.y >= 0.1,
+                "{name}: {size:?} too small to hit"
+            );
+        }
+    }
+
+    /// A block with neither `textures` nor `[block.model]` would render as the
+    /// magenta marker on all six faces. Rejecting the file is louder, and the
+    /// caller still falls back to the builtin blocks.
+    #[test]
+    fn a_block_without_textures_or_a_model_is_rejected() {
+        let mut tiles = TileRegistry::with_engine_tiles();
+        let bad = r#"
+            [[block]]
+            name = "ghost"
+            render = "opaque"
+            solid = true
+            hardness = 1.0
+            material = "stone"
+        "#;
+        let err = BlockRegistry::from_toml(bad, &mut tiles).expect_err("must not parse");
+        assert!(err.contains("ghost"), "{err}");
+    }
+
     /// Every `[item.model]` in the shipped data must resolve to real geometry.
     ///
     /// This reads the actual `assets/` tree, so it is the check that catches a
@@ -349,8 +547,9 @@ mod tests {
             declared.push(item.name.clone());
         }
 
-        // The twelve tiered tools plus the vine sword.
-        assert_eq!(declared.len(), 13, "declared item models: {declared:?}");
+        // The twelve tiered tools, the vine sword, and the four ground-cover
+        // blocks whose items are drawn as their own model.
+        assert_eq!(declared.len(), 17, "declared item models: {declared:?}");
     }
 
     /// The shipped items file with every model path pointed somewhere else.
@@ -511,7 +710,10 @@ mod tests {
         use crate::entity::spawning::BUILTIN_SPAWNING;
         let tweaked = BUILTIN_SPAWNING.replace("max_mobs = 40", "max_mobs = 99");
         let spawning = Arc::new(SpawnConfig::from_toml(&tweaked, &entities).unwrap());
-        let blocks = Arc::new(builtin_blocks(&mut TileRegistry::with_engine_tiles()));
+        let blocks = Arc::new(builtin_blocks(&mut BlockCtx {
+            tiles: &mut TileRegistry::with_engine_tiles(),
+            models: Vec::new(),
+        }));
         let items = Arc::new(ItemRegistry::from_blocks(&blocks));
         let worldgen = Arc::new(WorldGenConfig::builtin(&blocks));
         assert_ne!(

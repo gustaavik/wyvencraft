@@ -9,16 +9,47 @@ use crate::core::{Aabb, BlockId, BlockPos};
 use crate::entity::DroppedItem;
 use crate::inventory::{ItemId, ItemRegistry, ItemStack};
 use crate::render::tiles;
+use crate::world::Target;
 use crate::world::block::{BlockRegistry, Drops, FaceTextures};
 
 impl InGameState {
+    /// What the crosshair would hit at `pos`: the whole cell for an ordinary
+    /// block, the model's own smaller box for ground cover, nothing for air and
+    /// fluids. Also what the selection outline and crack overlay are drawn
+    /// around, so all three always agree.
+    pub(super) fn target_at(&self, pos: BlockPos) -> Option<Target> {
+        if !self.world.is_targetable(pos) {
+            return None;
+        }
+        let block = self.world.block_at(pos);
+        match self.block_models.get(block.0 as usize).and_then(|m| *m) {
+            Some(model) => Some(Target::Box(model.hitbox.translate(Vec3::new(
+                pos.x as f32,
+                pos.y as f32,
+                pos.z as f32,
+            )))),
+            None => Some(Target::Cell),
+        }
+    }
+
+    /// The world-space box of whatever occupies `pos` — the block's own model
+    /// hitbox, or its full cell. Used to draw the overlays that must line up
+    /// with what [`Self::target_at`] lets the crosshair hit.
+    pub(super) fn hitbox_at(&self, pos: BlockPos) -> Aabb {
+        let corner = Vec3::new(pos.x as f32, pos.y as f32, pos.z as f32);
+        match self.target_at(pos) {
+            Some(Target::Box(box_)) => box_,
+            _ => Aabb::block(corner),
+        }
+    }
+
     /// The block the player is currently looking at within reach, if any.
     pub(super) fn targeted_block(&self) -> Option<crate::world::RaycastHit> {
         crate::world::raycast(
             self.player.eye_position(),
             self.player.look_direction(),
             self.player.movement().reach,
-            |p| self.world.is_solid(p),
+            |p| self.target_at(p),
         )
     }
 
@@ -181,7 +212,13 @@ impl InGameState {
         let Some(hit) = self.targeted_block() else {
             return;
         };
-        let target = hit.place_position();
+        // Ground cover is swallowed rather than stacked on: without this,
+        // building next to a flower would leave blocks perched on top of it.
+        let target = if self.world.is_replaceable(hit.block) {
+            hit.block
+        } else {
+            hit.place_position()
+        };
         // Don't place inside the player.
         if Aabb::block(Vec3::new(target.x as f32, target.y as f32, target.z as f32))
             .intersects(self.player.aabb())

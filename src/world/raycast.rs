@@ -3,7 +3,22 @@
 
 use glam::Vec3;
 
-use crate::core::{BlockPos, Direction};
+use crate::core::{Aabb, BlockPos, Direction};
+
+/// What a cell offers the ray.
+///
+/// Most blocks fill their cell, and for those the DDA's own cell crossing *is*
+/// the answer. Ground cover doesn't: a mushroom occupies a fraction of its
+/// block, and a crosshair that grabbed the whole cell would target it from a
+/// stride away. Those cells hand back a smaller box, which the ray can miss —
+/// in which case the march simply continues past it.
+#[derive(Debug, Clone, Copy)]
+pub enum Target {
+    /// The whole cell.
+    Cell,
+    /// A smaller box, in world space, somewhere inside the cell.
+    Box(Aabb),
+}
 
 /// Result of a successful voxel raycast.
 #[derive(Debug, Clone, Copy)]
@@ -22,13 +37,17 @@ impl RaycastHit {
     }
 }
 
-/// March a ray through the voxel grid until `is_solid` reports a hit or
-/// `max_distance` (in blocks) is exceeded.
+/// March a ray through the voxel grid until `target` reports a cell the ray
+/// actually hits, or `max_distance` (in blocks) is exceeded.
+///
+/// `target` answers `None` for a cell the ray passes straight through. A
+/// [`Target::Box`] cell may still be missed, in which case the march continues
+/// — which is what lets a crosshair slide past a mushroom to the ground behind.
 pub fn raycast(
     origin: Vec3,
     dir: Vec3,
     max_distance: f32,
-    is_solid: impl Fn(BlockPos) -> bool,
+    target: impl Fn(BlockPos) -> Option<Target>,
 ) -> Option<RaycastHit> {
     let dir = dir.normalize_or_zero();
     if dir == Vec3::ZERO {
@@ -81,8 +100,21 @@ pub fn raycast(
     let mut traveled = 0.0;
 
     while traveled <= max_distance {
-        if is_solid(block) {
-            return Some(RaycastHit { block, face });
+        match target(block) {
+            // A full cell is settled by the crossing the DDA already made.
+            Some(Target::Cell) => return Some(RaycastHit { block, face }),
+            Some(Target::Box(aabb)) => {
+                if let Some((_, entered)) = aabb.ray_enter(origin, dir, max_distance) {
+                    return Some(RaycastHit {
+                        block,
+                        // Starting inside the box crosses no face; keep the one
+                        // the ray used to enter the cell.
+                        face: entered.unwrap_or(face),
+                    });
+                }
+                // Missed the box — keep marching past it.
+            }
+            None => {}
         }
 
         // Advance along the axis with the nearest boundary.
@@ -117,4 +149,77 @@ pub fn raycast(
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A cell-filling block at `pos`, everything else empty.
+    fn only(pos: BlockPos) -> impl Fn(BlockPos) -> Option<Target> {
+        move |p| (p == pos).then_some(Target::Cell)
+    }
+
+    #[test]
+    fn a_full_cell_is_hit_on_the_face_the_ray_crossed() {
+        let target = BlockPos::new(4, 0, 0);
+        let hit = raycast(Vec3::new(0.5, 0.5, 0.5), Vec3::X, 8.0, only(target)).expect("hit");
+        assert_eq!(hit.block, target);
+        assert_eq!(hit.face, Direction::NegX, "entered through the -X face");
+        assert_eq!(hit.place_position(), BlockPos::new(3, 0, 0));
+    }
+
+    #[test]
+    fn nothing_in_range_is_a_miss() {
+        let far = only(BlockPos::new(40, 0, 0));
+        assert!(raycast(Vec3::new(0.5, 0.5, 0.5), Vec3::X, 5.0, far).is_none());
+    }
+
+    /// The point of `Target::Box`: a ray aimed over a short plant carries on to
+    /// whatever stands behind it instead of stopping at its cell.
+    #[test]
+    fn a_ray_that_misses_a_small_box_keeps_marching() {
+        let plant = BlockPos::new(2, 0, 0);
+        let wall = BlockPos::new(6, 0, 0);
+        // A stubby box hugging the bottom of the plant's cell.
+        let boxes = move |p: BlockPos| {
+            if p == plant {
+                Some(Target::Box(Aabb::new(
+                    Vec3::new(2.4, 0.0, -0.1),
+                    Vec3::new(2.6, 0.3, 0.1),
+                )))
+            } else if p == wall {
+                Some(Target::Cell)
+            } else {
+                None
+            }
+        };
+        // Eye level 0.5: over the plant's 0.3-tall box, so it reaches the wall.
+        let over = raycast(Vec3::new(0.0, 0.5, 0.0), Vec3::X, 10.0, boxes).expect("hit");
+        assert_eq!(over.block, wall, "slid over the plant");
+
+        // Aimed low, the same ray stops at the plant.
+        let into = raycast(Vec3::new(0.0, 0.15, 0.0), Vec3::X, 10.0, boxes).expect("hit");
+        assert_eq!(into.block, plant);
+        assert_eq!(into.face, Direction::NegX, "entered the box's -X face");
+    }
+
+    /// A box hit reports the face of the *box*, which is what a placed block
+    /// gets stacked against — and for a plant standing on the ground, looking
+    /// down at it must not place into the ground.
+    #[test]
+    fn a_box_hit_reports_the_box_face_not_the_cell_face() {
+        let plant = BlockPos::new(0, 4, 0);
+        let boxes = move |p: BlockPos| {
+            (p == plant).then_some(Target::Box(Aabb::new(
+                Vec3::new(0.4, 4.0, 0.4),
+                Vec3::new(0.6, 4.5, 0.6),
+            )))
+        };
+        // Straight down from above: enters through the box's top.
+        let hit = raycast(Vec3::new(0.5, 8.0, 0.5), Vec3::NEG_Y, 10.0, boxes).expect("hit");
+        assert_eq!(hit.block, plant);
+        assert_eq!(hit.face, Direction::PosY);
+        assert_eq!(hit.place_position(), BlockPos::new(0, 5, 0));
+    }
 }

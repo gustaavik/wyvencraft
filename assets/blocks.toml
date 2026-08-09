@@ -17,7 +17,9 @@
 #             (matched against a tool's `harvests` list for mining speed)
 #   textures  one texture name for all faces, or
 #             { top = "...", bottom = "...", side = "..." }, or the fully
-#             explicit { neg_x, pos_x, neg_y, pos_y, neg_z, pos_z }
+#             explicit { neg_x, pos_x, neg_y, pos_y, neg_z, pos_z }.
+#             Optional only for a block with a [block.model], whose geometry
+#             brings its own texture and never samples the atlas.
 #   drops     what breaking the block yields (default: the block's own item)
 #             "self" | "none" | { requires_tool = "<tool kind>" }
 #             | { item = "<item name>", count = N }
@@ -25,6 +27,18 @@
 #             the engine auto-registers "<name> flow 1".."<name> flow N"
 #             blocks after all declared blocks, and the fluid simulation
 #             spreads/recedes between them.
+#   [block.model] draws the block as a .gltf/.bbmodel from assets/models/
+#             instead of six atlas-textured cube faces — the same
+#             `path`/`scale`/`offset`/`rotation` spelling as [item.model] and
+#             [entity.visual] kind = "model". The model is baked into the
+#             block's own cell, so a Blockbench author working on the 0..16
+#             grid wants `offset = [-0.5, 0, -0.5]` to re-centre it. Model
+#             blocks emit no cube faces at all, and (like item models) are
+#             visual-only: they never affect gameplay and never take part in
+#             the multiplayer content check.
+#   random_yaw  turn each instance by a hash of its position, so a field of
+#             plants doesn't read as a grid of clones. Only meaningful
+#             alongside [block.model].
 
 [[block]]
 name = "stone"
@@ -157,3 +171,56 @@ solid = true
 hardness = 3.0
 material = "stone"
 textures = "diamond_ore"
+
+# Ground cover: model-backed, walk-through decoration scattered on the surface
+# by worldgen (see the per-biome `plants` lists in worldgen.toml). No `textures`
+# — the models carry their own — and no `drops`, so each yields its own item.
+# `hardness = 0.0` still costs one mining tick (break_seconds floors at 0.05 s).
+
+[[block]]
+name = "blue bells"
+render = "cutout"
+solid = false
+hardness = 0.0
+material = "plant"
+random_yaw = true
+
+[block.model]
+path = "assets/models/plant1.bbmodel"
+offset = [-0.5, 0.0, -0.5]
+
+[[block]]
+name = "red flower"
+render = "cutout"
+solid = false
+hardness = 0.0
+material = "plant"
+random_yaw = true
+
+[block.model]
+path = "assets/models/plant2.bbmodel"
+offset = [-0.5, 0.0, -0.5]
+
+[[block]]
+name = "red mushroom"
+render = "cutout"
+solid = false
+hardness = 0.0
+material = "plant"
+random_yaw = true
+
+[block.model]
+path = "assets/models/mushroom1.bbmodel"
+offset = [-0.5, 0.0, -0.5]
+
+[[block]]
+name = "brown mushroom"
+render = "cutout"
+solid = false
+hardness = 0.0
+material = "plant"
+random_yaw = true
+
+[block.model]
+path = "assets/models/mushroom2.bbmodel"
+offset = [-0.5, 0.0, -0.5]

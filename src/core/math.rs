@@ -3,6 +3,8 @@
 
 use glam::{Mat4, Vec3, Vec4};
 
+use super::types::Direction;
+
 /// Rotate a point about the Y axis by `yaw` radians.
 ///
 /// This is the engine's yaw convention, matching `Player::look_direction`. It is
@@ -84,8 +86,23 @@ impl Aabb {
     /// `max_t`. An origin inside the box hits at `0.0`. Used for melee
     /// targeting (crosshair ray vs mob boxes).
     pub fn ray_hit(self, origin: Vec3, dir: Vec3, max_t: f32) -> Option<f32> {
+        self.ray_enter(origin, dir, max_t).map(|(t, _)| t)
+    }
+
+    /// Like [`ray_hit`](Self::ray_hit), but also reports the face the ray
+    /// entered through (pointing back toward the origin), which block targeting
+    /// needs to know where a placed block goes. The face is `None` when the
+    /// origin is already inside the box, since the ray never crossed one.
+    pub fn ray_enter(
+        self,
+        origin: Vec3,
+        dir: Vec3,
+        max_t: f32,
+    ) -> Option<(f32, Option<Direction>)> {
         let mut t_enter: f32 = 0.0;
         let mut t_exit = max_t;
+        // Which slab last raised `t_enter` — the face the ray came in through.
+        let mut entered: Option<Direction> = None;
         for axis in 0..3 {
             let (o, d) = (origin[axis], dir[axis]);
             let (lo, hi) = (self.min[axis], self.max[axis]);
@@ -98,13 +115,16 @@ impl Aabb {
             }
             let (t0, t1) = ((lo - o) / d, (hi - o) / d);
             let (near, far) = if t0 < t1 { (t0, t1) } else { (t1, t0) };
-            t_enter = t_enter.max(near);
+            if near > t_enter {
+                t_enter = near;
+                entered = Some(Direction::facing(axis, d < 0.0));
+            }
             t_exit = t_exit.min(far);
             if t_enter > t_exit {
                 return None;
             }
         }
-        Some(t_enter)
+        Some((t_enter, entered))
     }
 }
 

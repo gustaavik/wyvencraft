@@ -465,6 +465,10 @@ mod tests {
             "iron ore",
             "gold ore",
             "diamond ore",
+            "blue bells",
+            "red flower",
+            "red mushroom",
+            "brown mushroom",
         ];
         const STONE: &[BlockMaterial] = &[BlockMaterial::Stone];
         const WOOD: &[BlockMaterial] = &[BlockMaterial::Wood];

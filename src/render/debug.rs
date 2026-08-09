@@ -6,18 +6,18 @@
 use glam::Vec3;
 
 use super::vertex::LineVertex;
-use crate::core::BlockPos;
+use crate::core::Aabb;
 
 /// How far the outline box is inflated beyond the block, so its edges (which
 /// are coplanar with the block's faces) don't z-fight with them.
 const OUTLINE_INFLATE: f32 = 0.002;
 
-/// Append the 12 edges of the (slightly inflated) unit cube at `block` to
-/// `out`, in the given colour.
-pub fn push_block_outline(out: &mut Vec<LineVertex>, block: BlockPos, color: [f32; 3]) {
-    let o = Vec3::new(block.x as f32, block.y as f32, block.z as f32);
-    let min = o - Vec3::splat(OUTLINE_INFLATE);
-    let max = o + Vec3::splat(1.0 + OUTLINE_INFLATE);
+/// Append the 12 edges of `box_`, slightly inflated, to `out` in the given
+/// colour. Callers pass the block's targeting box, so the outline hugs a
+/// mushroom rather than the cell it stands in.
+pub fn push_block_outline(out: &mut Vec<LineVertex>, box_: Aabb, color: [f32; 3]) {
+    let min = box_.min - Vec3::splat(OUTLINE_INFLATE);
+    let max = box_.max + Vec3::splat(OUTLINE_INFLATE);
     let c = |x: f32, y: f32, z: f32| LineVertex {
         position: [x, y, z],
         color,

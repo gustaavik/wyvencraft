@@ -206,16 +206,16 @@ mod tests {
             ChunkPos::new(8, 5),
         ];
         const EXPECTED: [u64; 12] = [
-            0xdc08b2587c03a1ea,
-            0x26323b7c4295e68d,
-            0x13e10e0ca2e51799,
+            0x867c9b358e4c1d29,
+            0xa139cfea3a0a8c5b,
+            0xd5b77a589724faa3,
             0xf2ae2d34a8090f67,
             0xc753c9641d33dc5e,
-            0x4db7e6c1f297ea18,
-            0x6de90156dc4e9aba,
-            0x7be86e0acc2ed58d,
+            0x4709e3591d8b943a,
+            0xb2e8baae9bdde1fb,
+            0x62b3464268435f74,
             0x7923451cf12ae3ef,
-            0x6b1007b193e91748,
+            0x023d6824779a4174,
             0x114d35d38c5e5690,
             0x7904a7cadd01db54,
         ];

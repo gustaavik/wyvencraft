@@ -18,6 +18,7 @@ use crate::inventory::ItemStack;
 use crate::model::{ModelId, ModelRegistry};
 use crate::net::{Channel, ClientMessage, PlayerId, ServerMessage};
 use crate::render::{CpuMesh, mobskin, skin};
+use crate::world::Target;
 
 /// Zombie shamble: both arms held straight out (≈ 80° forward of hanging).
 const ARMS_FORWARD_ANGLE: f32 = -1.4;
@@ -264,9 +265,12 @@ impl InGameState {
             let sighting = nearest.map(|(t, distance)| {
                 let offset = t.eye - eye;
                 // Line of sight: no solid block between the two eye points.
+                // Solid blocks only, and always the whole cell: sight is about
+                // what blocks it, so ground cover you can walk through must not
+                // hide a player from a mob.
                 let visible = distance < 1.0e-3
                     || crate::world::raycast(eye, offset / distance, distance, |p| {
-                        self.world.is_solid(p)
+                        self.world.is_solid(p).then_some(Target::Cell)
                     })
                     .is_none();
                 PlayerSighting {

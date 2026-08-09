@@ -16,5 +16,5 @@ pub use chunk::Chunk;
 pub use fluid::FluidSim;
 pub use generation::{NoiseGenerator, WorldGenerator};
 pub use loader::ChunkLoader;
-pub use raycast::{RaycastHit, raycast};
+pub use raycast::{RaycastHit, Target, raycast};
 pub use world::World;

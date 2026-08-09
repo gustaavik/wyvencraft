@@ -1,4 +1,5 @@
-//! Surface features scattered on top of the base terrain: trees and boulders.
+//! Surface features scattered on top of the base terrain: boulders, trees, and
+//! the ground cover that fills in between them.
 //!
 //! Features are anchored on a world-space jittered grid: each grid cell hashes
 //! `(seed, cell)` to decide whether it holds a feature and where. Every chunk
@@ -20,9 +21,15 @@ const TREE_REACH: i32 = 2;
 const BOULDER_CELL: i32 = 24;
 /// Largest horizontal reach of a boulder from its centre.
 const BOULDER_REACH: i32 = 3;
+/// One potential ground-cover plant per grid cell of this many blocks. Much
+/// denser than trees, since a plant is a single block.
+const PLANT_CELL: i32 = 2;
+/// A plant occupies one cell, so it never reaches into a neighbouring chunk.
+const PLANT_REACH: i32 = 0;
 
 const TREE_SALT: u64 = 0x5452_4545; // "TREE"
 const BOULDER_SALT: u64 = 0x524F_434B; // "ROCK"
+const PLANT_SALT: u64 = 0x504C_414E; // "PLAN"
 
 /// How a feature block interacts with whatever already occupies the cell.
 #[derive(Clone, Copy)]
@@ -53,6 +60,19 @@ pub fn populate(chunk: &mut Chunk, noise: &TerrainNoise, seed: u64, config: &Wor
     for_each_anchor(origin, TREE_CELL, TREE_REACH, seed, TREE_SALT, |x, z, h| {
         try_tree(chunk, noise, origin, x, z, h, config);
     });
+    // Ground cover goes last, and only into air: trunks push through their own
+    // leaves but not through anything else, so a plant placed first would punch
+    // a hole in the tree that grew over it.
+    for_each_anchor(
+        origin,
+        PLANT_CELL,
+        PLANT_REACH,
+        seed,
+        PLANT_SALT,
+        |x, z, h| {
+            try_plant(chunk, noise, origin, x, z, h, config);
+        },
+    );
 }
 
 /// Visit the anchor of every grid cell whose feature could reach this chunk.
@@ -124,6 +144,37 @@ fn try_tree(
         TreeShape::Oak => place_oak(chunk, origin, x, ground, z, h, tree),
         TreeShape::Spruce => place_spruce(chunk, origin, x, ground, z, h, tree),
     }
+}
+
+/// Drop one ground-cover block on the surface at `(x, z)`, if the biome grows
+/// any there. The species is drawn from the biome's list by the feature hash,
+/// so which plant lands where depends only on `(seed, cell)`.
+fn try_plant(
+    chunk: &mut Chunk,
+    noise: &TerrainNoise,
+    origin: BlockPos,
+    x: i32,
+    z: i32,
+    h: u64,
+    config: &WorldGenConfig,
+) {
+    let ground = noise.surface_height(x, z).clamp(1, CHUNK_HEIGHT - 1);
+    if ground <= config.sea_level {
+        return;
+    }
+    let biome = config.biome(Biome::from_temperature(noise.temperature(x, z)));
+    if biome.plants.is_empty() {
+        return;
+    }
+    // The same clumping trees use, so meadows follow the groves.
+    let richness = (noise.vegetation(x, z) + 0.55).clamp(0.0, 1.3);
+    if (h % 1000) as f32 >= biome.plant_chance_per_mille * richness {
+        return;
+    }
+    // High bits: the low ones are already spent on the chance roll, and bits
+    // 8..32 on this cell's jitter.
+    let block = biome.plants[((h >> 44) % biome.plants.len() as u64) as usize];
+    set_block(chunk, origin, x, ground + 1, z, block, Overwrite::AirOnly);
 }
 
 /// Trunk height drawn from the tree's inclusive range by the feature hash.
@@ -306,5 +357,164 @@ fn set_block(
     };
     if replace {
         chunk.set_generated(local, block);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::ChunkPos;
+    use crate::world::block::{BlockRegistry, blocks};
+    use crate::world::generation::{NoiseGenerator, WorldGenerator};
+
+    /// Every distinct ground-cover block the shipped worldgen can place. The
+    /// biome lists overlap (the mushrooms grow in both plains and snowy), so
+    /// this deduplicates rather than concatenating.
+    fn plant_ids(config: &WorldGenConfig) -> Vec<BlockId> {
+        let mut ids = Vec::new();
+        for biome in [Biome::Plains, Biome::Snowy, Biome::Desert] {
+            for &id in &config.biome(biome).plants {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+        ids
+    }
+
+    fn sample_area() -> impl Iterator<Item = ChunkPos> {
+        (-6..6).flat_map(|x| (-6..6).map(move |z| ChunkPos::new(x, z)))
+    }
+
+    #[test]
+    fn ground_cover_fills_the_meadows() {
+        let registry = BlockRegistry::with_builtins();
+        let config = WorldGenConfig::builtin(&registry);
+        let plants = plant_ids(&config);
+        assert!(!plants.is_empty(), "the shipped biomes declare plants");
+
+        let generator = NoiseGenerator::new(42);
+        let mut found = vec![0usize; plants.len()];
+        for pos in sample_area() {
+            let chunk = generator.generate(pos);
+            for lx in 0..CHUNK_SIZE {
+                for lz in 0..CHUNK_SIZE {
+                    for y in 1..CHUNK_HEIGHT {
+                        let at = chunk.get(LocalPos {
+                            x: lx as u8,
+                            y: y as u16,
+                            z: lz as u8,
+                        });
+                        if let Some(i) = plants.iter().position(|&p| p == at) {
+                            found[i] += 1;
+                        }
+                    }
+                }
+            }
+        }
+        for (i, &count) in found.iter().enumerate() {
+            assert!(count > 0, "plant {i} never generated in the sample area");
+        }
+    }
+
+    /// A plant is decoration, not terrain: it stands on solid ground, never
+    /// floating, never on water, never stacked on another plant.
+    ///
+    /// Deliberately says nothing about the block *above*: ground cover
+    /// legitimately generates under a neighbouring tree's canopy overhang, and
+    /// a short oak's lowest leaf layer can sit only two blocks up.
+    #[test]
+    fn every_plant_stands_on_solid_ground() {
+        let registry = BlockRegistry::with_builtins();
+        let config = WorldGenConfig::builtin(&registry);
+        let plants = plant_ids(&config);
+        let generator = NoiseGenerator::new(0x00C0_FFEE);
+
+        for pos in sample_area() {
+            let chunk = generator.generate(pos);
+            let at = |x: usize, y: i32, z: usize| {
+                chunk.get(LocalPos {
+                    x: x as u8,
+                    y: y as u16,
+                    z: z as u8,
+                })
+            };
+            for lx in 0..CHUNK_SIZE as usize {
+                for lz in 0..CHUNK_SIZE as usize {
+                    for y in 1..CHUNK_HEIGHT {
+                        if !plants.contains(&at(lx, y, lz)) {
+                            continue;
+                        }
+                        let below = at(lx, y - 1, lz);
+                        assert!(!below.is_air(), "floating plant at {pos:?} ({lx},{y},{lz})");
+                        assert!(
+                            !plants.contains(&below),
+                            "stacked plants at {pos:?} ({lx},{y},{lz})"
+                        );
+                        assert_ne!(
+                            below,
+                            blocks::WATER,
+                            "plant on water at {pos:?} ({lx},{y},{lz})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Ground cover is placed after trees and only into air, so it can never
+    /// eat a trunk. A trunk runs unbroken from the ground up, so a plant with
+    /// wood directly above it is one that swallowed a trunk block.
+    #[test]
+    fn ground_cover_never_replaces_a_trunk() {
+        let registry = BlockRegistry::with_builtins();
+        let config = WorldGenConfig::builtin(&registry);
+        let plants = plant_ids(&config);
+        let generator = NoiseGenerator::new(7);
+
+        for pos in sample_area() {
+            let chunk = generator.generate(pos);
+            let at = |x: usize, y: i32, z: usize| {
+                chunk.get(LocalPos {
+                    x: x as u8,
+                    y: y as u16,
+                    z: z as u8,
+                })
+            };
+            for lx in 0..CHUNK_SIZE as usize {
+                for lz in 0..CHUNK_SIZE as usize {
+                    for y in 1..CHUNK_HEIGHT - 1 {
+                        if plants.contains(&at(lx, y, lz)) {
+                            assert_ne!(
+                                at(lx, y + 1, lz),
+                                blocks::WOOD,
+                                "plant inside a trunk at {pos:?} ({lx},{y},{lz})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Which plant lands in a cell depends only on `(seed, cell)` — a chunk
+    /// regenerated from the same seed must come back identical, since worlds
+    /// keep only their edits and replay terrain from the seed on every load.
+    #[test]
+    fn plant_placement_is_deterministic_in_seed_and_position() {
+        let a = NoiseGenerator::new(42).generate(ChunkPos::new(2, -3));
+        let b = NoiseGenerator::new(42).generate(ChunkPos::new(2, -3));
+        for lx in 0..CHUNK_SIZE {
+            for lz in 0..CHUNK_SIZE {
+                for y in 1..CHUNK_HEIGHT {
+                    let local = LocalPos {
+                        x: lx as u8,
+                        y: y as u16,
+                        z: lz as u8,
+                    };
+                    assert_eq!(a.get(local), b.get(local));
+                }
+            }
+        }
     }
 }

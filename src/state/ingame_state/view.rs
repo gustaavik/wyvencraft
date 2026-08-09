@@ -36,7 +36,7 @@ use crate::render::{
 };
 use crate::world::World;
 use crate::world::block::{BlockRegistry, FaceTextures};
-use crate::world::meshing::{mesh_block_overlay, mesh_chunk, push_item_cube};
+use crate::world::meshing::{BlockModels, mesh_block_overlay, mesh_chunk, push_item_cube};
 
 /// Animation state for a remote player plus the position used to derive their
 /// speed (no extra protocol data needed — movement is inferred from the change
@@ -84,6 +84,9 @@ pub(super) struct SceneCache {
     meshes: HashMap<ChunkPos, GpuMesh>,
     /// Transparent (water/glass) GPU meshes, drawn in a second blended pass.
     transparent_meshes: HashMap<ChunkPos, GpuMesh>,
+    /// Model-backed blocks (plants, mushrooms) in each chunk, one mesh per
+    /// distinct model because each binds its own texture.
+    model_meshes: HashMap<ChunkPos, Vec<(GpuMesh, ModelId)>>,
     /// Pending mesh rebuilds (budgeted across frames), with a dedup set.
     mesh_queue: VecDeque<ChunkPos>,
     queued: HashSet<ChunkPos>,
@@ -140,6 +143,7 @@ impl SceneCache {
         Self {
             meshes: HashMap::new(),
             transparent_meshes: HashMap::new(),
+            model_meshes: HashMap::new(),
             mesh_queue: VecDeque::new(),
             queued: HashSet::new(),
             player_model: HumanoidModel::player(),
@@ -185,6 +189,7 @@ impl SceneCache {
     pub fn forget_chunk(&mut self, pos: ChunkPos) {
         self.meshes.remove(&pos);
         self.transparent_meshes.remove(&pos);
+        self.model_meshes.remove(&pos);
     }
 
     /// Move freshly-dirtied chunks into the mesh queue (deduped).
@@ -202,6 +207,7 @@ impl SceneCache {
         ctx: &Arc<RenderContext>,
         world: &World,
         blocks: &BlockRegistry,
+        models: BlockModels<'_>,
         budget: usize,
     ) {
         for _ in 0..budget {
@@ -212,7 +218,7 @@ impl SceneCache {
 
             let output = world
                 .chunk(pos)
-                .map(|chunk| mesh_chunk(chunk, blocks, |p| world.block_at(p)));
+                .map(|chunk| mesh_chunk(chunk, blocks, models, |p| world.block_at(p)));
             match output {
                 Some(output) => {
                     match GpuMesh::upload(&ctx.memory_allocator, &output.opaque) {
@@ -234,6 +240,24 @@ impl SceneCache {
                         Err(err) => {
                             log::error!("transparent mesh upload failed at {pos:?}: {err:?}")
                         }
+                    }
+                    // Model-backed blocks: one mesh per model in this chunk,
+                    // each needing its texture resident before it can be drawn.
+                    let mut baked = Vec::new();
+                    for (id, mesh) in &output.models {
+                        self.ensure_model_texture(ctx, models.models, *id);
+                        match GpuMesh::upload(&ctx.memory_allocator, mesh) {
+                            Ok(Some(gpu)) => baked.push((gpu, *id)),
+                            Ok(None) => {}
+                            Err(err) => {
+                                log::error!("model mesh upload failed at {pos:?}: {err:?}")
+                            }
+                        }
+                    }
+                    if baked.is_empty() {
+                        self.model_meshes.remove(&pos);
+                    } else {
+                        self.model_meshes.insert(pos, baked);
                     }
                 }
                 // Chunk was unloaded before we got to it.
@@ -554,10 +578,10 @@ impl SceneCache {
     pub fn update_break_overlay(
         &mut self,
         ctx: &Arc<RenderContext>,
-        breaking: Option<(BlockPos, f32)>,
+        breaking: Option<(BlockPos, Aabb, f32)>,
     ) {
-        self.break_mesh = breaking.and_then(|(block, progress)| {
-            let overlay = mesh_block_overlay(block, tiles::crack_tile(progress));
+        self.break_mesh = breaking.and_then(|(block, box_, progress)| {
+            let overlay = mesh_block_overlay(box_, tiles::crack_tile(progress));
             match GpuMesh::upload(&ctx.memory_allocator, &overlay) {
                 Ok(mesh) => mesh,
                 Err(err) => {
@@ -570,14 +594,19 @@ impl SceneCache {
 
     /// (Re)build the selection outline on the targeted block. The geometry only
     /// depends on the block position, so it's cached until the target changes.
-    pub fn update_target_outline(&mut self, ctx: &Arc<RenderContext>, target: Option<BlockPos>) {
-        if target == self.outline_block {
+    pub fn update_target_outline(
+        &mut self,
+        ctx: &Arc<RenderContext>,
+        target: Option<(BlockPos, Aabb)>,
+    ) {
+        let block = target.map(|(block, _)| block);
+        if block == self.outline_block {
             return;
         }
-        self.outline_block = target;
-        self.outline_mesh = target.and_then(|block| {
+        self.outline_block = block;
+        self.outline_mesh = target.and_then(|(block, box_)| {
             let mut vertices = Vec::new();
-            debug::push_block_outline(&mut vertices, block, OUTLINE_COLOR);
+            debug::push_block_outline(&mut vertices, box_, OUTLINE_COLOR);
             match GpuLines::upload(&ctx.memory_allocator, &vertices) {
                 Ok(lines) => lines,
                 Err(err) => {
@@ -694,6 +723,15 @@ impl SceneCache {
                     .iter()
                     .filter_map(|(mesh, id)| self.textured_mesh(mesh, *id)),
             )
+            // Model-backed blocks, culled by the same chunk column AABB as the
+            // atlas meshes above.
+            .chain(
+                self.model_meshes
+                    .iter()
+                    .filter(|(pos, _)| in_view(pos))
+                    .flat_map(|(_, chunk)| chunk.iter())
+                    .filter_map(|(mesh, id)| self.textured_mesh(mesh, *id)),
+            )
             .collect();
 
         let atmo = day_cycle.atmosphere();
@@ -766,21 +804,35 @@ impl super::InGameState {
     /// above it — streaming, mobs, fluids, interaction — is plain logic that
     /// runs without a GPU, which is what makes it testable.
     pub(super) fn refresh_view(&mut self, ctx: &Arc<RenderContext>, dt: f32) {
-        // Overlays on the block under the crosshair.
-        let breaking = self.breaking.as_ref().map(|b| (b.block, b.progress));
+        // Overlays on the block under the crosshair. Both are drawn around the
+        // block's targeting box, so cracks and outline hug a mushroom the same
+        // way the crosshair does.
+        let breaking = self
+            .breaking
+            .as_ref()
+            .map(|b| (b.block, self.hitbox_at(b.block), b.progress));
         self.view.update_break_overlay(ctx, breaking);
         let target = if self.dead {
             None
         } else {
-            self.targeted_block().map(|hit| hit.block)
+            self.targeted_block()
+                .map(|hit| (hit.block, self.hitbox_at(hit.block)))
         };
         self.view.update_target_outline(ctx, target);
 
         // Chunk meshes: queue what the world dirtied, then spend the budget.
         let dirty = self.world.take_dirty();
         self.view.enqueue_dirty(dirty);
-        self.view
-            .process_mesh_budget(ctx, &self.world, &self.blocks, super::MESH_BUDGET);
+        self.view.process_mesh_budget(
+            ctx,
+            &self.world,
+            &self.blocks,
+            BlockModels {
+                models: &self.models,
+                blocks: &self.block_models,
+            },
+            super::MESH_BUDGET,
+        );
 
         // Loose entities.
         let (items, blocks) = (&self.items, &self.blocks);

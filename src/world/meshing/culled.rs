@@ -2,8 +2,8 @@
 
 use glam::Vec3;
 
-use super::ChunkMeshOutput;
-use crate::core::{BlockId, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, Direction};
+use super::{BlockModels, ChunkMeshOutput};
+use crate::core::{Aabb, BlockId, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, Direction};
 use crate::render::mesh::CpuMesh;
 use crate::render::texture::atlas_uv;
 use crate::render::vertex::{ChunkVertex, FLAG_WATER};
@@ -107,14 +107,29 @@ fn face_geometry(dir: Direction) -> ([[f32; 3]; 4], [[f32; 2]; 4]) {
     (corners, uv)
 }
 
+/// Yaw for a model-backed block that asked for a random one: a SplitMix64-style
+/// mix of its world position, so the same block re-meshes to the same angle and
+/// a field of plants doesn't read as a grid of clones.
+fn block_yaw(pos: BlockPos) -> f32 {
+    let mut h = (pos.x as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
+        ^ (pos.y as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ (pos.z as u64).wrapping_mul(0x1656_67B1_9E37_79F9);
+    h ^= h >> 30;
+    h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    h ^= h >> 27;
+    (h >> 40) as f32 / 16_777_216.0 * std::f32::consts::TAU
+}
+
 /// Build the renderable mesh for `chunk`.
 ///
 /// `neighbor` resolves block ids for world positions outside this chunk (for
 /// correct culling at chunk borders); it should return [`BlockId::AIR`] for
-/// not-yet-loaded chunks.
+/// not-yet-loaded chunks. `models` supplies the geometry of model-backed
+/// blocks; pass [`BlockModels::none`] when there are none.
 pub fn mesh_chunk(
     chunk: &Chunk,
     registry: &BlockRegistry,
+    models: BlockModels<'_>,
     neighbor: impl Fn(BlockPos) -> BlockId,
 ) -> ChunkMeshOutput {
     let mut out = ChunkMeshOutput::default();
@@ -151,6 +166,31 @@ pub fn mesh_chunk(
                 }
 
                 let world = BlockPos::new(origin.x + lx, ly, origin.z + lz);
+
+                // A model-backed block replaces the whole cube: its geometry
+                // brings its own texture, so it goes to a per-model bucket and
+                // no atlas face is emitted for it at all.
+                if let Some((placement, model)) = models.of(id) {
+                    let yaw = if placement.random_yaw {
+                        block_yaw(world)
+                    } else {
+                        0.0
+                    };
+                    // Baked about the cell's horizontal centre, so an authored
+                    // `offset = [-0.5, 0, -0.5]` turns the model about itself.
+                    let centre =
+                        Vec3::new(world.x as f32 + 0.5, world.y as f32, world.z as f32 + 0.5);
+                    let baked = model.mesh.to_cpu_mesh(
+                        centre,
+                        yaw,
+                        placement.scale,
+                        placement.rotation,
+                        placement.offset,
+                    );
+                    let bucket = out.models.entry(placement.id).or_default();
+                    bucket.push_indexed(baked.vertices, baked.indices);
+                    continue;
+                }
 
                 // Fluids render with a lowered, per-corner surface so blocks
                 // of different levels slope into each other; everything else
@@ -229,20 +269,21 @@ pub fn mesh_chunk(
     out
 }
 
-/// Build an overlay mesh over the block at `pos`, textured with `tile` on all
-/// six faces — used for the crack animation while a block is being mined. The
-/// cube is inflated slightly around its centre so it never z-fights the block.
-pub fn mesh_block_overlay(pos: BlockPos, tile: u32) -> CpuMesh {
+/// Build an overlay mesh over `box_`, textured with `tile` on all six faces —
+/// used for the crack animation while a block is being mined. Callers pass the
+/// block's targeting box, so cracks appear on the mushroom rather than around
+/// the cell it stands in. Inflated slightly so it never z-fights the block.
+pub fn mesh_block_overlay(box_: Aabb, tile: u32) -> CpuMesh {
     const INFLATE: f32 = 0.004;
-    let scale = 1.0 + 2.0 * INFLATE;
-    let center = [pos.x as f32 + 0.5, pos.y as f32 + 0.5, pos.z as f32 + 0.5];
+    let center = (box_.min + box_.max) * 0.5;
+    let size = (box_.max - box_.min) + Vec3::splat(2.0 * INFLATE);
 
     let mut mesh = CpuMesh::new();
     for dir in Direction::ALL {
         let (corners, uvs) = face_geometry(dir);
         let normal = dir.normal().to_array();
         let quad = std::array::from_fn(|i| ChunkVertex {
-            position: std::array::from_fn(|a| center[a] + (corners[i][a] - 0.5) * scale),
+            position: std::array::from_fn(|a| center[a] + (corners[i][a] - 0.5) * size[a]),
             normal,
             uv: atlas_uv(tile, uvs[i]),
             ao: 1.0,
@@ -296,6 +337,7 @@ pub fn push_item_cube(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::content::GameContent;
     use crate::core::{ChunkPos, LocalPos};
     use crate::render::tiles;
     use crate::world::block::blocks;
@@ -305,7 +347,7 @@ mod tests {
         let registry = BlockRegistry::with_builtins();
         let mut chunk = Chunk::new(ChunkPos::new(0, 0));
         chunk.set(LocalPos { x: 4, y: 10, z: 4 }, blocks::WATER);
-        let out = mesh_chunk(&chunk, &registry, |_| BlockId::AIR);
+        let out = mesh_chunk(&chunk, &registry, BlockModels::none(), |_| BlockId::AIR);
 
         assert_eq!(out.transparent.vertices.len(), 24, "all six faces drawn");
         let max_y = out
@@ -323,7 +365,7 @@ mod tests {
         let mut chunk = Chunk::new(ChunkPos::new(0, 0));
         chunk.set(LocalPos { x: 4, y: 10, z: 4 }, blocks::WATER);
         chunk.set(LocalPos { x: 4, y: 11, z: 4 }, blocks::WATER);
-        let out = mesh_chunk(&chunk, &registry, |_| BlockId::AIR);
+        let out = mesh_chunk(&chunk, &registry, BlockModels::none(), |_| BlockId::AIR);
 
         // The shared face is culled from both blocks: 2 x 5 faces remain.
         assert_eq!(out.transparent.vertices.len(), 40);
@@ -349,7 +391,7 @@ mod tests {
         let registry = BlockRegistry::with_builtins();
         let mut chunk = Chunk::new(ChunkPos::new(0, 0));
         chunk.set(LocalPos { x: 4, y: 10, z: 4 }, registry.flowing(0, 4));
-        let out = mesh_chunk(&chunk, &registry, |_| BlockId::AIR);
+        let out = mesh_chunk(&chunk, &registry, BlockModels::none(), |_| BlockId::AIR);
 
         let max_y = out
             .transparent
@@ -366,7 +408,7 @@ mod tests {
         let mut chunk = Chunk::new(ChunkPos::new(0, 0));
         chunk.set(LocalPos { x: 4, y: 10, z: 4 }, blocks::WATER);
         chunk.set(LocalPos { x: 5, y: 10, z: 4 }, registry.flowing(0, 4));
-        let out = mesh_chunk(&chunk, &registry, |_| BlockId::AIR);
+        let out = mesh_chunk(&chunk, &registry, BlockModels::none(), |_| BlockId::AIR);
 
         let max_top_at = |x: f32| {
             out.transparent
@@ -382,6 +424,62 @@ mod tests {
         // …while its far edge stays at its own level's height, so the top
         // face slopes downhill.
         assert_eq!(max_top_at(6.0), 10.0 + WATER_SURFACE * 0.5);
+    }
+
+    /// A model-backed block against the real shipped content: its geometry must
+    /// go to the per-model bucket and *nothing* to the atlas passes, because a
+    /// cube face would sample the block atlas with the model's own UVs.
+    ///
+    /// `load()` rather than `builtin()`: the embedded fallback carries the TOML
+    /// but not the `.bbmodel` files, so nothing would have a model to bake.
+    #[test]
+    fn a_model_block_meshes_into_its_own_bucket_and_emits_no_cube_faces() {
+        let content = GameContent::load();
+        let models = BlockModels {
+            models: &content.models,
+            blocks: &content.block_models,
+        };
+        let plant = content.blocks.find("blue bells").expect("shipped block");
+        let (placement, _) = models.of(plant).expect("blue bells declares a model");
+
+        let mut chunk = Chunk::new(ChunkPos::new(0, 0));
+        chunk.set(LocalPos { x: 4, y: 10, z: 6 }, plant);
+        let out = mesh_chunk(&chunk, &content.blocks, models, |_| BlockId::AIR);
+
+        assert!(out.opaque.is_empty(), "no atlas geometry");
+        assert!(out.transparent.is_empty(), "no blended geometry");
+        let bucket = out.models.get(&placement.id).expect("bucket for the model");
+        assert!(!bucket.is_empty());
+
+        // Baked into its own cell: `offset = [-0.5, 0, -0.5]` re-centres the
+        // 0..1 authored model, so any yaw keeps it inside the block's column.
+        for v in &bucket.vertices {
+            assert!((4.0..=5.0).contains(&v.position[0]), "x {:?}", v.position);
+            assert!((6.0..=7.0).contains(&v.position[2]), "z {:?}", v.position);
+            assert!(v.position[1] >= 9.9, "y {:?}", v.position);
+        }
+    }
+
+    /// Two of the same plant must land at different angles, and each must
+    /// re-mesh to the angle it had before — the yaw is a hash of the position,
+    /// not a counter or a random draw.
+    #[test]
+    fn random_yaw_varies_by_position_and_is_stable() {
+        let a = block_yaw(BlockPos::new(4, 70, 6));
+        let b = block_yaw(BlockPos::new(5, 70, 6));
+        assert_ne!(a, b, "neighbours must not share an angle");
+        assert_eq!(a, block_yaw(BlockPos::new(4, 70, 6)), "re-mesh is stable");
+        for pos in [
+            BlockPos::new(0, 0, 0),
+            BlockPos::new(-31, 64, 999),
+            BlockPos::new(i32::MIN, 1, i32::MAX),
+        ] {
+            let yaw = block_yaw(pos);
+            assert!(
+                (0.0..std::f32::consts::TAU).contains(&yaw),
+                "{pos:?}: {yaw}"
+            );
+        }
     }
 
     #[test]
@@ -409,7 +507,8 @@ mod tests {
 
     #[test]
     fn block_overlay_covers_all_faces_and_wraps_the_block() {
-        let mesh = mesh_block_overlay(BlockPos::new(2, 5, -3), tiles::CRACK_0);
+        let cell = Aabb::block(Vec3::new(2.0, 5.0, -3.0));
+        let mesh = mesh_block_overlay(cell, tiles::CRACK_0);
         assert_eq!(mesh.vertices.len(), 24); // 6 faces × 4 vertices
         assert_eq!(mesh.indices.len(), 36);
         for v in &mesh.vertices {
@@ -422,6 +521,18 @@ mod tests {
             let uv1 = atlas_uv(tiles::CRACK_0, [1.0, 1.0]);
             assert!(v.uv[0] >= uv0[0] && v.uv[0] <= uv1[0]);
             assert!(v.uv[1] >= uv0[1] && v.uv[1] <= uv1[1]);
+        }
+    }
+
+    /// Cracks on ground cover wrap the plant's own box, not the cell around it.
+    #[test]
+    fn block_overlay_follows_a_smaller_hitbox() {
+        let box_ = Aabb::new(Vec3::new(2.3, 5.0, -2.7), Vec3::new(2.7, 5.5, -2.3));
+        let mesh = mesh_block_overlay(box_, tiles::CRACK_0);
+        for v in &mesh.vertices {
+            assert!(v.position[0] > 2.29 && v.position[0] < 2.71);
+            assert!(v.position[1] > 4.99 && v.position[1] < 5.51);
+            assert!(v.position[2] > -2.71 && v.position[2] < -2.29);
         }
     }
 }
