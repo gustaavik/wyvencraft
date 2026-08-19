@@ -27,9 +27,10 @@ renet_netcode = "2.0"
 
 # --- Accounts ---
 # The join-ticket codec, shared verbatim with the auth server so the two can
-# never drift. A path dependency because `wcauthserver` has no remote yet;
-# switch to `git = "..."` the moment it does.
-wcauth-ticket = { path = "../wcauthserver/crates/ticket" }
+# never drift. The repo is private: fetching needs a GitHub credential with
+# `repo` scope (the `gh` osxkeychain helper is enough). `Cargo.lock` pins the
+# exact ticket commit; advance it deliberately with `cargo update -p wcauth-ticket`.
+wcauth-ticket = { git = "https://github.com/gustaavik/wcauthserver.git", branch = "main" }
 uuid = { version = "1", features = ["v4", "serde"] }
 # Blocking HTTP. Deliberately not `reqwest`: the game has no async runtime, and
 # pulling tokio in for four requests would be absurd.

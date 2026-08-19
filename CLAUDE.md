@@ -56,6 +56,18 @@ aborts at runtime:
 - `dynamic_rendering` — the world pass uses dynamic rendering (no `VkRenderPass`).
 - `image_view_format_swizzle` — egui uploads font textures with a swizzle.
 
+**Building needs read access to a private repo.** `wcauth-ticket` — the join-ticket
+contract — is a git dependency on the **private**
+[gustaavik/wcauthserver](https://github.com/gustaavik/wcauthserver), pinned to
+`branch = "main"` with the exact commit recorded in `Cargo.lock`. `cargo fetch`
+therefore needs a GitHub credential with `repo` scope; `.cargo/config.toml` sets
+`net.git-fetch-with-cli = true` so the fetch goes through the system `git` and
+picks up the `gh`/osxkeychain helper. Advance the pin deliberately with
+`cargo update -p wcauth-ticket`. While co-editing the ticket crate itself,
+uncomment the `[patch."https://github.com/gustaavik/wcauthserver.git"]` block in
+`.cargo/config.toml` to resolve it from a sibling `wcauthserver/` checkout instead
+— but leave the `Cargo.lock` churn that patch causes uncommitted.
+
 ## Architecture
 
 Domain modules with **one-directional dependencies** (do not introduce cycles):
@@ -170,8 +182,8 @@ those systems are testable without a Vulkan device.
 | Authorize a player      | `ops.toml` in the working directory (`ops = [{ id = "<account uuid>", name = "..." }]`), parsed by `chat::ops`. Keyed by the **account id from the verified join ticket**, never by anything a client asserts. The host/singleplayer player is always an op; only the authority loads the file |
 | Chat log / input bar    | `chat::{log,composer}` (pure state), drawn by `ui::chat::draw_chat`; keys `chat`/`chat_command` in `config::Keybinds` (T and /) |
 | Networking              | `net::{server,client,protocol}` transport; role behind `state::session::Session` (Singleplayer/Host/Client + `FakeSession`); message application in `state::ingame_state::net` |
-| Accounts / login        | `auth::{client,session,account,keys,verifier}`. `AuthClient` is a port (`HttpAuthClient` via ureq / `FakeAuthClient`); `LoginState` is the first screen; the session persists in `profile.toml`. Server lives in the sibling repo `wcauthserver` |
-| Who may join            | `net::server::Host::verify_join` checks the Ed25519 ticket a client puts in netcode `user_data` **before** a `PlayerId` exists — a failure is disconnected with no `Welcome`. Keys come from `authkeys.toml` via `auth::KeyCache`; **no keys means no joins**, never "everyone joins". Ticket format is `wcauth-ticket`, shared verbatim with the server |
+| Accounts / login        | `auth::{client,session,account,keys,verifier}`. `AuthClient` is a port (`HttpAuthClient` via ureq / `FakeAuthClient`); `LoginState` is the first screen; the session persists in `profile.toml`. Server lives in the private repo [gustaavik/wcauthserver](https://github.com/gustaavik/wcauthserver) |
+| Who may join            | `net::server::Host::verify_join` checks the Ed25519 ticket a client puts in netcode `user_data` **before** a `PlayerId` exists — a failure is disconnected with no `Welcome`. Keys come from `authkeys.toml` via `auth::KeyCache`; **no keys means no joins**, never "everyone joins". Ticket format is `wcauth-ticket`, shared verbatim with the server — literally the same crate, pulled from the wcauthserver repo as a git dependency |
 | Player nameplates       | `ui::nameplate` painted from `InGameState::draw_nameplates`; projection is `render::Camera::project`. egui composites after the world pass with no depth, so occlusion is an explicit `world::raycast` against `is_solid` |
 | Saving / world files    | `save` module (formats, `saves/<slug>/`) behind `save::WorldRepository` (File/Null/InMemory); triggers in `state::ingame_state::save_world` |
 | Pipelines / passes      | `render::pipeline`, `render::renderer`                                                     |
@@ -216,8 +228,10 @@ those systems are testable without a Vulkan device.
   `PlayerId` is assigned, so a rejected peer never sees a `Welcome`. The netcode
   `u64` is derived from the account uuid, so a world save follows the player
   rather than the machine, and the host checks that the id a client connects
-  with matches its ticket. Run the auth server from the sibling `wcauthserver`
-  repo (`make up`); point the game at it with `WYVEN_AUTH_URL`.
+  with matches its ticket. Run the auth server from the `wcauthserver` repo
+  (`make up`); point the game at it with `WYVEN_AUTH_URL`. The game does not
+  reimplement the ticket format — it compiles the server's own `wcauth-ticket`
+  crate, fetched from that repo (see the toolchain prerequisites above).
 - **Typing in chat is safe by construction.** `app::window_event` gives egui
   every event first and only forwards what egui didn't consume, so a focused
   `TextEdit` means gameplay keys never reach `InputState`. The `!typing` guards
