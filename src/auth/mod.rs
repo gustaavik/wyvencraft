@@ -30,15 +30,54 @@ pub use verifier::{TicketVerifier, VerifyFailure};
 
 /// Where the game looks for the auth server when nothing overrides it.
 ///
-/// `WYVEN_AUTH_URL` takes precedence, which is what lets a developer point at a
-/// local `docker compose up` without editing anything.
-pub const DEFAULT_AUTH_URL: &str = "http://llzdmervhd2eyewlrapa8jhi.100.94.237.98.sslip.io";
+/// Baked in at build time from `WYVEN_AUTH_URL` — that is how a release build
+/// ships pointing at production while the source keeps a local default. At run
+/// time the same variable takes precedence again, which is what lets a shipped
+/// binary be pointed at a local `docker compose up` without a rebuild.
+pub const DEFAULT_AUTH_URL: &str = match option_env!("WYVEN_AUTH_URL") {
+    Some(url) => url,
+    None => "http://127.0.0.1:8080",
+};
 
 /// The auth server this build should talk to.
 pub fn auth_url() -> String {
-    std::env::var("WYVEN_AUTH_URL")
+    let url = std::env::var("WYVEN_AUTH_URL")
         .ok()
-        .map(|value| value.trim_end_matches('/').to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_AUTH_URL.to_string())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_AUTH_URL.to_string());
+    normalize(&url)
+}
+
+/// Strip a trailing `/` so callers can always concatenate a path onto this.
+fn normalize(url: &str) -> String {
+    url.trim_end_matches('/').to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The baked-in default is what an unconfigured build talks to, so an empty
+    /// one would mean silently unreachable auth rather than a build failure.
+    #[test]
+    fn default_url_is_not_empty() {
+        assert!(!DEFAULT_AUTH_URL.trim().is_empty());
+    }
+
+    /// Callers build request paths as `format!("{base}/v1/…")`, so a trailing
+    /// slash from either source would produce a double slash.
+    #[test]
+    fn normalize_strips_trailing_slashes() {
+        assert_eq!(normalize("http://example.test/"), "http://example.test");
+        assert_eq!(normalize("http://example.test///"), "http://example.test");
+    }
+
+    #[test]
+    fn normalize_leaves_a_bare_url_alone() {
+        assert_eq!(normalize("http://example.test"), "http://example.test");
+        assert_eq!(
+            normalize("http://example.test/base"),
+            "http://example.test/base"
+        );
+    }
 }
