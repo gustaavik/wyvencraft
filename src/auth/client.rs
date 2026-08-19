@@ -91,6 +91,13 @@ impl HttpAuthClient {
     pub fn new(base_url: impl Into<String>) -> Self {
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(TIMEOUT))
+            // A refusal is a JSON envelope carrying the one thing the player
+            // needs to read ("that username is already taken"). Left at ureq's
+            // default, a 4xx becomes a transport-level error with the body
+            // thrown away, and every refusal collapses into "the account server
+            // refused the request (422)". Statuses are read in
+            // [`parse_envelope`] instead, alongside the body.
+            .http_status_as_error(false)
             .build();
 
         Self {
@@ -133,32 +140,17 @@ impl HttpAuthClient {
         Self::unwrap_envelope(response)
     }
 
-    /// Turn `{"status":...}` into either the payload or a typed error.
+    /// Read the reply and hand it to [`parse_envelope`].
     fn unwrap_envelope(
         mut response: ureq::http::Response<ureq::Body>,
     ) -> Result<serde_json::Value, AuthError> {
+        let status = response.status().as_u16();
         let text = response
             .body_mut()
             .read_to_string()
             .map_err(|err| AuthError::Malformed(format!("could not read the reply: {err}")))?;
 
-        let value: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|err| AuthError::Malformed(format!("reply was not JSON: {err}")))?;
-
-        match value.get("status").and_then(|s| s.as_str()) {
-            Some("ok") => Ok(value
-                .get("data")
-                .cloned()
-                .unwrap_or(serde_json::Value::Null)),
-            Some("error") => Err(AuthError::Refused {
-                code: field(&value, "code").unwrap_or_else(|| "unknown".to_string()),
-                message: field(&value, "message")
-                    .unwrap_or_else(|| "the account server refused the request".to_string()),
-            }),
-            _ => Err(AuthError::Malformed(
-                "reply had no status field".to_string(),
-            )),
-        }
+        parse_envelope(status, &text)
     }
 
     /// Read the session shape the auth endpoints all return.
@@ -263,20 +255,68 @@ impl AuthClient for HttpAuthClient {
     }
 }
 
+/// Turn `{"status":...}` into either the payload or a typed error.
+///
+/// Takes the status and the body as plain values rather than a response, so the
+/// whole mapping — the part a player actually reads — is testable with no
+/// server and no socket.
+fn parse_envelope(status: u16, text: &str) -> Result<serde_json::Value, AuthError> {
+    let value: serde_json::Value = match serde_json::from_str(text) {
+        Ok(value) => value,
+        Err(err) if status < 400 => {
+            return Err(AuthError::Malformed(format!("reply was not JSON: {err}")));
+        }
+        // Not our envelope at all: something between the game and the server
+        // answered (proxy, gateway). Say it by status rather than quoting its
+        // markup at the player.
+        Err(_) => return Err(status_refusal(status)),
+    };
+
+    match value.get("status").and_then(|s| s.as_str()) {
+        Some("ok") if status < 400 => Ok(value
+            .get("data")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null)),
+        // The server's own message is what the player sees: it was written to
+        // describe *their* input ("that is not a valid email address",
+        // "username must be 3-16 characters"), which no status code can.
+        Some("error") => Err(AuthError::Refused {
+            code: field(&value, "code").unwrap_or_else(|| "unknown".to_string()),
+            message: field(&value, "message").unwrap_or_else(|| status_message(status)),
+        }),
+        // A body that disagrees with its own status: trust the status.
+        _ if status >= 400 => Err(status_refusal(status)),
+        _ => Err(AuthError::Malformed(
+            "reply had no status field".to_string(),
+        )),
+    }
+}
+
+/// The fallback for a refusal that carried no message of its own.
+fn status_refusal(code: u16) -> AuthError {
+    AuthError::Refused {
+        code: format!("http_{code}"),
+        message: status_message(code),
+    }
+}
+
+fn status_message(code: u16) -> String {
+    match code {
+        401 => "invalid username or password".to_string(),
+        429 => "too many attempts; try again shortly".to_string(),
+        500..=599 => "the account server is having trouble".to_string(),
+        _ => format!("the account server refused the request ({code})"),
+    }
+}
+
 /// Distinguish "the server said no" from "there was no server".
 fn classify(err: ureq::Error) -> AuthError {
     match err {
-        // A status error still has a body, and that body is our envelope — so
-        // this is a refusal with a real message, not a transport failure.
-        ureq::Error::StatusCode(code) => AuthError::Refused {
-            code: format!("http_{code}"),
-            message: match code {
-                401 => "invalid username or password".to_string(),
-                429 => "too many attempts; try again shortly".to_string(),
-                500..=599 => "the account server is having trouble".to_string(),
-                _ => format!("the account server refused the request ({code})"),
-            },
-        },
+        // The agent is configured not to raise statuses as errors, so a status
+        // normally arrives as a response and is read by `parse_envelope`. This
+        // arm only covers the ones ureq raises itself (a redirect it will not
+        // follow) — still a refusal, not a transport failure.
+        ureq::Error::StatusCode(code) => status_refusal(code),
         other => AuthError::Unreachable(other.to_string()),
     }
 }
@@ -566,6 +606,83 @@ mod tests {
             verifier.verify(Some(&second.slot), 1_800_000_000).is_ok(),
             "a second join must not trip the replay cache"
         );
+    }
+
+    // --- envelope --------------------------------------------------------
+
+    /// The bug this guards: a refusal used to be classified from its status
+    /// before the body was ever read, so "that is not a valid email address"
+    /// reached the player as "the account server refused the request (422)".
+    #[test]
+    fn a_refusal_reports_the_servers_own_message() {
+        let err = parse_envelope(
+            422,
+            r#"{"status":"error","code":"validation_failed","message":"that is not a valid email address"}"#,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            AuthError::Refused {
+                code: "validation_failed".to_string(),
+                message: "that is not a valid email address".to_string(),
+            }
+        );
+        assert_eq!(err.to_string(), "that is not a valid email address");
+    }
+
+    #[test]
+    fn a_taken_username_reads_as_a_taken_username() {
+        let err = parse_envelope(
+            409,
+            r#"{"status":"error","code":"username_taken","message":"that username is already taken"}"#,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "that username is already taken");
+        assert!(!err.is_offline());
+    }
+
+    #[test]
+    fn a_success_envelope_yields_its_payload() {
+        let data = parse_envelope(200, r#"{"status":"ok","data":{"access_token":"abc"}}"#).unwrap();
+
+        assert_eq!(field(&data, "access_token").as_deref(), Some("abc"));
+    }
+
+    /// A gateway between the game and the server answers with markup, not our
+    /// envelope. The player gets a sentence, not HTML.
+    #[test]
+    fn a_reply_that_is_not_our_envelope_falls_back_to_the_status() {
+        assert_eq!(
+            parse_envelope(502, "<html>Bad Gateway</html>").unwrap_err(),
+            AuthError::Refused {
+                code: "http_502".to_string(),
+                message: "the account server is having trouble".to_string(),
+            }
+        );
+        // Even valid JSON that is not an envelope.
+        assert_eq!(
+            parse_envelope(401, r#"{"detail":"nope"}"#).unwrap_err(),
+            AuthError::Refused {
+                code: "http_401".to_string(),
+                message: "invalid username or password".to_string(),
+            }
+        );
+    }
+
+    /// Nothing is wrong with the *server*, so a broken 2xx stays malformed —
+    /// that is the variant that means "this build cannot read the reply".
+    #[test]
+    fn a_broken_success_reply_is_malformed_not_refused() {
+        assert!(matches!(
+            parse_envelope(200, "<html>"),
+            Err(AuthError::Malformed(_))
+        ));
+        assert!(matches!(
+            parse_envelope(200, r#"{"data":{}}"#),
+            Err(AuthError::Malformed(_))
+        ));
     }
 
     // --- RFC 3339 parsing ------------------------------------------------
