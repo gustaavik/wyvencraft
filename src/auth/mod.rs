@@ -32,7 +32,7 @@ pub use verifier::{TicketVerifier, VerifyFailure};
 ///
 /// `WYVEN_AUTH_URL` takes precedence, which is what lets a developer point at a
 /// local `docker compose up` without editing anything.
-pub const DEFAULT_AUTH_URL: &str = "http://127.0.0.1:8080";
+pub const DEFAULT_AUTH_URL: &str = "http://llzdmervhd2eyewlrapa8jhi.100.94.237.98.sslip.io";
 
 /// The auth server this build should talk to.
 pub fn auth_url() -> String {
