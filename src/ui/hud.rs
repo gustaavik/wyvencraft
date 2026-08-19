@@ -14,7 +14,7 @@ pub fn draw_crosshair(ctx: &Context) {
     let center = screen.center();
     let painter = ctx.layer_painter(egui::LayerId::background());
     let len = 8.0;
-    let stroke = Stroke::new(2.0, Color32::from_white_alpha(180));
+    let stroke = Stroke::new(2.0_f32, Color32::from_white_alpha(180));
     painter.line_segment(
         [center - egui::vec2(len, 0.0), center + egui::vec2(len, 0.0)],
         stroke,
@@ -58,7 +58,7 @@ pub fn draw_hotbar(
                     painter.rect_stroke(
                         cell,
                         3.0,
-                        Stroke::new(2.5, Color32::WHITE),
+                        Stroke::new(2.5_f32, Color32::WHITE),
                         egui::StrokeKind::Inside,
                     );
                 }

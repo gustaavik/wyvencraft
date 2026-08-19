@@ -1,0 +1,10 @@
+# Pinned so CI and every developer machine compile with the same rustc.
+#
+# CI runs `clippy -D warnings`, which turns any lint into a build failure — so
+# tracking `stable` meant a new Rust release could red an unrelated PR. (It did:
+# 1.97.1 added `float_literal_f32_fallback`, which fires on egui's
+# `Stroke::new(2.0, …)`, while 1.96 locally saw nothing.) Bump this deliberately
+# instead; rustup installs the pinned toolchain on the first cargo command.
+[toolchain]
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]

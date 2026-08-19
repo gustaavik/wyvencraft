@@ -77,10 +77,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build python3
 
-      - name: Install the Rust toolchain
+      # No argument: installs the toolchain named by rust-toolchain.toml. The
+      # target is added to that same pinned toolchain.
+      - name: Install the pinned toolchain
         run: |
-          rustup update --no-self-update stable
-          rustup default stable
+          rustup toolchain install
           rustup target add ${{ matrix.target }}
 
       - name: Build
