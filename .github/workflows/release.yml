@@ -1,0 +1,113 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to build and upload to"
+        required: true
+
+# `gh release upload` writes to the release.
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # `.cargo/config.toml` is gitignored, so its `[net]` block never reaches CI.
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  # Baked into the binary by `option_env!` in `auth::DEFAULT_AUTH_URL` — this is
+  # what a downloaded release talks to. No trailing slash.
+  WYVEN_AUTH_URL: http://llzdmervhd2eyewlrapa8jhi.100.94.237.98.sslip.io
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # One broken target still ships the others.
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+          - target: x86_64-apple-darwin
+            # macos-13 has been retired; this is the current standard Intel runner.
+            runner: macos-15-intel
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+
+    steps:
+      - name: Resolve the release tag
+        run: echo "TAG=${{ github.event.release.tag_name || inputs.tag }}" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      # `wcauth-ticket` is a git dependency on the private gustaavik/wcauthserver
+      # repo, which the built-in GITHUB_TOKEN cannot read.
+      - name: Authenticate to the private wcauthserver repo
+        env:
+          WCAUTH_TOKEN: ${{ secrets.WCAUTH_TOKEN }}
+        run: |
+          git config --global \
+            url."https://x-access-token:${WCAUTH_TOKEN}@github.com/".insteadOf \
+            "https://github.com/"
+
+      # shaderc compiles the GLSL to SPIR-V at build time via the `vulkano-shaders`
+      # proc macro. It is never linked into the shipped binary, and no Vulkan SDK
+      # is needed to build: vulkano and winit load Vulkan/X11/Wayland dynamically.
+      - name: Install shaderc (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install shaderc
+          echo "SHADERC_LIB_DIR=$(brew --prefix shaderc)/lib" >> "$GITHUB_ENV"
+
+      - name: Install shaderc (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libshaderc-dev
+          echo "SHADERC_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> "$GITHUB_ENV"
+
+      - name: Install the Rust toolchain
+        run: |
+          rustup update --no-self-update stable
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      # The binary alone is not runnable: textures, models and the content TOMLs
+      # are read from a CWD-relative `assets/` at runtime. Only the shaders are
+      # compiled in.
+      - name: Package
+        run: |
+          NAME="wyvencraft-${TAG}-${{ matrix.target }}"
+          mkdir -p "dist/${NAME}"
+          cp "target/${{ matrix.target }}/release/wyvencraft" "dist/${NAME}/"
+          cp -R assets "dist/${NAME}/"
+          cp README.md "dist/${NAME}/"
+          tar -czf "dist/${NAME}.tar.gz" -C dist "${NAME}"
+          # Recorded from inside dist/, so the file names a bare filename and a
+          # downloader can `shasum -c` it next to the tarball.
+          (cd dist && shasum -a 256 "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256")
+          echo "ASSET=dist/${NAME}.tar.gz" >> "$GITHUB_ENV"
+          echo "NAME=${NAME}" >> "$GITHUB_ENV"
+
+      # Also kept as a workflow artifact, so a workflow_dispatch run is useful on
+      # its own and a failed upload leaves the build recoverable.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.NAME }}
+          path: |
+            ${{ env.ASSET }}
+            ${{ env.ASSET }}.sha256
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$TAG" "$ASSET" "$ASSET.sha256" --clobber

@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+# A push to a PR supersedes whatever is still running for it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # `.cargo/config.toml` is gitignored, so its `[net]` block never reaches CI.
+  # `wcauth-ticket` lives in a private repo; fetching it through the system git
+  # is what lets the credential below apply.
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+jobs:
+  # Split out so a formatting slip reports in seconds instead of waiting on a
+  # full dependency build. rustfmt never resolves dependencies, so this job
+  # needs neither the private-repo token nor shaderc.
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install rustfmt
+        run: |
+          rustup update --no-self-update stable
+          rustup default stable
+          rustup component add rustfmt
+
+      - run: cargo fmt --all --check
+
+  clippy-test:
+    name: clippy + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # `wcauth-ticket` is a git dependency on the private gustaavik/wcauthserver
+      # repo. The built-in GITHUB_TOKEN is scoped to this repo only, so a PAT with
+      # Contents:read on wcauthserver is required.
+      - name: Authenticate to the private wcauthserver repo
+        env:
+          WCAUTH_TOKEN: ${{ secrets.WCAUTH_TOKEN }}
+        run: |
+          git config --global \
+            url."https://x-access-token:${WCAUTH_TOKEN}@github.com/".insteadOf \
+            "https://github.com/"
+
+      # `vulkano-shaders` is a proc-macro crate, so shaderc is needed to *compile*
+      # (it turns assets/shaders/*.{vert,frag} into SPIR-V) but is never linked
+      # into the binary. Without a library to find, shaderc-sys falls back to a
+      # slow cmake build from source.
+      - name: Install shaderc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libshaderc-dev
+          echo "SHADERC_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> "$GITHUB_ENV"
+
+      - name: Install clippy
+        run: |
+          rustup update --no-self-update stable
+          rustup default stable
+          rustup component add clippy
+
+      # Pinned to the v2.9.2 commit: the only third-party action in a workflow
+      # whose runner holds a PAT.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+
+      - run: cargo clippy --all-targets --locked -- -D warnings
+
+      - run: cargo test --locked

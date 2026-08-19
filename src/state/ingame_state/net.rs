@@ -59,7 +59,11 @@ impl InGameState {
     /// are validated here; updates arrive on a client and are already truth.
     fn apply_inbound(&mut self, inbound: Inbound) {
         match inbound {
-            Inbound::Joined { player, identity } => self.welcome_player(player, identity),
+            Inbound::Joined {
+                player,
+                identity,
+                account,
+            } => self.welcome_player(player, identity, account),
             Inbound::Left { player } => self.forget_player(player),
             Inbound::Request { player, msg } => self.apply_request(player, msg),
             Inbound::Update(msg) => self.apply_update(msg),
@@ -71,7 +75,12 @@ impl InGameState {
     /// Admit a joining player: hand back their saved state if this world
     /// remembers them, announce them, and bring them up to date on everyone's
     /// current gear (unchanging equipment isn't otherwise re-broadcast).
-    fn welcome_player(&mut self, pid: PlayerId, identity: u64) {
+    fn welcome_player(
+        &mut self,
+        pid: PlayerId,
+        identity: u64,
+        account: Option<crate::auth::AccountIdentity>,
+    ) {
         let restored = self
             .save
             .records
@@ -98,7 +107,18 @@ impl InGameState {
         };
         self.session.send_to(pid, &welcome, Channel::Reliable);
 
-        let name = format!("Player {}", pid.0);
+        // The name comes from the player's verified ticket, not from anything
+        // they typed or the host made up. `PlayerJoined` already carried a name
+        // field — it was just never given a real one to carry.
+        //
+        // The fallback only fires where there is nobody to verify (the
+        // singleplayer session, or a test): a host on a real socket refuses
+        // joins it cannot verify, so a connected peer always has an account.
+        let name = account
+            .as_ref()
+            .map(|account| account.username.clone())
+            .unwrap_or_else(|| format!("Player {}", pid.0));
+
         let joined = ServerMessage::PlayerJoined {
             id: pid,
             name: name.clone(),
@@ -106,6 +126,9 @@ impl InGameState {
         self.session.broadcast(&joined, Channel::Reliable);
 
         self.peers.identities.insert(pid, identity);
+        if let Some(account) = account {
+            self.peers.accounts.insert(pid, account);
+        }
         self.peers
             .players
             .insert(pid, RemotePlayer::new(pid, name, Vec3::from_array(spawn)));
@@ -781,6 +804,7 @@ mod tests {
         handle.deliver(Inbound::Joined {
             player: pid,
             identity: 42,
+            account: None,
         });
         state.pump_network(1.0 / 60.0);
 
@@ -825,6 +849,7 @@ mod tests {
         handle.deliver(Inbound::Joined {
             player: pid,
             identity: 42,
+            account: None,
         });
 
         state.pump_network(1.0 / 60.0);
@@ -891,6 +916,7 @@ mod tests {
         handle.deliver(Inbound::Joined {
             player: pid,
             identity,
+            account: None,
         });
         state.pump_network(1.0 / 60.0);
 
@@ -924,6 +950,7 @@ mod tests {
         handle.deliver(Inbound::Joined {
             player: pid,
             identity: 99,
+            account: None,
         });
         state.pump_network(1.0 / 60.0);
 
@@ -1026,6 +1053,7 @@ mod tests {
         handle.deliver(Inbound::Joined {
             player: pid,
             identity: 1,
+            account: None,
         });
         state.pump_network(1.0 / 60.0);
         // The joiner is placed at the host's position (no saved record).

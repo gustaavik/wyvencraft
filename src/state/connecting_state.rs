@@ -1,36 +1,136 @@
-//! Transient state while connecting to a host: pumps the client until it
-//! connects and receives the `Welcome` (which carries the world seed), then
-//! enters the world as a client.
+//! Transient state while connecting to a host: fetches a join ticket, pumps the
+//! client until it connects and receives the `Welcome` (which carries the world
+//! seed), then enters the world as a client.
+//!
+//! The ticket is fetched here rather than at login because it lives about two
+//! minutes — one obtained at sign-in would be long stale by the time anyone
+//! clicked Join. The fetch is blocking, so it happens on a worker while this
+//! screen spins.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::time::Duration;
 
 use super::{GameState, InGameState, MultiplayerMenuState, StateContext, Transition};
+use crate::auth::{AccountState, AuthClient, AuthError, HttpAuthClient, JoinTicket};
 use crate::net::{Client, ServerMessage};
 
 const TIMEOUT_SECS: f32 = 12.0;
 
+/// What the ticket worker reports back.
+type TicketResult = Result<JoinTicket, AuthError>;
+
 pub struct ConnectingState {
+    address: SocketAddr,
+    /// The netcode identity to present — derived from the account.
+    identity: u64,
+    /// In flight until the ticket lands.
+    pending_ticket: Option<Receiver<TicketResult>>,
     client: Option<Client>,
     elapsed: f32,
     status: String,
+    /// Set once we have given up, so `update` stops trying and drops back.
+    failed: bool,
 }
 
 impl ConnectingState {
-    pub fn new(address: SocketAddr) -> Self {
-        // Connect with the persisted profile identity so the host can recognise
-        // a returning player and hand back their saved inventory/position.
-        let identity = crate::save::client_identity();
-        let (client, status) = match Client::connect(address, identity) {
-            Ok(c) => (Some(c), format!("Connecting to {address}…")),
-            Err(e) => (None, format!("Connection failed: {e}")),
-        };
+    /// Start connecting. The account is used to obtain the join ticket.
+    pub fn new(address: SocketAddr, account: &AccountState) -> Self {
+        Self::with_client(address, account, Arc::new(HttpAuthClient::from_env()))
+    }
+
+    /// With an injected auth client, for tests.
+    pub fn with_client(
+        address: SocketAddr,
+        account: &AccountState,
+        auth: Arc<dyn AuthClient>,
+    ) -> Self {
+        // Checked here as well as in the menu, because this is the path that
+        // matters: the menu's greyed-out button is a courtesy, this is the gate.
+        if !account.can_play_multiplayer() {
+            return Self {
+                address,
+                identity: 0,
+                pending_ticket: None,
+                client: None,
+                elapsed: 0.0,
+                status: "Sign in to play with other people.".to_string(),
+                failed: true,
+            };
+        }
+
+        // Derived from the account, so the host matches a returning player to
+        // their saved inventory and position across machines. The host checks
+        // that this agrees with the ticket before letting anyone in.
+        let identity = account.netcode_id();
+
+        let (tx, rx) = channel();
+        let account = account.clone();
+        std::thread::spawn(move || {
+            let now = unix_now();
+            let _ = tx.send(account.issue_ticket(auth.as_ref(), now));
+        });
+
         Self {
-            client,
+            address,
+            identity,
+            pending_ticket: Some(rx),
+            client: None,
             elapsed: 0.0,
-            status,
+            status: "Getting a join ticket...".to_string(),
+            failed: false,
         }
     }
+
+    /// Once the ticket lands, open the connection with it attached.
+    fn poll_ticket(&mut self) -> Transition {
+        let Some(rx) = self.pending_ticket.as_ref() else {
+            return Transition::None;
+        };
+
+        match rx.try_recv() {
+            Ok(Ok(ticket)) => {
+                self.pending_ticket = None;
+                match Client::connect(self.address, self.identity, Some(ticket.slot)) {
+                    Ok(client) => {
+                        self.client = Some(client);
+                        self.status = format!("Connecting to {}...", self.address);
+                    }
+                    Err(err) => {
+                        self.status = format!("Connection failed: {err}");
+                        self.failed = true;
+                    }
+                }
+                Transition::None
+            }
+            Ok(Err(err)) => {
+                self.pending_ticket = None;
+                log::warn!("could not get a join ticket: {err}");
+                self.status = if err.is_offline() {
+                    "The account server is unreachable — cannot join.".to_string()
+                } else {
+                    format!("Could not join: {err}")
+                };
+                self.failed = true;
+                Transition::None
+            }
+            Err(TryRecvError::Empty) => Transition::None,
+            Err(TryRecvError::Disconnected) => {
+                self.pending_ticket = None;
+                self.status = "Could not get a join ticket.".to_string();
+                self.failed = true;
+                Transition::None
+            }
+        }
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 impl GameState for ConnectingState {
@@ -42,10 +142,24 @@ impl GameState for ConnectingState {
         ctx.grab_cursor = false;
         self.elapsed += ctx.dt;
 
-        let Some(client) = self.client.as_mut() else {
-            // Connect() failed outright; bail back to the menu after a moment.
-            if self.elapsed > 2.0 {
+        // Long enough to read why, short enough not to feel stuck.
+        if self.failed {
+            if self.elapsed > 3.0 {
                 return Transition::Replace(Box::new(MultiplayerMenuState::new()));
+            }
+            return Transition::None;
+        }
+
+        let transition = self.poll_ticket();
+        if !matches!(transition, Transition::None) {
+            return transition;
+        }
+
+        let Some(client) = self.client.as_mut() else {
+            // Still waiting on the ticket, or it failed and `failed` is set.
+            if self.elapsed > TIMEOUT_SECS {
+                self.status = "Timed out".to_string();
+                self.failed = true;
             }
             return Transition::None;
         };

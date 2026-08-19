@@ -73,7 +73,7 @@ pub enum Invocation<'a> {
         command: &'static dyn ChatCommand,
         args: &'a str,
     },
-    /// A `/…` with no command by that name.
+    /// A `/...` with no command by that name.
     Unknown { typed: &'a str },
 }
 
@@ -98,7 +98,7 @@ pub fn resolve(input: &str) -> Invocation<'_> {
     }
 }
 
-/// The message shown for a `/…` nobody implements.
+/// The message shown for a `/...` nobody implements.
 pub fn unknown_command_message(typed: &str) -> String {
     format!("unknown command '/{typed}' — try /help")
 }
@@ -109,7 +109,7 @@ pub fn unauthorized_message(command: &str) -> String {
 }
 
 /// The nearest candidate to `needle`: a case-insensitive prefix match if there
-/// is one, otherwise a substring match. Powers "did you mean …?" on a typo'd
+/// is one, otherwise a substring match. Powers "did you mean ...?" on a typo'd
 /// argument without pulling in a fuzzy-matching dependency.
 pub fn suggest<'a>(needle: &str, candidates: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
     let needle = needle.trim().to_ascii_lowercase();

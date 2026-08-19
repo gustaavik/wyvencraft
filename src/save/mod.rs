@@ -353,12 +353,77 @@ pub fn parse_seed(text: &str) -> u64 {
 struct ProfileToml {
     /// Decimal string for the same u64-in-TOML reason as the world seed.
     client_id: String,
+    /// The signed-in account, when there is one.
+    ///
+    /// `#[serde(default)]` so a `profile.toml` written before accounts existed
+    /// still parses — it simply has no account and the player logs in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    account: Option<AccountProfile>,
+}
+
+/// A signed-in session as it survives a restart, so a player is not asked for
+/// their password every launch.
+///
+/// The refresh token is the sensitive part. It lives here for the same reason
+/// every game launcher keeps one: the alternative is retyping a password on
+/// every start. `profile.toml` is gitignored, and the token is single-use and
+/// revocable — a stolen one stops working the moment the real client refreshes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountProfile {
+    /// Account uuid, as text.
+    pub account_id: String,
+    pub username: String,
+    pub refresh_token: String,
+}
+
+/// The account this client last signed in as, if any.
+pub fn stored_account() -> Option<AccountProfile> {
+    let text = fs::read_to_string(PROFILE_FILE).ok()?;
+    toml::from_str::<ProfileToml>(&text).ok()?.account
+}
+
+/// Remember (or forget, with `None`) the signed-in account.
+///
+/// Read-modify-write so the `client_id` already in the file is preserved: it is
+/// the offline fallback identity, and regenerating it would orphan any
+/// singleplayer save made before signing in.
+pub fn store_account(account: Option<AccountProfile>) -> Result<(), String> {
+    let path = PathBuf::from(PROFILE_FILE);
+    let existing = fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| toml::from_str::<ProfileToml>(&text).ok());
+
+    let profile = ProfileToml {
+        client_id: existing
+            .map(|profile| profile.client_id)
+            .unwrap_or_else(|| local_identity().to_string()),
+        account,
+    };
+
+    let text = toml::to_string_pretty(&profile)
+        .map_err(|err| format!("could not serialize profile: {err}"))?;
+    write_atomic(&path, text.as_bytes())
+        .map_err(|err| format!("could not write {PROFILE_FILE}: {err}"))
+}
+
+/// The machine-local identity, used only when nobody is signed in.
+///
+/// This is what `client_identity` always was: a random `u64` minted on first
+/// launch. With accounts it is no longer how a *multiplayer* peer is
+/// identified — that comes from the verified ticket — but singleplayer saves
+/// still need some stable key, and an offline player has nothing better.
+pub fn local_identity() -> u64 {
+    client_identity()
 }
 
 /// The stable multiplayer identity this machine connects with (the netcode
 /// client id). Persisted in `profile.toml` on first use so a host can recognise
 /// a returning player and hand back their saved inventory/position.
 /// `WYVEN_CLIENT_ID` overrides it (e.g. to run two clients from one directory).
+///
+/// Prefer [`crate::auth::AccountState::netcode_id`] where an account may be
+/// signed in: it derives the id from the account, so a save follows the player
+/// rather than the machine.
 pub fn client_identity() -> u64 {
     if let Ok(v) = std::env::var("WYVEN_CLIENT_ID")
         && let Ok(id) = v.trim().parse::<u64>()
@@ -375,6 +440,7 @@ pub fn client_identity() -> u64 {
     let id = (random_seed() ^ (u64::from(std::process::id())).rotate_left(32)).max(1);
     let profile = ProfileToml {
         client_id: id.to_string(),
+        account: None,
     };
     match toml::to_string_pretty(&profile) {
         Ok(text) => {

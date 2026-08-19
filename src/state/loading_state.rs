@@ -65,7 +65,7 @@ impl GameState for LoadingState {
         egui::CentralPanel::default().show(egui_ctx, |ui| {
             ui.vertical_centered(|ui| {
                 ui.add_space(120.0);
-                ui.heading("Generating world…");
+                ui.heading("Generating world...");
                 ui.spinner();
             });
         });

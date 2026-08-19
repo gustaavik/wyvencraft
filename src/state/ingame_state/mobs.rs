@@ -584,7 +584,7 @@ impl InGameState {
         }
     }
 
-    /// Dev hook (`WYVEN_DEBUG_SPAWN=cow,zombie,…`): spawn the named kinds in a
+    /// Dev hook (`WYVEN_DEBUG_SPAWN=cow,zombie,...`): spawn the named kinds in a
     /// line near the player right after entering the world, for visual checks
     /// without waiting on the spawner. Replaced by real spawning rules.
     pub(super) fn debug_spawn_from_env(&mut self) {

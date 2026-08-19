@@ -490,7 +490,7 @@ mod tests {
 
     #[test]
     fn mob_component_is_optional_but_strict() {
-        // A kind without [entity.mob] parses (it's just not a mob) …
+        // A kind without [entity.mob] parses (it's just not a mob) ...
         let plain = r#"
             [[entity]]
             name = "player"
@@ -544,7 +544,7 @@ mod tests {
         let reg = EntityRegistry::from_toml(plain).expect("plain file parses");
         assert!(reg.player().mob.is_none());
 
-        // … while a misspelled mob field rejects the file.
+        // ... while a misspelled mob field rejects the file.
         let bad = format!(
             "{plain}\n\
             [[entity]]\n\

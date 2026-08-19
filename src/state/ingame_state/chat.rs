@@ -131,15 +131,21 @@ impl InGameState {
     ///
     /// The local player of an authoritative session is always an op — they own
     /// the process, so there is nothing to enforce against them. Everyone else
-    /// is matched by the stable identity the host recorded when they joined.
+    /// is matched by the **verified account** the host recorded when they
+    /// joined.
+    ///
+    /// A player with no recorded account is never an op. That is the important
+    /// half: `peers.accounts` is only ever written from a checked ticket
+    /// signature, so there is no way to be authorized without having proved who
+    /// you are.
     fn is_op(&self, actor: PlayerId) -> bool {
         if actor == self.session.local_id() {
             return true;
         }
         self.peers
-            .identities
+            .accounts
             .get(&actor)
-            .is_some_and(|identity| self.ops.is_op(*identity))
+            .is_some_and(|account| self.ops.is_op(&account.account_id))
     }
 
     /// Split `count` of `name` into stacks and hand them to `actor`.
@@ -421,12 +427,42 @@ mod tests {
         (state, handle)
     }
 
-    /// Register `pid` as a joined client with `identity`, the way `welcome_player`
-    /// does, so the ops lookup has something to match against.
+    /// A stable test account, so a uuid does not have to be spelled out at
+    /// every call site.
+    fn account(n: u128) -> crate::auth::AccountIdentity {
+        crate::auth::AccountIdentity {
+            account_id: uuid::Uuid::from_u128(n),
+            username: format!("player{n}"),
+        }
+    }
+
+    /// Register `pid` as a joined client, the way `welcome_player` does, so the
+    /// ops lookup has something to match against.
+    ///
+    /// The account is what carries authorization now; `identity` is only the
+    /// save-record key.
     fn join(state: &mut InGameState, handle: &FakeHandle, pid: PlayerId, identity: u64) {
+        join_as(
+            state,
+            handle,
+            pid,
+            identity,
+            Some(account(u128::from(identity))),
+        );
+    }
+
+    /// Join with an explicit account — or with `None`, for an unverified peer.
+    fn join_as(
+        state: &mut InGameState,
+        handle: &FakeHandle,
+        pid: PlayerId,
+        identity: u64,
+        account: Option<crate::auth::AccountIdentity>,
+    ) {
         handle.deliver(Inbound::Joined {
             player: pid,
             identity,
+            account,
         });
         state.pump_network(1.0 / 60.0);
     }
@@ -572,7 +608,10 @@ mod tests {
     fn an_op_client_is_told_to_teleport_to_the_host() {
         let (mut state, handle) = host_session();
         let pid = PlayerId(1);
-        state.set_ops(OpsList::from_toml("ops = [{ id = \"5\" }]").unwrap());
+        state.set_ops(
+            OpsList::from_toml(&format!("ops = [{{ id = \"{}\" }}]", account(5).account_id))
+                .unwrap(),
+        );
         join(&mut state, &handle, pid, 5);
         state.player.position = Vec3::new(64.0, 71.0, -8.0);
 
@@ -708,7 +747,10 @@ mod tests {
         let (mut state, handle) = host_session();
         let pid = PlayerId(1);
         let identity = 4242;
-        state.set_ops(OpsList::from_toml(&format!("ops = [{{ id = \"{identity}\" }}]")).unwrap());
+        let op = account(u128::from(identity));
+        state.set_ops(
+            OpsList::from_toml(&format!("ops = [{{ id = \"{}\" }}]", op.account_id)).unwrap(),
+        );
         join(&mut state, &handle, pid, identity);
 
         handle.deliver(Inbound::Request {
@@ -739,13 +781,117 @@ mod tests {
         );
     }
 
-    /// A rejoining player brings a new `PlayerId` but the same identity, which
-    /// is exactly why the ops list is keyed by identity.
+    /// Authorization requires a *verified* account, not merely a connection.
+    ///
+    /// A host on a real socket refuses joins it cannot verify, so this state
+    /// should be unreachable in production — which is exactly why it is worth
+    /// pinning. If a future change ever admits an unverified peer, this catches
+    /// it before that peer can also become an op.
     #[test]
-    fn authorization_follows_the_identity_not_the_player_id() {
+    fn a_player_with_no_verified_account_is_never_an_op() {
+        let (mut state, handle) = host_session();
+        let pid = PlayerId(1);
+        // Every account in the file is an op...
+        state.set_ops(
+            OpsList::from_toml(&format!("ops = [{{ id = \"{}\" }}]", account(7).account_id))
+                .unwrap(),
+        );
+        // ...but this peer arrived without one.
+        join_as(&mut state, &handle, pid, 7, None);
+
+        handle.deliver(Inbound::Request {
+            player: pid,
+            msg: ClientMessage::Chat("/give bread 5".to_string()),
+        });
+        state.pump_network(1.0 / 60.0);
+
+        let net = handle.lock();
+        assert!(
+            !net.messages_to(pid)
+                .iter()
+                .any(|m| matches!(m, ServerMessage::GrantItems { .. })),
+            "an unverified peer must not be authorized"
+        );
+        assert!(
+            net.messages_to(pid).iter().any(|m| matches!(
+                m,
+                ServerMessage::Chat { kind: ChatKind::Error, text, .. }
+                    if text.contains("not authorized")
+            )),
+            "and should be told why"
+        );
+    }
+
+    /// Ops are keyed by account, so a *different* account holding the same save
+    /// slot is not authorized. This is the escalation the rewrite closes: the
+    /// old key was a number the client asserted for itself.
+    #[test]
+    fn a_different_account_on_the_same_identity_is_not_an_op() {
+        let (mut state, handle) = host_session();
+        let pid = PlayerId(1);
+        state.set_ops(
+            OpsList::from_toml(&format!("ops = [{{ id = \"{}\" }}]", account(7).account_id))
+                .unwrap(),
+        );
+        // Same save-record identity, a different account.
+        join_as(&mut state, &handle, pid, 7, Some(account(8)));
+
+        handle.deliver(Inbound::Request {
+            player: pid,
+            msg: ClientMessage::Chat("/give bread 5".to_string()),
+        });
+        state.pump_network(1.0 / 60.0);
+
+        assert!(
+            !handle
+                .lock()
+                .messages_to(pid)
+                .iter()
+                .any(|m| matches!(m, ServerMessage::GrantItems { .. })),
+        );
+    }
+
+    /// The username on the wire is the one from the verified ticket — not
+    /// something the host made up, and not something the client typed.
+    #[test]
+    fn a_joining_player_is_announced_under_their_verified_username() {
+        let (mut state, handle) = host_session();
+        let pid = PlayerId(1);
+        join_as(
+            &mut state,
+            &handle,
+            pid,
+            42,
+            Some(crate::auth::AccountIdentity {
+                account_id: uuid::Uuid::from_u128(42),
+                username: "gustav".to_string(),
+            }),
+        );
+
+        let net = handle.lock();
+        assert!(
+            net.broadcasts().iter().any(|m| matches!(
+                m,
+                ServerMessage::PlayerJoined { id, name } if *id == pid && name == "gustav"
+            )),
+            "expected a join announcing 'gustav', got {:?}",
+            net.broadcasts()
+        );
+    }
+
+    /// A rejoining player brings a new `PlayerId` but the same account, which
+    /// is exactly why the ops list is keyed by account rather than by session.
+    #[test]
+    fn authorization_follows_the_account_not_the_player_id() {
         let (mut state, handle) = host_session();
         let identity = 77;
-        state.set_ops(OpsList::from_toml("ops = [{ id = \"77\" }]").unwrap());
+        state.set_ops(
+            OpsList::from_toml(&format!(
+                "ops = [{{ id = \"{}\" }}]",
+                account(u128::from(identity)).account_id
+            ))
+            .unwrap(),
+        );
         // Same person, a different session id than last time.
         join(&mut state, &handle, PlayerId(3), identity);
 

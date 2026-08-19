@@ -1,10 +1,14 @@
 //! Who is authorized to run commands.
 //!
-//! Keyed by the stable *client identity* (`save::client_identity()`) rather than
-//! by [`PlayerId`](crate::net::PlayerId): player ids are assigned per session
-//! and shift on every reconnect, so they can't carry a permission. The identity
-//! is the same u64 the host already uses to hand a returning player their saved
-//! inventory back, which makes it the only durable handle on a person.
+//! Keyed by **account id** rather than by [`PlayerId`](crate::net::PlayerId):
+//! player ids are assigned per session and shift on every reconnect, so they
+//! can't carry a permission.
+//!
+//! It used to be keyed by the local `profile.toml` client id, which the client
+//! asserted for itself over an unauthenticated handshake — so anyone who learned
+//! an op's number *became* that op by setting one environment variable. Now the
+//! key is the uuid inside a signed join ticket, which nobody can mint. That is
+//! the change that turns this file from an honour system into a permission.
 //!
 //! The file is read exactly like `profile.toml` (CWD-relative, fail-soft): an
 //! absent or malformed `ops.toml` ops nobody rather than taking the game down.
@@ -14,15 +18,16 @@ use std::collections::HashMap;
 use std::fs;
 
 use serde::Deserialize;
+use uuid::Uuid;
 
 /// Ops file, next to `profile.toml` and `saves/` in the working directory.
 pub const OPS_FILE: &str = "ops.toml";
 
-/// The set of authorized identities, with the names the file gave them.
+/// The set of authorized accounts, with the names the file gave them.
 #[derive(Debug, Clone, Default)]
 pub struct OpsList {
-    /// identity → display name (the identity itself when the file omits one).
-    ops: HashMap<u64, String>,
+    /// account id → display name (the id itself when the file omits one).
+    ops: HashMap<Uuid, String>,
 }
 
 impl OpsList {
@@ -57,19 +62,19 @@ impl OpsList {
         }
     }
 
-    /// Parse an ops file. Entries whose `id` isn't a u64 are skipped with a
+    /// Parse an ops file. Entries whose `id` isn't a uuid are skipped with a
     /// warning — one typo shouldn't revoke everyone else.
     pub fn from_toml(text: &str) -> Result<Self, String> {
         let file: OpsToml = toml::from_str(text).map_err(|err| err.to_string())?;
         let mut ops = HashMap::new();
         for entry in file.ops {
-            match entry.id.trim().parse::<u64>() {
+            match Uuid::parse_str(entry.id.trim()) {
                 Ok(id) => {
                     let name = entry.name.unwrap_or_else(|| id.to_string());
                     ops.insert(id, name);
                 }
                 Err(_) => log::warn!(
-                    "{OPS_FILE}: '{}' is not a client id (expected a decimal number in quotes)",
+                    "{OPS_FILE}: '{}' is not an account id (expected a uuid, as shown by /whoami)",
                     entry.id
                 ),
             }
@@ -77,8 +82,8 @@ impl OpsList {
         Ok(Self { ops })
     }
 
-    pub fn is_op(&self, identity: u64) -> bool {
-        self.ops.contains_key(&identity)
+    pub fn is_op(&self, account: &Uuid) -> bool {
+        self.ops.contains_key(account)
     }
 
     pub fn len(&self) -> usize {
@@ -103,8 +108,8 @@ struct OpsToml {
 
 #[derive(Deserialize)]
 struct OpEntry {
-    /// Decimal string, for the same u64-in-TOML reason as the world seed and
-    /// `profile.toml`'s `client_id`.
+    /// The account uuid, as text — what `/whoami` prints and what the auth
+    /// server's `/accounts/me` returns.
     id: String,
     /// Optional, purely so the file is readable by a human.
     #[serde(default)]
@@ -115,6 +120,13 @@ struct OpEntry {
 mod tests {
     use super::*;
 
+    const GUSTAV: &str = "6200dcc7-4f94-4632-adc8-37924e5cda4b";
+    const SOMEONE: &str = "11111111-2222-3333-4444-555555555555";
+
+    fn uuid(text: &str) -> Uuid {
+        Uuid::parse_str(text).expect("test uuid")
+    }
+
     /// The default state of every install: no file, so the host is the only one
     /// who can run commands. This must be the *safe* direction — an unreadable
     /// ops file granting everyone access would be a silent privilege escalation.
@@ -122,12 +134,73 @@ mod tests {
     fn an_absent_ops_list_ops_nobody() {
         let ops = OpsList::default();
         assert!(ops.is_empty());
-        assert!(!ops.is_op(1));
-        assert!(!ops.is_op(0));
+        assert!(!ops.is_op(&uuid(GUSTAV)));
+        assert!(!ops.is_op(&Uuid::nil()));
     }
 
     #[test]
-    fn an_op_is_matched_by_identity() {
+    fn an_op_is_matched_by_account_id() {
+        let ops = OpsList::from_toml(&format!(
+            r#"
+            ops = [
+              {{ id = "{GUSTAV}", name = "gustav" }},
+              {{ id = "{SOMEONE}" }},
+            ]
+            "#
+        ))
+        .expect("a well-formed ops file parses");
+
+        assert_eq!(ops.len(), 2);
+        assert!(ops.is_op(&uuid(GUSTAV)));
+        assert!(ops.is_op(&uuid(SOMEONE)));
+        assert!(!ops.is_op(&Uuid::nil()));
+
+        // A nameless entry falls back to its id, so the load log is never blank.
+        let mut names: Vec<&str> = ops.names().collect();
+        names.sort_unstable();
+        assert_eq!(names, [SOMEONE, "gustav"]);
+    }
+
+    #[test]
+    fn uuid_matching_ignores_formatting_differences() {
+        let ops = OpsList::from_toml(&format!(
+            "ops = [ {{ id = \"  {}  \" }} ]",
+            GUSTAV.to_uppercase()
+        ))
+        .expect("parses");
+
+        // Uuid parsing is case-insensitive and we trim, so an op does not lose
+        // their permissions to a stray space or a capital letter.
+        assert!(ops.is_op(&uuid(GUSTAV)));
+    }
+
+    /// Fail-soft like every other data file in the project: a broken `ops.toml`
+    /// is a warning and an empty list, never a panic mid-session.
+    #[test]
+    fn a_malformed_ops_file_fails_soft() {
+        assert!(OpsList::from_toml("ops = [ this is not toml").is_err());
+
+        // A bad id inside an otherwise valid file only drops that entry.
+        let ops = OpsList::from_toml(&format!(
+            r#"
+            ops = [
+              {{ id = "not-a-uuid" }},
+              {{ id = "18446744073" }},
+              {{ id = "{GUSTAV}" }},
+            ]
+            "#
+        ))
+        .expect("the file itself is valid TOML");
+
+        assert_eq!(ops.len(), 1);
+        assert!(ops.is_op(&uuid(GUSTAV)));
+    }
+
+    /// The old format keyed on a decimal client id. Those entries no longer
+    /// parse, and must fail *closed* — an unrecognised line granting ops would
+    /// be exactly the escalation this rewrite exists to remove.
+    #[test]
+    fn a_pre_account_ops_file_ops_nobody() {
         let ops = OpsList::from_toml(
             r#"
             ops = [
@@ -136,34 +209,9 @@ mod tests {
             ]
             "#,
         )
-        .expect("a well-formed ops file parses");
-        assert_eq!(ops.len(), 2);
-        assert!(ops.is_op(18_446_744_073));
-        assert!(ops.is_op(42));
-        assert!(!ops.is_op(43));
-        // A nameless entry falls back to its id, so the load log is never blank.
-        let mut names: Vec<&str> = ops.names().collect();
-        names.sort_unstable();
-        assert_eq!(names, ["42", "gustav"]);
-    }
-
-    /// Fail-soft like every other data file in the project: a broken `ops.toml`
-    /// is a warning and an empty list, never a panic mid-session.
-    #[test]
-    fn a_malformed_ops_file_fails_soft() {
-        assert!(OpsList::from_toml("ops = [ this is not toml").is_err());
-        // A bad id inside an otherwise valid file only drops that entry.
-        let ops = OpsList::from_toml(
-            r#"
-            ops = [
-              { id = "not-a-number" },
-              { id = "7" },
-            ]
-            "#,
-        )
         .expect("the file itself is valid TOML");
-        assert_eq!(ops.len(), 1);
-        assert!(ops.is_op(7));
+
+        assert!(ops.is_empty());
     }
 
     /// An empty file is valid and means the same as no file.

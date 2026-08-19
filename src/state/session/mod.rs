@@ -47,9 +47,18 @@ pub enum Authority {
 
 /// One thing that arrived from the network this frame.
 pub enum Inbound {
-    /// Host: a client finished connecting. `identity` is their stable profile
-    /// id, used to hand back a returning player's saved record.
-    Joined { player: PlayerId, identity: u64 },
+    /// Host: a client finished connecting. `identity` is their stable id, used
+    /// to hand back a returning player's saved record.
+    ///
+    /// `account` is the verified account behind them — present for anyone who
+    /// arrived over a real network, because the host refuses joins it cannot
+    /// verify. It is `None` only where there is nobody to verify: the
+    /// singleplayer session, and `FakeSession` in tests.
+    Joined {
+        player: PlayerId,
+        identity: u64,
+        account: Option<crate::auth::AccountIdentity>,
+    },
     /// Host: a player disconnected.
     Left { player: PlayerId },
     /// Host: a request from a client, to be validated before it takes effect.

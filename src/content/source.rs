@@ -93,7 +93,7 @@ impl ContentSource for MapSource {
 /// be copy-pasted once per definition file.
 ///
 /// `label` names the content in the fallback message ("using builtin blocks");
-/// `describe` renders the success message's subject ("loaded 42 blocks from …"),
+/// `describe` renders the success message's subject ("loaded 42 blocks from ..."),
 /// since some registries report a count and others have nothing to count.
 ///
 /// `ctx` is threaded through *both* closures rather than captured, because the

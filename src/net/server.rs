@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use renet::{ClientId, ConnectionConfig, RenetServer, ServerEvent};
 use renet_netcode::{NetcodeServerTransport, ServerAuthentication, ServerConfig};
 
+use crate::auth::{AccountIdentity, TicketVerifier};
 use crate::net::protocol::{self, Channel, ClientMessage, PlayerId, ServerMessage};
 
 /// Default UDP port the host listens on.
@@ -26,6 +27,15 @@ pub struct Host {
     next_player_id: u64,
     /// Map of transport client id -> assigned player id.
     players: HashMap<ClientId, PlayerId>,
+    /// The verified account behind each connected player.
+    ///
+    /// Populated only from a checked signature, so an entry here *is* proof of
+    /// identity — which is what makes `ops.toml` a permission rather than a
+    /// suggestion, and what gives a nameplate a name nobody chose for themselves.
+    accounts: HashMap<PlayerId, AccountIdentity>,
+    /// Checks join tickets. `None` when this host has no auth keys cached, which
+    /// means it cannot verify anyone.
+    verifier: Option<TicketVerifier>,
     /// Detected this frame (drained by the caller).
     joined: Vec<ClientId>,
     left: Vec<PlayerId>,
@@ -50,6 +60,22 @@ impl Host {
         let transport = NetcodeServerTransport::new(server_config, socket)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
 
+        // Loaded once, at bind. A host that has never reached the auth server
+        // has no keys and turns everyone away — the safe direction, and the one
+        // that keeps "I could not check you" from silently meaning "you're in".
+        let keys = crate::auth::KeyCache::new().load();
+        let verifier = if keys.is_empty() {
+            log::warn!(
+                "no {} — this host cannot verify players and will refuse every join. \
+                 Sign in once to fetch the auth keys.",
+                crate::auth::keys::KEYS_FILE
+            );
+            None
+        } else {
+            log::info!("verifying joins against {} auth key(s)", keys.len());
+            Some(TicketVerifier::new(keys))
+        };
+
         log::info!("hosting on port {port} (seed {seed})");
         Ok(Self {
             server: RenetServer::new(ConnectionConfig::default()),
@@ -57,6 +83,8 @@ impl Host {
             seed,
             next_player_id: 1, // 0 is reserved for the host's local player
             players: HashMap::new(),
+            accounts: HashMap::new(),
+            verifier,
             joined: Vec::new(),
             left: Vec::new(),
         })
@@ -81,21 +109,72 @@ impl Host {
         while let Some(event) = self.server.get_event() {
             match event {
                 ServerEvent::ClientConnected { client_id } => {
-                    if !self.players.contains_key(&client_id) {
-                        let pid = PlayerId(self.next_player_id);
-                        self.next_player_id += 1;
-                        self.players.insert(client_id, pid);
-                        self.joined.push(client_id);
+                    if self.players.contains_key(&client_id) {
+                        continue;
                     }
+                    // Checked *before* a PlayerId is assigned or a join is
+                    // reported, so a peer that fails never reaches the game
+                    // layer at all — there is no `Welcome`, no world state, no
+                    // entry in the player list to clean up.
+                    let identity = match self.verify_join(client_id) {
+                        Ok(identity) => identity,
+                        Err(reason) => {
+                            log::warn!("refused client {client_id}: {reason}");
+                            self.server.disconnect(client_id);
+                            continue;
+                        }
+                    };
+
+                    let pid = PlayerId(self.next_player_id);
+                    self.next_player_id += 1;
+                    log::info!("player {} joined as {identity}", pid.0);
+                    self.players.insert(client_id, pid);
+                    self.accounts.insert(pid, identity);
+                    self.joined.push(client_id);
                 }
                 ServerEvent::ClientDisconnected { client_id, reason } => {
                     if let Some(pid) = self.players.remove(&client_id) {
                         log::info!("player {} disconnected: {reason}", pid.0);
+                        self.accounts.remove(&pid);
                         self.left.push(pid);
                     }
                 }
             }
         }
+    }
+
+    /// Check the ticket a connecting client presented.
+    fn verify_join(&mut self, client_id: ClientId) -> Result<AccountIdentity, String> {
+        let Some(verifier) = self.verifier.as_mut() else {
+            return Err("this host has no auth keys and cannot verify anyone".to_string());
+        };
+
+        let user_data = self.transport.user_data(client_id);
+        let identity = verifier
+            .verify(user_data.as_ref(), unix_now().as_secs())
+            .map_err(|err| err.to_string())?;
+
+        // The netcode id is derived from the account, so a client claiming one
+        // id while holding a ticket for another is trying something. Refusing
+        // keeps `identity -> save record` a function rather than a suggestion.
+        if identity.netcode_id() != client_id {
+            return Err(format!(
+                "ticket is for {} but the client connected as {client_id}",
+                identity.netcode_id()
+            ));
+        }
+
+        Ok(identity)
+    }
+
+    /// The verified account behind a player, if they are still connected.
+    pub fn account(&self, pid: PlayerId) -> Option<&AccountIdentity> {
+        self.accounts.get(&pid)
+    }
+
+    /// Whether this host is able to verify joining players at all.
+    pub fn can_verify(&self) -> bool {
+        self.verifier.is_some()
     }
 
     /// Newly connected clients this frame (transport ids).

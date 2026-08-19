@@ -268,7 +268,7 @@ mod tests {
         assert!(!said.contains("did you mean"), "got {said:?}");
     }
 
-    /// In singleplayer there is nobody to go to, and "did you mean …?" with no
+    /// In singleplayer there is nobody to go to, and "did you mean ...?" with no
     /// candidates reads like a bug.
     #[test]
     fn an_empty_session_says_so_rather_than_suggesting_nothing() {
