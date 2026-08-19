@@ -230,7 +230,7 @@ impl GameState for LoginState {
                 ui.add_space(24.0);
 
                 if self.restoring {
-                    ui.label("Signing you in…");
+                    ui.label("Signing you in...");
                     ui.spinner();
                     return;
                 }

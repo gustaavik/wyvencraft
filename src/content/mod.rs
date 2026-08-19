@@ -613,7 +613,7 @@ mod tests {
     /// yields a registry containing it, with its item and icon derived.
     ///
     /// The fixture extends the builtin blocks rather than replacing them,
-    /// because `worldgen.toml` names concrete blocks ("wood", "stone", …) and
+    /// because `worldgen.toml` names concrete blocks ("wood", "stone", ...) and
     /// resolving it against a registry missing them is a hard error by design.
     #[test]
     fn definitions_are_read_from_the_source() {

@@ -25,7 +25,7 @@ impl GameMode {
         self.is_creative()
     }
 
-    /// Whether the player can take damage (fall, starvation, …).
+    /// Whether the player can take damage (fall, starvation, ...).
     pub fn takes_damage(self) -> bool {
         matches!(self, GameMode::Survival)
     }

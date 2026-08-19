@@ -409,7 +409,7 @@ mod tests {
             start,
             cow.position
         );
-        // …and then bleed off against the ground. Measured on the impulse
+        // ...and then bleed off against the ground. Measured on the impulse
         // rather than on position: a passive cow wanders off under its own
         // power, which is movement but not the shove still acting.
         for _ in 0..120 {

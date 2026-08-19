@@ -102,7 +102,7 @@ impl WorldRepository for NullWorldRepository {
 /// Keeps snapshots in memory. For tests that assert on what a save captured
 /// without touching the filesystem.
 ///
-/// The state layer takes ownership of its repository (`Box<dyn …>`), so the
+/// The state layer takes ownership of its repository (`Box<dyn ...>`), so the
 /// recording lives behind a shared handle: build the repository, keep its
 /// [`log`](InMemoryWorldRepository::log), hand the repository over, and read
 /// the log afterwards. That avoids putting `Any` downcasting on the trait

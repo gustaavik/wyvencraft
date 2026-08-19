@@ -28,7 +28,7 @@ renet_netcode = "2.0"
 # --- Accounts ---
 # The join-ticket codec, shared verbatim with the auth server so the two can
 # never drift. A path dependency because `wcauthserver` has no remote yet;
-# switch to `git = "…"` the moment it does.
+# switch to `git = "..."` the moment it does.
 wcauth-ticket = { path = "../wcauthserver/crates/ticket" }
 uuid = { version = "1", features = ["v4", "serde"] }
 # Blocking HTTP. Deliberately not `reqwest`: the game has no async runtime, and

@@ -419,9 +419,9 @@ mod tests {
                 .fold(f32::MIN, f32::max)
         };
         // The flow block's edge shared with the source rises to the source's
-        // surface — no step between the two blocks…
+        // surface — no step between the two blocks...
         assert_eq!(max_top_at(5.0), 10.0 + WATER_SURFACE);
-        // …while its far edge stays at its own level's height, so the top
+        // ...while its far edge stays at its own level's height, so the top
         // face slopes downhill.
         assert_eq!(max_top_at(6.0), 10.0 + WATER_SURFACE * 0.5);
     }

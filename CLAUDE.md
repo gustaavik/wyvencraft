@@ -27,15 +27,15 @@ Run with logging: `RUST_LOG=info,wyvencraft=debug cargo run`.
 - `WYVEN_JOIN=127.0.0.1:25565` → join a session
 - `WYVEN_WORLD=name` → load-or-create this named world under `saves/` (combines
   with BOOT_INGAME/HOST). Without it, boot worlds are ephemeral — never saved.
-- `WYVEN_SEED=…` → seed if `WYVEN_WORLD` creates a new world (number, hex, or text)
-- `WYVEN_CLIENT_ID=…` → override the profile identity (run two clients from one dir)
-- `WYVEN_USERNAME=…` / `WYVEN_PASSWORD=…` → sign in at boot. A boot plan never
+- `WYVEN_SEED=...` → seed if `WYVEN_WORLD` creates a new world (number, hex, or text)
+- `WYVEN_CLIENT_ID=...` → override the profile identity (run two clients from one dir)
+- `WYVEN_USERNAME=...` / `WYVEN_PASSWORD=...` → sign in at boot. A boot plan never
   shows the login screen; without these it runs **offline**, which plays
   singleplayer but cannot join or be joined (no ticket to present, no keys to
   verify with).
-- `WYVEN_AUTH_URL=…` → the auth server (default `http://127.0.0.1:8080`). Bring
+- `WYVEN_AUTH_URL=...` → the auth server (default `http://127.0.0.1:8080`). Bring
   one up from the sibling `wcauthserver` repo with `make up`.
-- `WYVEN_DEBUG_SPAWN=cow,zombie,…` → spawn the named mobs next to the player at
+- `WYVEN_DEBUG_SPAWN=cow,zombie,...` → spawn the named mobs next to the player at
   boot (singleplayer/host), without waiting on the spawner. `WYVEN_DEBUG_SPAWN="vine
   sword"` places the file-loaded model prop (it has no `spawning.toml` entry, so
   it never appears on its own).
@@ -167,7 +167,7 @@ those systems are testable without a Vulkan device.
 | A new screen            | implement `state::GameState`, push/replace via `Transition`                                |
 | HUD / inventory UI      | `ui::hud`, `ui::inventory`                                                                 |
 | Add a chat command      | **one new file in `src/chat/command/` + one entry in `COMMANDS`** — nothing else changes (the `ModelLoader::LOADERS` pattern). Implement `ChatCommand` (`name`/`usage`/`permission`/`run`); the command parses its own arguments and phrases its own messages. It reaches the world only through the `CommandContext` port, so it never sees a `PlayerId` and works identically for the local player and a remote client. Test it against `chat::FakeContext` with no world, socket or GPU. **Caveat:** a command needing a capability the port doesn't expose yet also grows `CommandContext` + its two impls — and if that capability must reach a *client*, a `ServerMessage` too (`GrantItems`, `Teleport`) |
-| Authorize a player      | `ops.toml` in the working directory (`ops = [{ id = "<account uuid>", name = "…" }]`), parsed by `chat::ops`. Keyed by the **account id from the verified join ticket**, never by anything a client asserts. The host/singleplayer player is always an op; only the authority loads the file |
+| Authorize a player      | `ops.toml` in the working directory (`ops = [{ id = "<account uuid>", name = "..." }]`), parsed by `chat::ops`. Keyed by the **account id from the verified join ticket**, never by anything a client asserts. The host/singleplayer player is always an op; only the authority loads the file |
 | Chat log / input bar    | `chat::{log,composer}` (pure state), drawn by `ui::chat::draw_chat`; keys `chat`/`chat_command` in `config::Keybinds` (T and /) |
 | Networking              | `net::{server,client,protocol}` transport; role behind `state::session::Session` (Singleplayer/Host/Client + `FakeSession`); message application in `state::ingame_state::net` |
 | Accounts / login        | `auth::{client,session,account,keys,verifier}`. `AuthClient` is a port (`HttpAuthClient` via ureq / `FakeAuthClient`); `LoginState` is the first screen; the session persists in `profile.toml`. Server lives in the sibling repo `wcauthserver` |
@@ -198,7 +198,7 @@ those systems are testable without a Vulkan device.
   app (it renders on a real display) or by trusting vulkano validation + a stable
   run.
 - **Multiplayer testing:** launch two processes with `WYVEN_HOST=1` and
-  `WYVEN_JOIN=127.0.0.1:25565`; the client logs `connected; world seed … player id …`
+  `WYVEN_JOIN=127.0.0.1:25565`; the client logs `connected; world seed ... player id ...`
   on a successful handshake.
 - **Commands run on the authority, never on the client.** A client sends its
   raw chat line (command or not) as `ClientMessage::Chat`; the host parses it,

@@ -193,7 +193,7 @@ mod tests {
         }
     }
 
-    /// …and it must actually *fill* the cell: the widest on-screen axis reaches
+    /// ...and it must actually *fill* the cell: the widest on-screen axis reaches
     /// the margin. Guards against the fit going conservative again and leaving
     /// models as slivers adrift in their slots.
     #[test]

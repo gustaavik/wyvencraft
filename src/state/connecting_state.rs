@@ -78,7 +78,7 @@ impl ConnectingState {
             pending_ticket: Some(rx),
             client: None,
             elapsed: 0.0,
-            status: "Getting a join ticket…".to_string(),
+            status: "Getting a join ticket...".to_string(),
             failed: false,
         }
     }
@@ -95,7 +95,7 @@ impl ConnectingState {
                 match Client::connect(self.address, self.identity, Some(ticket.slot)) {
                     Ok(client) => {
                         self.client = Some(client);
-                        self.status = format!("Connecting to {}…", self.address);
+                        self.status = format!("Connecting to {}...", self.address);
                     }
                     Err(err) => {
                         self.status = format!("Connection failed: {err}");

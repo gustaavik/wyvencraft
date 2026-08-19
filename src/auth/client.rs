@@ -133,7 +133,7 @@ impl HttpAuthClient {
         Self::unwrap_envelope(response)
     }
 
-    /// Turn `{"status":…}` into either the payload or a typed error.
+    /// Turn `{"status":...}` into either the payload or a typed error.
     fn unwrap_envelope(
         mut response: ureq::http::Response<ureq::Body>,
     ) -> Result<serde_json::Value, AuthError> {
