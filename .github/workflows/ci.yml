@@ -27,11 +27,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install rustfmt
-        run: |
-          rustup update --no-self-update stable
-          rustup default stable
-          rustup component add rustfmt
+      # No argument: installs the toolchain and components named by
+      # rust-toolchain.toml, so CI and developer machines never drift.
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
 
       - run: cargo fmt --all --check
 
@@ -54,19 +53,22 @@ jobs:
 
       # `vulkano-shaders` is a proc-macro crate, so shaderc is needed to *compile*
       # (it turns assets/shaders/*.{vert,frag} into SPIR-V) but is never linked
-      # into the binary. Without a library to find, shaderc-sys falls back to a
-      # slow cmake build from source.
-      - name: Install shaderc
+      # into the binary. shaderc-sys vendors the full shaderc + glslang +
+      # SPIRV-Tools sources, so with no system library to find it builds a
+      # genuinely self-contained libshaderc_combined.a. That is what we want.
+      #
+      # Do NOT "optimise" this by installing libshaderc-dev. Ubuntu's
+      # libshaderc_combined.a is not actually combined — Debian unbundles glslang
+      # — so the proc macro links with undefined glslang symbols (Linux permits
+      # that for a shared object), and rustc then fails to dlopen it and reports
+      # the baffling `E0463: can't find crate for vulkano_shaders`.
+      - name: Install the shaderc build toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y libshaderc-dev
-          echo "SHADERC_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> "$GITHUB_ENV"
+          sudo apt-get install -y cmake ninja-build python3
 
-      - name: Install clippy
-        run: |
-          rustup update --no-self-update stable
-          rustup default stable
-          rustup component add clippy
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
 
       # Pinned to the v2.9.2 commit: the only third-party action in a workflow
       # whose runner holds a PAT.

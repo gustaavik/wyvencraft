@@ -65,17 +65,23 @@ jobs:
           brew install shaderc
           echo "SHADERC_LIB_DIR=$(brew --prefix shaderc)/lib" >> "$GITHUB_ENV"
 
-      - name: Install shaderc (Linux)
+      # On Linux there is no usable system shaderc: Ubuntu's
+      # libshaderc_combined.a is not actually combined (Debian unbundles
+      # glslang), which leaves the proc macro with undefined glslang symbols and
+      # makes rustc report `E0463: can't find crate for vulkano_shaders`. With no
+      # system library present, shaderc-sys builds its vendored sources instead
+      # and produces a self-contained archive. Do not install libshaderc-dev here.
+      - name: Install the shaderc build toolchain (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libshaderc-dev
-          echo "SHADERC_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> "$GITHUB_ENV"
+          sudo apt-get install -y cmake ninja-build python3
 
-      - name: Install the Rust toolchain
+      # No argument: installs the toolchain named by rust-toolchain.toml. The
+      # target is added to that same pinned toolchain.
+      - name: Install the pinned toolchain
         run: |
-          rustup update --no-self-update stable
-          rustup default stable
+          rustup toolchain install
           rustup target add ${{ matrix.target }}
 
       - name: Build

@@ -203,7 +203,12 @@ fn preview_box(ui: &mut egui::Ui, preview: egui::TextureId) -> (Option<InvAction
         Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
         Color32::WHITE,
     );
-    painter.rect_stroke(rect, 4.0, Stroke::new(2.0, SLOT_STROKE), StrokeKind::Inside);
+    painter.rect_stroke(
+        rect,
+        4.0,
+        Stroke::new(2.0_f32, SLOT_STROKE),
+        StrokeKind::Inside,
+    );
     let action = (resp.dragged() && resp.drag_delta().x != 0.0)
         .then(|| InvAction::Rotate(resp.drag_delta().x));
     (action, rect)
@@ -249,9 +254,9 @@ impl View<'_> {
         }
 
         let stroke = if selected {
-            Stroke::new(2.5, Color32::WHITE)
+            Stroke::new(2.5_f32, Color32::WHITE)
         } else {
-            Stroke::new(1.0, SLOT_STROKE)
+            Stroke::new(1.0_f32, SLOT_STROKE)
         };
         painter.rect_stroke(rect, 3.0, stroke, StrokeKind::Inside);
 
