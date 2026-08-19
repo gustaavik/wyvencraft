@@ -156,7 +156,10 @@ impl GameState for MultiplayerMenuState {
                 {
                     match resolve_addr(&self.address) {
                         Some(addr) => {
-                            transition = Transition::Replace(Box::new(ConnectingState::new(addr)));
+                            transition = Transition::Replace(Box::new(ConnectingState::new(
+                                addr,
+                                ctx.resources.account,
+                            )));
                         }
                         None => self.error = Some("Invalid address".to_string()),
                     }

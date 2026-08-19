@@ -20,17 +20,29 @@ pub struct Client {
 
 impl Client {
     /// Open a connection to `server_addr` (does not block; poll [`Client::is_connected`]).
-    /// `client_id` is the netcode identity we present; passing the persisted
-    /// profile id (see `save::client_identity`) lets a host recognise a
-    /// returning player across sessions.
-    pub fn connect(server_addr: SocketAddr, client_id: u64) -> std::io::Result<Self> {
+    ///
+    /// `client_id` is the netcode identity we present — derived from the signed-in
+    /// account, so a host recognises a returning player across sessions and
+    /// machines.
+    ///
+    /// `ticket` is the signed proof of who that account is, obtained from the
+    /// auth server just before connecting. It rides in netcode's `user_data`,
+    /// which is the only thing a client can say before the host decides whether
+    /// to keep it — so the host can reject an unauthenticated peer without ever
+    /// having spoken to it at the application level. A `None` ticket connects,
+    /// but any host with auth keys will drop it immediately.
+    pub fn connect(
+        server_addr: SocketAddr,
+        client_id: u64,
+        ticket: Option<[u8; wcauth_ticket::SLOT_LEN]>,
+    ) -> std::io::Result<Self> {
         let socket = UdpSocket::bind("0.0.0.0:0")?;
         let current_time = unix_now();
         let authentication = ClientAuthentication::Unsecure {
             protocol_id: PROTOCOL_ID,
             client_id,
             server_addr,
-            user_data: None,
+            user_data: ticket,
         };
         let transport = NetcodeClientTransport::new(current_time, authentication, socket)
             .map_err(|e| std::io::Error::other(e.to_string()))?;

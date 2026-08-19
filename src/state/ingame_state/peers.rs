@@ -22,6 +22,12 @@ pub(super) struct Peers {
     /// Host: stable identity (netcode client id) of each connected player,
     /// used to match a returning player to their saved record.
     pub identities: HashMap<PlayerId, u64>,
+    /// Host: the verified account behind each connected player.
+    ///
+    /// Only ever written from a checked ticket signature, which is what lets
+    /// `ops.toml` key on it. Empty in singleplayer and in tests, where there is
+    /// no remote peer to verify.
+    pub accounts: HashMap<PlayerId, crate::auth::AccountIdentity>,
     /// Host: latest inventory each client reported, kept in wire form and
     /// converted to the name-based disk form only when a record is written.
     pub inventories: HashMap<PlayerId, (Vec<Option<NetItemStack>>, u32)>,
@@ -48,6 +54,7 @@ impl Peers {
     pub fn remove(&mut self, pid: PlayerId) {
         self.players.remove(&pid);
         self.identities.remove(&pid);
+        self.accounts.remove(&pid);
         self.inventories.remove(&pid);
         self.equipment.remove(&pid);
     }

@@ -58,11 +58,63 @@ fn open_boot_world(world: &WorldChoice, mode: GameMode) -> Option<Result<SavedGa
     )
 }
 
+/// Set up the account for a dev-boot plan, which skips the login screen.
+///
+/// `WYVEN_BOOT_INGAME`, `WYVEN_HOST` and `WYVEN_JOIN` exist so the game can be
+/// launched headlessly with no clicking, and that has to keep working. So a boot
+/// plan never shows the login screen: it signs in with `WYVEN_USERNAME` if the
+/// auth server can be reached, and otherwise runs offline.
+///
+/// This is a *developer* path, not a way around the login gate — an offline
+/// client still cannot join anyone, because it has no ticket to present.
+fn boot_account(account: &crate::auth::AccountState) {
+    let Ok(username) = std::env::var("WYVEN_USERNAME") else {
+        log::info!("no WYVEN_USERNAME; booting offline");
+        account.set_offline();
+        return;
+    };
+    let Ok(password) = std::env::var("WYVEN_PASSWORD") else {
+        log::info!("WYVEN_USERNAME set but no WYVEN_PASSWORD; booting offline");
+        account.set_offline();
+        return;
+    };
+
+    let client = crate::auth::HttpAuthClient::from_env();
+    match crate::auth::AuthClient::login(&client, &username, &password) {
+        Ok(session) => {
+            log::info!("booted signed in as {}", session.identity);
+            // Cache the ticket keys too, so a `WYVEN_HOST=1` boot can verify the
+            // clients that join it.
+            if let Ok(keys) = crate::auth::AuthClient::public_keys(&client)
+                && !keys.is_empty()
+                && let Err(err) = crate::auth::KeyCache::new().store(&keys)
+            {
+                log::warn!("could not cache auth keys: {err}");
+            }
+            account.sign_in(session);
+        }
+        Err(err) => {
+            log::warn!("boot sign-in failed ({err}); continuing offline");
+            account.set_offline();
+        }
+    }
+}
+
 /// Turn a [`BootPlan`] into the state the app starts on. This is where the
 /// plan's decisions become effects: opening saves, binding sockets.
-fn initial_state(plan: BootPlan, content: &Arc<GameContent>) -> Box<dyn GameState> {
+fn initial_state(
+    plan: BootPlan,
+    content: &Arc<GameContent>,
+    account: &crate::auth::AccountState,
+) -> Box<dyn GameState> {
+    // Only the menu path is gated. Every other plan is a dev-boot flag, which
+    // must stay usable without a window to click in.
+    if !matches!(plan, BootPlan::MainMenu) {
+        boot_account(account);
+    }
+
     match plan {
-        BootPlan::MainMenu => Box::new(MainMenuState::new()),
+        BootPlan::MainMenu => Box::new(crate::state::LoginState::new(account.clone())),
         BootPlan::Singleplayer { world, mode } => match open_boot_world(&world, mode) {
             Some(Ok(game)) => Box::new(LoadingState::saved(game)),
             Some(Err(err)) => {
@@ -93,7 +145,7 @@ fn initial_state(plan: BootPlan, content: &Arc<GameContent>) -> Box<dyn GameStat
                 }
             }
         }
-        BootPlan::Join { address } => Box::new(ConnectingState::new(address)),
+        BootPlan::Join { address } => Box::new(ConnectingState::new(address, account)),
     }
 }
 
@@ -183,6 +235,9 @@ struct App {
     render_context: Arc<RenderContext>,
     /// Block/item registries loaded from `assets/*.toml` at startup.
     content: Arc<GameContent>,
+    /// Who this client is signed in as. Owned here and lent to every state
+    /// through `Resources`, so nothing needs a global.
+    account: crate::auth::AccountState,
     windows: VulkanoWindows,
     gui: Option<Gui>,
     renderer: Option<Renderer>,
@@ -222,12 +277,14 @@ impl App {
         // Dev convenience env vars skip the menus — see `boot` for the rules:
         //   WYVEN_BOOT_INGAME / WYVEN_HOST / WYVEN_JOIN / WYVEN_MODE /
         //   WYVEN_WORLD / WYVEN_SEED.
-        let initial = initial_state(BootPlan::from_env(&SystemEnv), &content);
+        let account = crate::auth::AccountState::new();
+        let initial = initial_state(BootPlan::from_env(&SystemEnv), &content, &account);
 
         Self {
             context,
             render_context,
             content,
+            account,
             windows: VulkanoWindows::default(),
             gui: None,
             renderer: None,
@@ -288,6 +345,7 @@ impl App {
                     render: &self.render_context,
                     content: &self.content,
                     ui_tex,
+                    account: &self.account,
                 },
                 dt,
                 elapsed,
@@ -314,6 +372,7 @@ impl App {
                     render: &self.render_context,
                     content: &self.content,
                     ui_tex,
+                    account: &self.account,
                 },
                 dt,
                 elapsed,
@@ -523,6 +582,7 @@ impl ApplicationHandler for App {
                         render: &self.render_context,
                         content: &self.content,
                         ui_tex,
+                        account: &self.account,
                     },
                     dt: 0.0,
                     elapsed: self.clock.elapsed(),

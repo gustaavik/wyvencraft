@@ -10,3 +10,4 @@ pub mod chat;
 pub mod hud;
 pub mod icon;
 pub mod inventory;
+pub mod nameplate;

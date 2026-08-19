@@ -8,6 +8,7 @@
 pub mod connecting_state;
 pub mod ingame_state;
 pub mod loading_state;
+pub mod login_state;
 pub mod menu_state;
 pub mod multiplayer_menu;
 pub mod pause_menu;
@@ -17,6 +18,7 @@ pub mod singleplayer_menu;
 pub use connecting_state::ConnectingState;
 pub use ingame_state::InGameState;
 pub use loading_state::LoadingState;
+pub use login_state::LoginState;
 pub use menu_state::MainMenuState;
 pub use multiplayer_menu::MultiplayerMenuState;
 pub use pause_menu::PauseMenuState;
@@ -59,6 +61,10 @@ pub struct Resources<'a> {
     pub content: &'a Arc<GameContent>,
     /// egui handles for the block atlas and the player-model preview image.
     pub ui_tex: UiTextures,
+    /// Who this client is signed in as. Read by the menus (to decide whether
+    /// multiplayer is available) and by `ConnectingState` (to fetch a join
+    /// ticket). Passed rather than global, like everything else here.
+    pub account: &'a crate::auth::AccountState,
 }
 
 /// Shared, per-frame context handed to states.

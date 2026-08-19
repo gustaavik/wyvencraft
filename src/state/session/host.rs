@@ -44,10 +44,13 @@ impl Session for HostSession {
         for cid in self.host.take_joined() {
             if let Some(player) = self.host.player_id(cid) {
                 // The netcode client id doubles as the player's stable identity:
-                // returning players get their saved state back.
+                // returning players get their saved state back. It is derived
+                // from the account, and the host checked that the ticket agrees
+                // with it before ever reporting the join.
                 inbound.push(Inbound::Joined {
                     player,
                     identity: cid,
+                    account: self.host.account(player).cloned(),
                 });
             }
         }

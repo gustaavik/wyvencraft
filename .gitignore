@@ -3,5 +3,7 @@
 # World saves + local player profile (generated at runtime)
 /saves
 /profile.toml
-# Command authorization list (per-machine, holds client ids)
+# Command authorization list (per-world, holds account ids)
 /ops.toml
+# Cached auth-server public keys, fetched at sign-in (public, but generated)
+/authkeys.toml

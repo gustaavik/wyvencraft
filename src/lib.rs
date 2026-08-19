@@ -33,6 +33,7 @@
 //! `chat`. Commands depend on the port; `state` implements it.
 
 pub mod app;
+pub mod auth;
 pub mod boot;
 pub mod chat;
 pub mod config;

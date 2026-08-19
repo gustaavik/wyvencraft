@@ -7,6 +7,72 @@ use super::{AUTOSAVE_INTERVAL, DOUBLE_TAP_WINDOW, InGameState, PREVIEW_DRAG_SENS
 use crate::render::{PreviewFrame, SceneFrame};
 use crate::state::{GameState, PauseMenuState, StateContext, Transition};
 use crate::ui::hud;
+use crate::ui::nameplate::{self, Nameplate};
+
+impl InGameState {
+    /// Paint every visible player's username above their model.
+    ///
+    /// The camera is rebuilt here rather than threaded through, and it is
+    /// bit-identical to the one the world pass will use: `update` has already
+    /// run this frame and set `render_alpha`, and `SceneCache::camera` is a pure
+    /// function of the player and that alpha.
+    ///
+    /// `aspect` comes from egui's screen rect rather than the swapchain. The
+    /// scale factor is uniform, so the ratio matches — and `ui` is not given the
+    /// physical size.
+    fn draw_nameplates(&self, egui_ctx: &egui::Context) {
+        if self.peers.players.is_empty() {
+            return;
+        }
+
+        let screen = egui_ctx.screen_rect();
+        if screen.height() <= 0.0 {
+            return;
+        }
+        let camera = self
+            .view
+            .camera(&self.player, screen.width() / screen.height());
+
+        let alpha = self.view.render_alpha;
+        let plates: Vec<Nameplate<'_>> = self
+            .peers
+            .players
+            .values()
+            .map(|remote| {
+                let position = remote.interpolated_position(alpha);
+                Nameplate {
+                    name: remote.name.as_str(),
+                    position,
+                    occluded: self.nameplate_occluded(&camera, position),
+                }
+            })
+            .collect();
+
+        nameplate::draw_nameplates(egui_ctx, &camera, plates);
+    }
+
+    /// Whether solid world sits between the eye and a player's nameplate.
+    ///
+    /// egui paints after the world pass with no depth information, so without
+    /// this a name reads straight through terrain. The march uses `is_solid` and
+    /// `Target::Cell` — the same predicate mob line-of-sight uses — so a flower
+    /// or a pane of glass never hides someone.
+    fn nameplate_occluded(&self, camera: &crate::render::Camera, position: glam::Vec3) -> bool {
+        let anchor = position + glam::Vec3::Y * nameplate::ANCHOR_HEIGHT;
+        let to_anchor = anchor - camera.position;
+        let distance = to_anchor.length();
+        if distance <= f32::EPSILON {
+            return false;
+        }
+
+        crate::world::raycast(camera.position, to_anchor, distance, |at| {
+            self.world
+                .is_solid(at)
+                .then_some(crate::world::Target::Cell)
+        })
+        .is_some()
+    }
+}
 
 impl GameState for InGameState {
     fn name(&self) -> &'static str {
@@ -266,6 +332,10 @@ impl GameState for InGameState {
             }
             return Transition::None;
         }
+
+        // Before the HUD, so a name can never sit on top of the hotbar or the
+        // vitals.
+        self.draw_nameplates(egui_ctx);
 
         self.draw_chat(egui_ctx);
 
