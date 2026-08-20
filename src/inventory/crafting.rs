@@ -251,11 +251,11 @@ mod tests {
         let text = r#"
             [[recipe]]
             output = "wooden pickaxe"
-            ingredients = { wood = 3 }
+            ingredients = { "oak log" = 3 }
         "#;
         let book = RecipeBook::from_toml(text, &items).expect("valid TOML");
         let mut inv = Inventory::new();
-        inv.add(ItemStack::new(items.find("wood").unwrap(), 3), &items);
+        inv.add(ItemStack::new(items.find("oak log").unwrap(), 3), &items);
 
         let out = book
             .get(0)

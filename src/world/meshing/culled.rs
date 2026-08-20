@@ -3,6 +3,7 @@
 use glam::Vec3;
 
 use super::{BlockModels, ChunkMeshOutput};
+use crate::core::math::rotate_y;
 use crate::core::{Aabb, BlockId, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, Direction};
 use crate::render::mesh::CpuMesh;
 use crate::render::texture::atlas_uv;
@@ -10,6 +11,10 @@ use crate::render::vertex::{ChunkVertex, FLAG_WATER, NO_TINT};
 use crate::world::block::{Block, BlockRegistry, FaceTextures, FluidInfo};
 use crate::world::blockmodel::BakedBlockModel;
 use crate::world::chunk::Chunk;
+
+/// How many biome colours a block model's `tintindex` can choose between.
+/// Minecraft's numbering: `0` grass, `1` foliage.
+pub const TINT_SOURCES: usize = 2;
 
 /// Top of a source water block: two texels (2/16) below the block top.
 /// Flowing water scales down from here with its level.
@@ -128,16 +133,16 @@ fn block_yaw(pos: BlockPos) -> f32 {
 /// not-yet-loaded chunks. `models` supplies the geometry of model-backed
 /// blocks; pass [`BlockModels::none`] when there are none.
 ///
-/// `tint(x, z)` is the biome colour at a world column, for the faces a block
-/// model marked `tintindex`. It is a closure rather than a table so the mesher
-/// stays pure: biome sampling belongs to the generator, and tests pass
-/// `|_, _| NO_TINT` and never touch one.
+/// `tint(x, z, index)` is the biome colour at a world column for one of the
+/// [`TINT_SOURCES`] a block model's `tintindex` can name. It is a closure rather
+/// than a table so the mesher stays pure: biome sampling belongs to the
+/// generator, and tests pass `|_, _, _| NO_TINT` and never touch one.
 pub fn mesh_chunk(
     chunk: &Chunk,
     registry: &BlockRegistry,
     models: BlockModels<'_>,
     neighbor: impl Fn(BlockPos) -> BlockId,
-    tint: impl Fn(i32, i32) -> [u8; 4],
+    tint: impl Fn(i32, i32, u8) -> [u8; 4],
 ) -> ChunkMeshOutput {
     let mut out = ChunkMeshOutput::default();
     let origin = chunk.pos.origin();
@@ -194,8 +199,16 @@ pub fn mesh_chunk(
                 // it needs no separate draw, and its `cullface` data lets it
                 // take part in neighbour culling like an ordinary cube.
                 if let Some(baked) = models.baked_of(id) {
-                    let hidden =
-                        |dir: Direction| occludes(sample(world.offset(dir)), dir.opposite());
+                    // Same rule the cube path below uses: a transparent or
+                    // cutout block also drops the face it shares with a
+                    // neighbour of its own kind. Without it a leaf canopy —
+                    // whose texture is see-through, so it occludes nothing —
+                    // would emit every face of every block inside it.
+                    let hidden = |dir: Direction| {
+                        let neighbor = sample(world.offset(dir));
+                        occludes(neighbor, dir.opposite())
+                            || (neighbor == id && (block.is_cutout() || block.is_transparent()))
+                    };
                     push_baked_model(&mut out, baked, block, world, hidden, &tint);
                     continue;
                 }
@@ -313,34 +326,50 @@ pub fn mesh_chunk(
 /// hidden by its neighbour, and what colour a `tintindex` quad takes here.
 ///
 /// `hidden(dir)` answers "does the neighbour in `dir` cover the face we share".
-#[allow(clippy::too_many_arguments)]
 fn push_baked_model(
     out: &mut ChunkMeshOutput,
     model: &BakedBlockModel,
     block: &Block,
     world: BlockPos,
     hidden: impl Fn(Direction) -> bool,
-    tint: &impl Fn(i32, i32) -> [u8; 4],
+    tint: &impl Fn(i32, i32, u8) -> [u8; 4],
 ) {
     let base = Vec3::new(world.x as f32, world.y as f32, world.z as f32);
-    // Sampled once per block rather than per face: biome colour varies by
-    // column, and all of a block's tinted faces belong to the same column.
-    let mut biome_tint = None;
+    // A model that asked for a random yaw turns about its cell's centre. Its
+    // `cullface` data is dropped along with the rotation: a turned face no
+    // longer points at the neighbour it named, and anything wanting a random
+    // yaw is a plant that covers no cell face to begin with.
+    let yaw = model.random_yaw.then(|| block_yaw(world));
+    let centre = Vec3::new(0.5, 0.0, 0.5);
+    // Sampled at most once per block: biome colour varies by column, and all of
+    // a block's faces belong to the same column.
+    let mut biome_tints: [Option<[u8; 4]>; TINT_SOURCES] = [None; TINT_SOURCES];
 
     for quad in &model.quads {
         if let Some(dir) = quad.cull
+            && yaw.is_none()
             && hidden(dir)
         {
             continue;
         }
-        let tint = if quad.tinted {
-            *biome_tint.get_or_insert_with(|| tint(world.x, world.z))
-        } else {
-            NO_TINT
+        let tint = match quad.tint {
+            Some(index) => {
+                let slot = usize::from(index).min(TINT_SOURCES - 1);
+                *biome_tints[slot].get_or_insert_with(|| tint(world.x, world.z, index))
+            }
+            None => NO_TINT,
+        };
+        let place = |p: Vec3| match yaw {
+            Some(yaw) => base + centre + rotate_y(p - centre, yaw),
+            None => base + p,
+        };
+        let normal = match yaw {
+            Some(yaw) => rotate_y(Vec3::from(quad.normal), yaw).to_array(),
+            None => quad.normal,
         };
         let vertices = std::array::from_fn(|i| ChunkVertex {
-            position: (base + quad.positions[i]).to_array(),
-            normal: quad.normal,
+            position: place(quad.positions[i]).to_array(),
+            normal,
             uv: quad.uvs[i],
             ao: quad.shade,
             flags: 0,
@@ -442,7 +471,7 @@ mod tests {
             &registry,
             BlockModels::none(),
             |_| BlockId::AIR,
-            |_, _| NO_TINT,
+            |_, _, _| NO_TINT,
         );
 
         assert_eq!(out.transparent.vertices.len(), 24, "all six faces drawn");
@@ -466,7 +495,7 @@ mod tests {
             &registry,
             BlockModels::none(),
             |_| BlockId::AIR,
-            |_, _| NO_TINT,
+            |_, _, _| NO_TINT,
         );
 
         // The shared face is culled from both blocks: 2 x 5 faces remain.
@@ -498,7 +527,7 @@ mod tests {
             &registry,
             BlockModels::none(),
             |_| BlockId::AIR,
-            |_, _| NO_TINT,
+            |_, _, _| NO_TINT,
         );
 
         let max_y = out
@@ -521,7 +550,7 @@ mod tests {
             &registry,
             BlockModels::none(),
             |_| BlockId::AIR,
-            |_, _| NO_TINT,
+            |_, _, _| NO_TINT,
         );
 
         let max_top_at = |x: f32| {
@@ -560,7 +589,7 @@ mod tests {
             &content.blocks,
             models,
             |_| BlockId::AIR,
-            |_, _| NO_TINT,
+            |_, _, _| NO_TINT,
         );
 
         assert!(out.opaque.is_empty(), "no atlas geometry");
@@ -599,7 +628,7 @@ mod tests {
             &content.blocks,
             models,
             |_| BlockId::AIR,
-            |_, _| NO_TINT,
+            |_, _, _| NO_TINT,
         );
 
         assert!(out.opaque.is_empty(), "no atlas geometry");
@@ -644,7 +673,7 @@ mod tests {
             &content.blocks,
             models,
             |_| BlockId::AIR,
-            |_, _| NO_TINT,
+            |_, _, _| NO_TINT,
         );
         assert_eq!(lone.array_opaque.vertices.len(), 6 * 4, "all six faces");
 
@@ -654,7 +683,7 @@ mod tests {
             &content.blocks,
             models,
             |_| BlockId::AIR,
-            |_, _| NO_TINT,
+            |_, _, _| NO_TINT,
         );
         assert_eq!(
             stacked.array_opaque.vertices.len(),
@@ -670,25 +699,25 @@ mod tests {
         let content = GameContent::load();
         let models = content.block_models();
         let dirt = content.blocks.find("dirt").expect("modelled");
-        let stone = content.blocks.find("stone").expect("still on the atlas");
+        let atlas = content.blocks.find("bedrock").expect("still on the atlas");
         assert!(
-            models.baked_of(stone).is_none(),
-            "stone must not be modelled"
+            models.baked_of(atlas).is_none(),
+            "bedrock must not be modelled"
         );
 
         let mut chunk = Chunk::new(ChunkPos::new(0, 0));
         chunk.set(LocalPos { x: 4, y: 10, z: 6 }, dirt);
-        chunk.set(LocalPos { x: 4, y: 11, z: 6 }, stone);
+        chunk.set(LocalPos { x: 4, y: 11, z: 6 }, atlas);
         let out = mesh_chunk(
             &chunk,
             &content.blocks,
             models,
             |_| BlockId::AIR,
-            |_, _| NO_TINT,
+            |_, _, _| NO_TINT,
         );
 
         assert_eq!(out.array_opaque.vertices.len(), 5 * 4, "dirt loses its top");
-        assert_eq!(out.opaque.vertices.len(), 5 * 4, "stone loses its bottom");
+        assert_eq!(out.opaque.vertices.len(), 5 * 4, "bedrock loses its bottom");
     }
 
     /// A `tintindex` face takes the biome colour; everything else keeps the
@@ -707,7 +736,7 @@ mod tests {
             &content.blocks,
             models,
             |_| BlockId::AIR,
-            |_, _| BIOME,
+            |_, _, _| BIOME,
         );
 
         let tinted = out.array_opaque.vertices.iter().filter(|v| v.tint == BIOME);
@@ -717,6 +746,79 @@ mod tests {
             out.array_opaque.vertices.iter().any(|v| v.tint == NO_TINT),
             "the dirt bottom and the base sides must stay untinted"
         );
+    }
+
+    /// Leaves are a cutout, so they occlude nothing — which would leave every
+    /// face of every block inside a canopy drawn. They cull against each other
+    /// instead, exactly as the atlas path has always done.
+    #[test]
+    fn stacked_leaves_cull_the_face_they_share() {
+        let content = GameContent::load();
+        let models = content.block_models();
+        let leaves = content.blocks.find("oak leaves").expect("shipped block");
+        let baked = models.baked_of(leaves).expect("modelled");
+        assert_eq!(
+            baked.occludes, [false; 6],
+            "a see-through texture must not claim to occlude"
+        );
+
+        let mut chunk = Chunk::new(ChunkPos::new(0, 0));
+        chunk.set(LocalPos { x: 4, y: 10, z: 6 }, leaves);
+        chunk.set(LocalPos { x: 4, y: 11, z: 6 }, leaves);
+        let out = mesh_chunk(
+            &chunk,
+            &content.blocks,
+            models,
+            |_| BlockId::AIR,
+            |_, _, _| NO_TINT,
+        );
+        assert_eq!(
+            out.array_opaque.vertices.len(),
+            10 * 4,
+            "the shared face is dropped from both blocks"
+        );
+    }
+
+    /// A `random_yaw` model turns about its own cell, so two instances read as
+    /// different plants rather than a grid of clones — and a turned face no
+    /// longer points where its `cullface` claims, so culling is dropped.
+    #[test]
+    fn a_random_yaw_block_turns_with_its_position() {
+        let content = GameContent::load();
+        let models = content.block_models();
+        let flower = content.blocks.find("cornflower").expect("shipped block");
+        assert!(models.baked_of(flower).expect("modelled").random_yaw);
+
+        let mesh_at = |x: u8, z: u8| {
+            let mut chunk = Chunk::new(ChunkPos::new(0, 0));
+            chunk.set(LocalPos { x, y: 10, z }, flower);
+            mesh_chunk(
+                &chunk,
+                &content.blocks,
+                models,
+                |_| BlockId::AIR,
+                |_, _, _| NO_TINT,
+            )
+            .array_opaque
+        };
+        let a = mesh_at(0, 0);
+        let b = mesh_at(1, 0);
+        assert_eq!(a.vertices.len(), b.vertices.len());
+        assert_ne!(
+            a.vertices[0].normal, b.vertices[0].normal,
+            "neighbouring flowers must not share an angle"
+        );
+
+        // Turned or not, it stays inside its own column.
+        for (mesh, x) in [(&a, 0.0f32), (&b, 1.0)] {
+            for v in &mesh.vertices {
+                assert!(
+                    (x - 0.05..=x + 1.05).contains(&v.position[0]),
+                    "{:?} left its cell",
+                    v.position
+                );
+            }
+        }
     }
 
     /// Two elements sharing a box is how the grass overlay is authored; without
@@ -734,7 +836,7 @@ mod tests {
             &content.blocks,
             models,
             |_| BlockId::AIR,
-            |_, _| NO_TINT,
+            |_, _, _| NO_TINT,
         );
 
         // North is -Z, so the overlay pokes out below z = 0.

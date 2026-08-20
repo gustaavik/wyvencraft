@@ -22,8 +22,20 @@ impl InGameState {
             return None;
         }
         let block = self.world.block_at(pos);
-        match self.block_models.get(block.0 as usize).and_then(|m| *m) {
-            Some(model) => Some(Target::Box(model.hitbox.translate(Vec3::new(
+        // Both model paths measure a hitbox from their own geometry, so a
+        // Blockbench-authored flower is no more targetable than a `.bbmodel`
+        // one. A block with neither is an ordinary cube and fills its cell.
+        let hitbox = self
+            .baked_models
+            .get(block.0 as usize)
+            .and_then(|m| m.as_ref().and_then(|m| m.hitbox))
+            .or_else(|| {
+                self.block_models
+                    .get(block.0 as usize)
+                    .and_then(|m| m.map(|m| m.hitbox))
+            });
+        match hitbox {
+            Some(hitbox) => Some(Target::Box(hitbox.translate(Vec3::new(
                 pos.x as f32,
                 pos.y as f32,
                 pos.z as f32,

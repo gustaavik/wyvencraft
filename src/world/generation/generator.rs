@@ -112,11 +112,11 @@ impl WorldGenerator for NoiseGenerator {
         self.seed
     }
 
-    fn biome_tint(&self, x: i32, z: i32) -> [u8; 4] {
+    fn biome_tint(&self, x: i32, z: i32, index: u8) -> [u8; 4] {
         // The same climate sample `generate` uses to pick surface blocks, so a
         // grass block's tint always agrees with the biome that placed it.
         let biome = Biome::from_temperature(self.noise.temperature(x, z));
-        self.config.biome(biome).tint
+        self.config.biome(biome).tint(index)
     }
 
     fn generate(&self, pos: ChunkPos) -> Chunk {
@@ -213,18 +213,18 @@ mod tests {
             ChunkPos::new(8, 5),
         ];
         const EXPECTED: [u64; 12] = [
-            0x867c9b358e4c1d29,
-            0xa139cfea3a0a8c5b,
-            0xd5b77a589724faa3,
-            0xf2ae2d34a8090f67,
-            0xc753c9641d33dc5e,
-            0x4709e3591d8b943a,
-            0xb2e8baae9bdde1fb,
-            0x62b3464268435f74,
-            0x7923451cf12ae3ef,
-            0x023d6824779a4174,
-            0x114d35d38c5e5690,
-            0x7904a7cadd01db54,
+            0x3a9c467d235d287b,
+            0x3294c27f6aa5a4b6,
+            0xd6e2a2aa8a46a894,
+            0x79231897e6fa2ef8,
+            0x77e43818845368f8,
+            0x025635edcf5f3d68,
+            0xbfa408e2d502f6e1,
+            0xe87742aed6015651,
+            0x8ceee4fc9b2f476a,
+            0x85f16f4f0a9ece01,
+            0x707bd8b13a1e6493,
+            0xd5e40a4811e47ba9,
         ];
         let got: Vec<u64> = [42u64, 0x00C0_FFEE]
             .iter()
@@ -278,8 +278,8 @@ mod tests {
         let area: Vec<ChunkPos> = (-6..6)
             .flat_map(|x| (-6..6).map(move |z| ChunkPos::new(x, z)))
             .collect();
-        let wood = count_blocks(&generator, &area, blocks::WOOD);
-        let leaves = count_blocks(&generator, &area, blocks::LEAVES);
+        let wood = count_blocks(&generator, &area, blocks::OAK_LOG);
+        let leaves = count_blocks(&generator, &area, blocks::OAK_LEAVES);
         assert!(wood > 0, "no tree trunks generated in sample area");
         assert!(
             leaves > wood,
@@ -304,7 +304,7 @@ mod tests {
                                 z: lz as u8,
                             })
                         };
-                        if at(y) == blocks::WOOD {
+                        if at(y) == blocks::OAK_LOG {
                             assert!(
                                 !at(y - 1).is_air(),
                                 "floating trunk at {pos:?} ({lx},{y},{lz})"

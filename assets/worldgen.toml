@@ -29,22 +29,16 @@ clay = { block = "clay", below = -0.35 }
 # so reordering or inserting entries relocates ores in existing worlds.
 # `threshold` is on the ore noise field — higher = rarer.
 [[ore]]
-block = "diamond ore"
-min_y = 1
-max_y = 16
-threshold = 0.68
-
-[[ore]]
-block = "gold ore"
-min_y = 4
-max_y = 32
-threshold = 0.66
-
-[[ore]]
 block = "iron ore"
 min_y = 8
 max_y = 72
 threshold = 0.60
+
+[[ore]]
+block = "copper ore"
+min_y = 8
+max_y = 80
+threshold = 0.58
 
 [[ore]]
 block = "coal ore"
@@ -57,15 +51,15 @@ threshold = 0.55
 [[tree]]
 name = "oak"
 shape = "oak"
-trunk = "wood"
-leaves = "leaves"
+trunk = "oak log"
+leaves = "oak leaves"
 trunk_height = [4, 6]
 
 [[tree]]
 name = "spruce"
 shape = "spruce"
-trunk = "wood"
-leaves = "leaves"
+trunk = "oak log"
+leaves = "oak leaves"
 trunk_height = [6, 8]
 
 # Half-buried boulders on dry land.
@@ -83,18 +77,20 @@ chance_per_mille = 300
 # both keys for a bare biome. Like every other name here these are strict — a
 # typo rejects the whole file.
 #
-# `tint` is the biome's foliage colour, multiplied into the block-model faces
-# marked `tintindex` in Blockbench — the grass top and the grass side overlay,
-# whose textures are deliberately greyscale so one set of art serves every
-# climate. Omit it for white, which multiplies to no change at all.
+# `tint` and `foliage_tint` are the colours multiplied into the block-model
+# faces Blockbench marked `tintindex` — 0 takes `tint` (the grass top and side
+# overlay), 1 takes `foliage_tint` (leaves). Those textures are deliberately
+# greyscale so one set of art serves every climate. Omit `tint` for white, which
+# multiplies to no change at all; omit `foliage_tint` and it follows `tint`.
 [biome.plains]
 surface = "grass"
 subsurface = "dirt"
 tree = "oak"
 tree_chance_per_mille = 550
-plants = ["blue bells", "red flower", "red mushroom", "brown mushroom"]
+plants = ["blue bells", "red flower", "cornflower", "red mushroom", "brown mushroom"]
 plant_chance_per_mille = 90
 tint = [124, 189, 107]
+foliage_tint = [93, 165, 74]
 
 [biome.snowy]
 surface = "snow"
@@ -106,9 +102,11 @@ plants = ["red mushroom", "brown mushroom"]
 plant_chance_per_mille = 15
 # Washed-out and blue-shifted, for grass poking through the snow line.
 tint = [128, 180, 151]
+foliage_tint = [98, 152, 122]
 
 [biome.desert]
 surface = "sand"
 subsurface = "sand"
 # Dry and yellowed; barely used, since desert grows no grass.
 tint = [191, 183, 85]
+foliage_tint = [174, 164, 42]

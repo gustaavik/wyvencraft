@@ -56,7 +56,8 @@ render = "opaque"
 solid = true
 hardness = 1.5
 material = "stone"
-textures = "stone"
+block_model = "assets/blocks/stone_block.json"
+drops = { item = "cobblestone" }
 
 [[block]]
 name = "dirt"
@@ -80,7 +81,7 @@ render = "opaque"
 solid = true
 hardness = 0.5
 material = "sand"
-textures = "sand"
+block_model = "assets/blocks/sand_block.json"
 
 [[block]]
 name = "water"
@@ -94,20 +95,20 @@ textures = "water"
 flow_levels = 7
 
 [[block]]
-name = "wood"
+name = "oak log"
 render = "opaque"
 solid = true
 hardness = 2.0
 material = "wood"
-textures = { top = "wood_rings", bottom = "wood_rings", side = "wood_bark" }
+block_model = "assets/blocks/oak_log_block.json"
 
 [[block]]
-name = "leaves"
+name = "oak leaves"
 render = "cutout"
 solid = true
 hardness = 0.2
 material = "plant"
-textures = "leaves"
+block_model = "assets/blocks/oak_leaves_block.json"
 drops = { requires_tool = "shears" }
 
 [[block]]
@@ -140,7 +141,7 @@ render = "opaque"
 solid = true
 hardness = 0.6
 material = "dirt"
-textures = "gravel"
+block_model = "assets/blocks/gravel_block.json"
 
 [[block]]
 name = "clay"
@@ -156,7 +157,7 @@ render = "opaque"
 solid = true
 hardness = 3.0
 material = "stone"
-textures = "coal_ore"
+block_model = "assets/blocks/coal_ore_block.json"
 
 [[block]]
 name = "iron ore"
@@ -164,23 +165,23 @@ render = "opaque"
 solid = true
 hardness = 3.0
 material = "stone"
-textures = "iron_ore"
+block_model = "assets/blocks/iron_ore_block.json"
 
 [[block]]
-name = "gold ore"
+name = "copper ore"
 render = "opaque"
 solid = true
 hardness = 3.0
 material = "stone"
-textures = "gold_ore"
+block_model = "assets/blocks/copper_ore_block.json"
 
 [[block]]
-name = "diamond ore"
+name = "cobblestone"
 render = "opaque"
 solid = true
-hardness = 3.0
+hardness = 2.0
 material = "stone"
-textures = "diamond_ore"
+block_model = "assets/blocks/cobblestone_block.json"
 
 # Ground cover: model-backed, walk-through decoration scattered on the surface
 # by worldgen (see the per-biome `plants` lists in worldgen.toml). No `textures`
@@ -234,3 +235,14 @@ random_yaw = true
 [block.model]
 path = "assets/models/mushroom2.bbmodel"
 offset = [-0.5, 0.0, -0.5]
+
+# Authored in Blockbench as two crossed planes, so it needs no `[block.model]`
+# placement: the model is already in cell coordinates.
+[[block]]
+name = "cornflower"
+render = "cutout"
+solid = false
+hardness = 0.0
+material = "plant"
+random_yaw = true
+block_model = "assets/blocks/cornflower_block.json"

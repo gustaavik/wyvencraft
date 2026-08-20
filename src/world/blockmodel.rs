@@ -18,9 +18,10 @@
 
 use glam::Vec3;
 
-use crate::core::Direction;
+use crate::core::{Aabb, Direction};
 use crate::model::blockjson::BlockJsonModel;
 use crate::render::block_textures::BlockTextureSet;
+use crate::world::block::model_hitbox;
 
 /// How far a corner may sit from a cell boundary and still count as on it.
 const COVERAGE_EPSILON: f32 = 1e-3;
@@ -35,8 +36,9 @@ pub struct BakedQuad {
     pub layer: u32,
     /// The neighbour that hides this quad when that neighbour is solid.
     pub cull: Option<Direction>,
-    /// Take the biome tint rather than the texture's own colour.
-    pub tinted: bool,
+    /// Which biome colour to multiply in, from `tintindex` — `0` grass, `1`
+    /// foliage. `None` draws the texture's own colour.
+    pub tint: Option<u8>,
     pub shade: f32,
 }
 
@@ -49,11 +51,21 @@ pub struct BakedBlockModel {
     /// one. Measured from the geometry, not declared.
     pub occludes: [bool; 6],
     pub bounds: (Vec3, Vec3),
+    /// What the crosshair hits, in block-local `0..1` coordinates, or `None`
+    /// for a model that fills its cell — an ordinary cube, which the raycast
+    /// marches through without a box test at all.
+    ///
+    /// Measured from `bounds` by the same [`model_hitbox`] the `.bbmodel` path
+    /// uses, so a flower is only targetable where it actually is.
+    pub hitbox: Option<Aabb>,
+    /// Turn each instance by a hash of its position. Declared on the `[[block]]`
+    /// table, not in the model file — it is placement, not geometry.
+    pub random_yaw: bool,
 }
 
 impl BakedBlockModel {
     /// Resolve `model`'s textures into `textures` and measure its coverage.
-    pub fn bake(model: &BlockJsonModel, textures: &mut BlockTextureSet) -> Self {
+    pub fn bake(model: &BlockJsonModel, textures: &mut BlockTextureSet, random_yaw: bool) -> Self {
         let quads: Vec<BakedQuad> = model
             .quads
             .iter()
@@ -64,7 +76,7 @@ impl BakedBlockModel {
                 layer: textures
                     .resolve(&model.texture_paths[q.texture], &model.textures[q.texture]),
                 cull: q.cull,
-                tinted: q.tinted,
+                tint: q.tint,
                 shade: q.shade,
             })
             .collect();
@@ -87,10 +99,19 @@ impl BakedBlockModel {
             })
             .unwrap_or((Vec3::ZERO, Vec3::ZERO));
 
+        // Whether the geometry reaches every side of the cell, regardless of
+        // what its texture lets through. Bounds alone cannot answer this: two
+        // crossed planes span the whole cell without filling any of it.
+        let fills_cell = Direction::ALL
+            .iter()
+            .all(|&dir| quads.iter().any(|q| covers_cell_face(q, dir)));
+
         Self {
             quads,
             occludes,
             bounds,
+            hitbox: (!fills_cell).then(|| model_hitbox(bounds)),
+            random_yaw,
         }
     }
 
@@ -183,7 +204,7 @@ mod tests {
         let model = crate::model::blockjson::load(json.as_bytes(), "assets/blocks", &source)
             .expect("model loads");
         let mut textures = BlockTextureSet::new();
-        let baked = BakedBlockModel::bake(&model, &mut textures);
+        let baked = BakedBlockModel::bake(&model, &mut textures, false);
         (baked, textures)
     }
 

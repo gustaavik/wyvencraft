@@ -72,10 +72,25 @@ pub struct BiomeGen {
     /// same vegetation clumping that groups trees into groves.
     pub plants: Vec<BlockId>,
     pub plant_chance_per_mille: f32,
-    /// The colour multiplied into faces a block model marked `tintindex` —
+    /// The colour multiplied into faces a block model marked `tintindex = 0` —
     /// grass tops, grass side overlays and the like. Defaults to white, which
     /// is the identity, so a biome that says nothing tints nothing.
     pub tint: [u8; 4],
+    /// The same for `tintindex = 1`: leaves and other hanging foliage, which
+    /// Minecraft colours a shade apart from the ground. Defaults to `tint`.
+    pub foliage_tint: [u8; 4],
+}
+
+impl BiomeGen {
+    /// The colour for one of the tint sources a model's `tintindex` names.
+    /// Out-of-range indices take grass, which is the safe wrong answer: a
+    /// greyscale texture stays visible rather than turning white.
+    pub fn tint(&self, index: u8) -> [u8; 4] {
+        match index {
+            1 => self.foliage_tint,
+            _ => self.tint,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -126,6 +141,10 @@ impl WorldGenConfig {
             .collect::<Result<_, String>>()?;
 
         let biome = |def: &BiomeDef| -> Result<BiomeGen, String> {
+            let tint = match def.tint {
+                Some([r, g, b]) => [r, g, b, 255],
+                None => crate::render::NO_TINT,
+            };
             let tree = match &def.tree {
                 Some(name) => {
                     let index = file
@@ -148,9 +167,10 @@ impl WorldGenConfig {
                     .map(|name| resolve(name))
                     .collect::<Result<_, String>>()?,
                 plant_chance_per_mille: def.plant_chance_per_mille.unwrap_or(0.0),
-                tint: match def.tint {
+                tint,
+                foliage_tint: match def.foliage_tint {
                     Some([r, g, b]) => [r, g, b, 255],
-                    None => crate::render::NO_TINT,
+                    None => tint,
                 },
             })
         };
@@ -294,9 +314,13 @@ struct BiomeDef {
     plants: Vec<String>,
     #[serde(default)]
     plant_chance_per_mille: Option<f32>,
-    /// `tint = [124, 189, 107]`, the biome's grass/foliage colour.
+    /// `tint = [124, 189, 107]`, the biome's grass colour (`tintindex = 0`).
     #[serde(default)]
     tint: Option<[u8; 3]>,
+    /// `foliage_tint = [...]`, the leaf colour (`tintindex = 1`). Defaults to
+    /// `tint`.
+    #[serde(default)]
+    foliage_tint: Option<[u8; 3]>,
 }
 
 #[cfg(test)]
@@ -334,9 +358,8 @@ mod tests {
         assert_eq!(
             ores,
             vec![
-                (blocks::DIAMOND_ORE, 1, 16, 0.68),
-                (blocks::GOLD_ORE, 4, 32, 0.66),
                 (blocks::IRON_ORE, 8, 72, 0.60),
+                (blocks::COPPER_ORE, 8, 80, 0.58),
                 (blocks::COAL_ORE, 16, 108, 0.55),
             ]
         );
@@ -344,7 +367,10 @@ mod tests {
         assert_eq!(config.trees.len(), 2);
         let oak = &config.trees[0];
         assert_eq!(oak.shape, TreeShape::Oak);
-        assert_eq!((oak.trunk, oak.leaves), (blocks::WOOD, blocks::LEAVES));
+        assert_eq!(
+            (oak.trunk, oak.leaves),
+            (blocks::OAK_LOG, blocks::OAK_LEAVES)
+        );
         assert_eq!(oak.trunk_height, (4, 6));
         let spruce = &config.trees[1];
         assert_eq!(spruce.shape, TreeShape::Spruce);

@@ -131,8 +131,17 @@ pub struct BlockModelSpec {
 pub struct BlockVisuals {
     /// `[block.model]` — a `.bbmodel`/`.gltf` file plus its placement.
     pub models: Vec<Option<BlockModelSpec>>,
-    /// `block_model` — the path of a Blockbench Java Block/Item `.json`.
-    pub json: Vec<Option<String>>,
+    /// `block_model` — a Blockbench Java Block/Item `.json` and its placement.
+    pub json: Vec<Option<BlockJsonSpec>>,
+}
+
+/// A block's `block_model`, still unresolved. The path is read after the block
+/// registry exists, exactly like [`BlockModelSpec`]; `random_yaw` rides along
+/// because it is authored on the `[[block]]` table, not in the model file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BlockJsonSpec {
+    pub path: String,
+    pub random_yaw: bool,
 }
 
 /// Geometry loaded from a model file instead of the six atlas-textured cube
@@ -174,7 +183,10 @@ pub fn model_hitbox(bounds: (Vec3, Vec3)) -> Aabb {
         .into_iter()
         .fold(0.0f32, |r, d| r.max(d.abs()))
         .clamp(MIN_HITBOX * 0.5, 0.5);
-    let bottom = lo.y.clamp(0.0, 1.0);
+    // Leave room for `MIN_HITBOX` above the floor, so a model with no vertical
+    // extent at all — a single horizontal face — still gets a targetable box
+    // instead of an inverted one.
+    let bottom = lo.y.clamp(0.0, 1.0 - MIN_HITBOX);
     let top = hi.y.clamp(bottom + MIN_HITBOX, 1.0);
     Aabb::new(
         Vec3::new(0.5 - radius, bottom, 0.5 - radius),
@@ -260,8 +272,8 @@ pub mod blocks {
     pub const GRASS: BlockId = BlockId(3);
     pub const SAND: BlockId = BlockId(4);
     pub const WATER: BlockId = BlockId(5);
-    pub const WOOD: BlockId = BlockId(6);
-    pub const LEAVES: BlockId = BlockId(7);
+    pub const OAK_LOG: BlockId = BlockId(6);
+    pub const OAK_LEAVES: BlockId = BlockId(7);
     pub const GLASS: BlockId = BlockId(8);
     pub const BEDROCK: BlockId = BlockId(9);
     pub const SNOW: BlockId = BlockId(10);
@@ -269,16 +281,17 @@ pub mod blocks {
     pub const CLAY: BlockId = BlockId(12);
     pub const COAL_ORE: BlockId = BlockId(13);
     pub const IRON_ORE: BlockId = BlockId(14);
-    pub const GOLD_ORE: BlockId = BlockId(15);
-    pub const DIAMOND_ORE: BlockId = BlockId(16);
+    pub const COPPER_ORE: BlockId = BlockId(15);
+    pub const COBBLESTONE: BlockId = BlockId(16);
     pub const BLUE_BELLS: BlockId = BlockId(17);
     pub const RED_FLOWER: BlockId = BlockId(18);
     pub const RED_MUSHROOM: BlockId = BlockId(19);
     pub const BROWN_MUSHROOM: BlockId = BlockId(20);
+    pub const CORNFLOWER: BlockId = BlockId(21);
     /// Flowing water levels 1 (shallowest) through 7: auto-registered after
     /// all declared blocks; the source block [`WATER`] is level 8.
-    pub const WATER_FLOW_1: BlockId = BlockId(21);
-    pub const WATER_FLOW_7: BlockId = BlockId(27);
+    pub const WATER_FLOW_1: BlockId = BlockId(22);
+    pub const WATER_FLOW_7: BlockId = BlockId(28);
 }
 
 // ---- TOML schema -----------------------------------------------------------
@@ -530,7 +543,10 @@ impl BlockRegistry {
             };
             let random_yaw = def.random_yaw;
             let model = def.model.map(|spec| BlockModelSpec { spec, random_yaw });
-            json.push(def.block_model);
+            json.push(
+                def.block_model
+                    .map(|path| BlockJsonSpec { path, random_yaw }),
+            );
             let id = reg.register(Block {
                 name: def.name,
                 render: def.render,
@@ -664,15 +680,15 @@ mod tests {
         use BlockMaterial as M;
         use RenderType as R;
         const INF: f32 = f32::INFINITY;
-        let expected: [(&str, R, bool, f32, M); 28] = [
+        let expected: [(&str, R, bool, f32, M); 29] = [
             ("air", R::Invisible, false, 0.0, M::Other),
             ("stone", R::Opaque, true, 1.5, M::Stone),
             ("dirt", R::Opaque, true, 0.5, M::Dirt),
             ("grass", R::Opaque, true, 0.6, M::Dirt),
             ("sand", R::Opaque, true, 0.5, M::Sand),
             ("water", R::Transparent, false, INF, M::Other),
-            ("wood", R::Opaque, true, 2.0, M::Wood),
-            ("leaves", R::Cutout, true, 0.2, M::Plant),
+            ("oak log", R::Opaque, true, 2.0, M::Wood),
+            ("oak leaves", R::Cutout, true, 0.2, M::Plant),
             ("glass", R::Transparent, true, 0.3, M::Glass),
             ("bedrock", R::Opaque, true, INF, M::Other),
             ("snow", R::Opaque, true, 0.2, M::Dirt),
@@ -680,12 +696,13 @@ mod tests {
             ("clay", R::Opaque, true, 0.6, M::Dirt),
             ("coal ore", R::Opaque, true, 3.0, M::Stone),
             ("iron ore", R::Opaque, true, 3.0, M::Stone),
-            ("gold ore", R::Opaque, true, 3.0, M::Stone),
-            ("diamond ore", R::Opaque, true, 3.0, M::Stone),
+            ("copper ore", R::Opaque, true, 3.0, M::Stone),
+            ("cobblestone", R::Opaque, true, 2.0, M::Stone),
             ("blue bells", R::Cutout, false, 0.0, M::Plant),
             ("red flower", R::Cutout, false, 0.0, M::Plant),
             ("red mushroom", R::Cutout, false, 0.0, M::Plant),
             ("brown mushroom", R::Cutout, false, 0.0, M::Plant),
+            ("cornflower", R::Cutout, false, 0.0, M::Plant),
             ("water flow 1", R::Transparent, false, INF, M::Other),
             ("water flow 2", R::Transparent, false, INF, M::Other),
             ("water flow 3", R::Transparent, false, INF, M::Other),
@@ -733,12 +750,19 @@ mod tests {
     fn blocks_toml_components_parse() {
         let reg = BlockRegistry::with_builtins();
         assert_eq!(
-            reg.get(blocks::LEAVES).drops,
+            reg.get(blocks::OAK_LEAVES).drops,
             Drops::SelfWithTool {
                 kind: "shears".into()
             }
         );
-        assert_eq!(reg.get(blocks::STONE).drops, Drops::SelfItem);
+        // Mining stone yields cobblestone, exactly as the recipes assume.
+        assert_eq!(
+            reg.get(blocks::STONE).drops,
+            Drops::Item {
+                name: "cobblestone".into(),
+                count: 1
+            }
+        );
         assert_eq!(reg.get(blocks::WATER_FLOW_1).drops, Drops::None);
         // Flow blocks inherit the source's look and physics.
         let (water, flow) = (reg.get(blocks::WATER), reg.get(blocks::WATER_FLOW_1));

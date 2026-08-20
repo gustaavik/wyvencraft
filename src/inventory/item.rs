@@ -454,8 +454,8 @@ mod tests {
             "grass",
             "sand",
             "water",
-            "wood",
-            "leaves",
+            "oak log",
+            "oak leaves",
             "glass",
             "bedrock",
             "snow",
@@ -463,12 +463,13 @@ mod tests {
             "clay",
             "coal ore",
             "iron ore",
-            "gold ore",
-            "diamond ore",
+            "copper ore",
+            "cobblestone",
             "blue bells",
             "red flower",
             "red mushroom",
             "brown mushroom",
+            "cornflower",
         ];
         const STONE: &[BlockMaterial] = &[BlockMaterial::Stone];
         const WOOD: &[BlockMaterial] = &[BlockMaterial::Wood];

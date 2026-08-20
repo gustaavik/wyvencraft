@@ -120,6 +120,11 @@ feeds to `SceneFrame::textured`.
 The atlas/array split is **temporary**. Blocks are migrating to Blockbench models
 one at a time; when the last one moves over, the atlas keeps only the entity
 sheets and cracks, and `voxel` / `voxel_array` collapse back into one pipeline.
+Twelve blocks have moved so far — everything except `water`, `glass`, `bedrock`,
+`snow`, `clay` and the four `.bbmodel` plants. The now-unused painters in
+`render::tiles` are deliberately left in place: they stay reachable through
+`paint_named`, so nothing warns, and deleting them is a single clean sweep once
+the last block migrates.
 
 Its mirror: **only `state::ingame_state::view` touches `RenderContext`.** Chunk
 streaming, mob AI, fluids and interaction are plain logic; `InGameState::refresh_view`
@@ -168,8 +173,9 @@ those systems are testable without a Vulkan device.
 ### Where to make common changes
 | Task                    | Location                                                                                   |
 | ----------------------- | ------------------------------------------------------------------------------------------ |
-| Add a block type        | Model it in Blockbench (**Java Block/Item** format, per-face UV, project texture size 256), export *Block/Item Model* to `assets/blocks/<name>.json` with its textures as separate **256×256** PNGs in `assets/textures/`, then one `[[block]]` in `assets/blocks.toml` with `block_model = "assets/blocks/<name>.json"`. A full cube is `from [0,0,0]` → `to [16,16,16]`; set `cullface` on every outward face or it draws all six even when buried; set `tintindex` only on faces that should take the biome colour. Parsing is `model::blockjson`, baking `world::blockmodel`, layers `render::block_textures`. The older `textures = "<name>"` atlas path still works for the blocks not yet re-authored |
-| Biome tint (grass colour) | `tint = [r, g, b]` per biome in `assets/worldgen.toml`, answered by `WorldGenerator::biome_tint` and multiplied into the faces a model marked `tintindex`. Greyscale art (`grass_top`, `grass_block_side_overlay`) is what makes one texture serve every climate |
+| Add a block type        | Model it in Blockbench (**Java Block/Item** format, per-face UV), export *Block/Item Model* to `assets/blocks/<name>.json` with its textures as separate PNGs in `assets/textures/`, then one `[[block]]` in `assets/blocks.toml` with `block_model = "assets/blocks/<name>.json"`. A full cube is `from [0,0,0]` → `to [16,16,16]`; set `cullface` on **each face's own direction** or it draws all six even when buried (and hides itself in the wrong one); set `tintindex` only on faces taking a biome colour. Textures may be 16px or 256px — anything square that divides 256 is scaled up to it. Parsing is `model::blockjson`, baking `world::blockmodel`, layers `render::block_textures`. The older `textures = "<name>"` atlas path still works for the blocks not yet re-authored |
+| A non-cube block, the new way | Same as above — the model is already in cell coordinates, so it needs no placement. `random_yaw` on the `[[block]]` table turns each instance about its cell (and drops its `cullface`, which a turned face can no longer honour). The hitbox is derived from the geometry: a model that covers all six cell faces stays a plain `Target::Cell`, anything else gets a measured box. `assets/blocks/cornflower_block.json` is the worked example |
+| Biome tint (grass, foliage) | `tint` and `foliage_tint` per biome in `assets/worldgen.toml`, selected by a face's `tintindex` — **0 grass, 1 foliage**, Minecraft's numbering — resolved through `WorldGenerator::biome_tint` at mesh time. Greyscale art (`grass_block_top`, `grass_block_side_overlay`, `oak_leaves`) is what lets one texture serve every climate; a *coloured* texture must not be tinted |
 | A non-cube block (plant, prop) | `[block.model]` in `assets/blocks.toml` — same `path`/`scale`/`offset`/`rotation` spelling as `[item.model]`, plus `random_yaw`. The block then emits **no** cube faces (`textures` becomes optional) and is baked into its cell by `world::meshing::culled`. Give it `solid = false` to walk through: `World::is_solid` is collision only, `is_targetable` is what the crosshair uses, and `is_replaceable` decides whether placing swallows it. Add a matching `[item.model]` on the same path so the drop, the hand and the icon agree — the registry memoises by path, so both share one `ModelId` |
 | Block hitbox (crosshair, outline, cracks) | Not authored — `content::placed_bounds` measures the placed model and `world::block::model_hitbox` turns it into a square, centred, cell-clamped box on `BlockModel::hitbox`, so it can never drift from what is drawn. The raycast predicate returns `world::Target::{Cell,Box}`; a `Box` the ray misses does **not** stop the march. `InGameState::{target_at,hitbox_at}` are the single source for targeting *and* both overlays. Mob line-of-sight deliberately stays `is_solid` + `Target::Cell` — a flower must not hide you |
 | Add an item / tool / food / armor | `assets/items.toml` (`[item.tool]` with `harvests`/`dig_speed`/`durability` and optional `damage`, `[item.food]`, `[item.armor]` with `slot`/`defense`/`durability`, `[item.model]` with `path`/`scale`/`offset`/`rotation`); starter kit in the same file |
@@ -225,10 +231,17 @@ those systems are testable without a Vulkan device.
   never on `Block`. Otherwise two peers whose grass is drawn slightly differently
   would be refused a shared world. If a `content_hash` test starts failing after
   a visual change, that is the invariant breaking, not the test being stale.
-- **Block textures are exactly 256×256.** An array image has one extent for every
-  layer, so this is an equality, not a maximum: a differently sized PNG warns and
-  renders magenta. The 16px atlas is the opposite — it hard-rejects anything that
-  *isn't* 16×16. Two texture systems, two fixed sizes, until the atlas retires.
+- **Block textures end up 256×256 whatever they were authored at.** An array
+  image has one extent for every layer, so anything square that divides 256 is
+  replicated up to it at load (`render::block_textures::upscale`) — nearest, at
+  an integer factor, so a 16px texture is pixel-identical on screen under the
+  array's nearest magnification. Anything else warns and renders magenta. The
+  16px atlas is stricter — it hard-rejects anything that *isn't* 16×16.
+- **A cutout block must cull against itself.** `BakedBlockModel::occludes` is
+  measured from the texture's opacity, so a leaves cube correctly occludes
+  nothing — which alone would leave every face of every block inside a canopy
+  drawn. Both mesher paths therefore also drop the face a transparent or cutout
+  block shares with a neighbour *of its own kind*.
 - **Vulkan correctness signal:** `vulkano`'s safe command-buffer/pipeline API
   validates state and *panics* on misuse (this is what catches bad pipelines even
   without Vulkan validation layers). A clean multi-frame run is strong evidence the

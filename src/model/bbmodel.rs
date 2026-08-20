@@ -296,6 +296,15 @@ impl FaceDir {
         }
     }
 
+    /// This face's name, as Minecraft and Blockbench spell it.
+    pub(super) fn name(self) -> &'static str {
+        FACES
+            .iter()
+            .find(|&&(_, dir)| dir == self)
+            .map(|&(name, _)| name)
+            .unwrap_or("?")
+    }
+
     /// Parse the name Minecraft's `cullface` uses.
     pub(super) fn from_name(name: &str) -> Option<Self> {
         FACES.iter().find(|(n, _)| *n == name).map(|&(_, dir)| dir)

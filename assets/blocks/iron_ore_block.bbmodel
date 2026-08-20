@@ -1,0 +1,172 @@
+{
+	"meta": {
+		"format_version": "5.0",
+		"model_format": "java_block",
+		"box_uv": false
+	},
+	"name": "iron_ore_block",
+	"parent": "",
+	"java_block_version": "1.21.11",
+	"ambientocclusion": true,
+	"front_gui_light": false,
+	"visible_box": [
+		1,
+		1,
+		0
+	],
+	"variable_placeholders": "",
+	"multi_file_ruleset": "",
+	"variable_placeholder_buttons": [],
+	"unhandled_root_fields": {},
+	"resolution": {
+		"width": 16,
+		"height": 16
+	},
+	"elements": [
+		{
+			"name": "block",
+			"box_uv": false,
+			"render_order": "behind",
+			"rescale": false,
+			"locked": false,
+			"shade": true,
+			"light_emission": 0,
+			"export": true,
+			"scope": 0,
+			"allow_mirror_modeling": true,
+			"from": [
+				0,
+				0,
+				0
+			],
+			"to": [
+				16,
+				16,
+				16
+			],
+			"autouv": 0,
+			"color": 6,
+			"origin": [
+				8,
+				8,
+				8
+			],
+			"faces": {
+				"north": {
+					"uv": [
+						0,
+						0,
+						16,
+						16
+					],
+					"texture": 0,
+					"cullface": "north"
+				},
+				"east": {
+					"uv": [
+						0,
+						0,
+						16,
+						16
+					],
+					"texture": 0,
+					"cullface": "east"
+				},
+				"south": {
+					"uv": [
+						0,
+						0,
+						16,
+						16
+					],
+					"texture": 0,
+					"cullface": "south"
+				},
+				"west": {
+					"uv": [
+						0,
+						0,
+						16,
+						16
+					],
+					"texture": 0,
+					"cullface": "west"
+				},
+				"up": {
+					"uv": [
+						0,
+						0,
+						16,
+						16
+					],
+					"texture": 0,
+					"cullface": "up"
+				},
+				"down": {
+					"uv": [
+						0,
+						0,
+						16,
+						16
+					],
+					"texture": 0,
+					"cullface": "down"
+				}
+			},
+			"type": "cube",
+			"uuid": "608ee601-e156-5e5c-5a87-6041897757bd"
+		}
+	],
+	"groups": [],
+	"outliner": [
+		"608ee601-e156-5e5c-5a87-6041897757bd"
+	],
+	"textures": [
+		{
+			"name": "iron_ore.png",
+			"path": "iron_ore.png",
+			"folder": "",
+			"namespace": "",
+			"id": "1",
+			"group": "",
+			"scope": 0,
+			"width": 16,
+			"height": 16,
+			"uv_width": 16,
+			"uv_height": 16,
+			"particle": false,
+			"use_as_default": false,
+			"layers_enabled": false,
+			"sync_to_project": "",
+			"file_format": "png",
+			"render_mode": "default",
+			"render_sides": "auto",
+			"wrap_mode": "limited",
+			"pbr_channel": "color",
+			"fps": 7,
+			"frame_time": 1,
+			"frame_order_type": "loop",
+			"frame_order": "",
+			"frame_interpolate": false,
+			"visible": true,
+			"internal": true,
+			"saved": true,
+			"uuid": "45593232-3320-28c8-6360-da25fe26b878",
+			"source": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAC6UlEQVQ4ETWTW28bVRSFv5k5c/PYzsV26iSNoBKEgiggxFv6QqWiCoknHvqz+iP4E/CA1AcQlUoIJYqCSkFGNk5sZxxfZjz3MWdOmpGONLPPrL3XXmtv7dmz79ZZlpHnOUmSkKbVSeXJyLKc28d1XRzHwfNqMqThug6WZSKCIFDgOI7QdV393+l05A81Fa9AURSp5LfJqpgQQhURtyDbttR9rebJSi5hGFKWBUEQEscxjz41iWYBv/xrK4amaaJpGqLfHyigYRhU5/BOjCbbOAsaClhdPn5gsNWqMfztb77odPn9fMBV833W6xJxcHBXJSDyObovqN9pkgwuKfIFf15vYJqCFz2o//QDG47NaHxGd+cddLdJo9FAhGGAy4qHH9kKfP78V7bamzjzBdvTv/C3PsegJN47Is4TrP1tEsfDk6JX+gnPq0sqHse9Fc2Tn9mUas+HPuPpnChO8boGtmVzeM9mV18wHl3x0s8lZi2FlC74vi/tsEikKLXOZ1z0TyiSmEWwwvrwCbZR8N49j33dJxhNmQyXuFdnjJufqNZF5XeeFzJbxpsQ3NoHmF5O0XIk5YJloqG/njAYvSJLUhbrGn7jY5JVdJNgd7erbLlREr55aJJe+vQuRrSbHc6iA8nQ5trYloOVSVFNdqR91dBVsyBms9ktlqdfbZAMZ/T+OMdrbfLm9BQ9OWa8/yU1LSNMkdYmaj503VADJpOYMlBirlO+/3GCs+hRFwX/ve4TJTnl4RNVICx1vn3kkA2nXMzh9Lp+w2C1ChUt3bTwpeq2+y7X0jZrR9LMCtwiYRFGPP26w8nzV9wVJf/0fQqtQbB9H7G3t/d2kVIcuRzSH5nZoMhSTNeilPvR7m7x4uWC/PKS4yghL8F+8Biv0mAwGCgG1YZVU9dwBOFyzlo4knrVL2pgruSX2DmiXiyJNI/ZZEJRSPfa7fbNy9vtmi7DigRZVG1pofqvGDUaTbXKQShX2XZotdqq8P8RnW3wPMMVJQAAAABJRU5ErkJggg=="
+		}
+	],
+	"display": {
+		"thirdperson_righthand": {
+			"rotation": [
+				32,
+				32,
+				32
+			],
+			"scale": [
+				0.25,
+				0.25,
+				0.25
+			]
+		}
+	}
+}

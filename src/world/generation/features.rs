@@ -487,7 +487,7 @@ mod tests {
                         if plants.contains(&at(lx, y, lz)) {
                             assert_ne!(
                                 at(lx, y + 1, lz),
-                                blocks::WOOD,
+                                blocks::OAK_LOG,
                                 "plant inside a trunk at {pos:?} ({lx},{y},{lz})"
                             );
                         }

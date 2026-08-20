@@ -24,8 +24,8 @@ use crate::model::{ModelId, ModelRegistry, ModelSpec, blockjson};
 use crate::render::TileRegistry;
 use crate::render::block_textures::{self, BlockTextureSet};
 use crate::world::block::{
-    BUILTIN_BLOCKS, BlockModel, BlockModelSpec, BlockRegistry, BlockVisuals, FaceTextures,
-    model_hitbox,
+    BUILTIN_BLOCKS, BlockJsonSpec, BlockModel, BlockModelSpec, BlockRegistry, BlockVisuals,
+    FaceTextures, model_hitbox,
 };
 use crate::world::blockmodel::BakedBlockModel;
 use crate::world::generation::WorldGenConfig;
@@ -250,10 +250,10 @@ impl GameContent {
         let mut block_textures = BlockTextureSet::new();
         let mut baked_models: Vec<Option<BakedBlockModel>> = Vec::new();
         let mut block_face_tiles: Vec<Option<FaceTextures>> = Vec::new();
-        for path in &block_json_paths {
-            let baked = path
-                .as_deref()
-                .and_then(|path| load_block_model(path, source, &mut block_textures));
+        for spec in &block_json_paths {
+            let baked = spec
+                .as_ref()
+                .and_then(|spec| load_block_model(spec, source, &mut block_textures));
             block_face_tiles.push(
                 baked
                     .as_ref()
@@ -311,10 +311,11 @@ impl GameContent {
 
 /// Parse one Blockbench block model and bake it, or warn and give up on it.
 fn load_block_model(
-    path: &str,
+    spec: &BlockJsonSpec,
     source: &dyn ContentSource,
     textures: &mut BlockTextureSet,
 ) -> Option<BakedBlockModel> {
+    let path = spec.path.as_str();
     let bytes = match source.read_bytes(path) {
         Ok(bytes) => bytes,
         Err(err) => {
@@ -325,7 +326,7 @@ fn load_block_model(
     let dir = path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
     match blockjson::load(&bytes, dir, source) {
         Ok(model) => {
-            let baked = BakedBlockModel::bake(&model, textures);
+            let baked = BakedBlockModel::bake(&model, textures, spec.random_yaw);
             log::info!(
                 "loaded block model {path} ({} quads, {} textures)",
                 baked.quads.len(),
@@ -671,22 +672,73 @@ mod tests {
             .collect();
         assert_eq!(
             modelled,
-            vec!["dirt", "grass"],
+            vec![
+                "stone",
+                "dirt",
+                "grass",
+                "sand",
+                "oak log",
+                "oak leaves",
+                "gravel",
+                "coal ore",
+                "iron ore",
+                "copper ore",
+                "cobblestone",
+                "cornflower",
+            ],
             "the blocks migrated to Blockbench so far"
         );
 
+        // Solid terrain cubes must fill their cell so neighbours can cull
+        // against them. The other two legitimately do not: leaves are a cutout,
+        // and a cornflower is two crossed planes.
+        let see_through = ["oak leaves", "cornflower"];
+
         for (id, baked) in content.baked_models.iter().enumerate() {
             let Some(baked) = baked else { continue };
-            let name = &content.blocks.get(crate::core::BlockId(id as u16)).name;
+            let name = content
+                .blocks
+                .get(crate::core::BlockId(id as u16))
+                .name
+                .as_str();
             assert!(!baked.quads.is_empty(), "{name}: no geometry");
+            let expected = !see_through.contains(&name);
             assert_eq!(
-                baked.occludes, [true; 6],
-                "{name}: a full terrain cube must occlude its neighbours"
+                baked.occludes, [expected; 6],
+                "{name}: wrong occlusion for what it is"
             );
             for quad in &baked.quads {
                 assert_ne!(quad.layer, 0, "{name}: sampling the missing-texture layer");
             }
         }
+    }
+
+    /// A flower is two crossed planes, so the crosshair must not reach it from
+    /// the far corner of its cell — and its box must be a real box, not the
+    /// inverted one a model with no vertical extent used to produce.
+    #[test]
+    fn a_modelled_plant_gets_a_hitbox_smaller_than_its_cell() {
+        let content = GameContent::load();
+        let id = content.blocks.find("cornflower").expect("shipped block");
+        let baked = content.baked_models[id.0 as usize]
+            .as_ref()
+            .expect("cornflower is modelled");
+
+        assert!(baked.random_yaw, "flowers vary their angle");
+        let hitbox = baked.hitbox.expect("a plant does not fill its cell");
+        let size = hitbox.max - hitbox.min;
+        assert!(size.x > 0.0 && size.y > 0.0 && size.z > 0.0, "{size}");
+        assert!(size.y <= 1.0, "taller than its cell: {size}");
+
+        // A full cube needs no box of its own — the raycast marches through it.
+        let stone = content.blocks.find("stone").expect("shipped block");
+        let cube = content.baked_models[stone.0 as usize]
+            .as_ref()
+            .expect("stone is modelled");
+        assert!(
+            cube.hitbox.is_none(),
+            "a full cube should stay a plain cell"
+        );
     }
 
     /// Dropped stacks and inventory icons still draw six-sided atlas cubes, so a

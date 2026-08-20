@@ -71,10 +71,10 @@ pub struct BlockQuad {
     pub texture: usize,
     /// From `cullface`: the neighbour that hides this quad when it is solid.
     pub cull: Option<Direction>,
-    /// From `tintindex`: multiply by the biome tint instead of drawing the
-    /// texture's own colour. Minecraft's index selects among several tint
-    /// sources; we have one, so any non-negative index means "tinted".
-    pub tinted: bool,
+    /// From `tintindex`: which biome colour to multiply into this face, instead
+    /// of drawing the texture's own. Minecraft's index selects among tint
+    /// sources — `0` grass, `1` foliage — and `None` here is its `-1`.
+    pub tint: Option<u8>,
     /// Baked directional face shade, or `1.0` where the element opted out with
     /// `"shade": false`.
     pub shade: f32,
@@ -261,9 +261,17 @@ impl Element {
             let Some(reference) = face.texture.as_deref() else {
                 continue;
             };
+            let Some(texture) = textures.resolve(reference, refs, dir, source)? else {
+                continue;
+            };
 
-            let texture = textures.resolve(reference, refs, dir, source)?;
             let corners = face_corners(face_dir, lo, hi);
+            // A zero-thickness element — the two crossed planes a flower is
+            // made of — still declares six faces, four of which collapse to
+            // nothing. Emitting them would cost vertices and draw no pixels.
+            if face_area(&corners) <= AREA_EPSILON {
+                continue;
+            }
             let uvs = face_uvs(rect, face.rotation, UV_RESOLUTION);
             let normal = transform.apply_normal(face_dir.normal());
 
@@ -277,11 +285,23 @@ impl Element {
             *depth += 1;
 
             let cull = match face.cullface.as_deref() {
-                Some(name) => Some(
-                    FaceDir::from_name(name)
-                        .ok_or_else(|| format!("unknown cullface {name:?}"))?
-                        .direction(),
-                ),
+                Some(cull) => {
+                    let cull = FaceDir::from_name(cull)
+                        .ok_or_else(|| format!("unknown cullface {cull:?}"))?;
+                    // A face lying flat on a cell boundary can only ever be
+                    // hidden by the neighbour it faces, so a `cullface` naming
+                    // any other direction is an authoring slip — and a costly
+                    // one, since the block then vanishes whenever something
+                    // solid sits in that unrelated direction.
+                    if cull != face_dir && covers_own_cell_face(face_dir, lo, hi) {
+                        log::warn!(
+                            "block model: the {name} face fills its side of the cell but \
+                             culls against {:?}; it should cull against {name}",
+                            cull.name()
+                        );
+                    }
+                    Some(cull.direction())
+                }
                 None => None,
             };
 
@@ -291,7 +311,7 @@ impl Element {
                 uvs,
                 texture,
                 cull,
-                tinted: face.tintindex >= 0,
+                tint: u8::try_from(face.tintindex).ok(),
                 shade: if self.shade {
                     super::mesh::shade(normal)
                 } else {
@@ -301,6 +321,48 @@ impl Element {
         }
         Ok(())
     }
+}
+
+/// Below this a face has no area worth drawing, in square pixels of the 0..16
+/// authoring grid.
+const AREA_EPSILON: f32 = 1e-4;
+
+/// Area of an axis-aligned box face, from its untransformed corners. A rotation
+/// preserves area, so this is measured before the transform for simplicity.
+fn face_area(corners: &[Vec3; 4]) -> f32 {
+    let lo = corners
+        .iter()
+        .fold(Vec3::splat(f32::INFINITY), |m, c| m.min(*c));
+    let hi = corners
+        .iter()
+        .fold(Vec3::splat(f32::NEG_INFINITY), |m, c| m.max(*c));
+    let extent = hi - lo;
+    // Exactly one component is zero for a box face; the other two are its sides.
+    let mut sides = [extent.x, extent.y, extent.z];
+    sides.sort_by(|a, b| a.total_cmp(b));
+    sides[1] * sides[2]
+}
+
+/// Whether this face lies flat on its own side of the cell and covers all of it
+/// — the only case where a `cullface` can be checked against the face itself.
+fn covers_own_cell_face(dir: FaceDir, lo: Vec3, hi: Vec3) -> bool {
+    const CELL: f32 = PIXELS_PER_BLOCK;
+    let (axis, plane) = match dir {
+        FaceDir::West => (0, lo.x),
+        FaceDir::East => (0, hi.x),
+        FaceDir::Down => (1, lo.y),
+        FaceDir::Up => (1, hi.y),
+        FaceDir::North => (2, lo.z),
+        FaceDir::South => (2, hi.z),
+    };
+    let on_boundary = match dir {
+        FaceDir::West | FaceDir::Down | FaceDir::North => plane == 0.0,
+        FaceDir::East | FaceDir::Up | FaceDir::South => plane == CELL,
+    };
+    on_boundary
+        && (0..3)
+            .filter(|&a| a != axis)
+            .all(|a| lo[a] == 0.0 && hi[a] == CELL)
 }
 
 /// Identify the plane a quad lies in, quantised so two faces authored at the
@@ -335,27 +397,60 @@ struct TextureSet {
 }
 
 impl TextureSet {
+    /// The index `reference` resolves to, or `None` when the face has no
+    /// texture at all and should simply not be drawn.
     fn resolve(
         &mut self,
         reference: &str,
         refs: &HashMap<String, String>,
         dir: &str,
         source: &dyn ContentSource,
-    ) -> Result<usize, String> {
-        let path = texture_path(reference, refs, dir)?;
+    ) -> Result<Option<usize>, String> {
+        let Some(path) = texture_path(reference, refs, dir)? else {
+            return Ok(None);
+        };
         if let Some(&index) = self.by_path.get(&path) {
-            return Ok(index);
+            return Ok(Some(index));
         }
-        let bytes = source
-            .read_bytes(&path)
-            .map_err(|e| format!("could not read texture {path}: {e}"))?;
-        let image = decode_png(&bytes).map_err(|e| format!("texture {path}: {e}"))?;
+        // Blockbench writes the reference relative to the exported file when the
+        // texture was linked from disk, and as a bare name when it was not.
+        // Both mean the same thing here, so the relative form is a hint rather
+        // than a contract: fall back to the one directory textures actually
+        // live in before giving up.
+        let (resolved, bytes) = match source.read_bytes(&path) {
+            Ok(bytes) => (path.clone(), bytes),
+            Err(first) => {
+                let fallback = texture_dir_path(&path);
+                match source.read_bytes(&fallback) {
+                    Ok(bytes) => {
+                        log::debug!("texture {path} not found; using {fallback}");
+                        (fallback, bytes)
+                    }
+                    Err(_) => return Err(format!("could not read texture {path}: {first}")),
+                }
+            }
+        };
+        // Remember the reference we were *given* as well as where it landed, or
+        // every face naming the same bare texture would take the fallback path
+        // again and decode its own copy.
+        if let Some(&index) = self.by_path.get(&resolved) {
+            self.by_path.insert(path, index);
+            return Ok(Some(index));
+        }
+        let image = decode_png(&bytes).map_err(|e| format!("texture {resolved}: {e}"))?;
         let index = self.images.len();
         self.images.push(image);
-        self.paths.push(path.clone());
+        self.paths.push(resolved.clone());
+        self.by_path.insert(resolved, index);
         self.by_path.insert(path, index);
-        Ok(index)
+        Ok(Some(index))
     }
+}
+
+/// The same texture, looked for in `assets/textures/` instead.
+fn texture_dir_path(path: &str) -> String {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    format!("assets/textures/{name}")
 }
 
 /// Follow a `"#key"` reference through the document's texture map to a file
@@ -367,7 +462,7 @@ fn texture_path(
     reference: &str,
     refs: &HashMap<String, String>,
     dir: &str,
-) -> Result<String, String> {
+) -> Result<Option<String>, String> {
     let mut value = reference;
     for _ in 0..MAX_TEXTURE_INDIRECTION {
         let Some(key) = value.strip_prefix('#') else {
@@ -378,11 +473,17 @@ fn texture_path(
                 Some((_, "png")) => path.to_string(),
                 _ => format!("{path}.png"),
             };
-            return Ok(resolve_sibling(dir, &path));
+            return Ok(Some(resolve_sibling(dir, &path)));
         };
-        value = refs
-            .get(key)
-            .ok_or_else(|| format!("texture {reference:?} names undefined key {key:?}"))?;
+        let Some(next) = refs.get(key) else {
+            // `#missing` is Minecraft's marker for a face with no texture, and
+            // Blockbench writes it for faces the author cleared. Dropping just
+            // that face is the useful reading; failing the model over it would
+            // cost the block its whole appearance.
+            log::debug!("texture {reference:?} is undefined; that face is not drawn");
+            return Ok(None);
+        };
+        value = next;
     }
     Err(format!(
         "texture {reference:?} still unresolved after {MAX_TEXTURE_INDIRECTION} hops (a loop?)"
@@ -508,15 +609,22 @@ mod tests {
         assert!(err.contains("loop"), "{err}");
     }
 
+    /// `#missing` is what Minecraft — and Blockbench, for a face whose texture
+    /// was cleared — writes when a face has no texture. Losing the whole model
+    /// over one such face would cost the block its entire appearance.
     #[test]
-    fn an_undefined_texture_key_is_reported() {
+    fn an_undefined_texture_key_drops_only_its_own_face() {
         let json = r##"{
-            "textures": {},
+            "textures": { "0": "../textures/a" },
             "elements": [{ "from": [0,0,0], "to": [16,16,16],
-                "faces": { "up": {"uv": [0,0,16,16], "texture": "#9"} } }]
+                "faces": {
+                    "up":   {"uv": [0,0,16,16], "texture": "#0"},
+                    "down": {"uv": [0,0,16,16], "texture": "#missing"}
+                } }]
         }"##;
-        let err = load_inline(json).expect_err("should fail");
-        assert!(err.contains("undefined key"), "{err}");
+        let model = load_inline(json).expect("loads");
+        assert_eq!(model.quads.len(), 1, "only the textured face survives");
+        assert!(model.quads[0].normal.y > 0.5, "and it is the up face");
     }
 
     #[test]
@@ -632,8 +740,8 @@ mod tests {
             .iter()
             .find(|q| q.normal.y < -0.5)
             .expect("down face");
-        assert!(up.tinted);
-        assert!(!down.tinted, "an absent tintindex must not tint");
+        assert_eq!(up.tint, Some(0));
+        assert_eq!(down.tint, None, "an absent tintindex must not tint");
     }
 
     #[test]
@@ -662,6 +770,112 @@ mod tests {
         assert!(err.contains("invalid block model JSON"), "{err}");
     }
 
+    /// Blockbench writes a bare name when the texture was not linked from disk.
+    /// It means the same thing as the relative form, so the loader looks in the
+    /// one directory textures actually live in before giving up.
+    #[test]
+    fn a_bare_texture_name_falls_back_to_the_textures_directory() {
+        let json = r##"{
+            "textures": { "0": "a" },
+            "elements": [{ "from": [0,0,0], "to": [16,16,16],
+                "faces": { "up": {"uv": [0,0,16,16], "texture": "#0"} } }]
+        }"##;
+        let model = load_inline(json).expect("loads");
+        assert_eq!(model.texture_paths, vec!["assets/textures/a.png"]);
+    }
+
+    /// Every face naming the same bare texture must share one entry — the
+    /// fallback path is easy to accidentally take once per face.
+    #[test]
+    fn a_bare_name_used_by_every_face_is_decoded_once() {
+        let json = r##"{
+            "textures": { "0": "a" },
+            "elements": [{ "from": [0,0,0], "to": [16,16,16],
+                "faces": {
+                    "north": {"uv": [0,0,16,16], "texture": "#0"},
+                    "east":  {"uv": [0,0,16,16], "texture": "#0"},
+                    "south": {"uv": [0,0,16,16], "texture": "#0"},
+                    "west":  {"uv": [0,0,16,16], "texture": "#0"},
+                    "up":    {"uv": [0,0,16,16], "texture": "#0"},
+                    "down":  {"uv": [0,0,16,16], "texture": "#0"}
+                } }]
+        }"##;
+        let model = load_inline(json).expect("loads");
+        assert_eq!(model.quads.len(), 6);
+        assert_eq!(model.textures.len(), 1, "one PNG, one entry");
+    }
+
+    /// A flower is two zero-thickness planes; four of each element's six faces
+    /// collapse to nothing and would draw no pixels at all.
+    #[test]
+    fn a_zero_area_face_is_not_emitted() {
+        let json = r##"{
+            "textures": { "0": "../textures/a" },
+            "elements": [{
+                "from": [8, 0, 0], "to": [8, 16, 16],
+                "faces": {
+                    "north": {"uv": [0,0,16,16], "texture": "#0"},
+                    "east":  {"uv": [0,0,16,16], "texture": "#0"},
+                    "west":  {"uv": [0,0,16,16], "texture": "#0"},
+                    "up":    {"uv": [0,0,16,16], "texture": "#0"}
+                }
+            }]
+        }"##;
+        let model = load_inline(json).expect("loads");
+        // Only the two faces of the plane itself have area.
+        assert_eq!(model.quads.len(), 2);
+        for quad in &model.quads {
+            assert!(
+                quad.normal.x.abs() > 0.5,
+                "normal {} is not the plane's",
+                quad.normal
+            );
+        }
+    }
+
+    /// Minecraft's numbering, which the biome tint tables follow: 0 grass,
+    /// 1 foliage.
+    #[test]
+    fn the_tint_index_is_carried_through_verbatim() {
+        let json = r##"{
+            "textures": { "0": "../textures/a" },
+            "elements": [{ "from": [0,0,0], "to": [16,16,16],
+                "faces": {
+                    "up":    {"uv": [0,0,16,16], "texture": "#0", "tintindex": 0},
+                    "north": {"uv": [0,0,16,16], "texture": "#0", "tintindex": 1},
+                    "down":  {"uv": [0,0,16,16], "texture": "#0"}
+                } }]
+        }"##;
+        let model = load_inline(json).expect("loads");
+        let tint_of =
+            |pick: fn(&BlockQuad) -> bool| model.quads.iter().find(|q| pick(q)).expect("face").tint;
+        assert_eq!(tint_of(|q| q.normal.y > 0.5), Some(0), "grass");
+        assert_eq!(tint_of(|q| q.normal.z < -0.5), Some(1), "foliage");
+        assert_eq!(tint_of(|q| q.normal.y < -0.5), None, "untinted");
+    }
+
+    /// The shipped copper and iron ores were exported with `cullface: "west"`
+    /// on every face — a slip that would have hidden the whole block whenever
+    /// something solid sat to its west.
+    #[test]
+    fn a_full_cube_face_culls_against_its_own_direction() {
+        for path in [
+            "assets/blocks/copper_ore_block.json",
+            "assets/blocks/iron_ore_block.json",
+        ] {
+            let model = load_file(path);
+            assert_eq!(model.quads.len(), 6, "{path}");
+            for quad in &model.quads {
+                let cull = quad.cull.expect("every face of a cube culls");
+                assert!(
+                    cull.normal().dot(quad.normal) > 0.99,
+                    "{path}: a face pointing {} culls against {cull:?}",
+                    quad.normal
+                );
+            }
+        }
+    }
+
     // --- The shipped files ---------------------------------------------------
 
     #[test]
@@ -683,12 +897,12 @@ mod tests {
                 "assets/textures/dirt.png",
                 "assets/textures/grass_block_side.png",
                 "assets/textures/grass_block_side_overlay.png",
-                "assets/textures/grass_top.png",
+                "assets/textures/grass_block_top.png",
             ],
             "the single-texture Model type could never have carried this"
         );
         assert!(
-            model.quads.iter().any(|q| q.tinted),
+            model.quads.iter().any(|q| q.tint.is_some()),
             "grass should have at least one tinted face"
         );
     }

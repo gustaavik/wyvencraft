@@ -92,18 +92,26 @@ impl BlockTextureSet {
 
     /// The layer `path` was given, adding `image` on first use.
     ///
-    /// Fail-soft, like every other content load: a wrongly sized texture warns
+    /// Art smaller than [`BLOCK_TEXTURE_SIZE`] is scaled up to it — an array
+    /// image has one extent for every layer, so 16-pixel and 256-pixel textures
+    /// can only coexist if the small ones are enlarged. Nearest replication at
+    /// an integer factor is lossless in the sense that matters: the sampler
+    /// magnifies with `Nearest`, so a 16×16 texture blown up 16× is
+    /// pixel-identical to the original on screen, and mip level 4 of the result
+    /// *is* the original.
+    ///
+    /// Fail-soft, like every other content load: art that cannot be scaled warns
     /// and takes the missing-texture layer, so one bad PNG costs its own block's
     /// appearance rather than the boot.
     pub fn resolve(&mut self, path: &str, image: &Rgba8) -> u32 {
         if let Some(&layer) = self.by_path.get(path) {
             return layer;
         }
-        let layer = match self.validate(path, image) {
-            Ok(()) => {
+        let layer = match self.prepare(path, image) {
+            Ok(image) => {
                 let index = self.layers.len() as u32;
-                self.opaque.push(is_opaque(image));
-                self.layers.push(image.clone());
+                self.opaque.push(is_opaque(&image));
+                self.layers.push(image);
                 index
             }
             Err(err) => {
@@ -115,20 +123,32 @@ impl BlockTextureSet {
         layer
     }
 
-    fn validate(&self, path: &str, image: &Rgba8) -> Result<(), String> {
-        if image.size != [BLOCK_TEXTURE_SIZE; 2] {
-            return Err(format!(
-                "block textures must be {BLOCK_TEXTURE_SIZE}x{BLOCK_TEXTURE_SIZE}, got {}x{}",
-                image.width(),
-                image.height()
-            ));
-        }
+    /// Validate `image` and bring it up to the array's extent.
+    fn prepare(&self, path: &str, image: &Rgba8) -> Result<Rgba8, String> {
         if self.layers.len() as u32 >= MAX_BLOCK_LAYERS {
             return Err(format!(
                 "block texture array is full ({MAX_BLOCK_LAYERS} layers), {path}"
             ));
         }
-        Ok(())
+        let [width, height] = image.size;
+        if width != height {
+            return Err(format!(
+                "block textures must be square, got {width}x{height}"
+            ));
+        }
+        if width == BLOCK_TEXTURE_SIZE {
+            return Ok(image.clone());
+        }
+        // Only an exact integer factor keeps every source texel a whole block of
+        // destination texels; anything else would blur pixel art or leave a
+        // partial row, and is far more likely a mistake than an intention.
+        if width == 0 || !BLOCK_TEXTURE_SIZE.is_multiple_of(width) {
+            return Err(format!(
+                "block textures must be {BLOCK_TEXTURE_SIZE}px or an exact fraction of it, \
+                 got {width}x{height}"
+            ));
+        }
+        Ok(upscale(image, BLOCK_TEXTURE_SIZE / width))
     }
 
     /// Whether `layer`'s texture has no transparent texel — a face drawn from it
@@ -177,6 +197,27 @@ fn solid(rgba: [u8; 4]) -> Rgba8 {
 
 fn is_opaque(image: &Rgba8) -> bool {
     image.pixels.chunks_exact(4).all(|px| px[3] == 255)
+}
+
+/// Replicate every texel of `image` into a `factor`×`factor` block.
+///
+/// The inverse of [`downsample_half`] applied `log2(factor)` times, and exact:
+/// downsampling the result back reproduces the input bit-for-bit.
+pub fn upscale(image: &Rgba8, factor: u32) -> Rgba8 {
+    let [w, h] = image.size;
+    let (dw, dh) = (w * factor, h * factor);
+    let mut pixels = Vec::with_capacity((dw * dh * 4) as usize);
+    for y in 0..dh {
+        let row = ((y / factor) * w) as usize;
+        for x in 0..dw {
+            let i = (row + (x / factor) as usize) * 4;
+            pixels.extend_from_slice(&image.pixels[i..i + 4]);
+        }
+    }
+    Rgba8 {
+        pixels,
+        size: [dw, dh],
+    }
 }
 
 /// Halve `image` with a box filter.
@@ -437,17 +478,68 @@ mod tests {
         assert!(a != 0 && b != 0, "content must not land on the marker");
     }
 
-    /// The array has one extent for every layer, so this is an equality rather
-    /// than a maximum — and the failure has to be visible, not silent.
+    /// 16-pixel and 256-pixel art has to coexist in one array, so the small
+    /// art is enlarged rather than rejected — and enlarging must not change a
+    /// single pixel of what ends up on screen.
     #[test]
-    fn a_wrongly_sized_texture_falls_back_to_the_marker() {
+    fn a_smaller_texture_is_scaled_up_to_the_array_extent() {
         let mut set = BlockTextureSet::new();
-        let layer = set.resolve(
-            "assets/textures/small.png",
-            &image(16, |_, _| [0, 0, 0, 255]),
+        let art = image(16, |x, y| [x as u8, y as u8, 0, 255]);
+        let layer = set.resolve("assets/textures/small.png", &art);
+        assert_ne!(layer, 0, "it should take a real layer");
+
+        let stored = set.layer(layer).expect("layer");
+        assert_eq!(stored.size, [BLOCK_TEXTURE_SIZE; 2]);
+        // Every source texel became a 16x16 block of destination texels.
+        let at = |x: u32, y: u32| {
+            let i = ((y * BLOCK_TEXTURE_SIZE + x) * 4) as usize;
+            stored.pixels[i..i + 4].to_vec()
+        };
+        assert_eq!(at(0, 0), vec![0, 0, 0, 255]);
+        assert_eq!(
+            at(15, 15),
+            vec![0, 0, 0, 255],
+            "still the first source texel"
         );
-        assert_eq!(layer, 0);
-        assert_eq!(set.len(), 1, "the bad texture must not take a layer");
+        assert_eq!(at(16, 0), vec![1, 0, 0, 255], "the next one over");
+        assert_eq!(at(255, 255), vec![15, 15, 0, 255]);
+    }
+
+    /// Downsampling is how the inventory stand-in tile is derived, so the two
+    /// have to be exact inverses or a 16px block's icon would drift.
+    #[test]
+    fn scaling_up_and_back_down_is_lossless() {
+        let art = image(16, |x, y| [x as u8 * 3, y as u8 * 5, 7, 255]);
+        let mut scaled = upscale(&art, 16);
+        for _ in 0..4 {
+            scaled = downsample_half(&scaled);
+        }
+        assert_eq!(scaled.size, [16, 16]);
+        assert_eq!(scaled.pixels, art.pixels);
+    }
+
+    /// A size that is not an exact fraction would have to blur or leave a
+    /// partial row, and is far likelier a mistake than an intention.
+    #[test]
+    fn art_that_does_not_divide_the_extent_falls_back_to_the_marker() {
+        let mut set = BlockTextureSet::new();
+        for (name, art) in [
+            ("odd", image(17, |_, _| [0, 0, 0, 255])),
+            ("huge", image(512, |_, _| [0, 0, 0, 255])),
+        ] {
+            assert_eq!(set.resolve(name, &art), 0, "{name} should be refused");
+        }
+        assert_eq!(set.len(), 1, "no bad texture may take a layer");
+    }
+
+    #[test]
+    fn non_square_art_falls_back_to_the_marker() {
+        let mut set = BlockTextureSet::new();
+        let art = Rgba8 {
+            pixels: vec![255; 16 * 32 * 4],
+            size: [16, 32],
+        };
+        assert_eq!(set.resolve("strip.png", &art), 0);
     }
 
     #[test]

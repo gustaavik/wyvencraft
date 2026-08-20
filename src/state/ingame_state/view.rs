@@ -234,7 +234,7 @@ impl SceneCache {
                     blocks,
                     models,
                     |p| world.block_at(p),
-                    |x, z| generator.biome_tint(x, z),
+                    |x, z, index| generator.biome_tint(x, z, index),
                 )
             });
             match output {
