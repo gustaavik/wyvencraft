@@ -96,15 +96,30 @@ Key rule: **`render` never depends on `world`.** The active game state builds pl
 references). This keeps the GPU layer decoupled from gameplay.
 
 All geometry — voxels, box models and file-loaded models alike — is `CpuMesh` of
-`ChunkVertex` on the one voxel pipeline (already `TriangleList` with culling off
-and an alpha-test `discard`). What differs is the texture: `SceneFrame::opaque`
-samples the shared block atlas, while `SceneFrame::textured` carries meshes that
-bring their own `render::Texture` and rebind descriptor set 0 per draw. There is
-still **no model matrix** — every transform is baked on the CPU. Chunks straddle
-both: a `[block.model]` block (ground cover) is baked into its cell and grouped by
+`ChunkVertex`, `TriangleList` with culling off and an alpha-test `discard`. What
+differs is only the texture bound as descriptor set 0, which is what splits
+`SceneFrame` into its lists:
+
+- `opaque` / `transparent` sample the shared **16px atlas** (`render::texture`) —
+  the older block path, entity skins, armor and mob sheets. One bind per pass.
+- `array_opaque` / `array_transparent` sample the **block texture array**
+  (`render::block_textures`): one 256×256 layer per texture a Blockbench-authored
+  block names, chosen per vertex by `ChunkVertex::layer`, mipmapped with nearest
+  magnification. Also one bind per pass, however many block types are on screen.
+  Drawn by the `voxel_array` pipeline, which shares `voxel.vert` with `voxel` and
+  differs only in its fragment shader.
+- `textured` carries meshes that bring their own `render::Texture` and rebind set
+  0 **per draw** — file-loaded `.gltf`/`.bbmodel` models.
+
+There is still **no model matrix** — every transform is baked on the CPU. Chunks
+straddle all three: a `block_model` block goes into the chunk's own array buffers,
+while a `[block.model]` block (ground cover) is baked into its cell and grouped by
 `ModelId` into `ChunkMeshOutput::models`, which `SceneCache` uploads per chunk and
-feeds to `SceneFrame::textured` — so one chunk can contribute an atlas mesh, a
-blended mesh, and one textured mesh per distinct model it contains.
+feeds to `SceneFrame::textured`.
+
+The atlas/array split is **temporary**. Blocks are migrating to Blockbench models
+one at a time; when the last one moves over, the atlas keeps only the entity
+sheets and cracks, and `voxel` / `voxel_array` collapse back into one pipeline.
 
 Its mirror: **only `state::ingame_state::view` touches `RenderContext`.** Chunk
 streaming, mob AI, fluids and interaction are plain logic; `InGameState::refresh_view`
@@ -144,7 +159,8 @@ those systems are testable without a Vulkan device.
   asserts the two loaders agree vertex-for-vertex — that is what pins the
   bbmodel face-corner order, UV-rotation direction and 1/16 scale.
 - **Registry** — `world::BlockRegistry`, `inventory::ItemRegistry`,
-  `entity::EntityRegistry`, `render::TileRegistry` (texture name → atlas tile).
+  `entity::EntityRegistry`, `render::TileRegistry` (texture name → atlas tile),
+  `render::BlockTextureSet` (texture path → block-texture-array layer).
 - **Strategy** — `world::generation::WorldGenerator` (default `NoiseGenerator`).
 - **Producer/consumer** — `world::loader::ChunkLoader` (crossbeam worker pool).
 - **Command/message** — `net::protocol` (`ClientMessage` / `ServerMessage`).
@@ -152,14 +168,15 @@ those systems are testable without a Vulkan device.
 ### Where to make common changes
 | Task                    | Location                                                                                   |
 | ----------------------- | ------------------------------------------------------------------------------------------ |
-| Add a block type        | `assets/blocks.toml` (pure data); texture = PNG in `assets/textures/<name>.png` or a painter in `render::tiles::paint_named` |
+| Add a block type        | Model it in Blockbench (**Java Block/Item** format, per-face UV, project texture size 256), export *Block/Item Model* to `assets/blocks/<name>.json` with its textures as separate **256×256** PNGs in `assets/textures/`, then one `[[block]]` in `assets/blocks.toml` with `block_model = "assets/blocks/<name>.json"`. A full cube is `from [0,0,0]` → `to [16,16,16]`; set `cullface` on every outward face or it draws all six even when buried; set `tintindex` only on faces that should take the biome colour. Parsing is `model::blockjson`, baking `world::blockmodel`, layers `render::block_textures`. The older `textures = "<name>"` atlas path still works for the blocks not yet re-authored |
+| Biome tint (grass colour) | `tint = [r, g, b]` per biome in `assets/worldgen.toml`, answered by `WorldGenerator::biome_tint` and multiplied into the faces a model marked `tintindex`. Greyscale art (`grass_top`, `grass_block_side_overlay`) is what makes one texture serve every climate |
 | A non-cube block (plant, prop) | `[block.model]` in `assets/blocks.toml` — same `path`/`scale`/`offset`/`rotation` spelling as `[item.model]`, plus `random_yaw`. The block then emits **no** cube faces (`textures` becomes optional) and is baked into its cell by `world::meshing::culled`. Give it `solid = false` to walk through: `World::is_solid` is collision only, `is_targetable` is what the crosshair uses, and `is_replaceable` decides whether placing swallows it. Add a matching `[item.model]` on the same path so the drop, the hand and the icon agree — the registry memoises by path, so both share one `ModelId` |
 | Block hitbox (crosshair, outline, cracks) | Not authored — `content::placed_bounds` measures the placed model and `world::block::model_hitbox` turns it into a square, centred, cell-clamped box on `BlockModel::hitbox`, so it can never drift from what is drawn. The raycast predicate returns `world::Target::{Cell,Box}`; a `Box` the ray misses does **not** stop the march. `InGameState::{target_at,hitbox_at}` are the single source for targeting *and* both overlays. Mob line-of-sight deliberately stays `is_solid` + `Target::Cell` — a flower must not hide you |
 | Add an item / tool / food / armor | `assets/items.toml` (`[item.tool]` with `harvests`/`dig_speed`/`durability` and optional `damage`, `[item.food]`, `[item.armor]` with `slot`/`defense`/`durability`, `[item.model]` with `path`/`scale`/`offset`/`rotation`); starter kit in the same file |
 | Tool tiers / melee damage | Tiers are data only — `dig_speed` + `durability` (+ `damage` on swords and axes) in `assets/items.toml`. There is deliberately **no** harvest-level gate: `harvests` decides *what* a tool is for, never *whether* a block drops. A tool without `damage` swings for `mobs::PLAYER_ATTACK_DAMAGE` (the fist); the local swing resolves in `InGameState::melee_damage`, a client's in `client_melee_damage`, which reads the inventory that client last reported |
 | Load a 3D model from a file | drop a `.gltf` or `.bbmodel` in `assets/models/`, then point at it: `[entity.visual] kind = "model"` in `assets/entities.toml`, or `[item.model]` in `assets/items.toml`. Parsing is `model::{gltf,bbmodel}` behind the `ModelLoader` trait (a new format = a new impl + one line in `ModelRegistry::LOADERS`); placement math in `model::mesh`; GPU textures uploaded lazily in `state::ingame_state::view`. Exports disagree on which plane a flat object lies in (the tiered tools are flat in XY, `vine_sword` in YZ), so `ModelSpec::rotation` turns a model about its own axes — applied after `offset` re-centres it |
 | Armor (slots, defense, wear, render) | data in `assets/items.toml` `[item.armor]`; slots 36..42 in `inventory::inventory`; defense math in `entity::player::damage`; equip gate + wear in `state::ingame_state`; worn-model shells + cape in `entity::model::build_mesh_armored`; procedural sheets in `render::armor`; net via `ServerMessage::PlayerEquipment` |
-| Item icons              | `ItemIcon` is computed in `content`: `Cube` (from block faces), `Flat` (painters in `render::tiles::paint_named`, PNG-overridable), or `Model` for items with `[item.model]`. Drawn by `ui::icon::draw_item_icon`; the atlas and the 3D icon sheet are registered with egui in `app` |
+| Item icons              | `ItemIcon` is computed in `content`: `Cube` (from block faces), `Flat` (painters in `render::tiles::paint_named`, PNG-overridable), or `Model` for items with `[item.model]`. Drawn by `ui::icon::draw_item_icon`; the atlas and the 3D icon sheet are registered with egui in `app`. A `block_model` block's cube faces are 16px stand-ins **downsampled from its own 256px art** (`content::derive_face_tiles`), so the icon and the dropped-item cube keep working unchanged — read them through `GameContent::face_textures`, never `Block::textures` |
 | 3D item icons           | `render::icons` (cell layout, framing transform, ortho camera) + `Renderer::draw_icons`; the sheet is rendered **once** at startup by `app::build_icon_sheet`, one cell per `ModelId`. Tune presentation with `ICON_YAW`/`ICON_PITCH`/`ICON_ROLL`/`FILL` in `render::icons` |
 | Live player preview     | offscreen pass `render::Renderer::draw_model` + `PreviewFrame`; mesh/camera in `state::ingame_state::{update_preview_mesh,preview_frame}`; image + egui `TextureId` in `app` (runs *before* the world pass) |
 | Block drop rules        | `drops = ...` on the block in `assets/blocks.toml` (`"self"`, `"none"`, `{ requires_tool }`, `{ item, count }`) |
@@ -190,7 +207,7 @@ those systems are testable without a Vulkan device.
 | GPU meshes / camera     | `state::ingame_state::view` (`SceneCache`) — the only holder of `RenderContext`             |
 | Startup / dev env vars  | `boot::BootPlan::from_env` (pure, tested); effects in `app::initial_state`. A dev-boot plan skips the login screen via `app::boot_account` |
 | Loading `assets/*.toml` | `content::source::ContentSource` (Fs/Embedded/Map) + one `load_or_builtin` helper           |
-| Shaders                 | `assets/shaders/*.{vert,frag}`, declared in `render::shaders`                              |
+| Shaders                 | `assets/shaders/*.{vert,frag}`, declared in `render::shaders`. `voxel.vert` is shared by both chunk pipelines, so a new vertex attribute means editing it plus `render::vertex` and every `ChunkVertex { .. }` site |
 
 ## Conventions & gotchas
 
@@ -201,6 +218,17 @@ those systems are testable without a Vulkan device.
 - The crate-level `#![allow(dead_code)]` is **gone** — `cargo build` is
   warning-free and `cargo clippy --all-targets` is clean. Keep them that way
   rather than re-adding a blanket allow.
+- **Visual data must stay off `Block`.** `Block`'s `Debug` repr feeds
+  `content::content_hash`, which gates multiplayer joins — so anything derived
+  from a texture or a model (block models, baked geometry, the stand-in atlas
+  tiles a `block_model` block gets) lives on `GameContent` indexed by `BlockId`,
+  never on `Block`. Otherwise two peers whose grass is drawn slightly differently
+  would be refused a shared world. If a `content_hash` test starts failing after
+  a visual change, that is the invariant breaking, not the test being stale.
+- **Block textures are exactly 256×256.** An array image has one extent for every
+  layer, so this is an equality, not a maximum: a differently sized PNG warns and
+  renders magenta. The 16px atlas is the opposite — it hard-rejects anything that
+  *isn't* 16×16. Two texture systems, two fixed sizes, until the atlas retires.
 - **Vulkan correctness signal:** `vulkano`'s safe command-buffer/pipeline API
   validates state and *panics* on misuse (this is what catches bad pipelines even
   without Vulkan validation layers). A clean multi-frame run is strong evidence the

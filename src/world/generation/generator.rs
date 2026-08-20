@@ -112,6 +112,13 @@ impl WorldGenerator for NoiseGenerator {
         self.seed
     }
 
+    fn biome_tint(&self, x: i32, z: i32) -> [u8; 4] {
+        // The same climate sample `generate` uses to pick surface blocks, so a
+        // grass block's tint always agrees with the biome that placed it.
+        let biome = Biome::from_temperature(self.noise.temperature(x, z));
+        self.config.biome(biome).tint
+    }
+
     fn generate(&self, pos: ChunkPos) -> Chunk {
         let mut chunk = Chunk::new(pos);
         let origin = pos.origin();

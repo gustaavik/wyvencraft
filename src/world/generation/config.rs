@@ -72,6 +72,10 @@ pub struct BiomeGen {
     /// same vegetation clumping that groups trees into groves.
     pub plants: Vec<BlockId>,
     pub plant_chance_per_mille: f32,
+    /// The colour multiplied into faces a block model marked `tintindex` —
+    /// grass tops, grass side overlays and the like. Defaults to white, which
+    /// is the identity, so a biome that says nothing tints nothing.
+    pub tint: [u8; 4],
 }
 
 #[derive(Debug)]
@@ -144,6 +148,10 @@ impl WorldGenConfig {
                     .map(|name| resolve(name))
                     .collect::<Result<_, String>>()?,
                 plant_chance_per_mille: def.plant_chance_per_mille.unwrap_or(0.0),
+                tint: match def.tint {
+                    Some([r, g, b]) => [r, g, b, 255],
+                    None => crate::render::NO_TINT,
+                },
             })
         };
 
@@ -286,6 +294,9 @@ struct BiomeDef {
     plants: Vec<String>,
     #[serde(default)]
     plant_chance_per_mille: Option<f32>,
+    /// `tint = [124, 189, 107]`, the biome's grass/foliage colour.
+    #[serde(default)]
+    tint: Option<[u8; 3]>,
 }
 
 #[cfg(test)]

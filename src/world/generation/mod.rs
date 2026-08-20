@@ -23,4 +23,13 @@ pub trait WorldGenerator: Send + Sync {
     fn seed(&self) -> u64;
     /// Generate the full block contents for one chunk.
     fn generate(&self, pos: ChunkPos) -> Chunk;
+    /// The biome tint at a world column, for the block-model faces marked
+    /// `tintindex`. The mesher asks the generator rather than the chunk because
+    /// biome is a function of position, not of stored data — a chunk edited by a
+    /// player still has the climate its coordinates imply.
+    ///
+    /// White by default: a generator with no climate model tints nothing.
+    fn biome_tint(&self, _x: i32, _z: i32) -> [u8; 4] {
+        crate::render::NO_TINT
+    }
 }

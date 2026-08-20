@@ -11,21 +11,26 @@ pub use culled::{mesh_block_overlay, mesh_chunk, push_item_cube};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use crate::core::BlockId;
+use crate::core::{BlockId, Direction};
 use crate::model::{Model, ModelId, ModelRegistry};
 use crate::render::mesh::CpuMesh;
 use crate::world::block::BlockModel;
+use crate::world::blockmodel::BakedBlockModel;
 
-/// The model geometry a chunk mesh may need: the parsed models plus the
-/// per-block assignment (`content::GameContent::block_models`, indexed by
-/// [`BlockId`]).
+/// The model geometry a chunk mesh may need: the parsed `.bbmodel`/`.gltf`
+/// models plus the per-block assignment (`content::GameContent::block_models`,
+/// indexed by [`BlockId`]), and the Blockbench-authored block models
+/// (`content::GameContent::baked_models`, also indexed by [`BlockId`]).
 ///
-/// Mirrors `state::ingame_state::view::ModelContent` — the mesher borrows both
-/// halves for one call rather than owning either.
+/// Mirrors `state::ingame_state::view::ModelContent` — the mesher borrows every
+/// half for one call rather than owning any.
 #[derive(Clone, Copy)]
 pub struct BlockModels<'a> {
     pub models: &'a ModelRegistry,
     pub blocks: &'a [Option<BlockModel>],
+    /// Blocks authored as Blockbench `.json`. These supersede `blocks` for any
+    /// id present in both, and are the direction all blocks are moving in.
+    pub baked: &'a [Option<BakedBlockModel>],
 }
 
 impl<'a> BlockModels<'a> {
@@ -36,6 +41,7 @@ impl<'a> BlockModels<'a> {
         BlockModels {
             models: EMPTY.get_or_init(ModelRegistry::new),
             blocks: &[],
+            baked: &[],
         }
     }
 
@@ -45,15 +51,37 @@ impl<'a> BlockModels<'a> {
         let placement = self.blocks.get(block.0 as usize)?.as_ref()?;
         Some((placement, self.models.get(placement.id)?))
     }
+
+    /// The Blockbench-authored geometry for `block`, if it has any.
+    pub fn baked_of(&self, block: BlockId) -> Option<&'a BakedBlockModel> {
+        self.baked.get(block.0 as usize)?.as_ref()
+    }
+
+    /// Whether `block` fills the cell face pointing `dir` with an opaque
+    /// texture — the modelled counterpart of `Block::is_opaque`, and what lets
+    /// a modelled block hide the face of the atlas-textured cube beside it.
+    pub fn occludes(&self, block: BlockId, dir: Direction) -> bool {
+        self.baked_of(block)
+            .is_some_and(|m| m.occludes[dir as usize])
+    }
 }
 
-/// Result of meshing one chunk, split by render pass so transparent geometry
-/// (water/glass) can be drawn separately and sorted.
+/// Result of meshing one chunk, split by the pipeline that draws it and then by
+/// render pass, so transparent geometry (water/glass) can be drawn separately
+/// and sorted.
 #[derive(Default)]
 pub struct ChunkMeshOutput {
+    /// Cube faces sampling the shared 16-pixel atlas.
     pub opaque: CpuMesh,
     pub transparent: CpuMesh,
-    /// Geometry from model-backed blocks, grouped by the model it samples —
+    /// Geometry from Blockbench-authored blocks, sampling the block texture
+    /// array. One mesh for the whole chunk however many block types and
+    /// textures it contains — the layer index is per vertex, so they all batch
+    /// into a single draw. This is what `opaque`/`transparent` become once every
+    /// block has been re-authored as a model.
+    pub array_opaque: CpuMesh,
+    pub array_transparent: CpuMesh,
+    /// Geometry from `.bbmodel`-backed blocks, grouped by the model it samples —
     /// one mesh per model however many blocks in the chunk share it. These
     /// cannot join `opaque`: each brings its own texture and needs its own
     /// draw, exactly like the dropped-item models in `SceneCache`.
@@ -62,6 +90,10 @@ pub struct ChunkMeshOutput {
 
 impl ChunkMeshOutput {
     pub fn is_empty(&self) -> bool {
-        self.opaque.is_empty() && self.transparent.is_empty() && self.models.is_empty()
+        self.opaque.is_empty()
+            && self.transparent.is_empty()
+            && self.array_opaque.is_empty()
+            && self.array_transparent.is_empty()
+            && self.models.is_empty()
     }
 }

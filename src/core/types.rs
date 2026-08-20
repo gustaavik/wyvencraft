@@ -187,6 +187,21 @@ impl Direction {
         self.offset().as_vec3()
     }
 
+    /// The face pointing the other way along the same axis. A block model's
+    /// `cullface` names the neighbour direction, so hiding the face means
+    /// asking that neighbour about *its* opposite face.
+    #[inline]
+    pub fn opposite(self) -> Direction {
+        match self {
+            Direction::NegX => Direction::PosX,
+            Direction::PosX => Direction::NegX,
+            Direction::NegY => Direction::PosY,
+            Direction::PosY => Direction::NegY,
+            Direction::NegZ => Direction::PosZ,
+            Direction::PosZ => Direction::NegZ,
+        }
+    }
+
     /// The face on `axis` (0 = X, 1 = Y, 2 = Z) pointing the positive way when
     /// `positive`. Used to name the box face a ray crossed from its slab index.
     #[inline]

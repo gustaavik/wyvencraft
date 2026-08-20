@@ -11,7 +11,7 @@ use glam::{EulerRot, Mat3, Mat4, Vec3};
 
 use crate::core::math::yaw_matrix;
 use crate::render::mesh::CpuMesh;
-use crate::render::vertex::ChunkVertex;
+use crate::render::vertex::{ChunkVertex, NO_TINT};
 
 /// Triangle geometry in model space: Y-up, right-handed, one block = 1.0, UVs
 /// with a top-left origin. `positions`, `normals` and `uvs` are parallel arrays
@@ -90,6 +90,10 @@ impl ModelMesh {
                 uv: self.uvs[i],
                 ao: shade(normal),
                 flags: 0,
+                // A file-loaded model binds its own texture rather than a layer
+                // of the block texture array, and is never biome-tinted.
+                layer: 0,
+                tint: NO_TINT,
             }
         });
         mesh.push_indexed(vertices, self.indices.iter().copied());
@@ -141,7 +145,7 @@ pub fn placement(
 /// 0.68, ±X 0.86, ±Z 0.80). Axis-aligned normals reproduce those values exactly,
 /// so an imported model sits in the same light as the voxels around it instead
 /// of reading as a flat sticker.
-fn shade(normal: Vec3) -> f32 {
+pub(super) fn shade(normal: Vec3) -> f32 {
     let n = normal.normalize_or_zero();
     let weights = n.abs();
     let total = weights.x + weights.y + weights.z;

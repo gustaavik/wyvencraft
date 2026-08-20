@@ -483,6 +483,7 @@ impl ApplicationHandler for App {
             self.render_context.clone(),
             color_format,
             self.content.tiles.atlas_rgba(),
+            &self.content.block_textures,
         );
 
         // Pre-render the 3D icon for every model-backed item.

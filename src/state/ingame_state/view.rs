@@ -84,6 +84,13 @@ pub(super) struct SceneCache {
     meshes: HashMap<ChunkPos, GpuMesh>,
     /// Transparent (water/glass) GPU meshes, drawn in a second blended pass.
     transparent_meshes: HashMap<ChunkPos, GpuMesh>,
+    /// The same two passes for Blockbench-authored blocks, which sample the
+    /// block texture array instead of the atlas. One mesh per chunk either way:
+    /// the array layer rides on the vertex, so every block type in a chunk
+    /// batches into one draw. These become the only chunk meshes once the last
+    /// block has been re-authored as a model.
+    array_meshes: HashMap<ChunkPos, GpuMesh>,
+    array_transparent_meshes: HashMap<ChunkPos, GpuMesh>,
     /// Model-backed blocks (plants, mushrooms) in each chunk, one mesh per
     /// distinct model because each binds its own texture.
     model_meshes: HashMap<ChunkPos, Vec<(GpuMesh, ModelId)>>,
@@ -143,6 +150,8 @@ impl SceneCache {
         Self {
             meshes: HashMap::new(),
             transparent_meshes: HashMap::new(),
+            array_meshes: HashMap::new(),
+            array_transparent_meshes: HashMap::new(),
             model_meshes: HashMap::new(),
             mesh_queue: VecDeque::new(),
             queued: HashSet::new(),
@@ -189,6 +198,8 @@ impl SceneCache {
     pub fn forget_chunk(&mut self, pos: ChunkPos) {
         self.meshes.remove(&pos);
         self.transparent_meshes.remove(&pos);
+        self.array_meshes.remove(&pos);
+        self.array_transparent_meshes.remove(&pos);
         self.model_meshes.remove(&pos);
     }
 
@@ -216,9 +227,16 @@ impl SceneCache {
             };
             self.queued.remove(&pos);
 
-            let output = world
-                .chunk(pos)
-                .map(|chunk| mesh_chunk(chunk, blocks, models, |p| world.block_at(p)));
+            let generator = world.generator();
+            let output = world.chunk(pos).map(|chunk| {
+                mesh_chunk(
+                    chunk,
+                    blocks,
+                    models,
+                    |p| world.block_at(p),
+                    |x, z| generator.biome_tint(x, z),
+                )
+            });
             match output {
                 Some(output) => {
                     match GpuMesh::upload(&ctx.memory_allocator, &output.opaque) {
@@ -239,6 +257,29 @@ impl SceneCache {
                         }
                         Err(err) => {
                             log::error!("transparent mesh upload failed at {pos:?}: {err:?}")
+                        }
+                    }
+                    // Blockbench-authored blocks: one mesh per chunk however
+                    // many block types and textures it holds, because the layer
+                    // index rides on the vertex.
+                    match GpuMesh::upload(&ctx.memory_allocator, &output.array_opaque) {
+                        Ok(Some(mesh)) => {
+                            self.array_meshes.insert(pos, mesh);
+                        }
+                        Ok(None) => {
+                            self.array_meshes.remove(&pos);
+                        }
+                        Err(err) => log::error!("block mesh upload failed at {pos:?}: {err:?}"),
+                    }
+                    match GpuMesh::upload(&ctx.memory_allocator, &output.array_transparent) {
+                        Ok(Some(mesh)) => {
+                            self.array_transparent_meshes.insert(pos, mesh);
+                        }
+                        Ok(None) => {
+                            self.array_transparent_meshes.remove(&pos);
+                        }
+                        Err(err) => {
+                            log::error!("blended block mesh upload failed at {pos:?}: {err:?}")
                         }
                     }
                     // Model-backed blocks: one mesh per model in this chunk,
@@ -680,6 +721,22 @@ impl SceneCache {
             .map(|(_, mesh)| mesh)
             .collect();
 
+        // Blockbench-authored blocks, culled by the same chunk column AABB.
+        // They sample the block texture array, so they are a separate list even
+        // though they are the same geometry kind as `opaque`.
+        let array_opaque: Vec<&GpuMesh> = self
+            .array_meshes
+            .iter()
+            .filter(|(pos, _)| in_view(pos))
+            .map(|(_, mesh)| mesh)
+            .collect();
+        let array_transparent: Vec<&GpuMesh> = self
+            .array_transparent_meshes
+            .iter()
+            .filter(|(pos, _)| in_view(pos))
+            .map(|(_, mesh)| mesh)
+            .collect();
+
         // Crack overlay on the block being mined, blended over everything else.
         // No frustum check: the target is a single nearby block within reach.
         if let Some(mesh) = &self.break_mesh {
@@ -754,6 +811,8 @@ impl SceneCache {
             time: self.elapsed,
             opaque,
             transparent,
+            array_opaque,
+            array_transparent,
             textured,
             lines: self.outline_mesh.as_ref(),
         }
@@ -830,12 +889,14 @@ impl super::InGameState {
             BlockModels {
                 models: &self.models,
                 blocks: &self.block_models,
+                baked: &self.baked_models,
             },
             super::MESH_BUDGET,
         );
 
         // Loose entities.
         let (items, blocks) = (&self.items, &self.blocks);
+        let block_faces = self.block_face_tiles.clone();
         let models = self.models.clone();
         let item_models = self.item_models.clone();
         let content = ModelContent {
@@ -851,7 +912,7 @@ impl super::InGameState {
                     .place_block
                     .is_some_and(|b| blocks.get(b).is_transparent());
                 (
-                    super::interaction::drop_textures(item, items, blocks),
+                    super::interaction::drop_textures(item, items, blocks, &block_faces),
                     is_transparent,
                 )
             },

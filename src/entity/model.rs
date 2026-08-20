@@ -12,7 +12,7 @@ use crate::inventory::{ARMOR_SIZE, ArmorSlot, ItemId, ItemRegistry};
 use crate::render::armor::ArmorKind;
 use crate::render::mesh::CpuMesh;
 use crate::render::skin::{self, SkinPart};
-use crate::render::vertex::ChunkVertex;
+use crate::render::vertex::{ChunkVertex, NO_TINT};
 
 /// One rectangular box part of a model, in model-local space (origin at feet).
 #[derive(Debug, Clone, Copy)]
@@ -571,6 +571,9 @@ fn push_box(
                 uv: skin::sheet_uv(sheet_origin, rect, uv[i]),
                 ao,
                 flags: 0,
+                // Skin sheets live in the atlas, not the block texture array.
+                layer: 0,
+                tint: NO_TINT,
             }
         });
         mesh.push_quad(quad);

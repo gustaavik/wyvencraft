@@ -155,6 +155,32 @@ impl TileRegistry {
         entry
     }
 
+    /// Register `art` under `name`, allocating a slot on first use.
+    ///
+    /// For art with no PNG or painter of its own: the small stand-ins derived
+    /// from a Blockbench block model's 256-pixel textures, which the inventory
+    /// icon and the dropped-item cube still sample. Keyed by name exactly like
+    /// [`TileRegistry::resolve`], so faces sharing a texture share a tile.
+    pub fn insert(&mut self, name: &str, art: TileRgba) -> TileEntry {
+        if let Some(&entry) = self.by_name.get(name) {
+            return entry;
+        }
+        let entry = match self.allocate() {
+            Some(tile) => {
+                self.pixels[tile as usize] = Some(art);
+                TileEntry { tile, frames: 1 }
+            }
+            None => {
+                log::warn!(
+                    "texture atlas full ({MAX_TILES} tiles); {name:?} gets the missing marker"
+                );
+                TileEntry::MISSING
+            }
+        };
+        self.by_name.insert(name.to_string(), entry);
+        entry
+    }
+
     /// Replace a pre-registered animated entry's frames with PNGs from disk
     /// where present (`<name>_<frame>.png`). Static names load their PNG in
     /// [`TileRegistry::resolve`] directly.

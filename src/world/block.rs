@@ -119,6 +119,22 @@ pub struct BlockModelSpec {
     pub random_yaw: bool,
 }
 
+/// The visual-only model assignments a block file carries, reported out of the
+/// parse rather than stored on [`Block`].
+///
+/// Both vectors are indexed by [`BlockId`] and cover every block, including the
+/// auto-registered flowing fluids. They are separate because the two paths are
+/// resolved differently — one through the [`ModelId`] registry, one straight
+/// into baked quads — and because this is where the migration is visible: the
+/// `json` column grows as blocks are re-authored, `models` shrinks to nothing.
+#[derive(Debug, Default)]
+pub struct BlockVisuals {
+    /// `[block.model]` — a `.bbmodel`/`.gltf` file plus its placement.
+    pub models: Vec<Option<BlockModelSpec>>,
+    /// `block_model` — the path of a Blockbench Java Block/Item `.json`.
+    pub json: Vec<Option<String>>,
+}
+
 /// Geometry loaded from a model file instead of the six atlas-textured cube
 /// faces. A block carrying one is meshed by baking the model into its cell and
 /// emits no cube faces at all.
@@ -281,12 +297,20 @@ struct BlockDef {
     solid: bool,
     hardness: f32,
     material: BlockMaterial,
-    /// Optional only for a block with a `[block.model]`, whose geometry brings
-    /// its own texture and never samples the atlas.
+    /// Optional for a block whose geometry brings its own texture and never
+    /// samples the atlas — either a `[block.model]` or a `block_model`.
     textures: Option<TexturesDef>,
     drops: Option<DropsDef>,
     fluid: Option<FluidDef>,
     model: Option<ModelSpec>,
+    /// `block_model = "blocks/dirt_block.json"` — a Blockbench *Java
+    /// Block/Item* export, the way all blocks are authored going forward. Unlike
+    /// `[block.model]` it needs no placement: the model is already in cell
+    /// coordinates, carries several textures, and declares its own cull faces.
+    ///
+    /// Spelled differently from `[block.model]` only because both exist during
+    /// the migration; it takes that name once the `.bbmodel` path is gone.
+    block_model: Option<String>,
     /// Only meaningful alongside `[block.model]`; see [`BlockModel::random_yaw`].
     #[serde(default)]
     random_yaw: bool,
@@ -414,11 +438,11 @@ impl BlockRegistry {
     /// file — the caller falls back to [`BlockRegistry::with_builtins`].
     /// Unknown texture names only degrade that block (tile 0 + a warning).
     pub fn from_toml(text: &str, tiles: &mut TileRegistry) -> Result<Self, String> {
-        Self::from_toml_with_models(text, tiles, &mut Vec::new())
+        Self::from_toml_with_models(text, tiles, &mut BlockVisuals::default())
     }
 
-    /// Like [`BlockRegistry::from_toml`], but also reports each block's
-    /// `[block.model]` in a vector indexed by [`BlockId`].
+    /// Like [`BlockRegistry::from_toml`], but also reports each block's model
+    /// assignment in [`BlockVisuals`], indexed by [`BlockId`].
     ///
     /// Model assignment rides out of band because it cannot be resolved yet —
     /// blocks are parsed before the model registry exists — and because it must
@@ -426,14 +450,16 @@ impl BlockRegistry {
     pub fn from_toml_with_models(
         text: &str,
         tiles: &mut TileRegistry,
-        models: &mut Vec<Option<BlockModelSpec>>,
+        visuals: &mut BlockVisuals,
     ) -> Result<Self, String> {
         let file: BlockFile = toml::from_str(text).map_err(|e| e.to_string())?;
         if file.block.is_empty() {
             return Err("no [[block]] entries".into());
         }
 
+        let BlockVisuals { models, json } = visuals;
         models.clear();
+        json.clear();
         let mut reg = Self {
             blocks: Vec::new(),
             fluid_flow: Vec::new(),
@@ -450,6 +476,7 @@ impl BlockRegistry {
             fluid: None,
         });
         models.push(None); // air
+        json.push(None);
 
         // Fluid sources, in declaration order: (source id, flow_levels).
         let mut fluids: Vec<(BlockId, u8)> = Vec::new();
@@ -479,21 +506,31 @@ impl BlockRegistry {
                 }
                 None => None,
             };
-            // A model block's geometry carries its own texture, so it needs no
-            // atlas tiles; anything else without `textures` would silently
-            // render as the magenta marker, which is worth rejecting loudly.
-            let (textures, animated_faces) = match (&def.textures, &def.model) {
-                (Some(t), _) => t.resolve(tiles),
-                (None, Some(_)) => (FaceTextures::uniform(0), 0),
-                (None, None) => {
+            if def.model.is_some() && def.block_model.is_some() {
+                return Err(format!(
+                    "block {:?}: declares both `block_model` and a `[block.model]`",
+                    def.name
+                ));
+            }
+            // A modelled block's geometry carries its own texture, so it needs
+            // no atlas tiles here; a `block_model`'s six face tiles are derived
+            // from its own art later, in `content`. Anything else without
+            // `textures` would silently render as the magenta marker, which is
+            // worth rejecting loudly.
+            let modelled = def.model.is_some() || def.block_model.is_some();
+            let (textures, animated_faces) = match &def.textures {
+                Some(t) => t.resolve(tiles),
+                None if modelled => (FaceTextures::uniform(0), 0),
+                None => {
                     return Err(format!(
-                        "block {:?}: needs `textures` or a `[block.model]`",
+                        "block {:?}: needs `textures`, a `block_model` or a `[block.model]`",
                         def.name
                     ));
                 }
             };
             let random_yaw = def.random_yaw;
             let model = def.model.map(|spec| BlockModelSpec { spec, random_yaw });
+            json.push(def.block_model);
             let id = reg.register(Block {
                 name: def.name,
                 render: def.render,
@@ -538,8 +575,9 @@ impl BlockRegistry {
             reg.fluid_flow.push(flow);
         }
         // The auto-registered flowing blocks never carry a model, but the
-        // vector is indexed by `BlockId` and so must cover every block.
+        // vectors are indexed by `BlockId` and so must cover every block.
         models.resize(reg.len(), None);
+        json.resize(reg.len(), None);
         Ok(reg)
     }
 

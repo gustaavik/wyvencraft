@@ -2,6 +2,7 @@
 //! meshing, streaming, and ray-targeting.
 
 pub mod block;
+pub mod blockmodel;
 pub mod chunk;
 pub mod fluid;
 pub mod generation;

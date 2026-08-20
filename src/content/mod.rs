@@ -20,12 +20,16 @@ use crate::core::Direction;
 use crate::entity::kind::VisualSpec;
 use crate::entity::{EntityRegistry, SpawnConfig};
 use crate::inventory::ItemRegistry;
-use crate::model::{ModelId, ModelRegistry, ModelSpec};
+use crate::model::{ModelId, ModelRegistry, ModelSpec, blockjson};
 use crate::render::TileRegistry;
+use crate::render::block_textures::{self, BlockTextureSet};
 use crate::world::block::{
-    BUILTIN_BLOCKS, BlockModel, BlockModelSpec, BlockRegistry, model_hitbox,
+    BUILTIN_BLOCKS, BlockModel, BlockModelSpec, BlockRegistry, BlockVisuals, FaceTextures,
+    model_hitbox,
 };
+use crate::world::blockmodel::BakedBlockModel;
 use crate::world::generation::WorldGenConfig;
+use crate::world::meshing::BlockModels;
 
 use source::load_or_builtin;
 pub use source::{ContentSource, EmbeddedSource, FsSource, MapSource};
@@ -63,6 +67,9 @@ pub struct GameContent {
     /// Texture name → atlas tile assignments plus the CPU-side atlas pixels
     /// (uploaded once by the renderer at startup).
     pub tiles: TileRegistry,
+    /// The 256×256 textures Blockbench-authored blocks sample, one array layer
+    /// each. Uploaded once by the renderer alongside the atlas.
+    pub block_textures: BlockTextureSet,
     pub blocks: Arc<BlockRegistry>,
     pub items: Arc<ItemRegistry>,
     pub entities: Arc<EntityRegistry>,
@@ -81,6 +88,13 @@ pub struct GameContent {
     /// meshed by baking that model into its cell instead of six atlas-textured
     /// cube faces. Kept off `Block` for the same reason as [`ItemModel`].
     pub block_models: Vec<Option<BlockModel>>,
+    /// Blockbench-authored geometry for each block, indexed by `BlockId`. The
+    /// direction every block is moving in; also kept off `Block`.
+    pub baked_models: Vec<Option<BakedBlockModel>>,
+    /// Atlas tiles derived from a Blockbench block's own textures, indexed by
+    /// `BlockId` — see [`GameContent::face_textures`], which is how everything
+    /// outside the chunk mesh should read them.
+    pub block_face_tiles: Vec<Option<FaceTextures>>,
     /// Fingerprint of every gameplay-affecting definition. Exchanged in the
     /// multiplayer `Welcome`: raw block/item ids cross the wire, so a session
     /// between peers with divergent content would silently corrupt worlds —
@@ -122,18 +136,21 @@ impl GameContent {
         // stay out of `content_hash`.
         let mut block_ctx = BlockCtx {
             tiles: &mut tiles,
-            models: Vec::new(),
+            visuals: BlockVisuals::default(),
         };
         let blocks = Arc::new(load_or_builtin(
             source,
             BLOCKS_PATH,
             "blocks",
             &mut block_ctx,
-            |text, ctx| BlockRegistry::from_toml_with_models(text, ctx.tiles, &mut ctx.models),
+            |text, ctx| BlockRegistry::from_toml_with_models(text, ctx.tiles, &mut ctx.visuals),
             builtin_blocks,
             |reg| format!("{} blocks", reg.len()),
         ));
-        let block_model_specs = block_ctx.models;
+        let BlockVisuals {
+            models: block_model_specs,
+            json: block_json_paths,
+        } = block_ctx.visuals;
         // Item models ride out on the `ctx` channel rather than on `Item`
         // itself: they are visual-only and must stay out of `content_hash`.
         let mut item_model_specs: Vec<Option<ModelSpec>> = Vec::new();
@@ -225,10 +242,32 @@ impl GameContent {
             })
             .collect();
 
-        let item_icons = build_item_icons(&mut tiles, &blocks, &items, &item_models);
+        // Blocks authored in Blockbench. Each `.json` is parsed, its textures
+        // take layers of the shared array, and the geometry is baked into quads
+        // the chunk mesher can place with a translation. Fail-soft like every
+        // other content load: a bad model costs its own block's appearance (it
+        // falls back to whatever `textures` it declared) and nothing else.
+        let mut block_textures = BlockTextureSet::new();
+        let mut baked_models: Vec<Option<BakedBlockModel>> = Vec::new();
+        let mut block_face_tiles: Vec<Option<FaceTextures>> = Vec::new();
+        for path in &block_json_paths {
+            let baked = path
+                .as_deref()
+                .and_then(|path| load_block_model(path, source, &mut block_textures));
+            block_face_tiles.push(
+                baked
+                    .as_ref()
+                    .map(|m| derive_face_tiles(m, &block_textures, &mut tiles)),
+            );
+            baked_models.push(baked);
+        }
+
+        let item_icons =
+            build_item_icons(&mut tiles, &blocks, &items, &item_models, &block_face_tiles);
         let hash = content_hash(&blocks, &items, &entities, &worldgen, &spawning);
         Arc::new(Self {
             tiles,
+            block_textures,
             blocks,
             items,
             entities,
@@ -238,9 +277,94 @@ impl GameContent {
             item_icons,
             item_models,
             block_models,
+            baked_models,
+            block_face_tiles,
             hash,
         })
     }
+
+    /// The model geometry the chunk mesher needs, borrowed from this content.
+    pub fn block_models(&self) -> BlockModels<'_> {
+        BlockModels {
+            models: &self.models,
+            blocks: &self.block_models,
+            baked: &self.baked_models,
+        }
+    }
+
+    /// The six atlas tiles standing in for `block` outside the chunk mesh — its
+    /// inventory icon, and the little cube a dropped stack is drawn as.
+    ///
+    /// A Blockbench-authored block has these derived from its own model
+    /// textures; every other block uses the tiles `blocks.toml` named for it.
+    /// Kept here rather than written back onto `Block` because `Block` feeds
+    /// [`content_hash`], and a derived tile index would then refuse a join over
+    /// a difference that is purely visual.
+    pub fn face_textures(&self, block: crate::core::BlockId) -> FaceTextures {
+        self.block_face_tiles
+            .get(block.0 as usize)
+            .copied()
+            .flatten()
+            .unwrap_or(self.blocks.get(block).textures)
+    }
+}
+
+/// Parse one Blockbench block model and bake it, or warn and give up on it.
+fn load_block_model(
+    path: &str,
+    source: &dyn ContentSource,
+    textures: &mut BlockTextureSet,
+) -> Option<BakedBlockModel> {
+    let bytes = match source.read_bytes(path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            log::warn!("could not read block model {path}: {err}");
+            return None;
+        }
+    };
+    let dir = path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+    match blockjson::load(&bytes, dir, source) {
+        Ok(model) => {
+            let baked = BakedBlockModel::bake(&model, textures);
+            log::info!(
+                "loaded block model {path} ({} quads, {} textures)",
+                baked.quads.len(),
+                model.textures.len()
+            );
+            Some(baked)
+        }
+        Err(err) => {
+            log::warn!("could not load block model {path}: {err}");
+            None
+        }
+    }
+}
+
+/// Reduce a baked model's face textures to one atlas tile each.
+///
+/// Keyed by `"blockmodel:<layer>"` so two blocks covering a face with the same
+/// texture share a tile rather than each burning one of the atlas's few free
+/// slots. A face nothing covers keeps tile 0 — a model with no bottom has no
+/// honest bottom to show on an icon.
+fn derive_face_tiles(
+    model: &BakedBlockModel,
+    textures: &BlockTextureSet,
+    tiles: &mut TileRegistry,
+) -> FaceTextures {
+    let mut faces = [0u32; 6];
+    for (face, layer) in faces.iter_mut().zip(model.face_layers()) {
+        let Some(layer) = layer else { continue };
+        let Some(image) = textures.layer(layer) else {
+            continue;
+        };
+        *face = tiles
+            .insert(
+                &format!("blockmodel:{layer}"),
+                block_textures::to_atlas_tile(image),
+            )
+            .tile;
+    }
+    FaceTextures(faces)
 }
 
 /// Resolve an icon for every item. A placeable solid block becomes an isometric
@@ -251,6 +375,7 @@ fn build_item_icons(
     blocks: &BlockRegistry,
     items: &ItemRegistry,
     item_models: &[Option<ItemModel>],
+    block_face_tiles: &[Option<FaceTextures>],
 ) -> Vec<ItemIcon> {
     items
         .iter()
@@ -265,10 +390,20 @@ fn build_item_icons(
             if let Some(block_id) = item.place_block {
                 let block = blocks.get(block_id);
                 if block.is_visible() && block.fluid.is_none() {
+                    // A Blockbench-authored block's tiles are derived from its
+                    // own model textures; everything else uses what
+                    // `blocks.toml` named. Same shape either way, so the icon
+                    // keeps the familiar isometric cube rather than needing a
+                    // second orientation in the 3D icon sheet.
+                    let faces = block_face_tiles
+                        .get(block_id.0 as usize)
+                        .copied()
+                        .flatten()
+                        .unwrap_or(block.textures);
                     return ItemIcon::Cube {
-                        top: block.textures.tile(Direction::PosY),
-                        left: block.textures.tile(Direction::NegZ),
-                        right: block.textures.tile(Direction::PosX),
+                        top: faces.tile(Direction::PosY),
+                        left: faces.tile(Direction::NegZ),
+                        right: faces.tile(Direction::PosX),
                     };
                 }
             }
@@ -340,11 +475,11 @@ fn placed_bounds(model: &crate::model::Model, spec: &BlockModelSpec) -> (glam::V
 /// shared tile registry, plus the `[block.model]` specs it reports back.
 struct BlockCtx<'a> {
     tiles: &'a mut TileRegistry,
-    models: Vec<Option<BlockModelSpec>>,
+    visuals: BlockVisuals,
 }
 
 fn builtin_blocks(ctx: &mut BlockCtx<'_>) -> BlockRegistry {
-    BlockRegistry::from_toml_with_models(BUILTIN_BLOCKS, ctx.tiles, &mut ctx.models)
+    BlockRegistry::from_toml_with_models(BUILTIN_BLOCKS, ctx.tiles, &mut ctx.visuals)
         .expect("embedded blocks.toml must parse")
 }
 
@@ -515,6 +650,69 @@ mod tests {
     /// Every `[item.model]` in the shipped data must resolve to real geometry.
     ///
     /// This reads the actual `assets/` tree, so it is the check that catches a
+    /// Every block naming a `block_model` must actually have baked geometry —
+    /// a mistyped path or an unreadable export otherwise degrades quietly to an
+    /// invisible block, which is far harder to notice than a broken icon.
+    #[test]
+    fn every_blockbench_block_in_the_shipped_data_loads() {
+        let content = GameContent::load();
+        let modelled: Vec<&str> = content
+            .baked_models
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.is_some())
+            .map(|(id, _)| {
+                content
+                    .blocks
+                    .get(crate::core::BlockId(id as u16))
+                    .name
+                    .as_str()
+            })
+            .collect();
+        assert_eq!(
+            modelled,
+            vec!["dirt", "grass"],
+            "the blocks migrated to Blockbench so far"
+        );
+
+        for (id, baked) in content.baked_models.iter().enumerate() {
+            let Some(baked) = baked else { continue };
+            let name = &content.blocks.get(crate::core::BlockId(id as u16)).name;
+            assert!(!baked.quads.is_empty(), "{name}: no geometry");
+            assert_eq!(
+                baked.occludes, [true; 6],
+                "{name}: a full terrain cube must occlude its neighbours"
+            );
+            for quad in &baked.quads {
+                assert_ne!(quad.layer, 0, "{name}: sampling the missing-texture layer");
+            }
+        }
+    }
+
+    /// Dropped stacks and inventory icons still draw six-sided atlas cubes, so a
+    /// Blockbench block needs a small stand-in tile per face derived from its own
+    /// textures. Without it they would all show the magenta marker.
+    #[test]
+    fn a_blockbench_block_has_derived_atlas_tiles_for_its_faces() {
+        let content = GameContent::load();
+        let grass = content.blocks.find("grass").expect("shipped block");
+
+        // `Block::textures` is deliberately left empty: a derived tile index
+        // must never reach `content_hash`.
+        assert_eq!(content.blocks.get(grass).textures.0, [0; 6]);
+
+        let faces = content.face_textures(grass);
+        for dir in Direction::ALL {
+            assert_ne!(
+                faces.tile(dir),
+                0,
+                "{dir:?} fell back to the missing marker"
+            );
+        }
+        // The top and the bottom come from different art (grass vs dirt).
+        assert_ne!(faces.tile(Direction::PosY), faces.tile(Direction::NegY));
+    }
+
     /// mistyped path, a Blockbench export the loader cannot read, or a model
     /// saved without its texture — all of which otherwise degrade quietly to a
     /// magenta icon at runtime.
@@ -712,7 +910,7 @@ mod tests {
         let spawning = Arc::new(SpawnConfig::from_toml(&tweaked, &entities).unwrap());
         let blocks = Arc::new(builtin_blocks(&mut BlockCtx {
             tiles: &mut TileRegistry::with_engine_tiles(),
-            models: Vec::new(),
+            visuals: BlockVisuals::default(),
         }));
         let items = Arc::new(ItemRegistry::from_blocks(&blocks));
         let worldgen = Arc::new(WorldGenConfig::builtin(&blocks));

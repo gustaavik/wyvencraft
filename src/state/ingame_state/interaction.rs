@@ -238,14 +238,24 @@ impl InGameState {
 
 /// Atlas tiles for a dropped item's cube: the block's own faces for block
 /// items; simple stand-in tiles for tools and food (no dedicated item art yet).
+///
+/// `block_faces` is `content::GameContent::block_face_tiles` — the tiles derived
+/// from a Blockbench-authored block's own 256-pixel textures, which is what a
+/// dropped stack of one is drawn with. Anything not authored that way falls back
+/// to the tiles `blocks.toml` named.
 pub(super) fn drop_textures(
     item: ItemId,
     items: &ItemRegistry,
     blocks: &BlockRegistry,
+    block_faces: &[Option<FaceTextures>],
 ) -> FaceTextures {
     let def = items.get(item);
     match def.place_block {
-        Some(block) => blocks.get(block).textures,
+        Some(block) => block_faces
+            .get(block.0 as usize)
+            .copied()
+            .flatten()
+            .unwrap_or(blocks.get(block).textures),
         None if def.tool.is_some() => FaceTextures::uniform(tiles::WOOD_BARK),
         None => FaceTextures::uniform(tiles::LEAVES),
     }

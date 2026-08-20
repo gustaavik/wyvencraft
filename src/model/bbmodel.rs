@@ -16,6 +16,7 @@ use glam::{EulerRot, Mat4, Quat, Vec3};
 use serde::Deserialize;
 
 use crate::content::ContentSource;
+use crate::core::Direction;
 use crate::render::texture::decode_png;
 
 use super::datauri::{self, Uri};
@@ -23,7 +24,7 @@ use super::mesh::ModelMesh;
 use super::{Model, ModelLoader, resolve_sibling};
 
 /// Blockbench authors in sixteenths of a block.
-const PIXELS_PER_BLOCK: f32 = 16.0;
+pub(super) const PIXELS_PER_BLOCK: f32 = 16.0;
 
 pub struct BbmodelLoader;
 
@@ -86,9 +87,9 @@ struct Document {
 }
 
 #[derive(Deserialize, Clone, Copy)]
-struct Resolution {
-    width: f32,
-    height: f32,
+pub(super) struct Resolution {
+    pub(super) width: f32,
+    pub(super) height: f32,
 }
 
 #[derive(Deserialize)]
@@ -160,13 +161,13 @@ struct TextureEntry {
 /// levels simply multiply. Keeping it as a matrix rather than hand-composing
 /// quaternions and offsets is what makes nesting obviously right.
 #[derive(Clone, Copy)]
-struct Transform(Mat4);
+pub(super) struct Transform(Mat4);
 
 impl Transform {
-    const IDENTITY: Self = Self(Mat4::IDENTITY);
+    pub(super) const IDENTITY: Self = Self(Mat4::IDENTITY);
 
     /// Nest a rotation of `degrees` about `pivot` inside this one.
-    fn then(self, degrees: [f32; 3], pivot: [f32; 3]) -> Self {
+    pub(super) fn then(self, degrees: [f32; 3], pivot: [f32; 3]) -> Self {
         if degrees == [0.0; 3] {
             return self;
         }
@@ -180,13 +181,13 @@ impl Transform {
         Self(self.0 * Mat4::from_translation(pivot) * rotation * Mat4::from_translation(-pivot))
     }
 
-    fn apply(self, p: Vec3) -> Vec3 {
+    pub(super) fn apply(self, p: Vec3) -> Vec3 {
         self.0.transform_point3(p)
     }
 
     /// Rotations preserve length and angle, so normals need no inverse-transpose
     /// here — only the rotational part, applied as a direction.
-    fn apply_normal(self, n: Vec3) -> Vec3 {
+    pub(super) fn apply_normal(self, n: Vec3) -> Vec3 {
         self.0.transform_vector3(n).normalize_or_zero()
     }
 }
@@ -255,8 +256,9 @@ impl Element {
     }
 }
 
-/// The six cube faces, in Blockbench's naming.
-const FACES: [(&str, FaceDir); 6] = [
+/// The six cube faces, in Blockbench's naming. Minecraft's Java block-model
+/// JSON spells them identically, so [`super::blockjson`] shares this table.
+pub(super) const FACES: [(&str, FaceDir); 6] = [
     ("north", FaceDir::North),
     ("south", FaceDir::South),
     ("east", FaceDir::East),
@@ -265,8 +267,8 @@ const FACES: [(&str, FaceDir); 6] = [
     ("down", FaceDir::Down),
 ];
 
-#[derive(Clone, Copy)]
-enum FaceDir {
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum FaceDir {
     North,
     South,
     East,
@@ -276,21 +278,33 @@ enum FaceDir {
 }
 
 impl FaceDir {
-    fn normal(self) -> Vec3 {
+    pub(super) fn normal(self) -> Vec3 {
+        self.direction().normal()
+    }
+
+    /// The engine axis-direction this face points along. Blockbench and
+    /// Minecraft agree on the naming: north is `-Z`, south `+Z`, east `+X`,
+    /// west `-X`.
+    pub(super) fn direction(self) -> Direction {
         match self {
-            FaceDir::North => Vec3::NEG_Z,
-            FaceDir::South => Vec3::Z,
-            FaceDir::East => Vec3::X,
-            FaceDir::West => Vec3::NEG_X,
-            FaceDir::Up => Vec3::Y,
-            FaceDir::Down => Vec3::NEG_Y,
+            FaceDir::North => Direction::NegZ,
+            FaceDir::South => Direction::PosZ,
+            FaceDir::East => Direction::PosX,
+            FaceDir::West => Direction::NegX,
+            FaceDir::Up => Direction::PosY,
+            FaceDir::Down => Direction::NegY,
         }
+    }
+
+    /// Parse the name Minecraft's `cullface` uses.
+    pub(super) fn from_name(name: &str) -> Option<Self> {
+        FACES.iter().find(|(n, _)| *n == name).map(|&(_, dir)| dir)
     }
 }
 
 /// The four corners of a face, in the cycle order that the UV rect's corners
 /// `(u1,v1) → (u2,v1) → (u2,v2) → (u1,v2)` map onto at face rotation 0.
-fn face_corners(dir: FaceDir, lo: Vec3, hi: Vec3) -> [Vec3; 4] {
+pub(super) fn face_corners(dir: FaceDir, lo: Vec3, hi: Vec3) -> [Vec3; 4] {
     let p = |x: f32, y: f32, z: f32| Vec3::new(x, y, z);
     match dir {
         FaceDir::North => [
@@ -334,7 +348,7 @@ fn face_corners(dir: FaceDir, lo: Vec3, hi: Vec3) -> [Vec3; 4] {
 
 /// Normalised UVs for the four face corners, honouring the face's `rotation`
 /// (0/90/180/270, turning the texture on the face).
-fn face_uvs(rect: [f32; 4], rotation: f32, resolution: Resolution) -> [[f32; 2]; 4] {
+pub(super) fn face_uvs(rect: [f32; 4], rotation: f32, resolution: Resolution) -> [[f32; 2]; 4] {
     let [u1, v1, u2, v2] = rect;
     let corners = [[u1, v1], [u2, v1], [u2, v2], [u1, v2]];
     // Verified against the glTF export: 270° shifts the mapping by one step.

@@ -18,8 +18,18 @@
 #   textures  one texture name for all faces, or
 #             { top = "...", bottom = "...", side = "..." }, or the fully
 #             explicit { neg_x, pos_x, neg_y, pos_y, neg_z, pos_z }.
-#             Optional only for a block with a [block.model], whose geometry
-#             brings its own texture and never samples the atlas.
+#             Optional for a block whose geometry brings its own texture and
+#             never samples the atlas — a `block_model` or a [block.model].
+#   block_model  the block is authored in Blockbench and exported as a Java
+#             Block/Item .json under assets/blocks/, with its textures as
+#             separate 256x256 PNGs in assets/textures/. This is how blocks
+#             are made from now on; `textures` and [block.model] are the older
+#             paths, kept working while the remaining blocks are re-authored.
+#             The model is already in cell coordinates (a full cube is
+#             from [0,0,0] to [16,16,16]), so it takes no placement. Set
+#             `cullface` on every outward face or the block will draw all six
+#             faces even when buried, and `tintindex` only on faces that
+#             should take the biome colour (`tint` in assets/worldgen.toml).
 #   drops     what breaking the block yields (default: the block's own item)
 #             "self" | "none" | { requires_tool = "<tool kind>" }
 #             | { item = "<item name>", count = N }
@@ -54,7 +64,7 @@ render = "opaque"
 solid = true
 hardness = 0.5
 material = "dirt"
-textures = "dirt"
+block_model = "assets/blocks/dirt_block.json"
 
 [[block]]
 name = "grass"
@@ -62,7 +72,7 @@ render = "opaque"
 solid = true
 hardness = 0.6
 material = "dirt"
-textures = { top = "grass_top", bottom = "dirt", side = "grass_side" }
+block_model = "assets/blocks/grass_block.json"
 
 [[block]]
 name = "sand"

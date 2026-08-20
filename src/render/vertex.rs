@@ -8,9 +8,17 @@ use vulkano::pipeline::graphics::vertex_input::Vertex;
 /// [`crate::render::tiles::WATER_FRAMES`] animation frames.
 pub const FLAG_WATER: u32 = 1;
 
-/// Vertex for voxel/chunk geometry: world position, face normal, atlas UV, a
-/// baked ambient-occlusion term, and per-face shader-effect flags.
-#[derive(BufferContents, Vertex, Clone, Copy, Debug, Default)]
+/// A vertex that draws its texture's own colour.
+///
+/// Tint multiplies, so white is the identity — which is why it is spelled out
+/// rather than left to `Default`, whose zeroes would paint everything black.
+pub const NO_TINT: [u8; 4] = [255; 4];
+
+/// Vertex for voxel/chunk geometry: world position, face normal, texture UV, a
+/// baked ambient-occlusion term, per-face shader-effect flags, and — for
+/// geometry drawn against the block texture array — which layer to sample and
+/// what to tint it by.
+#[derive(BufferContents, Vertex, Clone, Copy, Debug)]
 #[repr(C)]
 pub struct ChunkVertex {
     #[format(R32G32B32_SFLOAT)]
@@ -25,6 +33,28 @@ pub struct ChunkVertex {
     /// Bit flags for shader effects (see [`FLAG_WATER`]).
     #[format(R32_UINT)]
     pub flags: u32,
+    /// Layer of [`crate::render::block_textures`] to sample. Ignored by the
+    /// atlas pipeline, which addresses its texture through `uv` alone.
+    #[format(R32_UINT)]
+    pub layer: u32,
+    /// Multiplied into the sampled colour — biome tint for the faces a block
+    /// model marked `tintindex`. [`NO_TINT`] leaves the texture as authored.
+    #[format(R8G8B8A8_UNORM)]
+    pub tint: [u8; 4],
+}
+
+impl Default for ChunkVertex {
+    fn default() -> Self {
+        Self {
+            position: [0.0; 3],
+            normal: [0.0; 3],
+            uv: [0.0; 2],
+            ao: 1.0,
+            flags: 0,
+            layer: 0,
+            tint: NO_TINT,
+        }
+    }
 }
 
 /// Vertex for entity models and simple coloured geometry.

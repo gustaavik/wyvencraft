@@ -82,6 +82,11 @@ chance_per_mille = 300
 # uniformly from the list, on a much denser candidate grid than trees. Omit
 # both keys for a bare biome. Like every other name here these are strict — a
 # typo rejects the whole file.
+#
+# `tint` is the biome's foliage colour, multiplied into the block-model faces
+# marked `tintindex` in Blockbench — the grass top and the grass side overlay,
+# whose textures are deliberately greyscale so one set of art serves every
+# climate. Omit it for white, which multiplies to no change at all.
 [biome.plains]
 surface = "grass"
 subsurface = "dirt"
@@ -89,6 +94,7 @@ tree = "oak"
 tree_chance_per_mille = 550
 plants = ["blue bells", "red flower", "red mushroom", "brown mushroom"]
 plant_chance_per_mille = 90
+tint = [124, 189, 107]
 
 [biome.snowy]
 surface = "snow"
@@ -98,7 +104,11 @@ tree_chance_per_mille = 400
 # Only fungi survive the cold, and sparsely.
 plants = ["red mushroom", "brown mushroom"]
 plant_chance_per_mille = 15
+# Washed-out and blue-shifted, for grass poking through the snow line.
+tint = [128, 180, 151]
 
 [biome.desert]
 surface = "sand"
 subsurface = "sand"
+# Dry and yellowed; barely used, since desert grows no grass.
+tint = [191, 183, 85]

@@ -5,6 +5,7 @@
 //! state. That keeps `render` free of any dependency on `world`/`entity`.
 
 pub mod armor;
+pub mod block_textures;
 pub mod camera;
 pub mod context;
 pub mod debug;
@@ -20,10 +21,11 @@ pub mod tile_registry;
 pub mod tiles;
 pub mod vertex;
 
+pub use block_textures::{BlockTextureArray, BlockTextureSet};
 pub use camera::Camera;
 pub use context::RenderContext;
 pub use mesh::{CpuMesh, GpuLines, GpuMesh};
 pub use renderer::{LightParams, PreviewFrame, Renderer, SceneFrame, SkyParams, TexturedMesh};
 pub use texture::{Rgba8, Texture};
 pub use tile_registry::{TileEntry, TileRegistry};
-pub use vertex::{ChunkVertex, EntityVertex, FLAG_WATER, LineVertex};
+pub use vertex::{ChunkVertex, EntityVertex, FLAG_WATER, LineVertex, NO_TINT};
