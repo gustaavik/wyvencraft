@@ -4,7 +4,9 @@
 //!
 //! * **As a client** — [`AuthClient`] talks to the auth server to log in, keep a
 //!   session alive, and fetch a join ticket. [`AuthSession`] is what a
-//!   logged-in player carries around; `save::profile` persists it.
+//!   logged-in player carries around; `save::profile` persists it. [`username`]
+//!   knows what the server will accept as a name, so a login form can refuse a
+//!   bad one without asking.
 //! * **As a host** — [`TicketVerifier`] checks the ticket a joining player
 //!   presents, using a public key set cached on disk. No network call, so a host
 //!   admits legitimate players even when the auth server is unreachable.
@@ -21,12 +23,14 @@ pub mod account;
 pub mod client;
 pub mod keys;
 pub mod session;
+pub mod username;
 pub mod verifier;
 
 pub use account::{AccountState, AccountStatus};
 pub use client::{AuthClient, AuthError, FakeAuthClient, HttpAuthClient, JoinTicket};
 pub use keys::KeyCache;
 pub use session::{AccountIdentity, AuthSession};
+pub use username::UsernameError;
 pub use verifier::{TicketVerifier, VerifyFailure};
 
 /// Where the game looks for the auth server when nothing overrides it.

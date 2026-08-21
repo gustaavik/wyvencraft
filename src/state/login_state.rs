@@ -10,7 +10,12 @@ use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
 use super::{GameState, MainMenuState, StateContext, Transition, Wyvencraft};
 use crate::save::AccountProfile;
-use wyven_auth::{AccountState, AuthClient, AuthError, AuthSession, HttpAuthClient, KeyCache};
+use wyven_auth::{
+    AccountState, AuthClient, AuthError, AuthSession, HttpAuthClient, KeyCache, username,
+};
+
+/// The colour anything gone wrong is said in.
+const WARNING: egui::Color32 = egui::Color32::from_rgb(220, 120, 120);
 
 /// Which form is showing.
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -176,12 +181,22 @@ impl LoginState {
     }
 
     fn submit(&mut self) {
-        let username = self.username.trim().to_string();
+        // Before `mem::take` below spends the password field: an early return
+        // that has already emptied it makes the player retype a password that
+        // was never the problem.
+        let username = match username::validate(&self.username) {
+            Ok(name) => name.to_string(),
+            Err(err) => {
+                self.message = Some(err.to_string());
+                return;
+            }
+        };
+
         let password = std::mem::take(&mut self.password);
         let email = self.email.trim().to_string();
 
-        if username.is_empty() || password.is_empty() {
-            self.message = Some("Enter a username and password.".to_string());
+        if password.is_empty() {
+            self.message = Some("Enter a password.".to_string());
             return;
         }
 
@@ -247,6 +262,17 @@ impl GameState<Wyvencraft> for LoginState {
                         [field_width, 24.0],
                         egui::TextEdit::singleline(&mut self.username).hint_text("Username"),
                     );
+                    // Nothing is refused as it is typed — the field takes
+                    // whatever the player writes and this line says what is
+                    // wrong with it, so a half-typed name is not scolded and a
+                    // paste is not silently rewritten.
+                    if let Err(err) = username::validate(&self.username)
+                        && !self.username.trim().is_empty()
+                    {
+                        ui.colored_label(WARNING, egui::RichText::new(err.to_string()).small());
+                    } else if self.mode == Mode::Register {
+                        ui.small("3-16 characters: letters, digits and _");
+                    }
                     ui.add_space(6.0);
 
                     if self.mode == Mode::Register {
@@ -302,7 +328,7 @@ impl GameState<Wyvencraft> for LoginState {
 
                 if let Some(message) = &self.message {
                     ui.add_space(12.0);
-                    ui.colored_label(egui::Color32::from_rgb(220, 120, 120), message);
+                    ui.colored_label(WARNING, message);
                 }
 
                 // Offered once the server has actually been shown to be
@@ -477,5 +503,25 @@ mod tests {
 
         assert!(state.password.is_empty());
         settle(&mut state);
+    }
+
+    /// A name the server is guaranteed to refuse never becomes a request. The
+    /// point is not the message but `!busy()`: nothing was sent.
+    #[test]
+    fn a_malformed_username_is_refused_without_asking_the_server() {
+        for bad in ["gus-tav", "gus tav", "ab", "_admin"] {
+            let (mut state, _) =
+                login_state(FakeAuthClient::new().with_account("gustav", "hunter2hunter2"));
+            state.username = bad.to_string();
+            state.password = "hunter2hunter2".to_string();
+
+            state.submit();
+
+            assert!(state.message.is_some(), "{bad} should explain itself");
+            assert!(!state.busy(), "{bad} must not reach the server");
+            // The password was never the problem, so it is still there to
+            // submit alongside a corrected name.
+            assert_eq!(state.password, "hunter2hunter2");
+        }
     }
 }

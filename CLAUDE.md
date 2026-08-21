@@ -283,7 +283,7 @@ those systems are testable without a Vulkan device.
 | Authorize a player      | `ops.toml` in the working directory (`ops = [{ id = "<account uuid>", name = "..." }]`), parsed by `chat::ops`. Keyed by the **account id from the verified join ticket**, never by anything a client asserts. The host/singleplayer player is always an op; only the authority loads the file |
 | Chat log / input bar    | `chat::{log,composer}` (pure state), drawn by `ui::chat::draw_chat`; keys `chat`/`chat_command` in `config::Keybinds` (T and /) |
 | Networking              | `wyven_net::{server,client}` + `net::protocol` transport; role behind `state::session::Session` (Singleplayer/Host/Client + `FakeSession`); message application in `state::ingame_state::net` |
-| Accounts / login        | `wyven_auth::{client,session,account,keys,verifier}`. `AuthClient` is a port (`HttpAuthClient` via ureq / `FakeAuthClient`); `LoginState` is the first screen; the session persists in `profile.toml`. Server lives in the private repo [gustaavik/wcauthserver](https://github.com/gustaavik/wcauthserver) |
+| Accounts / login        | `wyven_auth::{client,session,account,keys,username,verifier}`. `AuthClient` is a port (`HttpAuthClient` via ureq / `FakeAuthClient`); `LoginState` is the first screen; the session persists in `profile.toml`. `wyven_auth::username` hand-mirrors the server's name rule (`[A-Za-z0-9_]`, 3..=16, no leading `_`) so the form refuses locally what the server would refuse anyway — same duplication, and same obligation to keep both sides in step, as `AccountIdentity::netcode_id`. Server lives in the private repo [gustaavik/wcauthserver](https://github.com/gustaavik/wcauthserver) |
 | Who may join            | `net::TicketJoin` (the game's `JoinVerifier`) checks the Ed25519 ticket a client puts in netcode `user_data` **before** a `PlayerId` exists — a failure is disconnected with no `Welcome`. Keys come from `authkeys.toml` via `wyven_auth::KeyCache`; **no keys means no joins**, never "everyone joins". Ticket format is `wcauth-ticket`, shared verbatim with the server — literally the same crate, pulled from the wcauthserver repo as a git dependency |
 | Player nameplates       | `ui::nameplate` painted from `InGameState::draw_nameplates`; projection is `wyven_render::Camera::project`. egui composites after the world pass with no depth, so occlusion is an explicit `wyven_voxel::raycast` against `is_solid` |
 | Saving / world files    | `save` module (formats, `saves/<slug>/`) behind `save::WorldRepository` (File/Null/InMemory); triggers in `state::ingame_state::save_world` |
@@ -378,8 +378,8 @@ those systems are testable without a Vulkan device.
 ## Verifying a change
 
 1. `cargo build --workspace` / `cargo clippy --workspace --all-targets` clean.
-2. `cargo test --workspace` green (488 tests: 48 auth, 8 core, 54 model,
-   43 render, 14 voxel, 321 game).
+2. `cargo test --workspace` green (495 tests: 54 auth, 8 core, 54 model,
+   43 render, 14 voxel, 322 game).
 3. Run it: `WYVEN_BOOT_INGAME=1 cargo run` (or host/join for net changes) and
    confirm no panic over several seconds. In a sandbox, launch in the background and
    poll the log rather than blocking on a foreground `sleep` — `timeout` is not
