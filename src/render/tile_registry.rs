@@ -1,23 +1,25 @@
 //! Name-keyed atlas tile registry.
 //!
-//! Content (blocks.toml) references textures by *name*. Each name resolves,
-//! in priority order, to: a PNG on disk (`assets/textures/<name>.png`, 16×16),
-//! the procedural painter of the same name ([`super::tiles::paint_named`]),
-//! or the magenta "missing texture" marker. Tile indices are assigned
-//! dynamically at load; nothing outside the registry should assume a name's
-//! index.
+//! The registry does two jobs: hand each texture *name* a slot in the atlas, and
+//! assemble the finished pixels for upload. It deliberately does **not** know
+//! what any name means or where its art comes from — that is a [`TileSource`],
+//! injected at construction. A voxel game's grass and a flight sim's instrument
+//! panel are the same problem to this file.
 //!
-//! *Engine tiles* (the player skin sheet, the mob and armor sheets, the
-//! break-crack overlay) are pre-registered at fixed indices: the skin block is
-//! blitted from [`super::skin`]; the cracks are painted from the constants in
-//! [`super::tiles`], since the entity model and the break overlay address them
-//! by constant.
+//! Two kinds of art share the atlas:
+//!
+//! - **Named** art, allocated on demand through [`TileRegistry::resolve`]. The
+//!   caller references it by name and never learns the index.
+//! - **Reserved** art, pinned to a fixed index by the caller
+//!   ([`ReservedTiles`]). Anything addressed by *constant* rather than by name
+//!   needs this — a sprite sheet whose parts are read at known offsets, or an
+//!   overlay a shader indexes arithmetically. Reserved slots are claimed before
+//!   any name is resolved, so named art can never land on one.
 
 use std::collections::HashMap;
 
 use super::texture::{ATLAS_COLUMNS, ATLAS_SIZE, TILE_SIZE};
-use super::tiles::{self, TileRgba};
-use super::{armor, mobskin, skin};
+use wyven_assets::decode_png;
 
 /// Total atlas capacity; growth requires touching `ATLAS_COLUMNS` in the
 /// fragment shader too, so it is fixed for now.
@@ -26,6 +28,11 @@ const MAX_TILES: usize = (ATLAS_COLUMNS * ATLAS_COLUMNS) as usize;
 /// The magenta marker painted into any atlas tile without assigned art, so a
 /// bad tile index is immediately visible in-game.
 const MISSING_TEXTURE: [u8; 4] = [255, 0, 255, 255];
+
+const N: usize = TILE_SIZE as usize;
+
+/// One tile of RGBA pixels, indexed `[y][x]` with y = 0 at the top.
+pub type TileRgba = [[[u8; 4]; N]; N];
 
 /// A resolved texture: the atlas tile it was assigned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,63 +45,111 @@ impl TileEntry {
     pub const MISSING: TileEntry = TileEntry { tile: 0 };
 }
 
+/// Where a named tile's art comes from.
+///
+/// This is the seam that keeps the renderer free of any particular game's
+/// artwork. The registry asks for a name; what it gets back — a PNG off disk,
+/// procedurally painted pixels, or nothing — is entirely the implementor's
+/// business.
+pub trait TileSource: Send + Sync {
+    /// Art for `name`, or `None` if this source has none (the registry then
+    /// logs and hands out [`TileEntry::MISSING`]).
+    fn tile(&self, name: &str) -> Option<TileRgba>;
+}
+
+/// A source with no art at all: every name resolves to the missing marker.
+/// Useful for tests, and for any atlas built purely from reserved art.
+pub struct NoTiles;
+
+impl TileSource for NoTiles {
+    fn tile(&self, _name: &str) -> Option<TileRgba> {
+        None
+    }
+}
+
+/// Art pinned to fixed atlas indices, claimed before any name is allocated.
+#[derive(Default)]
+pub struct ReservedTiles {
+    entries: Vec<(u32, TileRgba)>,
+}
+
+impl ReservedTiles {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Pin `art` at `tile`.
+    pub fn with(mut self, tile: u32, art: TileRgba) -> Self {
+        self.entries.push((tile, art));
+        self
+    }
+
+    /// Pin a whole sheet's worth of `(index, art)` pairs.
+    pub fn extend(mut self, art: impl IntoIterator<Item = (u32, TileRgba)>) -> Self {
+        self.entries.extend(art);
+        self
+    }
+}
+
+/// Decode a tile-sized texture PNG (RGBA or RGB, 8-bit) into atlas art.
+///
+/// Exposed because a [`TileSource`] reading PNGs off disk should not have to
+/// re-derive "which PNG flavours do we accept, and at what size".
+pub fn decode_tile(bytes: &[u8]) -> Result<TileRgba, String> {
+    let image = decode_png(bytes)?;
+    if image.size != [TILE_SIZE; 2] {
+        return Err(format!(
+            "must be {TILE_SIZE}x{TILE_SIZE}, got {}x{}",
+            image.width(),
+            image.height()
+        ));
+    }
+    let mut art: TileRgba = [[[0; 4]; N]; N];
+    for (y, row) in art.iter_mut().enumerate() {
+        for (x, px) in row.iter_mut().enumerate() {
+            let i = (y * N + x) * 4;
+            *px = [
+                image.pixels[i],
+                image.pixels[i + 1],
+                image.pixels[i + 2],
+                image.pixels[i + 3],
+            ];
+        }
+    }
+    Ok(art)
+}
+
 /// Name → tile assignment plus the CPU-side atlas pixels.
 pub struct TileRegistry {
     by_name: HashMap<String, TileEntry>,
     pixels: Vec<Option<TileRgba>>,
     used: [bool; MAX_TILES],
+    source: Box<dyn TileSource>,
 }
 
 impl TileRegistry {
-    /// A registry holding only the engine tiles, at their fixed indices.
-    pub fn with_engine_tiles() -> Self {
+    /// A registry that draws named art from `source`, with `reserved` already
+    /// claimed at its fixed indices.
+    pub fn new(source: Box<dyn TileSource>, reserved: &ReservedTiles) -> Self {
         let mut reg = Self {
             by_name: HashMap::new(),
             pixels: vec![None; MAX_TILES],
             used: [false; MAX_TILES],
+            source,
         };
         // Tile 0 is the reserved missing-texture marker.
         reg.used[0] = true;
-
-        // Unnamed engine art addressed by constant: the break-crack overlay.
-        let cracks = tiles::CRACK_0..tiles::CRACK_0 + tiles::CRACK_STAGES;
-        for tile in cracks {
-            reg.claim_fixed(tile);
-        }
-
-        // Player skin: blit the 64×64 Minecraft-format sheet into its reserved
-        // atlas block. Each tile carries its own art (sliced from the sheet), so
-        // it is set directly rather than through `claim_fixed`/`tiles::paint`.
-        let sheet = skin::load_default();
-        for (tile, art) in skin::atlas_tiles(&sheet) {
+        for &(tile, art) in &reserved.entries {
             reg.used[tile as usize] = true;
             reg.pixels[tile as usize] = Some(art);
         }
-
-        // Armor sheets: reserved high (rows 4–11), each addressed by its origin
-        // like the skin, so worn pieces sample them with the same face rects.
-        for kind in armor::ALL {
-            for (tile, art) in armor::atlas_tiles(kind) {
-                reg.used[tile as usize] = true;
-                reg.pixels[tile as usize] = Some(art);
-            }
-        }
-
-        // Mob skin sheets: same scheme, filling out the high band (rows 4–15).
-        for kind in mobskin::ALL {
-            for (tile, art) in mobskin::atlas_tiles(kind) {
-                reg.used[tile as usize] = true;
-                reg.pixels[tile as usize] = Some(art);
-            }
-        }
-
         reg
     }
 
-    /// Claim `tile` for the engine art painted at that index.
-    fn claim_fixed(&mut self, tile: u32) {
-        self.used[tile as usize] = true;
-        self.pixels[tile as usize] = tiles::paint(tile);
+    /// A registry with no art at all — every name resolves to the missing
+    /// marker. For tests that only care about slot allocation.
+    pub fn empty() -> Self {
+        Self::new(Box::new(NoTiles), &ReservedTiles::new())
     }
 
     /// Resolve `name` to its tile entry, assigning a slot and loading pixels
@@ -104,24 +159,10 @@ impl TileRegistry {
         if let Some(&entry) = self.by_name.get(name) {
             return entry;
         }
-        let art = load_png(name).or_else(|| tiles::paint_named(name));
-        let entry = match art {
-            Some(art) => match self.allocate() {
-                Some(tile) => {
-                    self.pixels[tile as usize] = Some(art);
-                    TileEntry { tile }
-                }
-                None => {
-                    log::warn!(
-                        "texture atlas full ({MAX_TILES} tiles); {name:?} gets the missing marker"
-                    );
-                    TileEntry::MISSING
-                }
-            },
+        let entry = match self.source.tile(name) {
+            Some(art) => self.claim(name, art),
             None => {
-                log::warn!(
-                    "unknown texture {name:?} (no assets/textures/{name}.png and no builtin art)"
-                );
+                log::warn!("unknown texture {name:?}: no art from the tile source");
                 TileEntry::MISSING
             }
         };
@@ -131,15 +172,22 @@ impl TileRegistry {
 
     /// Register `art` under `name`, allocating a slot on first use.
     ///
-    /// For art with no PNG or painter of its own: the small stand-ins derived
-    /// from a Blockbench block model's 256-pixel textures, which the inventory
-    /// icon and the dropped-item cube still sample. Keyed by name exactly like
-    /// [`TileRegistry::resolve`], so faces sharing a texture share a tile.
+    /// For art the source has no answer for because it was *derived* at load
+    /// time rather than authored — a small stand-in downsampled from a larger
+    /// texture, say. Keyed by name exactly like [`TileRegistry::resolve`], so
+    /// two callers naming the same art share a tile.
     pub fn insert(&mut self, name: &str, art: TileRgba) -> TileEntry {
         if let Some(&entry) = self.by_name.get(name) {
             return entry;
         }
-        let entry = match self.allocate() {
+        let entry = self.claim(name, art);
+        self.by_name.insert(name.to_string(), entry);
+        entry
+    }
+
+    /// Put `art` in the next free slot, or warn and fall back to the marker.
+    fn claim(&mut self, name: &str, art: TileRgba) -> TileEntry {
+        match self.allocate() {
             Some(tile) => {
                 self.pixels[tile as usize] = Some(art);
                 TileEntry { tile }
@@ -150,9 +198,7 @@ impl TileRegistry {
                 );
                 TileEntry::MISSING
             }
-        };
-        self.by_name.insert(name.to_string(), entry);
-        entry
+        }
     }
 
     fn allocate(&mut self) -> Option<u32> {
@@ -185,82 +231,82 @@ impl TileRegistry {
     }
 }
 
-/// Decode a 16×16 texture PNG (RGBA or RGB, 8-bit). Anything else warns and
-/// falls through to the procedural art.
-fn load_png(name: &str) -> Option<TileRgba> {
-    let path = format!("assets/textures/{name}.png");
-    let bytes = std::fs::read(&path).ok()?;
-    let decode = || -> Result<TileRgba, String> {
-        let image = super::texture::decode_png(&bytes)?;
-        if image.size != [TILE_SIZE; 2] {
-            return Err(format!(
-                "must be {TILE_SIZE}x{TILE_SIZE}, got {}x{}",
-                image.width(),
-                image.height()
-            ));
-        }
-        let mut art: TileRgba = [[[0; 4]; TILE_SIZE as usize]; TILE_SIZE as usize];
-        for (y, row) in art.iter_mut().enumerate() {
-            for (x, px) in row.iter_mut().enumerate() {
-                let i = (y * TILE_SIZE as usize + x) * 4;
-                *px = [
-                    image.pixels[i],
-                    image.pixels[i + 1],
-                    image.pixels[i + 2],
-                    image.pixels[i + 3],
-                ];
-            }
-        }
-        Ok(art)
-    };
-    match decode() {
-        Ok(art) => {
-            log::info!("texture {name:?}: using {path}");
-            Some(art)
-        }
-        Err(err) => {
-            log::warn!("ignoring {path}: {err}");
-            None
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn content_tiles_allocate_and_stay_stable() {
-        let mut reg = TileRegistry::with_engine_tiles();
-        let stone = reg.resolve("stone");
-        assert_ne!(stone, TileEntry::MISSING);
-        // Same name resolves to the same slot.
-        assert_eq!(reg.resolve("stone"), stone);
-        // Different names get different slots.
-        assert_ne!(reg.resolve("dirt").tile, stone.tile);
-        // Content never lands on an engine slot.
-        for name in ["stone", "dirt", "leaves", "glass"] {
-            let t = reg.resolve(name).tile;
-            assert!(!skin::atlas_tile_indices().any(|s| s == t));
-            assert!(!armor::is_armor_tile(t), "{name} landed in the armor band");
-            assert!(!mobskin::is_mob_tile(t), "{name} landed in a mob sheet");
-            assert!(!(tiles::CRACK_0..tiles::CRACK_0 + tiles::CRACK_STAGES).contains(&t));
-            assert_ne!(t, 0);
+    /// Serves a flat colour for any name starting with `known`.
+    struct Swatch;
+
+    impl TileSource for Swatch {
+        fn tile(&self, name: &str) -> Option<TileRgba> {
+            if !name.starts_with("known") {
+                return None;
+            }
+            // Colour-code by name length so two names get distinguishable art.
+            Some([[[name.len() as u8, 0, 0, 255]; N]; N])
         }
+    }
+
+    fn registry(reserved: ReservedTiles) -> TileRegistry {
+        TileRegistry::new(Box::new(Swatch), &reserved)
+    }
+
+    #[test]
+    fn names_allocate_once_and_stay_stable() {
+        let mut reg = registry(ReservedTiles::new());
+        let a = reg.resolve("known a");
+        assert_ne!(a, TileEntry::MISSING);
+        assert_eq!(reg.resolve("known a"), a, "same name, same slot");
+        assert_ne!(
+            reg.resolve("known bb").tile,
+            a.tile,
+            "distinct names differ"
+        );
     }
 
     #[test]
     fn unknown_names_resolve_to_missing() {
-        let mut reg = TileRegistry::with_engine_tiles();
+        let mut reg = registry(ReservedTiles::new());
         assert_eq!(reg.resolve("no such texture"), TileEntry::MISSING);
+    }
+
+    /// The point of reserving: art addressed by constant must keep its index,
+    /// and no name may ever be handed that slot.
+    #[test]
+    fn named_art_never_lands_on_a_reserved_slot() {
+        let taken = [3u32, 4, 5, 200];
+        let reserved = taken
+            .iter()
+            .fold(ReservedTiles::new(), |r, &t| r.with(t, [[[1; 4]; N]; N]));
+        let mut reg = registry(reserved);
+        for i in 0..8 {
+            let tile = reg.resolve(&format!("known {i}")).tile;
+            assert!(!taken.contains(&tile), "name {i} landed on a reserved slot");
+            assert_ne!(tile, 0, "name {i} landed on the missing marker's slot");
+        }
+    }
+
+    #[test]
+    fn insert_registers_art_the_source_has_no_answer_for() {
+        let mut reg = registry(ReservedTiles::new());
+        let derived = reg.insert("derived", [[[7; 4]; N]; N]);
+        assert_ne!(derived, TileEntry::MISSING);
+        assert_eq!(reg.insert("derived", [[[9; 4]; N]; N]), derived, "memoised");
     }
 
     #[test]
     fn atlas_has_expected_size() {
-        let reg = TileRegistry::with_engine_tiles();
+        let reg = registry(ReservedTiles::new());
         assert_eq!(
             reg.atlas_rgba().len(),
             (ATLAS_SIZE * ATLAS_SIZE * 4) as usize
         );
+    }
+
+    #[test]
+    fn a_registry_with_no_source_resolves_everything_to_missing() {
+        let mut reg = TileRegistry::empty();
+        assert_eq!(reg.resolve("known a"), TileEntry::MISSING);
     }
 }

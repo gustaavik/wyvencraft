@@ -8,6 +8,7 @@
 use glam::Vec3;
 
 use super::{HOST_PLAYER_ID, InGameState};
+use crate::art::{mobskin, skin};
 use crate::core::{Aabb, BlockPos, Rng64};
 use crate::entity::kind::VisualSpec;
 use crate::entity::{
@@ -17,7 +18,7 @@ use crate::entity::{
 use crate::inventory::ItemStack;
 use crate::model::{ModelId, ModelRegistry};
 use crate::net::{Channel, ClientMessage, PlayerId, ServerMessage};
-use crate::render::{CpuMesh, mobskin, skin};
+use crate::render::CpuMesh;
 use crate::world::Target;
 
 /// Zombie shamble: both arms held straight out (≈ 80° forward of hanging).

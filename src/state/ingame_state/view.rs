@@ -21,6 +21,7 @@ use glam::Vec3;
 
 use super::mobs::{RemoteMob, mob_mesh};
 use super::{OUTLINE_COLOR, REMOTE_MAX_SPEED, THIRD_PERSON_DISTANCE};
+use crate::art::tiles;
 use crate::content::ItemModel;
 use crate::core::{Aabb, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, ChunkPos, DayCycle};
 use crate::entity::{
@@ -32,7 +33,7 @@ use crate::model::{ModelId, ModelRegistry};
 use crate::net::{PlayerId, RemotePlayer};
 use crate::render::{
     Camera, CpuMesh, GpuLines, GpuMesh, LightParams, PreviewFrame, RenderContext, SceneFrame,
-    SkyParams, Texture, TexturedMesh, debug, tiles,
+    SkyParams, Texture, TexturedMesh, debug,
 };
 use crate::world::World;
 use crate::world::block::{BlockRegistry, FaceTextures};

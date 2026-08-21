@@ -14,8 +14,8 @@
 
 use crate::core::Direction;
 
-use super::texture::{ATLAS_COLUMNS, ATLAS_SIZE, TILE_SIZE};
-use super::tiles::TileRgba;
+use crate::render::TileRgba;
+use crate::render::texture::{ATLAS_COLUMNS, ATLAS_SIZE, TILE_SIZE};
 
 /// Sheet edge length in pixels.
 pub const SKIN_SIZE: u32 = 64;
@@ -135,7 +135,7 @@ pub const SHEET_TILES: u32 = SKIN_SIZE / TILE_SIZE;
 /// Map a face rect + local image uv (u → right, v → down) into atlas texture
 /// coordinates for a sheet whose top-left tile is `origin_tile` (`[col, row]`).
 /// Generic over the sheet position so armor sheets reuse it; the skin-space
-/// counterpart of [`super::texture::atlas_uv`].
+/// counterpart of [`crate::render::texture::atlas_uv`].
 pub fn sheet_uv(origin_tile: [u32; 2], rect: [u32; 4], local: [f32; 2]) -> [f32; 2] {
     let size = ATLAS_SIZE as f32;
     let origin = [origin_tile[0] * TILE_SIZE, origin_tile[1] * TILE_SIZE];
@@ -211,10 +211,10 @@ fn embedded() -> Box<SkinRgba> {
 }
 
 /// Decode a 64×64 skin/armor PNG. The size is the only extra constraint on top
-/// of [`super::texture::decode_png`]: the part rects below index into a sheet of
+/// of [`crate::render::texture::decode_png`]: the part rects below index into a sheet of
 /// exactly this shape.
 pub fn decode(bytes: &[u8]) -> Result<Box<SkinRgba>, String> {
-    let image = super::texture::decode_png(bytes)?;
+    let image = crate::render::texture::decode_png(bytes)?;
     if image.size != [SKIN_SIZE; 2] {
         return Err(format!(
             "must be {SKIN_SIZE}x{SKIN_SIZE}, got {}x{}",

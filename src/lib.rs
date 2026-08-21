@@ -36,6 +36,7 @@ pub use wyven_assets;
 pub use wyven_core;
 
 pub mod app;
+pub mod art;
 pub mod auth;
 pub mod boot;
 pub mod chat;

@@ -132,7 +132,7 @@ impl GameContent {
     /// file falls back to its builtin independently, so one bad file never
     /// costs more than itself.
     pub fn from_source(source: &dyn ContentSource) -> Arc<Self> {
-        let mut tiles = TileRegistry::with_engine_tiles();
+        let mut tiles = crate::art::tile_registry();
 
         // Blocks own the tile registry: both the parsed and the builtin path
         // must register their textures into the *same* `tiles`, or the tile
@@ -767,7 +767,7 @@ mod tests {
     /// caller still falls back to the builtin blocks.
     #[test]
     fn a_block_without_textures_or_a_model_is_rejected() {
-        let mut tiles = TileRegistry::with_engine_tiles();
+        let mut tiles = crate::art::tile_registry();
         let bad = r#"
             [[block]]
             name = "ghost"
@@ -1143,7 +1143,7 @@ mod tests {
         assert_eq!(a.hash, b.hash, "identical content must hash identically");
         assert_ne!(a.hash, 0);
 
-        let mut tiles = TileRegistry::with_engine_tiles();
+        let mut tiles = crate::art::tile_registry();
         let tweaked = BUILTIN_BLOCKS.replace("hardness = 1.5", "hardness = 9.0");
         let blocks = Arc::new(BlockRegistry::from_toml(&tweaked, &mut tiles).unwrap());
         let items = Arc::new(ItemRegistry::from_blocks(&blocks));
@@ -1161,7 +1161,7 @@ mod tests {
         let tweaked = BUILTIN_SPAWNING.replace("max_mobs = 40", "max_mobs = 99");
         let spawning = Arc::new(SpawnConfig::from_toml(&tweaked, &entities).unwrap());
         let blocks = Arc::new(builtin_blocks(&mut BlockCtx {
-            tiles: &mut TileRegistry::with_engine_tiles(),
+            tiles: &mut crate::art::tile_registry(),
             visuals: BlockVisuals::default(),
         }));
         let items = Arc::new(ItemRegistry::from_blocks(&blocks));

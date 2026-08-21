@@ -15,7 +15,7 @@
 use crate::core::{Direction, Rng64};
 
 use super::skin::{self, SkinPart};
-use super::tiles::TileRgba;
+use crate::render::TileRgba;
 
 /// The quadruped unwrap. A cow-sized body (12×10×18 px) unfolds 60 px wide,
 /// so it gets its own row instead of reusing the humanoid layout. All four

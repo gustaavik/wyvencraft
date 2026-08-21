@@ -488,10 +488,10 @@ pub fn push_item_cube(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::art::tiles;
     use crate::content::{FluidTexture, GameContent};
     use crate::core::{ChunkPos, LocalPos};
     use crate::render::block_textures::AnimatedLayers;
-    use crate::render::tiles;
     use crate::render::vertex::{ANIM_FIELD_MASK, ANIM_FPS_SHIFT, ANIM_FRAMES_SHIFT};
     use crate::world::block::blocks;
 

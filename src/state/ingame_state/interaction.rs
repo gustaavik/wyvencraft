@@ -5,10 +5,10 @@
 use glam::Vec3;
 
 use super::{BreakState, InGameState};
+use crate::art::tiles;
 use crate::core::{Aabb, BlockId, BlockPos};
 use crate::entity::DroppedItem;
 use crate::inventory::{ItemId, ItemRegistry, ItemStack};
-use crate::render::tiles;
 use crate::world::Target;
 use crate::world::block::{BlockRegistry, Drops, FaceTextures};
 

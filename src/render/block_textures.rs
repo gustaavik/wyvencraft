@@ -51,7 +51,7 @@ use vulkano::sync::GpuFuture;
 use super::context::RenderContext;
 use super::pipeline::voxel_array;
 use super::texture::{Rgba8, TILE_SIZE};
-use super::tiles::TileRgba;
+use super::tile_registry::TileRgba;
 
 /// Edge length every block texture must have. One extent covers all layers of
 /// an array image, so this is an equality, not a maximum.

@@ -477,7 +477,7 @@ impl BlockRegistry {
     /// one via [`crate::content::GameContent`]). Infallible: the shipped file
     /// is validated by the golden tests.
     pub fn with_builtins() -> Self {
-        let mut tiles = TileRegistry::with_engine_tiles();
+        let mut tiles = crate::art::tile_registry();
         Self::from_toml(BUILTIN_BLOCKS, &mut tiles).expect("embedded blocks.toml must parse")
     }
 
@@ -771,7 +771,7 @@ mod tests {
     /// by accident, so the loader refuses it outright.
     #[test]
     fn a_fluid_loop_that_does_not_divide_the_animation_clock_is_rejected() {
-        let mut tiles = TileRegistry::with_engine_tiles();
+        let mut tiles = crate::art::tile_registry();
         // 64 frames at 6 fps: 6 * 3600 leaves 32 frames over.
         let bad = BUILTIN_BLOCKS.replace("fps = 8", "fps = 6");
         let err = BlockRegistry::from_toml(&bad, &mut tiles).expect_err("must not parse");
@@ -889,7 +889,7 @@ mod tests {
 
     /// Parse a blocks file with a throwaway tile registry.
     fn parse(text: &str) -> Result<BlockRegistry, String> {
-        let mut tiles = TileRegistry::with_engine_tiles();
+        let mut tiles = crate::art::tile_registry();
         BlockRegistry::from_toml(text, &mut tiles)
     }
 

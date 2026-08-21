@@ -8,7 +8,7 @@
 //! drawn as ASCII sprites instead, because a pickaxe silhouette is easier to
 //! read (and edit) as a picture than as arithmetic.
 
-use super::texture::TILE_SIZE;
+use crate::render::texture::TILE_SIZE;
 
 // Row 0: terrain blocks.
 pub const STONE: u32 = 1;
