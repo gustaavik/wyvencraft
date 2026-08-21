@@ -132,7 +132,7 @@ impl<P: Protocol, V: JoinVerifier> Host<P, V> {
 
                     let pid = PlayerId(self.next_player_id);
                     self.next_player_id += 1;
-                    log::info!("player {} joined", pid.0);
+                    log::info!("player {} joined as {identity}", pid.0);
                     self.players.insert(client_id, pid);
                     self.accounts.insert(pid, identity);
                     self.joined.push(client_id);

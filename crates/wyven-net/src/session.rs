@@ -32,7 +32,11 @@ pub type UserData = [u8; renet_netcode::NETCODE_USER_DATA_BYTES];
 pub trait JoinVerifier {
     /// What a verified peer turns out to be. The host hands this back with
     /// every join so the game can attach permissions or a display name to it.
-    type Identity;
+    ///
+    /// `Display` because the host logs who joined, and "player 3 joined" is a
+    /// materially worse operator experience than naming the account — which is
+    /// the whole point of having verified it.
+    type Identity: std::fmt::Display;
 
     /// Check `user_data` from a peer that connected as `client_id`.
     ///
@@ -60,9 +64,18 @@ pub trait JoinVerifier {
 pub struct OpenJoin;
 
 impl JoinVerifier for OpenJoin {
-    type Identity = ();
+    type Identity = Anonymous;
 
-    fn verify(&mut self, _: Option<&UserData>, _: u64, _: u64) -> Result<(), String> {
-        Ok(())
+    fn verify(&mut self, _: Option<&UserData>, _: u64, _: u64) -> Result<Anonymous, String> {
+        Ok(Anonymous)
+    }
+}
+
+/// The identity of a peer nobody checked.
+pub struct Anonymous;
+
+impl std::fmt::Display for Anonymous {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("an unverified peer")
     }
 }

@@ -14,5 +14,5 @@ pub mod wire;
 
 pub use client::Client;
 pub use server::{DEFAULT_PORT, Host, HostConfig};
-pub use session::{JoinVerifier, OpenJoin, Protocol, UserData};
+pub use session::{Anonymous, JoinVerifier, OpenJoin, Protocol, UserData};
 pub use wire::{Channel, PlayerId, decode, encode};
