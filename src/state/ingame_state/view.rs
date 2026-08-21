@@ -886,24 +886,25 @@ impl super::InGameState {
             ctx,
             &self.world,
             BlockAppearance {
-                blocks: &self.blocks,
-                face_tiles: &self.block_face_tiles,
-                models: &self.models,
-                placed: &self.block_models,
-                baked: &self.baked_models,
-                fluids: &self.fluid_textures,
+                blocks: &self.content.blocks,
+                face_tiles: &self.content.block_face_tiles,
+                models: &self.content.models,
+                placed: &self.content.block_models,
+                baked: &self.content.baked_models,
+                fluids: &self.content.fluid_textures,
             },
             super::MESH_BUDGET,
         );
 
-        // Loose entities.
-        let (items, blocks) = (&self.items, &self.blocks);
-        let block_faces = self.block_face_tiles.clone();
-        let models = self.models.clone();
-        let item_models = self.item_models.clone();
+        // Loose entities. One `Arc` clone releases the borrow on `self` for
+        // the closure below, where three deep `Vec` clones used to.
+        let loaded = self.content.clone();
+        let (items, blocks) = (&loaded.items, &loaded.blocks);
+        let block_faces = &loaded.block_face_tiles;
+        let models = &loaded.models;
         let content = ModelContent {
-            models: &models,
-            item_models: &item_models,
+            models,
+            item_models: &loaded.item_models,
         };
         self.view.update_drops_mesh(
             ctx,
@@ -914,14 +915,14 @@ impl super::InGameState {
                     .place_block
                     .is_some_and(|b| blocks.get(b).is_transparent());
                 (
-                    super::interaction::drop_textures(item, items, &block_faces),
+                    super::interaction::drop_textures(item, items, block_faces),
                     is_transparent,
                 )
             },
             content,
         );
         self.view
-            .update_mob_meshes(ctx, &self.mobs, &mut self.remote_mobs, &models, dt);
+            .update_mob_meshes(ctx, &self.mobs, &mut self.remote_mobs, models, dt);
         self.view.update_arrows_mesh(ctx, &self.arrows);
 
         // Animated humanoids. The local player settles to idle while the
@@ -933,17 +934,22 @@ impl super::InGameState {
             Vec3::new(v.x, 0.0, v.z).length()
         };
         self.view.advance_player_anim(local_speed, dt);
-        self.view
-            .update_player_mesh(ctx, &self.player, &self.inventory, &self.items, content);
+        self.view.update_player_mesh(
+            ctx,
+            &self.player,
+            &self.inventory,
+            &self.content.items,
+            content,
+        );
         self.view.update_preview_mesh(
             ctx,
             self.inventory_open,
             &self.player,
             &self.inventory,
-            &self.items,
+            &self.content.items,
             content,
         );
         self.view
-            .update_remote_meshes(ctx, &self.peers.players, &self.items, dt);
+            .update_remote_meshes(ctx, &self.peers.players, &self.content.items, dt);
     }
 }

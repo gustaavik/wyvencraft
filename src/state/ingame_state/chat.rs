@@ -154,11 +154,11 @@ impl InGameState {
     /// against [`CommandContext::item_names`], so an unresolvable one here is a
     /// caller bug and fails soft.
     fn give_item(&mut self, actor: PlayerId, name: &str, count: u32) {
-        let Some(id) = self.items.find(name) else {
+        let Some(id) = self.content.items.find(name) else {
             log::warn!("asked to give unknown item '{name}'; ignoring");
             return;
         };
-        let stacks = build_stacks(id, count, &self.items);
+        let stacks = build_stacks(id, count, &self.content.items);
         self.grant(actor, stacks);
         log::info!("gave player {} {count} × {name}", actor.0);
     }
@@ -245,7 +245,7 @@ impl InGameState {
     /// front of the player — the same overflow rule as crafting.
     pub(super) fn receive_stacks(&mut self, stacks: Vec<ItemStack>) {
         for stack in stacks {
-            let leftover = self.inventory.add(stack, &self.items);
+            let leftover = self.inventory.add(stack, &self.content.items);
             if leftover > 0 {
                 self.drops.push(DroppedItem::thrown(
                     ItemStack {
@@ -254,7 +254,7 @@ impl InGameState {
                     },
                     self.player.eye_position(),
                     self.player.look_direction(),
-                    self.entities.dropped_item(),
+                    self.content.entities.dropped_item(),
                 ));
             }
         }
@@ -282,7 +282,7 @@ impl InGameState {
     pub(super) fn apply_granted_items(&mut self, wire: &[NetItemStack]) {
         let stacks: Vec<ItemStack> = wire
             .iter()
-            .filter_map(|stack| stack_from_wire(*stack, &self.items))
+            .filter_map(|stack| stack_from_wire(*stack, &self.content.items))
             .collect();
         self.receive_stacks(stacks);
     }
@@ -325,6 +325,7 @@ impl CommandContext for SessionContext<'_> {
 
     fn item_names(&self) -> Vec<String> {
         self.state
+            .content
             .items
             .iter()
             .map(|(_, item)| item.name.clone())
@@ -468,7 +469,7 @@ mod tests {
     }
 
     fn count_of(state: &InGameState, name: &str) -> u32 {
-        let id = state.items.find(name).expect("the item exists");
+        let id = state.content.items.find(name).expect("the item exists");
         state.inventory.count_of(id)
     }
 
@@ -499,8 +500,8 @@ mod tests {
         let mut state = InGameState::new(GameContent::builtin(), 5, GameMode::Creative);
         state.submit_chat("/give wooden pickaxe 3".to_string());
 
-        let id = state.items.find("wooden pickaxe").unwrap();
-        let full = state.items.max_durability(id).unwrap();
+        let id = state.content.items.find("wooden pickaxe").unwrap();
+        let full = state.content.items.max_durability(id).unwrap();
         let picks: Vec<_> = state
             .inventory
             .slots()
@@ -535,8 +536,8 @@ mod tests {
     #[test]
     fn a_granted_stack_that_does_not_fit_lands_on_the_ground() {
         let mut state = InGameState::new(GameContent::builtin(), 5, GameMode::Creative);
-        let stone = state.items.find("stone").unwrap();
-        let max = state.items.max_stack(stone);
+        let stone = state.content.items.find("stone").unwrap();
+        let max = state.content.items.max_stack(stone);
 
         // Fill every storage slot, so nothing can be absorbed.
         for slot in 0..crate::inventory::INVENTORY_SIZE {
@@ -550,7 +551,7 @@ mod tests {
 
         assert_eq!(state.inventory.count_of(stone), before, "nothing displaced");
         assert_eq!(count_of(&state, "bread"), 0, "no room for it");
-        let bread = state.items.find("bread").unwrap();
+        let bread = state.content.items.find("bread").unwrap();
         let dropped: u32 = state
             .drops
             .iter()
@@ -770,7 +771,7 @@ mod tests {
             .expect("an op's /give is granted");
         drop(net);
 
-        let bread = state.items.find("bread").unwrap();
+        let bread = state.content.items.find("bread").unwrap();
         assert_eq!(granted.len(), 1);
         assert_eq!(granted[0].item, bread.0);
         assert_eq!(granted[0].count, 5);
@@ -968,7 +969,7 @@ mod tests {
     fn a_client_applies_the_items_the_host_grants_it() {
         let local = PlayerId(2);
         let (mut state, handle) = client_session(local);
-        let bread = state.items.find("bread").unwrap();
+        let bread = state.content.items.find("bread").unwrap();
 
         handle.deliver(Inbound::Update(ServerMessage::GrantItems {
             to: local,
@@ -988,7 +989,7 @@ mod tests {
     #[test]
     fn a_client_ignores_a_grant_addressed_to_someone_else() {
         let (mut state, handle) = client_session(PlayerId(2));
-        let bread = state.items.find("bread").unwrap();
+        let bread = state.content.items.find("bread").unwrap();
 
         handle.deliver(Inbound::Update(ServerMessage::GrantItems {
             to: PlayerId(9),

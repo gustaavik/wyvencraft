@@ -22,7 +22,7 @@ impl InGameState {
         for index in 0..TOTAL_SLOTS {
             let stack = restore.slots.get(index).and_then(|slot| {
                 slot.and_then(|s| {
-                    ((s.item as usize) < self.items.len()).then_some(ItemStack {
+                    ((s.item as usize) < self.content.items.len()).then_some(ItemStack {
                         item: ItemId(s.item),
                         count: s.count,
                         durability: s.durability,
@@ -56,12 +56,12 @@ impl InGameState {
                 &self.peers.identities,
                 &self.peers.players,
                 &self.peers.inventories,
-                &self.items,
+                &self.content.items,
                 pid,
             );
         }
-        let world = WorldData::from_world(&self.world, &self.blocks);
-        let player = PlayerData::capture(&self.player, &self.inventory, &self.items);
+        let world = WorldData::from_world(&self.world, &self.content.blocks);
+        let player = PlayerData::capture(&self.player, &self.inventory, &self.content.items);
         let mobs = MobsData::from_mobs(&self.mobs);
         let snapshot = WorldSnapshot {
             world: &world,

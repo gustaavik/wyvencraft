@@ -198,7 +198,7 @@ impl InGameState {
     /// kind is unknown or isn't a mob. The brain's random stream is seeded
     /// from the world seed and the mob id, so runs are reproducible.
     pub(super) fn spawn_mob(&mut self, kind_name: &str, position: Vec3) -> Option<MobId> {
-        let kind = self.entities.find(kind_name)?;
+        let kind = self.content.entities.find(kind_name)?;
         let id = MobId(self.next_mob_id);
         let seed = self.world.seed() ^ id.0.wrapping_mul(0x9E37_79B9_7F4A_7C15);
         let mob = Mob::spawn(kind, id, position, seed)?;
@@ -223,6 +223,7 @@ impl InGameState {
             });
         }
         let eye_height = self
+            .content
             .entities
             .player()
             .movement
@@ -357,7 +358,7 @@ impl InGameState {
     /// — the host and the killing client roll identical loot without it ever
     /// crossing the wire. Unknown item names are skipped with a warning.
     pub(super) fn pop_drops_for(&mut self, kind_name: &str, mob_id: u64, position: Vec3) {
-        let Some(kind) = self.entities.find(kind_name) else {
+        let Some(kind) = self.content.entities.find(kind_name) else {
             return;
         };
         let Some(params) = kind.mob.clone() else {
@@ -366,7 +367,7 @@ impl InGameState {
         let mut rng = Rng64::new(self.world.seed() ^ mob_id.wrapping_mul(0xA24B_AED4_963E_E407));
         let block = BlockPos::from_world(position + Vec3::Y * 0.25);
         for drop in &params.drops {
-            let Some(item) = self.items.find(&drop.item) else {
+            let Some(item) = self.content.items.find(&drop.item) else {
                 log::warn!(
                     "mob {kind_name:?} drop references unknown item {:?}; skipping",
                     drop.item
@@ -377,13 +378,13 @@ impl InGameState {
             if count == 0 {
                 continue;
             }
-            let stack = ItemStack::new(item, (count as u8).min(self.items.max_stack(item)));
+            let stack = ItemStack::new(item, (count as u8).min(self.content.items.max_stack(item)));
             let angle = self.view.elapsed * 9.73 + rng.range_f32(0.0, std::f32::consts::TAU);
             self.drops.push(crate::entity::DroppedItem::block_drop(
                 stack,
                 block,
                 angle,
-                self.entities.dropped_item(),
+                self.content.entities.dropped_item(),
             ));
         }
     }
@@ -394,7 +395,7 @@ impl InGameState {
     pub(super) fn melee_damage(&self) -> f32 {
         self.inventory
             .item_in_selected()
-            .and_then(|id| self.items.tool(id))
+            .and_then(|id| self.content.items.tool(id))
             .and_then(|tool| tool.damage)
             .unwrap_or(PLAYER_ATTACK_DAMAGE)
     }
@@ -468,7 +469,7 @@ impl InGameState {
         let authority = self.session.is_authority();
         let local_box = (authority && !self.dead && self.player.mode.takes_damage())
             .then(|| self.player.aabb());
-        let player_kind = self.entities.player().physics;
+        let player_kind = self.content.entities.player().physics;
         let remote_boxes: Vec<(PlayerId, Aabb)> = if authority {
             self.peers
                 .players
@@ -526,7 +527,7 @@ impl InGameState {
     /// The planner is pure ([`crate::entity::Spawner::tick`]); this method
     /// feeds it the live world and applies its plan.
     pub(super) fn update_spawning(&mut self, dt: f32) {
-        let cfg = self.spawning.clone();
+        let cfg = self.content.spawning.clone();
         let mut anchors = vec![self.player.position];
         anchors.extend(self.peers.players.values().map(|r| r.position()));
         let is_night = self.day_cycle.is_night();

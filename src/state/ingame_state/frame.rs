@@ -176,7 +176,7 @@ impl GameState<Wyvencraft> for InGameState {
             // the player is wearing right now.
             let movement = crate::config::movement(ctx.input, &kb);
             let dt = ctx.dt.min(0.05);
-            self.player.defense = self.inventory.total_defense(&self.items);
+            self.player.defense = self.inventory.total_defense(&self.content.items);
             let health_before = self.player.health;
             // Player physics is stepped at a fixed rate, not on the frame delta,
             // so jump height is the same at every framerate.
@@ -260,7 +260,10 @@ impl GameState<Wyvencraft> for InGameState {
         // Water flow: singleplayer/host simulate authoritatively and broadcast
         // each change; clients receive them as ordinary BlockChanged edits.
         if self.session.is_authority() {
-            for (pos, block) in self.fluids.tick(&mut self.world, &self.blocks, ctx.dt) {
+            for (pos, block) in self
+                .fluids
+                .tick(&mut self.world, &self.content.blocks, ctx.dt)
+            {
                 self.broadcast_local_edit(pos, block);
             }
             // Mobs are host-authoritative like fluids; clients only render
@@ -313,7 +316,7 @@ impl GameState<Wyvencraft> for InGameState {
             let out = crate::ui::inventory::draw_inventory(
                 egui_ctx,
                 &self.inventory,
-                &self.items,
+                &self.content.items,
                 &self.recipes,
                 &ctx.shared.content.item_icons,
                 self.held,
@@ -326,7 +329,7 @@ impl GameState<Wyvencraft> for InGameState {
             if let Some(action) = out.action {
                 match action {
                     InvAction::Slot(index) => self.handle_slot_click(index),
-                    InvAction::Pick(id) => self.held = Some(self.items.full_stack(id)),
+                    InvAction::Pick(id) => self.held = Some(self.content.items.full_stack(id)),
                     InvAction::Craft(index) => self.handle_craft(index),
                     InvAction::Rotate(dx) => {
                         self.view.preview.yaw -= dx * PREVIEW_DRAG_SENSITIVITY;
@@ -346,7 +349,7 @@ impl GameState<Wyvencraft> for InGameState {
         hud::draw_hotbar(
             egui_ctx,
             &self.inventory,
-            &self.items,
+            &self.content.items,
             &ctx.shared.content.item_icons,
             ctx.shared.ui_tex,
         );
