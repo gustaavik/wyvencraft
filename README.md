@@ -8,6 +8,9 @@ in — solo or with friends over the network.
 > Status: all core milestones complete (M0–M8). Builds and runs on macOS via
 > MoltenVK. See [Roadmap](#roadmap) for optional polish that remains.
 
+Developer documentation on how the systems communicate — accounts and join tickets,
+the multiplayer wire protocol, and the engine/game seams — is in [`docs/`](docs/README.md).
+
 ## Features
 
 - **Procedural world generation** — seeded, multi-octave Perlin/Simplex noise for
@@ -69,28 +72,28 @@ Logging honours `RUST_LOG` (e.g. `RUST_LOG=info,wyvencraft=debug cargo run`).
 
 Skip the menus with environment variables:
 
-| Variable | Effect |
-|---|---|
-| `WYVEN_BOOT_INGAME=1` | Boot straight into a singleplayer world |
-| `WYVEN_HOST=1` | Host a session immediately (port `25565`) |
-| `WYVEN_JOIN=addr:port` | Connect to a host immediately |
-| `WYVEN_WORLD=test` | Select the world too connect too |
+| Variable               | Effect                                    |
+| ---------------------- | ----------------------------------------- |
+| `WYVEN_BOOT_INGAME=1`  | Boot straight into a singleplayer world   |
+| `WYVEN_HOST=1`         | Host a session immediately (port `25565`) |
+| `WYVEN_JOIN=addr:port` | Connect to a host immediately             |
+| `WYVEN_WORLD=test`     | Select the world too connect too          |
 
 ## Controls
 
-| Input | Action |
-|---|---|
-| `W` `A` `S` `D` | Move |
-| Mouse | Look |
-| `Space` | Jump |
-| Left click | Break block |
-| Right click | Place selected block |
-| Scroll wheel | Select hotbar slot |
-| `Q` | Drop one item from the selected slot |
-| `E` | Open/close inventory |
-| `F5` | Toggle perspective (1st / 3rd person) |
-| `F3` | Toggle debug overlay |
-| `Esc` | Pause (or close inventory) |
+| Input           | Action                                |
+| --------------- | ------------------------------------- |
+| `W` `A` `S` `D` | Move                                  |
+| Mouse           | Look                                  |
+| `Space`         | Jump                                  |
+| Left click      | Break block                           |
+| Right click     | Place selected block                  |
+| Scroll wheel    | Select hotbar slot                    |
+| `Q`             | Drop one item from the selected slot  |
+| `E`             | Open/close inventory                  |
+| `F5`            | Toggle perspective (1st / 3rd person) |
+| `F3`            | Toggle debug overlay                  |
+| `Esc`           | Pause (or close inventory)            |
 
 ## Multiplayer
 
@@ -127,16 +130,16 @@ depends on `world`; the game state hands the renderer plain mesh data + a camera
 
 ## Tech stack
 
-| Concern | Crate |
-|---|---|
-| Vulkan | `vulkano`, `vulkano-shaders`, `vulkano-util` |
-| Window / input | `winit` |
-| UI | `egui`, `egui_winit_vulkano` |
-| Math | `glam` |
-| Noise | `noise` |
-| Networking | `renet`, `renet_netcode` |
-| Concurrency | `rayon`, `crossbeam-channel`, `parking_lot` |
-| Serialization | `serde`, `bincode` |
+| Concern        | Crate                                        |
+| -------------- | -------------------------------------------- |
+| Vulkan         | `vulkano`, `vulkano-shaders`, `vulkano-util` |
+| Window / input | `winit`                                      |
+| UI             | `egui`, `egui_winit_vulkano`                 |
+| Math           | `glam`                                       |
+| Noise          | `noise`                                      |
+| Networking     | `renet`, `renet_netcode`                     |
+| Concurrency    | `rayon`, `crossbeam-channel`, `parking_lot`  |
+| Serialization  | `serde`, `bincode`                           |
 
 ## Roadmap
 

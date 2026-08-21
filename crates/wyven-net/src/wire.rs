@@ -10,14 +10,26 @@ use serde::de::DeserializeOwned;
 pub struct PlayerId(pub u64);
 
 /// Logical network channels, mapped to renet channel ids.
+///
+/// The ids are `renet`'s `DefaultChannel` numbering, because both `Host` and
+/// `Client` build with `ConnectionConfig::default()`. Note that **1 is reliable
+/// *unordered* and 2 is reliable *ordered*** — that is renet's mapping, not a
+/// typo here. renet also drains the channels in id order against a per-tick byte
+/// budget, so gameplay snapshots get the wire before a bulk transfer does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Channel {
-    /// Frequent, loss-tolerant updates (movement snapshots).
+    /// Frequent, loss-tolerant updates (movement snapshots). Dropped rather than
+    /// queued when the budget is tight, which is what keeps them current.
     Unreliable = 0,
-    /// Ordered, guaranteed delivery (block edits, inventory, chat).
+    /// Guaranteed delivery, **no ordering between messages** (block edits,
+    /// inventory, chat, mob lifecycle events). Each message arrives exactly once,
+    /// but two sent in sequence may be applied in either order — nothing on this
+    /// channel may depend on its neighbour having landed first.
     Reliable = 1,
-    /// Large transfers sliced across frames (initial modified-chunk sync).
+    /// Guaranteed *and* ordered, for large transfers sliced across frames (the
+    /// initial world-edit sync). The ordering is incidental to its purpose; what
+    /// this channel is really for is yielding to the two above it.
     Chunk = 2,
 }
 

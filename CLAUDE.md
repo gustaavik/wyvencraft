@@ -86,6 +86,10 @@ uncomment the `[patch."https://github.com/gustaavik/wcauthserver.git"]` block in
 
 ## Architecture
 
+> **How the parts talk to each other** — trust boundaries, the auth/join flow, the wire
+> protocol and the authority model — lives in [`docs/`](docs/README.md). This section is
+> the *where to change what* map; those are the *who tells whom what* map.
+
 ### The engine crates (`crates/`)
 
 Nine workspace members, **one-directional** and enforced by cargo — none of them
