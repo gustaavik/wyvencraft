@@ -374,8 +374,8 @@ those systems are testable without a Vulkan device.
 ## Verifying a change
 
 1. `cargo build --workspace` / `cargo clippy --workspace --all-targets` clean.
-2. `cargo test --workspace` green (488 tests: 8 core, 54 model, 43 render,
-   14 voxel, 369 game).
+2. `cargo test --workspace` green (488 tests: 48 auth, 8 core, 54 model,
+   43 render, 14 voxel, 321 game).
 3. Run it: `WYVEN_BOOT_INGAME=1 cargo run` (or host/join for net changes) and
    confirm no panic over several seconds. In a sandbox, launch in the background and
    poll the log rather than blocking on a foreground `sleep` — `timeout` is not
