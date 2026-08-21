@@ -27,11 +27,12 @@ use crate::world::BlockRegistry;
 #[derive(Clone, Copy)]
 pub struct BlockAppearance<'a> {
     /// Render type and fluid membership — the two visual facts that *are* on
-    /// the block table, because both are declared in `blocks.toml`.
+    /// the block table, because both are behaviour as much as appearance.
     pub blocks: &'a BlockRegistry,
-    /// The atlas tiles each block's faces sample. Derived at load for a
-    /// Blockbench-authored block, declared for every other, which is why it is
-    /// a table here rather than a field on `Block`.
+    /// The atlas tiles each block's faces sample, resolved at load: derived
+    /// from a Blockbench block's own art, from a fluid's first still frame, or
+    /// from the names `blocks.toml` gave. A tile index is derived from art, so
+    /// it lives here and never on `Block`, which feeds `content_hash`.
     pub face_tiles: &'a [Option<FaceTextures>],
     /// Parsed model files, referenced by index from `placed`.
     pub models: &'a ModelRegistry,
@@ -56,7 +57,7 @@ impl BlockCatalog for BlockAppearance<'_> {
             .get(id.0 as usize)
             .copied()
             .flatten()
-            .unwrap_or(self.blocks.get(id).textures)
+            .unwrap_or(crate::content::MISSING_FACES)
     }
 
     #[inline]

@@ -10,7 +10,7 @@ use crate::core::{Aabb, BlockId, BlockPos};
 use crate::entity::DroppedItem;
 use crate::inventory::{ItemId, ItemRegistry, ItemStack};
 use crate::world::Target;
-use crate::world::block::{BlockRegistry, Drops};
+use crate::world::block::Drops;
 use wyven_voxel::FaceTextures;
 
 impl InGameState {
@@ -259,7 +259,6 @@ impl InGameState {
 pub(super) fn drop_textures(
     item: ItemId,
     items: &ItemRegistry,
-    blocks: &BlockRegistry,
     block_faces: &[Option<FaceTextures>],
 ) -> FaceTextures {
     let def = items.get(item);
@@ -268,7 +267,7 @@ pub(super) fn drop_textures(
             .get(block.0 as usize)
             .copied()
             .flatten()
-            .unwrap_or(blocks.get(block).textures),
+            .unwrap_or(crate::content::MISSING_FACES),
         None if def.tool.is_some() => FaceTextures::uniform(tiles::WOOD_BARK),
         None => FaceTextures::uniform(tiles::LEAVES),
     }

@@ -9,8 +9,7 @@
 
 use crate::core::BlockId;
 use wyven_model::ModelSpec;
-use wyven_render::TileRegistry;
-use wyven_voxel::{BlockProperties, FaceTextures, FluidInfo, RenderType};
+use wyven_voxel::{BlockProperties, FluidInfo, RenderType};
 
 /// Embedded copy of the shipped block definitions, used when
 /// `assets/blocks.toml` is missing or invalid (the assets dir is CWD-relative).
@@ -64,6 +63,11 @@ pub struct BlockModelSpec {
 /// `json` column grows as blocks are re-authored, `models` shrinks to nothing.
 #[derive(Debug, Default)]
 pub struct BlockVisuals {
+    /// `textures = ...` — the six texture *names*, in [`Direction`] order,
+    /// still unresolved. Resolving them to atlas slots is `content`'s job: a
+    /// tile index is derived from art, and anything derived from art must stay
+    /// off [`Block`], which feeds `content_hash`.
+    pub textures: Vec<Option<[String; 6]>>,
     /// `[block.model]` — a `.bbmodel`/`.gltf` file plus its placement.
     pub models: Vec<Option<BlockModelSpec>>,
     /// `block_model` — a Blockbench Java Block/Item `.json` and its placement.
@@ -123,7 +127,6 @@ pub struct Block {
     pub render: RenderType,
     /// Whether entities collide with this block.
     pub solid: bool,
-    pub textures: FaceTextures,
     /// Relative mining time; `f32::INFINITY` means unbreakable (e.g. bedrock).
     pub hardness: f32,
     /// What the block is made of, for tool matching.
@@ -332,9 +335,12 @@ fn default_fluid_fps() -> u8 {
 }
 
 impl TexturesDef {
-    /// Resolve texture names to atlas tiles via the tile registry (which
-    /// warns and substitutes the missing marker for unknown names).
-    fn resolve(&self, tiles: &mut TileRegistry) -> FaceTextures {
+    /// The six texture names in [`Direction`] order (`-X,+X,-Y,+Y,-Z,+Z`).
+    ///
+    /// Names, not tiles: which atlas slot each one lands in depends on the art
+    /// loaded alongside it, and that is a question for `content`, not for the
+    /// block table.
+    fn names(&self) -> [String; 6] {
         let names: [&str; 6] = match self {
             Self::Uniform(name) => [name; 6],
             // order: -X,+X,-Y,+Y,-Z,+Z  =>  side,side,bottom,top,side,side
@@ -348,11 +354,7 @@ impl TexturesDef {
                 pos_z,
             } => [neg_x, pos_x, neg_y, pos_y, neg_z, pos_z],
         };
-        let mut faces = [0u32; 6];
-        for (i, name) in names.iter().enumerate() {
-            faces[i] = tiles.resolve(name).tile;
-        }
-        FaceTextures(faces)
+        names.map(str::to_string)
     }
 }
 
@@ -389,8 +391,7 @@ impl BlockRegistry {
     /// one via [`crate::content::GameContent`]). Infallible: the shipped file
     /// is validated by the golden tests.
     pub fn with_builtins() -> Self {
-        let mut tiles = crate::art::tile_registry();
-        Self::from_toml(BUILTIN_BLOCKS, &mut tiles).expect("embedded blocks.toml must parse")
+        Self::from_toml(BUILTIN_BLOCKS).expect("embedded blocks.toml must parse")
     }
 
     /// Parse a blocks file. Declared order defines the numeric [`BlockId`]s:
@@ -400,9 +401,10 @@ impl BlockRegistry {
     ///
     /// Structural errors (bad TOML, duplicate/reserved names) fail the whole
     /// file — the caller falls back to [`BlockRegistry::with_builtins`].
-    /// Unknown texture names only degrade that block (tile 0 + a warning).
-    pub fn from_toml(text: &str, tiles: &mut TileRegistry) -> Result<Self, String> {
-        Self::from_toml_with_models(text, tiles, &mut BlockVisuals::default())
+    /// Unknown texture names only degrade that block, once `content` fails to
+    /// find art for them.
+    pub fn from_toml(text: &str) -> Result<Self, String> {
+        Self::from_toml_with_models(text, &mut BlockVisuals::default())
     }
 
     /// Like [`BlockRegistry::from_toml`], but also reports each block's model
@@ -411,21 +413,19 @@ impl BlockRegistry {
     /// Model assignment rides out of band because it cannot be resolved yet —
     /// blocks are parsed before the model registry exists — and because it must
     /// stay off [`Block`], which feeds `content_hash`. See [`BlockModel`].
-    pub fn from_toml_with_models(
-        text: &str,
-        tiles: &mut TileRegistry,
-        visuals: &mut BlockVisuals,
-    ) -> Result<Self, String> {
+    pub fn from_toml_with_models(text: &str, visuals: &mut BlockVisuals) -> Result<Self, String> {
         let file: BlockFile = toml::from_str(text).map_err(|e| e.to_string())?;
         if file.block.is_empty() {
             return Err("no [[block]] entries".into());
         }
 
         let BlockVisuals {
+            textures: texture_names,
             models,
             json,
             fluids: fluid_visuals,
         } = visuals;
+        texture_names.clear();
         models.clear();
         json.clear();
         fluid_visuals.clear();
@@ -433,11 +433,11 @@ impl BlockRegistry {
             blocks: Vec::new(),
             fluid_flow: Vec::new(),
         };
+        texture_names.push(None);
         reg.register(Block {
             name: "air".into(),
             render: RenderType::Invisible,
             solid: false,
-            textures: FaceTextures::uniform(0),
             hardness: 0.0,
             material: BlockMaterial::Other,
             drops: Drops::None,
@@ -530,8 +530,8 @@ impl BlockRegistry {
             let modelled =
                 def.model.is_some() || def.block_model.is_some() || fluid_texture.is_some();
             let textures = match &def.textures {
-                Some(t) => t.resolve(tiles),
-                None if modelled => FaceTextures::uniform(0),
+                Some(t) => Some(t.names()),
+                None if modelled => None,
                 None => {
                     return Err(format!(
                         "block {:?}: needs `textures`, a `block_model`, a `[block.model]` \
@@ -540,6 +540,7 @@ impl BlockRegistry {
                     ));
                 }
             };
+            texture_names.push(textures);
             let random_yaw = def.random_yaw;
             let model = def.model.map(|spec| BlockModelSpec { spec, random_yaw });
             json.push(
@@ -554,7 +555,6 @@ impl BlockRegistry {
                 name: def.name,
                 render: def.render,
                 solid: def.solid,
-                textures,
                 hardness: def.hardness,
                 material: def.material,
                 drops,
@@ -571,8 +571,10 @@ impl BlockRegistry {
         // are the save format — see the fluid module docs).
         for (group, (source_id, levels, texture)) in fluids.into_iter().enumerate() {
             let source = reg.get(source_id).clone();
+            let source_textures = texture_names.get(source_id.0 as usize).cloned().flatten();
             let flow: Vec<BlockId> = (1..=levels)
                 .map(|level| {
+                    texture_names.push(source_textures.clone());
                     fluid_visuals.push(texture.clone().map(|spec| FluidVisual {
                         spec,
                         flowing: true,
@@ -581,7 +583,6 @@ impl BlockRegistry {
                         name: format!("{} flow {}", source.name, level),
                         render: source.render,
                         solid: source.solid,
-                        textures: source.textures,
                         hardness: source.hardness,
                         material: source.material,
                         drops: Drops::None,
@@ -683,17 +684,16 @@ mod tests {
     /// by accident, so the loader refuses it outright.
     #[test]
     fn a_fluid_loop_that_does_not_divide_the_animation_clock_is_rejected() {
-        let mut tiles = crate::art::tile_registry();
         // 64 frames at 6 fps: 6 * 3600 leaves 32 frames over.
         let bad = BUILTIN_BLOCKS.replace("fps = 8", "fps = 6");
-        let err = BlockRegistry::from_toml(&bad, &mut tiles).expect_err("must not parse");
+        let err = BlockRegistry::from_toml(&bad).expect_err("must not parse");
         assert!(err.contains("3600"), "{err}");
 
         // ...while the shipped pairing, and every other multiple of 4, is fine.
         for fps in ["4", "8", "12", "20"] {
             let text = BUILTIN_BLOCKS.replace("fps = 8", &format!("fps = {fps}"));
             assert!(
-                BlockRegistry::from_toml(&text, &mut tiles).is_ok(),
+                BlockRegistry::from_toml(&text).is_ok(),
                 "{fps} fps over 64 frames should be accepted"
             );
         }
@@ -801,8 +801,7 @@ mod tests {
 
     /// Parse a blocks file with a throwaway tile registry.
     fn parse(text: &str) -> Result<BlockRegistry, String> {
-        let mut tiles = crate::art::tile_registry();
-        BlockRegistry::from_toml(text, &mut tiles)
+        BlockRegistry::from_toml(text)
     }
 
     /// Structural errors reject the whole file (the loader then falls back to

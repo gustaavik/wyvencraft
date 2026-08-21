@@ -914,7 +914,7 @@ impl super::InGameState {
                     .place_block
                     .is_some_and(|b| blocks.get(b).is_transparent());
                 (
-                    super::interaction::drop_textures(item, items, blocks, &block_faces),
+                    super::interaction::drop_textures(item, items, &block_faces),
                     is_transparent,
                 )
             },
