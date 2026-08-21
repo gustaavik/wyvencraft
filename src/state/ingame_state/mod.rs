@@ -37,13 +37,13 @@ use crate::core::{BlockPos, DayCycle};
 use crate::entity::{Arrow, DroppedItem, EntityRegistry, Mob, Player, SpawnConfig, Spawner};
 use crate::inventory::{Inventory, ItemRegistry, ItemStack, RecipeBook};
 use crate::state::session::Session;
-use crate::world::block::{BlockModel, FaceTextures};
 use crate::world::blockmodel::BakedBlockModel;
 use crate::world::{BlockRegistry, ChunkLoader, FluidSim, World};
 use peers::Peers;
 use persistence::Persistence;
 use view::SceneCache;
 use wyven_model::ModelRegistry;
+use wyven_voxel::{BlockModel, FaceTextures};
 
 /// The host's own player always has this id; clients are numbered from 1.
 pub(crate) use crate::state::session::HOST_PLAYER_ID;

@@ -18,8 +18,8 @@
 
 use glam::Vec3;
 
-use crate::core::{Aabb, Direction};
-use crate::world::block::model_hitbox;
+use crate::appearance::model_hitbox;
+use wyven_core::{Aabb, Direction};
 use wyven_model::blockjson::BlockJsonModel;
 use wyven_render::block_textures::BlockTextureSet;
 
@@ -175,7 +175,7 @@ fn covers_cell_face(quad: &BakedQuad, dir: Direction) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::content::MapSource;
+    use wyven_assets::MapSource;
     use wyven_render::block_textures::BLOCK_TEXTURE_SIZE;
 
     /// A block-sized PNG, since the texture array demands one exact extent.

@@ -3,7 +3,7 @@
 //! Storage is currently a flat `Vec<BlockId>`; the public API hides this so it
 //! can later be swapped for palette/section compression without touching callers.
 
-use crate::core::{BlockId, CHUNK_VOLUME, ChunkPos, LocalPos};
+use wyven_core::{BlockId, CHUNK_VOLUME, ChunkPos, LocalPos};
 
 /// Block data for one chunk plus bookkeeping flags.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]

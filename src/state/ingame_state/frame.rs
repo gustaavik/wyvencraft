@@ -260,7 +260,7 @@ impl GameState for InGameState {
         // Water flow: singleplayer/host simulate authoritatively and broadcast
         // each change; clients receive them as ordinary BlockChanged edits.
         if self.session.is_authority() {
-            for (pos, block) in self.fluids.tick(&mut self.world, ctx.dt) {
+            for (pos, block) in self.fluids.tick(&mut self.world, &self.blocks, ctx.dt) {
                 self.broadcast_local_edit(pos, block);
             }
             // Mobs are host-authoritative like fluids; clients only render

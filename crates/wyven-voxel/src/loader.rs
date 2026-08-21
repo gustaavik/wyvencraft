@@ -15,9 +15,9 @@ use std::thread::JoinHandle;
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
 
-use crate::core::ChunkPos;
-use crate::world::chunk::Chunk;
-use crate::world::generation::WorldGenerator;
+use crate::chunk::Chunk;
+use crate::generate::WorldGenerator;
+use wyven_core::ChunkPos;
 
 /// Owns the generation worker pool and the request/result channels.
 pub struct ChunkLoader {

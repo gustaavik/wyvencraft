@@ -10,7 +10,8 @@ use crate::core::{Aabb, BlockId, BlockPos};
 use crate::entity::DroppedItem;
 use crate::inventory::{ItemId, ItemRegistry, ItemStack};
 use crate::world::Target;
-use crate::world::block::{BlockRegistry, Drops, FaceTextures};
+use crate::world::block::{BlockRegistry, Drops};
+use wyven_voxel::FaceTextures;
 
 impl InGameState {
     /// What the crosshair would hit at `pos`: the whole cell for an ordinary

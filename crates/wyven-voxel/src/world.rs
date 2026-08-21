@@ -1,21 +1,21 @@
 //! The voxel world: a map of loaded chunks plus block-level access helpers.
 //!
 //! Chunk *streaming* (background generation/meshing around players) is layered on
-//! top of this in [`crate::world::loader`]; `World` itself stays a synchronous,
+//! top of this in [`crate::loader`]; `World` itself stays a synchronous,
 //! testable data structure.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::core::{BlockId, BlockPos, ChunkPos, LocalPos};
-use crate::world::block::BlockRegistry;
-use crate::world::chunk::Chunk;
-use crate::world::generation::WorldGenerator;
+use crate::catalog::BlockProperties;
+use crate::chunk::Chunk;
+use crate::generate::WorldGenerator;
+use wyven_core::{BlockId, BlockPos, ChunkPos, LocalPos};
 
 pub struct World {
     chunks: HashMap<ChunkPos, Chunk>,
     generator: Arc<dyn WorldGenerator>,
-    registry: Arc<BlockRegistry>,
+    blocks: Arc<dyn BlockProperties>,
     /// Chunks whose mesh is stale (need (re)building on the GPU).
     dirty: HashSet<ChunkPos>,
     /// Persistent record of every edit that diverges from generated terrain,
@@ -26,11 +26,11 @@ pub struct World {
 }
 
 impl World {
-    pub fn new(generator: Arc<dyn WorldGenerator>, registry: Arc<BlockRegistry>) -> Self {
+    pub fn new(generator: Arc<dyn WorldGenerator>, blocks: Arc<dyn BlockProperties>) -> Self {
         Self {
             chunks: HashMap::new(),
             generator,
-            registry,
+            blocks,
             dirty: HashSet::new(),
             edits: HashMap::new(),
         }
@@ -45,8 +45,9 @@ impl World {
         self.generator.seed()
     }
 
-    pub fn registry(&self) -> &Arc<BlockRegistry> {
-        &self.registry
+    /// The predicate table this world reads block ids through.
+    pub fn blocks(&self) -> &Arc<dyn BlockProperties> {
+        &self.blocks
     }
 
     pub fn is_loaded(&self, pos: ChunkPos) -> bool {
@@ -112,7 +113,7 @@ impl World {
 
     /// Whether the block at `pos` collides with entities.
     pub fn is_solid(&self, pos: BlockPos) -> bool {
-        self.registry.get(self.block_at(pos)).solid
+        self.blocks.is_solid(self.block_at(pos))
     }
 
     /// Whether the block at `pos` can be put in the crosshair.
@@ -121,16 +122,15 @@ impl World {
     /// walk through (a flower) must still be breakable. Fluids stay out — the
     /// crosshair reaches through water — and so does air, which is invisible.
     pub fn is_targetable(&self, pos: BlockPos) -> bool {
-        let block = self.registry.get(self.block_at(pos));
-        block.solid || (block.is_visible() && block.fluid.is_none())
+        self.blocks.is_targetable(self.block_at(pos))
     }
 
     /// Whether placing a block at `pos` should swallow what is already there
     /// rather than stack on its face. See [`Block::is_replaceable`].
     ///
-    /// [`Block::is_replaceable`]: crate::world::block::Block::is_replaceable
+    /// [`Block::is_replaceable`]: crate::block::Block::is_replaceable
     pub fn is_replaceable(&self, pos: BlockPos) -> bool {
-        self.registry.get(self.block_at(pos)).is_replaceable()
+        self.blocks.is_replaceable(self.block_at(pos))
     }
 
     /// Like [`is_solid`](Self::is_solid), but treats *unloaded* chunks as solid so
@@ -141,7 +141,7 @@ impl World {
             return false;
         };
         match self.chunks.get(&pos.chunk()) {
-            Some(chunk) => self.registry.get(chunk.get(local)).solid,
+            Some(chunk) => self.blocks.is_solid(chunk.get(local)),
             None => true,
         }
     }
@@ -225,13 +225,15 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::world::generation::NoiseGenerator;
+    use crate::testing::{FlatGenerator, TestCatalog};
 
-    /// A test world over a deterministic generator.
+    /// A world over a flat generator and a two-block catalog — no game, no
+    /// block table, no content files.
     fn test_world() -> World {
-        let generator: Arc<dyn WorldGenerator> = Arc::new(NoiseGenerator::new(42));
-        let registry = Arc::new(BlockRegistry::with_builtins());
-        World::new(generator, registry)
+        let mut catalog = TestCatalog::new();
+        let stone = catalog.cube(1);
+        let generator: Arc<dyn WorldGenerator> = Arc::new(FlatGenerator::new(42, 64, stone));
+        World::new(generator, catalog.shared())
     }
 
     /// A non-air block sufficiently high up to land on baseline air, so the edit is

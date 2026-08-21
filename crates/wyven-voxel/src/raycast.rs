@@ -3,7 +3,7 @@
 
 use glam::Vec3;
 
-use crate::core::{Aabb, BlockPos, Direction};
+use wyven_core::{Aabb, BlockPos, Direction};
 
 /// What a cell offers the ray.
 ///

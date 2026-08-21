@@ -22,6 +22,7 @@ use glam::Vec3;
 use super::mobs::{RemoteMob, mob_mesh};
 use super::{OUTLINE_COLOR, REMOTE_MAX_SPEED, THIRD_PERSON_DISTANCE};
 use crate::art::tiles;
+use crate::content::BlockAppearance;
 use crate::content::ItemModel;
 use crate::core::{Aabb, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, ChunkPos, DayCycle};
 use crate::entity::{
@@ -30,14 +31,14 @@ use crate::entity::{
 use crate::inventory::{ARMOR_SIZE, Inventory, ItemId, ItemRegistry};
 use crate::net::{PlayerId, RemotePlayer};
 use crate::world::World;
-use crate::world::block::{BlockRegistry, FaceTextures};
-use crate::world::meshing::{BlockModels, mesh_block_overlay, mesh_chunk, push_item_cube};
+use crate::world::meshing::{mesh_block_overlay, mesh_chunk, push_item_cube};
 use wyven_model::mesh as model_mesh;
 use wyven_model::{ModelId, ModelRegistry};
 use wyven_render::{
     Camera, CpuMesh, GpuLines, GpuMesh, LightParams, PreviewFrame, RenderContext, SceneFrame,
     SkyParams, Texture, TexturedMesh, debug,
 };
+use wyven_voxel::FaceTextures;
 
 /// Animation state for a remote player plus the position used to derive their
 /// speed (no extra protocol data needed — movement is inferred from the change
@@ -218,8 +219,7 @@ impl SceneCache {
         &mut self,
         ctx: &Arc<RenderContext>,
         world: &World,
-        blocks: &BlockRegistry,
-        models: BlockModels<'_>,
+        blocks: BlockAppearance<'_>,
         budget: usize,
     ) {
         for _ in 0..budget {
@@ -232,8 +232,7 @@ impl SceneCache {
             let output = world.chunk(pos).map(|chunk| {
                 mesh_chunk(
                     chunk,
-                    blocks,
-                    models,
+                    &blocks,
                     |p| world.block_at(p),
                     |x, z, index| generator.biome_tint(x, z, index),
                 )
@@ -287,7 +286,7 @@ impl SceneCache {
                     // each needing its texture resident before it can be drawn.
                     let mut baked = Vec::new();
                     for (id, mesh) in &output.models {
-                        self.ensure_model_texture(ctx, models.models, *id);
+                        self.ensure_model_texture(ctx, blocks.models, *id);
                         match GpuMesh::upload(&ctx.memory_allocator, mesh) {
                             Ok(Some(gpu)) => baked.push((gpu, *id)),
                             Ok(None) => {}
@@ -886,10 +885,11 @@ impl super::InGameState {
         self.view.process_mesh_budget(
             ctx,
             &self.world,
-            &self.blocks,
-            BlockModels {
+            BlockAppearance {
+                blocks: &self.blocks,
+                face_tiles: &self.block_face_tiles,
                 models: &self.models,
-                blocks: &self.block_models,
+                placed: &self.block_models,
                 baked: &self.baked_models,
                 fluids: &self.fluid_textures,
             },

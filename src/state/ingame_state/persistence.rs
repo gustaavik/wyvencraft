@@ -60,7 +60,7 @@ impl InGameState {
                 pid,
             );
         }
-        let world = WorldData::from_world(&self.world);
+        let world = WorldData::from_world(&self.world, &self.blocks);
         let player = PlayerData::capture(&self.player, &self.inventory, &self.items);
         let mobs = MobsData::from_mobs(&self.mobs);
         let snapshot = WorldSnapshot {

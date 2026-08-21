@@ -21,7 +21,7 @@
 use std::collections::HashSet;
 
 use crate::core::{BlockId, BlockPos, Direction};
-use crate::world::World;
+use crate::world::{BlockRegistry, World};
 
 /// Seconds between simulation steps (one "water tick").
 const TICK_INTERVAL: f32 = 0.25;
@@ -58,7 +58,12 @@ impl FluidSim {
 
     /// Advance the simulation clock and run one step when due. Returns the
     /// block changes applied to `world` so the caller can broadcast them.
-    pub fn tick(&mut self, world: &mut World, dt: f32) -> Vec<(BlockPos, BlockId)> {
+    pub fn tick(
+        &mut self,
+        world: &mut World,
+        blocks: &BlockRegistry,
+        dt: f32,
+    ) -> Vec<(BlockPos, BlockId)> {
         self.timer += dt;
         if self.timer < TICK_INTERVAL {
             return Vec::new();
@@ -75,7 +80,7 @@ impl FluidSim {
 
         let mut changes = Vec::new();
         for pos in cells {
-            let Some(next) = evaluate(world, pos) else {
+            let Some(next) = evaluate(world, blocks, pos) else {
                 continue;
             };
             if world.set_block(pos, next).is_some() {
@@ -91,15 +96,14 @@ impl FluidSim {
 /// What the cell at `pos` should become, or `None` if it is stable or not a
 /// fluid cell. Only air and flowing fluid re-evaluate; sources are permanent
 /// until a block replaces them.
-fn evaluate(world: &World, pos: BlockPos) -> Option<BlockId> {
-    let reg = world.registry();
+fn evaluate(world: &World, reg: &BlockRegistry, pos: BlockPos) -> Option<BlockId> {
     let current = world.block_at(pos);
     match reg.fluid(current) {
         Some(f) if f.is_source() => return None,
         None if !current.is_air() => return None,
         _ => {}
     }
-    let next = match target(world, pos) {
+    let next = match target(world, reg, pos) {
         Some((group, level)) => reg.flowing(group, level),
         None => BlockId::AIR,
     };
@@ -109,8 +113,7 @@ fn evaluate(world: &World, pos: BlockPos) -> Option<BlockId> {
 /// The strongest `(group, level)` claim on `pos` from its neighbours: a full
 /// falling stream under any fluid, otherwise one less than the strongest
 /// horizontal neighbour that spreads sideways. `None` when nothing feeds it.
-fn target(world: &World, pos: BlockPos) -> Option<(u16, u8)> {
-    let reg = world.registry();
+fn target(world: &World, reg: &BlockRegistry, pos: BlockPos) -> Option<(u16, u8)> {
     if let Some(above) = reg.fluid(world.block_at(pos.offset(Direction::PosY))) {
         return Some((above.group, above.max_level - 1));
     }
@@ -156,10 +159,10 @@ mod tests {
 
     /// A world with a walled 5x5 stone basin (interior x/z in 6..=10) high in
     /// the air, so tests fully contain the flow.
-    fn basin_world() -> World {
+    fn basin_world() -> (World, Arc<BlockRegistry>) {
         let generator: Arc<dyn WorldGenerator> = Arc::new(NoiseGenerator::new(42));
         let registry = Arc::new(BlockRegistry::with_builtins());
-        let mut world = World::new(generator, registry);
+        let mut world = World::new(generator, registry.clone());
         world.ensure_chunk(ChunkPos::new(0, 0));
         for x in 5..=11 {
             for z in 5..=11 {
@@ -170,13 +173,13 @@ mod tests {
                 }
             }
         }
-        world
+        (world, registry)
     }
 
     /// Run ticks until a full step applies no changes (or panic — diverged).
-    fn settle(sim: &mut FluidSim, world: &mut World) {
+    fn settle(sim: &mut FluidSim, world: &mut World, blocks: &BlockRegistry) {
         for _ in 0..64 {
-            if sim.tick(world, TICK_INTERVAL).is_empty() {
+            if sim.tick(world, blocks, TICK_INTERVAL).is_empty() {
                 return;
             }
         }
@@ -185,21 +188,21 @@ mod tests {
 
     #[test]
     fn water_spreads_from_a_source_with_decaying_levels() {
-        let mut world = basin_world();
+        let (mut world, blocks) = basin_world();
         let mut sim = FluidSim::new();
         world.set_block(CENTER, blocks::WATER);
         sim.block_changed(CENTER);
-        settle(&mut sim, &mut world);
+        settle(&mut sim, &mut world, &blocks);
 
         // One level weaker per horizontal step; the source is untouched.
         assert_eq!(world.block_at(CENTER), blocks::WATER);
         assert_eq!(
             world.block_at(BlockPos::new(9, WATER_Y, 8)),
-            world.registry().flowing(0, 7)
+            blocks.flowing(0, 7)
         );
         assert_eq!(
             world.block_at(BlockPos::new(10, WATER_Y, 8)),
-            world.registry().flowing(0, 6)
+            blocks.flowing(0, 6)
         );
         // Nothing climbs the rim or floats above the surface.
         assert!(world.block_at(BlockPos::new(11, WATER_Y + 1, 8)).is_air());
@@ -208,15 +211,15 @@ mod tests {
 
     #[test]
     fn flow_recedes_when_the_source_is_removed() {
-        let mut world = basin_world();
+        let (mut world, blocks) = basin_world();
         let mut sim = FluidSim::new();
         world.set_block(CENTER, blocks::WATER);
         sim.block_changed(CENTER);
-        settle(&mut sim, &mut world);
+        settle(&mut sim, &mut world, &blocks);
 
         world.set_block(CENTER, BlockId::AIR);
         sim.block_changed(CENTER);
-        settle(&mut sim, &mut world);
+        settle(&mut sim, &mut world, &blocks);
 
         for x in 6..=10 {
             for z in 6..=10 {
@@ -228,19 +231,19 @@ mod tests {
 
     #[test]
     fn water_falls_before_spreading_sideways() {
-        let mut world = basin_world();
+        let (mut world, blocks) = basin_world();
         let mut sim = FluidSim::new();
         // A source hovering above the basin: the stream must drop straight
         // down, then spread only from the cell that lands on the floor.
         let hover = BlockPos::new(8, WATER_Y + 4, 8);
         world.set_block(hover, blocks::WATER);
         sim.block_changed(hover);
-        settle(&mut sim, &mut world);
+        settle(&mut sim, &mut world, &blocks);
 
         for y in WATER_Y..hover.y {
             let pos = BlockPos::new(8, y, 8);
             assert!(
-                world.registry().is_fluid(world.block_at(pos)),
+                blocks.is_fluid(world.block_at(pos)),
                 "column gap at {pos:?}"
             );
             if y > WATER_Y {
@@ -249,10 +252,6 @@ mod tests {
             }
         }
         // The landing cell spreads across the floor.
-        assert!(
-            world
-                .registry()
-                .is_fluid(world.block_at(BlockPos::new(9, WATER_Y, 8)))
-        );
+        assert!(blocks.is_fluid(world.block_at(BlockPos::new(9, WATER_Y, 8))));
     }
 }

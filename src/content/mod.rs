@@ -19,16 +19,22 @@ use crate::entity::kind::VisualSpec;
 use crate::entity::{EntityRegistry, SpawnConfig};
 use crate::inventory::ItemRegistry;
 use crate::world::block::{
-    BUILTIN_BLOCKS, BlockJsonSpec, BlockModel, BlockModelSpec, BlockRegistry, BlockVisuals,
-    FaceTextures, FluidVisual, model_hitbox,
+    BUILTIN_BLOCKS, BlockJsonSpec, BlockModelSpec, BlockRegistry, BlockVisuals, FluidVisual,
 };
 use crate::world::blockmodel::BakedBlockModel;
 use crate::world::generation::WorldGenConfig;
-use crate::world::meshing::BlockModels;
+pub use wyven_voxel::FluidTexture;
+use wyven_voxel::model_hitbox;
+use wyven_voxel::{BlockModel, FaceTextures};
+
 use wyven_assets::decode_png;
 use wyven_model::{ModelId, ModelRegistry, ModelSpec, blockjson};
 use wyven_render::TileRegistry;
 use wyven_render::block_textures::{self, AnimatedLayers, BlockTextureSet, Strip};
+
+pub mod catalog;
+
+pub use catalog::BlockAppearance;
 
 // The byte-source port lives in `wyven_assets` — the model loaders need it
 // too, and they sit below game content. Re-exported under the old name so
@@ -318,10 +324,12 @@ impl GameContent {
     }
 
     /// The model geometry the chunk mesher needs, borrowed from this content.
-    pub fn block_models(&self) -> BlockModels<'_> {
-        BlockModels {
+    pub fn appearance(&self) -> BlockAppearance<'_> {
+        BlockAppearance {
+            blocks: &self.blocks,
+            face_tiles: &self.block_face_tiles,
             models: &self.models,
-            blocks: &self.block_models,
+            placed: &self.block_models,
             baked: &self.baked_models,
             fluids: &self.fluid_textures,
         }
@@ -342,22 +350,6 @@ impl GameContent {
             .flatten()
             .unwrap_or(self.blocks.get(block).textures)
     }
-}
-
-/// Where a fluid block's animation lives in the block texture array.
-///
-/// Both columns of the strip are resolved even for a source block: the
-/// auto-registered flowing blocks share this entry, and which column a face
-/// takes is a per-face decision the mesher makes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FluidTexture {
-    /// Column 1 — top and bottom faces, and every face of a source block.
-    pub still: AnimatedLayers,
-    /// Column 0 — the side faces of a flowing block.
-    pub flowing: AnimatedLayers,
-    pub fps: u8,
-    /// `tintindex` into the biome colours; `2` is water.
-    pub tint: Option<u8>,
 }
 
 /// Column of the strip each of the two states reads. Documented in
