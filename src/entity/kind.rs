@@ -7,7 +7,7 @@
 //! new `[[entity]]` entry plus, at most, one new component implemented once
 //! in Rust.
 
-use crate::model::ModelSpec;
+use wyven_model::ModelSpec;
 
 /// Embedded copy of the shipped entity definitions, used when
 /// `assets/entities.toml` is missing or invalid.
@@ -249,7 +249,7 @@ pub enum VisualSpec {
     ItemCube(ItemCubeParams),
     /// The four-legged box model ([`crate::entity::QuadrupedModel`]).
     Quadruped(QuadrupedVisual),
-    /// Geometry loaded from a model file ([`crate::model`]), with its own
+    /// Geometry loaded from a model file ([`wyven_model`]), with its own
     /// texture rather than a slot in the block atlas.
     Model(ModelSpec),
 }

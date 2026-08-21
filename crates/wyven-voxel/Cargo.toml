@@ -1,0 +1,25 @@
+[package]
+name = "wyven-voxel"
+version.workspace = true
+edition.workspace = true
+description = "Voxel substrate: chunk storage, background loading, meshing and raycasting."
+
+[dependencies]
+wyven-core.workspace = true
+serde.workspace = true
+wyven-render.workspace = true
+wyven-model.workspace = true
+wyven-assets.workspace = true
+glam.workspace = true
+crossbeam-channel.workspace = true
+rayon.workspace = true
+log.workspace = true
+
+[features]
+# Exposes the generator/catalog doubles in `testing` to other crates. Always on
+# for this crate's own tests.
+testing = []
+
+[dev-dependencies]
+# Only the block-model fixtures encode PNGs.
+png.workspace = true

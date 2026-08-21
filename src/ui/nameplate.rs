@@ -13,7 +13,7 @@
 use egui::{Color32, FontId, Stroke, Vec2};
 use glam::Vec3;
 
-use crate::render::Camera;
+use wyven_render::Camera;
 
 /// Beyond this many blocks a name is not drawn at all.
 ///

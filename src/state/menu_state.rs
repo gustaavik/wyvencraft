@@ -1,6 +1,8 @@
 //! Main menu: choose singleplayer / multiplayer / quit.
 
-use super::{GameState, MultiplayerMenuState, SingleplayerMenuState, StateContext, Transition};
+use super::{
+    GameState, MultiplayerMenuState, SingleplayerMenuState, StateContext, Transition, Wyvencraft,
+};
 
 #[derive(Default)]
 pub struct MainMenuState;
@@ -11,7 +13,7 @@ impl MainMenuState {
     }
 }
 
-impl GameState for MainMenuState {
+impl GameState<Wyvencraft> for MainMenuState {
     fn name(&self) -> &'static str {
         "MainMenu"
     }
@@ -24,7 +26,7 @@ impl GameState for MainMenuState {
 
     fn ui(&mut self, egui_ctx: &egui::Context, ctx: &mut StateContext) -> Transition {
         let mut transition = Transition::None;
-        let account = ctx.resources.account;
+        let account = &ctx.shared.account;
         let signed_in_as = account.username();
         let multiplayer_available = account.can_play_multiplayer();
 

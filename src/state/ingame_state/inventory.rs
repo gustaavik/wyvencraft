@@ -12,7 +12,7 @@ impl InGameState {
         if !self.inventory_open
             && let Some(held) = self.held.take()
         {
-            self.inventory.add(held, &self.items);
+            self.inventory.add(held, &self.content.items);
         }
     }
 
@@ -21,7 +21,9 @@ impl InGameState {
         // An armor slot only accepts its own piece. Taking a piece back off is
         // always allowed, so this only gates the held stack going in.
         if let Some(held) = self.held
-            && !self.inventory.can_equip(index, held.item, &self.items)
+            && !self
+                .inventory
+                .can_equip(index, held.item, &self.content.items)
         {
             return;
         }
@@ -36,7 +38,7 @@ impl InGameState {
             }
             (Some(mut held), Some(mut stack)) => {
                 if held.item == stack.item {
-                    let max = self.items.max_stack(stack.item);
+                    let max = self.content.items.max_stack(stack.item);
                     let leftover = stack.merge(held, max);
                     self.inventory.set_slot(index, Some(stack));
                     self.held = if leftover == 0 {
@@ -61,10 +63,10 @@ impl InGameState {
         let Some(recipe) = self.recipes.get(index) else {
             return;
         };
-        let Some(stack) = recipe.craft(&mut self.inventory, &self.items) else {
+        let Some(stack) = recipe.craft(&mut self.inventory, &self.content.items) else {
             return;
         };
-        let leftover = self.inventory.add(stack, &self.items);
+        let leftover = self.inventory.add(stack, &self.content.items);
         if leftover > 0 {
             self.drops.push(DroppedItem::thrown(
                 ItemStack {
@@ -73,7 +75,7 @@ impl InGameState {
                 },
                 self.player.eye_position(),
                 self.player.look_direction(),
-                self.entities.dropped_item(),
+                self.content.entities.dropped_item(),
             ));
         }
     }

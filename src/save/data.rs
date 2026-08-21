@@ -26,8 +26,7 @@ pub struct WorldData {
 
 impl WorldData {
     /// Snapshot a world's edit overlay, building the name palette on the fly.
-    pub fn from_world(world: &World) -> Self {
-        let registry = world.registry();
+    pub fn from_world(world: &World, registry: &BlockRegistry) -> Self {
         let mut palette: Vec<String> = Vec::new();
         let mut index_of: HashMap<BlockId, u16> = HashMap::new();
         let edits = world
@@ -224,7 +223,7 @@ mod tests {
             assert!(world.set_block(pos, block).is_some());
         }
 
-        let data = WorldData::from_world(&world);
+        let data = WorldData::from_world(&world, &registry);
         assert_eq!(data.palette.len(), 2, "palette dedups block names");
 
         // Round-trip through bincode like the .dat files do.

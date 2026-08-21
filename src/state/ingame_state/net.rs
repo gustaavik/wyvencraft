@@ -79,14 +79,14 @@ impl InGameState {
         &mut self,
         pid: PlayerId,
         identity: u64,
-        account: Option<crate::auth::AccountIdentity>,
+        account: Option<wyven_auth::AccountIdentity>,
     ) {
         let restored = self
             .save
             .records
             .0
             .get(&identity)
-            .map(|record| record_to_restore(record, &self.items));
+            .map(|record| record_to_restore(record, &self.content.items));
         let spawn = restored
             .as_ref()
             .map(|r| r.position)
@@ -101,8 +101,8 @@ impl InGameState {
             spawn,
             time_of_day: self.day_cycle.time_of_day(),
             game_mode: self.player.mode,
-            content_hash: self.content_hash,
-            recipes: recipes_to_wire(&self.recipes, &self.items),
+            content_hash: self.content.hash,
+            recipes: recipes_to_wire(&self.recipes, &self.content.items),
             restored,
         };
         self.session.send_to(pid, &welcome, Channel::Reliable);
@@ -156,7 +156,7 @@ impl InGameState {
             &self.peers.identities,
             &self.peers.players,
             &self.peers.inventories,
-            &self.items,
+            &self.content.items,
             pid,
         );
         self.peers.remove(pid);
@@ -238,6 +238,7 @@ impl InGameState {
         }
         let spawned: Vec<ServerMessage> = self
             .mobs
+            .live
             .iter()
             .map(|mob| ServerMessage::MobSpawned {
                 id: mob.id.0,
@@ -262,7 +263,7 @@ impl InGameState {
             .inventories
             .get(&pid)
             .and_then(|(slots, selected)| slots.get(*selected as usize)?.as_ref())
-            .and_then(|stack| self.items.tool(ItemId(stack.item)))
+            .and_then(|stack| self.content.items.tool(ItemId(stack.item)))
             .and_then(|tool| tool.damage)
             .unwrap_or(mobs::PLAYER_ATTACK_DAMAGE)
     }
@@ -274,7 +275,7 @@ impl InGameState {
             return;
         };
         let damage = self.client_melee_damage(pid);
-        if let Some(mob) = self.mobs.iter_mut().find(|m| m.id.0 == mob_id)
+        if let Some(mob) = self.mobs.live.iter_mut().find(|m| m.id.0 == mob_id)
             && mobs::attack_in_range(attacker, mob.position)
         {
             let to_mob = mob.position - attacker;
@@ -342,21 +343,24 @@ impl InGameState {
             ServerMessage::PlayerEquipment { id, armor } if id != local_id => {
                 self.peers.entry(id, Vec3::ZERO).armor = armor;
             }
-            ServerMessage::MobSpawned { id, kind, position } => match self.entities.find(&kind) {
-                Some(k) if k.mob.is_some() => {
-                    log::debug!("replicating mob {id} ({kind}) from host");
-                    self.remote_mobs
-                        .insert(id, RemoteMob::new(k, Vec3::from_array(position)));
+            ServerMessage::MobSpawned { id, kind, position } => {
+                match self.content.entities.find(&kind) {
+                    Some(k) if k.mob.is_some() => {
+                        log::debug!("replicating mob {id} ({kind}) from host");
+                        self.mobs
+                            .remote
+                            .insert(id, RemoteMob::new(k, Vec3::from_array(position)));
+                    }
+                    // Shouldn't happen (the content hash gates divergent builds),
+                    // but degrade gracefully.
+                    _ => log::warn!("host spawned unknown mob kind {kind:?}; ignoring"),
                 }
-                // Shouldn't happen (the content hash gates divergent builds),
-                // but degrade gracefully.
-                _ => log::warn!("host spawned unknown mob kind {kind:?}; ignoring"),
-            },
+            }
             ServerMessage::MobStates { mobs } => {
                 for (id, position, yaw) in mobs {
                     // Unknown ids are fine: an unreliable snapshot can outrun
                     // its reliable MobSpawned.
-                    if let Some(mob) = self.remote_mobs.get_mut(&id) {
+                    if let Some(mob) = self.mobs.remote.get_mut(&id) {
                         mob.push_snapshot(Vec3::from_array(position), yaw);
                     }
                 }
@@ -366,7 +370,7 @@ impl InGameState {
                 // outcome arrives as MobDespawned.
             }
             ServerMessage::MobDespawned { id, killed_by } => {
-                if let Some(mob) = self.remote_mobs.remove(&id)
+                if let Some(mob) = self.mobs.remote.remove(&id)
                     && killed_by == Some(local_id)
                 {
                     // This player made the kill: roll the loot locally.
@@ -382,7 +386,7 @@ impl InGameState {
             } => {
                 // Visual-only on clients: damage is host-side, so the local
                 // copy carries none.
-                self.arrows.push(Arrow::new(
+                self.mobs.arrows.push(Arrow::new(
                     Vec3::from_array(position),
                     Vec3::from_array(velocity),
                     0.0,
@@ -481,10 +485,11 @@ impl InGameState {
         for msg in std::mem::take(&mut self.peers.mob_events) {
             self.session.broadcast(&msg, Channel::Reliable);
         }
-        if !self.mobs.is_empty() {
+        if !self.mobs.live.is_empty() {
             let states = ServerMessage::MobStates {
                 mobs: self
                     .mobs
+                    .live
                     .iter()
                     .map(|m| (m.id.0, m.position.to_array(), m.yaw))
                     .collect(),
@@ -760,10 +765,14 @@ mod tests {
 
     /// Put `name` in the first hotbar slot and select it.
     fn hold(state: &mut InGameState, name: &str) {
-        let id = state.items.find(name).unwrap_or_else(|| panic!("{name}"));
+        let id = state
+            .content
+            .items
+            .find(name)
+            .unwrap_or_else(|| panic!("{name}"));
         state
             .inventory
-            .set_slot(0, Some(state.items.full_stack(id)));
+            .set_slot(0, Some(state.content.items.full_stack(id)));
         state.inventory.set_selected(0);
     }
 
@@ -815,12 +824,12 @@ mod tests {
             "nothing reported yet, so a fist"
         );
 
-        let sword = state.items.find("iron sword").expect("iron sword");
+        let sword = state.content.items.find("iron sword").expect("iron sword");
         let mut slots = vec![None; 3];
         slots[2] = Some(NetItemStack {
             item: sword.0,
             count: 1,
-            durability: state.items.max_durability(sword),
+            durability: state.content.items.max_durability(sword),
         });
         handle.deliver(Inbound::Request {
             player: pid,
@@ -887,7 +896,7 @@ mod tests {
     #[test]
     fn a_returning_player_gets_their_saved_state_back() {
         let (mut state, handle) = host_session();
-        let bread = state.items.find("bread").unwrap();
+        let bread = state.content.items.find("bread").unwrap();
         let identity = 7;
 
         // This world remembers them from a previous session.
@@ -1061,27 +1070,27 @@ mod tests {
 
         // In reach: the swing lands.
         let near = state.spawn_mob("cow", attacker).expect("cow spawns");
-        let full_health = state.mobs[0].health;
+        let full_health = state.mobs.live[0].health;
         handle.deliver(Inbound::Request {
             player: pid,
             msg: ClientMessage::Attack { id: near.0 },
         });
         state.pump_network(1.0 / 60.0);
         assert!(
-            state.mobs[0].health < full_health,
+            state.mobs.live[0].health < full_health,
             "a swing from next to the mob lands"
         );
 
         // Out of reach: the same message does nothing.
-        let hurt_health = state.mobs[0].health;
-        state.mobs[0].position = attacker + Vec3::new(500.0, 0.0, 0.0);
+        let hurt_health = state.mobs.live[0].health;
+        state.mobs.live[0].position = attacker + Vec3::new(500.0, 0.0, 0.0);
         handle.deliver(Inbound::Request {
             player: pid,
             msg: ClientMessage::Attack { id: near.0 },
         });
         state.pump_network(1.0 / 60.0);
         assert_eq!(
-            state.mobs[0].health, hurt_health,
+            state.mobs.live[0].health, hurt_health,
             "the same swing from 500 blocks away is rejected"
         );
     }

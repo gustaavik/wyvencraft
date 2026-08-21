@@ -2,7 +2,7 @@
 
 use winit::keyboard::KeyCode;
 
-use super::{GameState, MainMenuState, StateContext, Transition};
+use super::{GameState, MainMenuState, StateContext, Transition, Wyvencraft};
 
 #[derive(Default)]
 pub struct PauseMenuState;
@@ -13,7 +13,7 @@ impl PauseMenuState {
     }
 }
 
-impl GameState for PauseMenuState {
+impl GameState<Wyvencraft> for PauseMenuState {
     fn name(&self) -> &'static str {
         "Pause"
     }

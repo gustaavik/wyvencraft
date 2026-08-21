@@ -1,0 +1,9 @@
+[package]
+name = "wyven-core"
+version.workspace = true
+edition.workspace = true
+description = "Foundational voxel math, coordinate types, RNG and frame timing."
+
+[dependencies]
+glam.workspace = true
+serde.workspace = true

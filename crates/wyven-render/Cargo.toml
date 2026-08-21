@@ -1,0 +1,15 @@
+[package]
+name = "wyven-render"
+version.workspace = true
+edition.workspace = true
+description = "Vulkan rendering: context, pipelines, meshes, textures and camera."
+
+[dependencies]
+wyven-core.workspace = true
+wyven-assets.workspace = true
+vulkano.workspace = true
+vulkano-shaders.workspace = true
+vulkano-util.workspace = true
+glam.workspace = true
+bytemuck.workspace = true
+log.workspace = true

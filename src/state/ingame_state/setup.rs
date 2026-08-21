@@ -1,11 +1,11 @@
 //! Construction of [`InGameState`] for each kind of session: fresh
 //! singleplayer/host, a world loaded from disk, or a client joining a host.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use glam::Vec3;
 
+use super::MobWorld;
 use super::net::recipes_from_wire;
 use super::peers::Peers;
 use super::persistence::Persistence;
@@ -14,7 +14,7 @@ use super::{DOUBLE_TAP_WINDOW, InGameState, SPAWN_RADIUS};
 use crate::chat::{ChatState, OpsList};
 use crate::content::GameContent;
 use crate::core::{BlockPos, CHUNK_HEIGHT, ChunkPos, DayCycle, GameMode};
-use crate::entity::{Player, Spawner};
+use crate::entity::Player;
 use crate::inventory::{Inventory, RecipeBook};
 use crate::net::{Client, Host, NetVec3, PlayerId, PlayerRestore, RecipeData};
 use crate::save::{FileWorldRepository, SavedGame};
@@ -86,7 +86,7 @@ impl InGameState {
             None,
         );
         if let Some(world) = &world {
-            let resolved = world.resolve(&state.blocks);
+            let resolved = world.resolve(&state.content.blocks);
             let count = resolved.len();
             for (pos, block) in resolved {
                 state.world.apply_edit(pos, block);
@@ -97,7 +97,11 @@ impl InGameState {
             log::info!("restored {count} world edits");
         }
         if let Some(player) = &player {
-            player.apply(&mut state.player, &mut state.inventory, &state.items);
+            player.apply(
+                &mut state.player,
+                &mut state.inventory,
+                &state.content.items,
+            );
         }
         // Respawn the saved mob population. Fresh ids and brains (both are
         // session-scoped); unknown kinds fail soft like unknown blocks/items.
@@ -106,7 +110,7 @@ impl InGameState {
             let position = Vec3::from_array(data.position);
             match state.spawn_mob(&data.kind, position) {
                 Some(_) => {
-                    if let Some(mob) = state.mobs.last_mut() {
+                    if let Some(mob) = state.mobs.live.last_mut() {
                         mob.health = data.health.min(mob.params.max_health);
                         mob.night_spawned = data.night_spawned;
                     }
@@ -118,7 +122,10 @@ impl InGameState {
             }
         }
         if saved_mobs > 0 {
-            log::info!("restored {} of {saved_mobs} saved mobs", state.mobs.len());
+            log::info!(
+                "restored {} of {saved_mobs} saved mobs",
+                state.mobs.live.len()
+            );
         }
         log::info!(
             "loaded world '{}' (seed {}, time {:.3}, player {})",
@@ -182,15 +189,10 @@ impl InGameState {
         mode: GameMode,
         recipe_data: Option<Vec<RecipeData>>,
     ) -> Self {
-        let blocks = content.blocks.clone();
+        // Everything below reads through `content`; four of these used to be
+        // deep-cloned into `Arc`s the state held separately, which was a copy of
+        // the whole item/block model tables per session for no reason.
         let items = content.items.clone();
-        let entities = content.entities.clone();
-        let models = content.models.clone();
-        let item_models = Arc::new(content.item_models.clone());
-        let block_models = Arc::new(content.block_models.clone());
-        let baked_models = Arc::new(content.baked_models.clone());
-        let fluid_textures = Arc::new(content.fluid_textures.clone());
-        let block_face_tiles = Arc::new(content.block_face_tiles.clone());
         let recipes = match recipe_data {
             Some(data) => {
                 let book = recipes_from_wire(&data, &items);
@@ -202,7 +204,7 @@ impl InGameState {
 
         let generator: Arc<dyn WorldGenerator> =
             Arc::new(NoiseGenerator::with_config(seed, content.worldgen.clone()));
-        let mut world = World::new(generator.clone(), blocks.clone());
+        let mut world = World::new(generator.clone(), content.blocks.clone());
 
         // Worker pool sized to leave headroom for the main + render threads.
         let workers = std::thread::available_parallelism()
@@ -238,17 +240,7 @@ impl InGameState {
 
         let mut state = Self {
             world,
-            player: Player::new(spawn, mode, entities.player()),
-            blocks,
-            items,
-            entities,
-            models,
-            item_models,
-            block_models,
-            baked_models,
-            fluid_textures,
-            block_face_tiles,
-            content_hash: content.hash,
+            player: Player::new(spawn, mode, content.entities.player()),
             inventory,
             recipes,
             show_debug: false,
@@ -267,12 +259,7 @@ impl InGameState {
             spawn,
             fluids: FluidSim::new(),
             breaking: None,
-            mobs: Vec::new(),
-            next_mob_id: 0,
-            spawning: content.spawning.clone(),
-            spawner: Spawner::new(seed ^ 0x5EED_0F5B_A3B1_E5B0),
-            remote_mobs: HashMap::new(),
-            arrows: Vec::new(),
+            mobs: MobWorld::new(seed ^ 0x5EED_0F5B_A3B1_E5B0),
             drops: Vec::new(),
             dead: false,
             jump_tap_timer: DOUBLE_TAP_WINDOW * 2.0,
@@ -280,6 +267,7 @@ impl InGameState {
             session,
             peers: Peers::default(),
             save: Persistence::none(),
+            content,
         };
         if state.session.is_authority() {
             state.debug_spawn_from_env();

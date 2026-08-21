@@ -5,7 +5,7 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 
 use super::connecting_state::ConnectingState;
-use super::{GameState, InGameState, MainMenuState, StateContext, Transition};
+use super::{GameState, InGameState, MainMenuState, StateContext, Transition, Wyvencraft};
 use crate::content::GameContent;
 use crate::core::GameMode;
 use crate::net::{DEFAULT_PORT, Host};
@@ -70,7 +70,12 @@ impl MultiplayerMenuState {
             }
         };
         // Bind with the world's own seed so `Host::seed()` matches the world.
-        match Host::bind(DEFAULT_PORT, game.save.meta.seed) {
+        match Host::bind(
+            DEFAULT_PORT,
+            game.save.meta.seed,
+            crate::net::host_config(),
+            crate::net::TicketJoin::from_cache(),
+        ) {
             Ok(host) => {
                 Transition::Replace(Box::new(InGameState::new_host_saved(content, game, host)))
             }
@@ -82,7 +87,7 @@ impl MultiplayerMenuState {
     }
 }
 
-impl GameState for MultiplayerMenuState {
+impl GameState<Wyvencraft> for MultiplayerMenuState {
     fn name(&self) -> &'static str {
         "MultiplayerMenu"
     }
@@ -144,7 +149,7 @@ impl GameState for MultiplayerMenuState {
                     .add_sized([220.0, 36.0], egui::Button::new("Host Game"))
                     .clicked()
                 {
-                    transition = self.host(ctx.resources.content.clone());
+                    transition = self.host(ctx.shared.content.clone());
                 }
 
                 ui.add_space(16.0);
@@ -158,7 +163,7 @@ impl GameState for MultiplayerMenuState {
                         Some(addr) => {
                             transition = Transition::Replace(Box::new(ConnectingState::new(
                                 addr,
-                                ctx.resources.account,
+                                &ctx.shared.account,
                             )));
                         }
                         None => self.error = Some("Invalid address".to_string()),

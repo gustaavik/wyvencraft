@@ -5,14 +5,14 @@
 
 use glam::Vec3;
 
+use crate::art::armor::ArmorKind;
+use crate::art::skin::{self, SkinPart};
 use crate::core::Direction;
 use crate::core::math::rotate_y as rot_y;
 use crate::entity::kind::QuadrupedVisual;
 use crate::inventory::{ARMOR_SIZE, ArmorSlot, ItemId, ItemRegistry};
-use crate::render::armor::ArmorKind;
-use crate::render::mesh::CpuMesh;
-use crate::render::skin::{self, SkinPart};
-use crate::render::vertex::{ChunkVertex, NO_TINT};
+use wyven_render::mesh::CpuMesh;
+use wyven_render::vertex::{ChunkVertex, NO_TINT};
 
 /// One rectangular box part of a model, in model-local space (origin at feet).
 #[derive(Debug, Clone, Copy)]
@@ -119,8 +119,8 @@ impl HumanoidModel {
 
     /// Like [`HumanoidModel::build_mesh`] but sampling the 64×64 sheet at
     /// `sheet_origin` — how humanoid mobs reuse this model with their own
-    /// skins ([`crate::render::mobskin`]). Each part is drawn twice: the base
-    /// box sampling its base region of the sheet (see [`crate::render::skin`]),
+    /// skins ([`crate::art::mobskin`]). Each part is drawn twice: the base
+    /// box sampling its base region of the sheet (see [`crate::art::skin`]),
     /// then a slightly inflated overlay box sampling the
     /// hat/jacket/sleeve/pants region — its transparent pixels are alpha-tested
     /// away in the shader, giving a 3D layered look. With `Pose::default()` the
@@ -371,7 +371,7 @@ impl HumanoidModel {
 /// A four-legged box model (cow, sheep): a horizontal body slab on four leg
 /// posts with a head at the front (-Z). Proportions come from the kind's
 /// `[entity.visual]` data ([`QuadrupedVisual`]); textures from a mob skin
-/// sheet ([`crate::render::mobskin`]'s quadruped unwrap).
+/// sheet ([`crate::art::mobskin`]'s quadruped unwrap).
 pub struct QuadrupedModel {
     pub body: ModelBox,
     pub head: ModelBox,
@@ -427,7 +427,7 @@ impl QuadrupedModel {
         pose: &Pose,
         sheet_origin: [u32; 2],
     ) -> CpuMesh {
-        use crate::render::mobskin::{Q_BODY, Q_HEAD, Q_LEG};
+        use crate::art::mobskin::{Q_BODY, Q_HEAD, Q_LEG};
 
         let mut mesh = CpuMesh::new();
         let swings = [pose.left_arm, pose.right_arm, pose.left_leg, pose.right_leg];

@@ -57,7 +57,7 @@ pub enum Inbound {
     Joined {
         player: PlayerId,
         identity: u64,
-        account: Option<crate::auth::AccountIdentity>,
+        account: Option<wyven_auth::AccountIdentity>,
     },
     /// Host: a player disconnected.
     Left { player: PlayerId },

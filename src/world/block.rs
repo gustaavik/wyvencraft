@@ -7,33 +7,13 @@
 //! name. Behavior is expressed as components on the block ([`Drops`],
 //! [`FluidInfo`]) rather than hard-coded `match` arms on identity.
 
-use glam::Vec3;
-
-use crate::core::{Aabb, BlockId, Direction};
-use crate::model::{ModelId, ModelSpec};
-use crate::render::TileRegistry;
+use crate::core::BlockId;
+use wyven_model::ModelSpec;
+use wyven_voxel::{BlockProperties, FluidInfo, RenderType};
 
 /// Embedded copy of the shipped block definitions, used when
 /// `assets/blocks.toml` is missing or invalid (the assets dir is CWD-relative).
 pub const BUILTIN_BLOCKS: &str = include_str!("../../assets/blocks.toml");
-
-/// How a block participates in meshing/rendering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RenderType {
-    /// Not drawn at all (air).
-    Invisible,
-    /// Fully opaque cube; hides neighbouring faces.
-    Opaque,
-    /// See-through cube (glass/water); does not hide neighbours of other
-    /// block types and is drawn in the transparent pass.
-    Transparent,
-    /// Alpha-tested cube (leaves): texture is either fully opaque or fully
-    /// clear per texel, so it draws in the opaque pass with depth writes (the
-    /// shader discards clear texels). Avoids the blend-order artifacts of the
-    /// unsorted transparent pass. Does not hide neighbours of other types.
-    Cutout,
-}
 
 /// What a block is made of — selects which tool mines it fastest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
@@ -49,28 +29,6 @@ pub enum BlockMaterial {
     Other,
 }
 
-/// Per-face atlas tile indices, ordered by [`Direction`] (`-X,+X,-Y,+Y,-Z,+Z`).
-#[derive(Debug, Clone, Copy)]
-pub struct FaceTextures(pub [u32; 6]);
-
-impl FaceTextures {
-    /// Same tile on every face.
-    pub const fn uniform(tile: u32) -> Self {
-        Self([tile; 6])
-    }
-
-    /// Distinct top / bottom / side tiles (the common grass/log case).
-    pub const fn column(top: u32, bottom: u32, side: u32) -> Self {
-        // order: -X,+X,-Y,+Y,-Z,+Z  =>  side,side,bottom,top,side,side
-        Self([side, side, bottom, top, side, side])
-    }
-
-    #[inline]
-    pub fn tile(&self, dir: Direction) -> u32 {
-        self.0[dir as usize]
-    }
-}
-
 /// What breaking a block yields (the `drops` field in `assets/blocks.toml`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Drops {
@@ -83,30 +41,6 @@ pub enum Drops {
     SelfWithTool { kind: String },
     /// A different item, by name (resolved against the item registry at use).
     Item { name: String, count: u8 },
-}
-
-/// Fluid behavior component: marks a block as part of a level-based fluid.
-///
-/// A fluid is declared on its source block (`[block.fluid]` with
-/// `flow_levels = N`); the loader then auto-registers one flowing block per
-/// level `1..=N`, and the source carries level `N + 1`. The simulation in
-/// [`crate::world::fluid`] spreads and recedes between these blocks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FluidInfo {
-    /// Which fluid this block belongs to (ordinal among fluid sources).
-    pub group: u16,
-    /// This block's level: `max_level` for the source, decaying to 1.
-    pub level: u8,
-    /// The source's level (`flow_levels + 1`); the scale for surface heights.
-    pub max_level: u8,
-}
-
-impl FluidInfo {
-    /// Sources are permanent until replaced; flowing blocks re-evaluate.
-    #[inline]
-    pub fn is_source(&self) -> bool {
-        self.level == self.max_level
-    }
 }
 
 /// A block's `[block.model]`, still unresolved: the model registry does not
@@ -129,6 +63,11 @@ pub struct BlockModelSpec {
 /// `json` column grows as blocks are re-authored, `models` shrinks to nothing.
 #[derive(Debug, Default)]
 pub struct BlockVisuals {
+    /// `textures = ...` — the six texture *names*, in [`Direction`] order,
+    /// still unresolved. Resolving them to atlas slots is `content`'s job: a
+    /// tile index is derived from art, and anything derived from art must stay
+    /// off [`Block`], which feeds `content_hash`.
+    pub textures: Vec<Option<[String; 6]>>,
     /// `[block.model]` — a `.bbmodel`/`.gltf` file plus its placement.
     pub models: Vec<Option<BlockModelSpec>>,
     /// `block_model` — a Blockbench Java Block/Item `.json` and its placement.
@@ -181,56 +120,6 @@ pub struct BlockJsonSpec {
     pub random_yaw: bool,
 }
 
-/// Geometry loaded from a model file instead of the six atlas-textured cube
-/// faces. A block carrying one is meshed by baking the model into its cell and
-/// emits no cube faces at all.
-///
-/// Like `content::ItemModel` this is kept *off* [`Block`] on purpose: `Block`
-/// feeds `content_hash`, which gates multiplayer joins, and two players whose
-/// flowers are drawn differently have no reason to be refused a shared world.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct BlockModel {
-    pub id: ModelId,
-    pub scale: f32,
-    pub rotation: Vec3,
-    pub offset: Vec3,
-    /// Turn each instance by a hash of its position, so a field of plants does
-    /// not read as a grid of clones.
-    pub random_yaw: bool,
-    /// What the crosshair actually hits, in block-local `0..1` coordinates —
-    /// measured from the model rather than authored, so it always matches what
-    /// is drawn. A mushroom filling a fifth of its cell should not be
-    /// targetable from the far corner of that cell.
-    pub hitbox: Aabb,
-}
-
-/// The tightest sensible targeting box for a model occupying `bounds` (in
-/// block-local `0..1` space, the model already placed).
-///
-/// Square in plan and centred, because `random_yaw` turns each instance and a
-/// box that hugged one orientation would be wrong for every other. Clamped into
-/// the cell, and never smaller than [`MIN_HITBOX`] so a flat or degenerate model
-/// stays clickable.
-pub fn model_hitbox(bounds: (Vec3, Vec3)) -> Aabb {
-    /// Floor on either dimension of a derived hitbox, in blocks.
-    const MIN_HITBOX: f32 = 0.1;
-
-    let (lo, hi) = bounds;
-    let radius = [lo.x - 0.5, hi.x - 0.5, lo.z - 0.5, hi.z - 0.5]
-        .into_iter()
-        .fold(0.0f32, |r, d| r.max(d.abs()))
-        .clamp(MIN_HITBOX * 0.5, 0.5);
-    // Leave room for `MIN_HITBOX` above the floor, so a model with no vertical
-    // extent at all — a single horizontal face — still gets a targetable box
-    // instead of an inverted one.
-    let bottom = lo.y.clamp(0.0, 1.0 - MIN_HITBOX);
-    let top = hi.y.clamp(bottom + MIN_HITBOX, 1.0);
-    Aabb::new(
-        Vec3::new(0.5 - radius, bottom, 0.5 - radius),
-        Vec3::new(0.5 + radius, top, 0.5 + radius),
-    )
-}
-
 /// Static description of a block type.
 #[derive(Debug, Clone)]
 pub struct Block {
@@ -238,7 +127,6 @@ pub struct Block {
     pub render: RenderType,
     /// Whether entities collide with this block.
     pub solid: bool,
-    pub textures: FaceTextures,
     /// Relative mining time; `f32::INFINITY` means unbreakable (e.g. bedrock).
     pub hardness: f32,
     /// What the block is made of, for tool matching.
@@ -282,6 +170,33 @@ impl Block {
     #[inline]
     pub fn is_replaceable(&self) -> bool {
         !self.solid && self.is_breakable() && self.fluid.is_none() && self.is_visible()
+    }
+}
+
+/// How the engine reads a `BlockId` through this table.
+///
+/// These three are the *only* things `wyven_voxel::World` needs to know about a
+/// block, and each is derived from a rule the block table already holds. The
+/// engine never sees the name, hardness, material or drops that surround them.
+impl BlockProperties for BlockRegistry {
+    #[inline]
+    fn is_solid(&self, id: BlockId) -> bool {
+        self.get(id).solid
+    }
+
+    /// Deliberately wider than [`is_solid`](BlockProperties::is_solid):
+    /// decoration you can walk through (a flower) must still be breakable.
+    /// Fluids stay out — the crosshair reaches through water — and so does air,
+    /// which is invisible.
+    #[inline]
+    fn is_targetable(&self, id: BlockId) -> bool {
+        let block = self.get(id);
+        block.solid || (block.is_visible() && block.fluid.is_none())
+    }
+
+    #[inline]
+    fn is_replaceable(&self, id: BlockId) -> bool {
+        self.get(id).is_replaceable()
     }
 }
 
@@ -420,9 +335,12 @@ fn default_fluid_fps() -> u8 {
 }
 
 impl TexturesDef {
-    /// Resolve texture names to atlas tiles via the tile registry (which
-    /// warns and substitutes the missing marker for unknown names).
-    fn resolve(&self, tiles: &mut TileRegistry) -> FaceTextures {
+    /// The six texture names in [`Direction`] order (`-X,+X,-Y,+Y,-Z,+Z`).
+    ///
+    /// Names, not tiles: which atlas slot each one lands in depends on the art
+    /// loaded alongside it, and that is a question for `content`, not for the
+    /// block table.
+    fn names(&self) -> [String; 6] {
         let names: [&str; 6] = match self {
             Self::Uniform(name) => [name; 6],
             // order: -X,+X,-Y,+Y,-Z,+Z  =>  side,side,bottom,top,side,side
@@ -436,11 +354,7 @@ impl TexturesDef {
                 pos_z,
             } => [neg_x, pos_x, neg_y, pos_y, neg_z, pos_z],
         };
-        let mut faces = [0u32; 6];
-        for (i, name) in names.iter().enumerate() {
-            faces[i] = tiles.resolve(name).tile;
-        }
-        FaceTextures(faces)
+        names.map(str::to_string)
     }
 }
 
@@ -477,8 +391,7 @@ impl BlockRegistry {
     /// one via [`crate::content::GameContent`]). Infallible: the shipped file
     /// is validated by the golden tests.
     pub fn with_builtins() -> Self {
-        let mut tiles = TileRegistry::with_engine_tiles();
-        Self::from_toml(BUILTIN_BLOCKS, &mut tiles).expect("embedded blocks.toml must parse")
+        Self::from_toml(BUILTIN_BLOCKS).expect("embedded blocks.toml must parse")
     }
 
     /// Parse a blocks file. Declared order defines the numeric [`BlockId`]s:
@@ -488,9 +401,10 @@ impl BlockRegistry {
     ///
     /// Structural errors (bad TOML, duplicate/reserved names) fail the whole
     /// file — the caller falls back to [`BlockRegistry::with_builtins`].
-    /// Unknown texture names only degrade that block (tile 0 + a warning).
-    pub fn from_toml(text: &str, tiles: &mut TileRegistry) -> Result<Self, String> {
-        Self::from_toml_with_models(text, tiles, &mut BlockVisuals::default())
+    /// Unknown texture names only degrade that block, once `content` fails to
+    /// find art for them.
+    pub fn from_toml(text: &str) -> Result<Self, String> {
+        Self::from_toml_with_models(text, &mut BlockVisuals::default())
     }
 
     /// Like [`BlockRegistry::from_toml`], but also reports each block's model
@@ -499,21 +413,19 @@ impl BlockRegistry {
     /// Model assignment rides out of band because it cannot be resolved yet —
     /// blocks are parsed before the model registry exists — and because it must
     /// stay off [`Block`], which feeds `content_hash`. See [`BlockModel`].
-    pub fn from_toml_with_models(
-        text: &str,
-        tiles: &mut TileRegistry,
-        visuals: &mut BlockVisuals,
-    ) -> Result<Self, String> {
+    pub fn from_toml_with_models(text: &str, visuals: &mut BlockVisuals) -> Result<Self, String> {
         let file: BlockFile = toml::from_str(text).map_err(|e| e.to_string())?;
         if file.block.is_empty() {
             return Err("no [[block]] entries".into());
         }
 
         let BlockVisuals {
+            textures: texture_names,
             models,
             json,
             fluids: fluid_visuals,
         } = visuals;
+        texture_names.clear();
         models.clear();
         json.clear();
         fluid_visuals.clear();
@@ -521,11 +433,11 @@ impl BlockRegistry {
             blocks: Vec::new(),
             fluid_flow: Vec::new(),
         };
+        texture_names.push(None);
         reg.register(Block {
             name: "air".into(),
             render: RenderType::Invisible,
             solid: false,
-            textures: FaceTextures::uniform(0),
             hardness: 0.0,
             material: BlockMaterial::Other,
             drops: Drops::None,
@@ -618,8 +530,8 @@ impl BlockRegistry {
             let modelled =
                 def.model.is_some() || def.block_model.is_some() || fluid_texture.is_some();
             let textures = match &def.textures {
-                Some(t) => t.resolve(tiles),
-                None if modelled => FaceTextures::uniform(0),
+                Some(t) => Some(t.names()),
+                None if modelled => None,
                 None => {
                     return Err(format!(
                         "block {:?}: needs `textures`, a `block_model`, a `[block.model]` \
@@ -628,6 +540,7 @@ impl BlockRegistry {
                     ));
                 }
             };
+            texture_names.push(textures);
             let random_yaw = def.random_yaw;
             let model = def.model.map(|spec| BlockModelSpec { spec, random_yaw });
             json.push(
@@ -642,7 +555,6 @@ impl BlockRegistry {
                 name: def.name,
                 render: def.render,
                 solid: def.solid,
-                textures,
                 hardness: def.hardness,
                 material: def.material,
                 drops,
@@ -659,8 +571,10 @@ impl BlockRegistry {
         // are the save format — see the fluid module docs).
         for (group, (source_id, levels, texture)) in fluids.into_iter().enumerate() {
             let source = reg.get(source_id).clone();
+            let source_textures = texture_names.get(source_id.0 as usize).cloned().flatten();
             let flow: Vec<BlockId> = (1..=levels)
                 .map(|level| {
+                    texture_names.push(source_textures.clone());
                     fluid_visuals.push(texture.clone().map(|spec| FluidVisual {
                         spec,
                         flowing: true,
@@ -669,7 +583,6 @@ impl BlockRegistry {
                         name: format!("{} flow {}", source.name, level),
                         render: source.render,
                         solid: source.solid,
-                        textures: source.textures,
                         hardness: source.hardness,
                         material: source.material,
                         drops: Drops::None,
@@ -771,17 +684,16 @@ mod tests {
     /// by accident, so the loader refuses it outright.
     #[test]
     fn a_fluid_loop_that_does_not_divide_the_animation_clock_is_rejected() {
-        let mut tiles = TileRegistry::with_engine_tiles();
         // 64 frames at 6 fps: 6 * 3600 leaves 32 frames over.
         let bad = BUILTIN_BLOCKS.replace("fps = 8", "fps = 6");
-        let err = BlockRegistry::from_toml(&bad, &mut tiles).expect_err("must not parse");
+        let err = BlockRegistry::from_toml(&bad).expect_err("must not parse");
         assert!(err.contains("3600"), "{err}");
 
         // ...while the shipped pairing, and every other multiple of 4, is fine.
         for fps in ["4", "8", "12", "20"] {
             let text = BUILTIN_BLOCKS.replace("fps = 8", &format!("fps = {fps}"));
             assert!(
-                BlockRegistry::from_toml(&text, &mut tiles).is_ok(),
+                BlockRegistry::from_toml(&text).is_ok(),
                 "{fps} fps over 64 frames should be accepted"
             );
         }
@@ -889,8 +801,7 @@ mod tests {
 
     /// Parse a blocks file with a throwaway tile registry.
     fn parse(text: &str) -> Result<BlockRegistry, String> {
-        let mut tiles = TileRegistry::with_engine_tiles();
-        BlockRegistry::from_toml(text, &mut tiles)
+        BlockRegistry::from_toml(text)
     }
 
     /// Structural errors reject the whole file (the loader then falls back to

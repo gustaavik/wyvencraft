@@ -7,8 +7,8 @@
 //! dispatches on — never on item identity.
 
 use crate::core::BlockId;
-use crate::model::ModelSpec;
 use crate::world::block::{BlockMaterial, BlockRegistry};
+use wyven_model::ModelSpec;
 
 /// Embedded copy of the shipped item definitions, used when
 /// `assets/items.toml` is missing or invalid.

@@ -1,0 +1,10 @@
+[package]
+name = "wyven-input"
+version.workspace = true
+edition.workspace = true
+description = "Frame-coherent input state derived from winit events."
+
+[dependencies]
+wyven-core.workspace = true
+winit.workspace = true
+glam.workspace = true

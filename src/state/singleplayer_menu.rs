@@ -3,7 +3,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{GameState, LoadingState, MainMenuState, StateContext, Transition};
+use super::{GameState, LoadingState, MainMenuState, StateContext, Transition, Wyvencraft};
 use crate::core::GameMode;
 use crate::save::{self, WorldEntry, WorldSave};
 
@@ -69,7 +69,7 @@ impl SingleplayerMenuState {
     }
 }
 
-impl GameState for SingleplayerMenuState {
+impl GameState<Wyvencraft> for SingleplayerMenuState {
     fn name(&self) -> &'static str {
         "SingleplayerMenu"
     }

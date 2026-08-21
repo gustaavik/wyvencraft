@@ -21,22 +21,24 @@ use glam::Vec3;
 
 use super::mobs::{RemoteMob, mob_mesh};
 use super::{OUTLINE_COLOR, REMOTE_MAX_SPEED, THIRD_PERSON_DISTANCE};
+use crate::art::tiles;
+use crate::content::BlockAppearance;
 use crate::content::ItemModel;
 use crate::core::{Aabb, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, ChunkPos, DayCycle};
 use crate::entity::{
     AnimationState, Arrow, DroppedItem, HandAnchor, HumanoidModel, Mob, Perspective, Player,
 };
 use crate::inventory::{ARMOR_SIZE, Inventory, ItemId, ItemRegistry};
-use crate::model::mesh as model_mesh;
-use crate::model::{ModelId, ModelRegistry};
 use crate::net::{PlayerId, RemotePlayer};
-use crate::render::{
-    Camera, CpuMesh, GpuLines, GpuMesh, LightParams, PreviewFrame, RenderContext, SceneFrame,
-    SkyParams, Texture, TexturedMesh, debug, tiles,
-};
 use crate::world::World;
-use crate::world::block::{BlockRegistry, FaceTextures};
-use crate::world::meshing::{BlockModels, mesh_block_overlay, mesh_chunk, push_item_cube};
+use crate::world::meshing::{mesh_block_overlay, mesh_chunk, push_item_cube};
+use wyven_model::mesh as model_mesh;
+use wyven_model::{ModelId, ModelRegistry};
+use wyven_render::{
+    Camera, CpuMesh, GpuLines, GpuMesh, LightParams, PreviewFrame, RenderContext, SceneFrame,
+    SkyParams, Texture, TexturedMesh, debug,
+};
+use wyven_voxel::FaceTextures;
 
 /// Animation state for a remote player plus the position used to derive their
 /// speed (no extra protocol data needed — movement is inferred from the change
@@ -217,8 +219,7 @@ impl SceneCache {
         &mut self,
         ctx: &Arc<RenderContext>,
         world: &World,
-        blocks: &BlockRegistry,
-        models: BlockModels<'_>,
+        blocks: BlockAppearance<'_>,
         budget: usize,
     ) {
         for _ in 0..budget {
@@ -231,8 +232,7 @@ impl SceneCache {
             let output = world.chunk(pos).map(|chunk| {
                 mesh_chunk(
                     chunk,
-                    blocks,
-                    models,
+                    &blocks,
                     |p| world.block_at(p),
                     |x, z, index| generator.biome_tint(x, z, index),
                 )
@@ -286,7 +286,7 @@ impl SceneCache {
                     // each needing its texture resident before it can be drawn.
                     let mut baked = Vec::new();
                     for (id, mesh) in &output.models {
-                        self.ensure_model_texture(ctx, models.models, *id);
+                        self.ensure_model_texture(ctx, blocks.models, *id);
                         match GpuMesh::upload(&ctx.memory_allocator, mesh) {
                             Ok(Some(gpu)) => baked.push((gpu, *id)),
                             Ok(None) => {}
@@ -885,24 +885,26 @@ impl super::InGameState {
         self.view.process_mesh_budget(
             ctx,
             &self.world,
-            &self.blocks,
-            BlockModels {
-                models: &self.models,
-                blocks: &self.block_models,
-                baked: &self.baked_models,
-                fluids: &self.fluid_textures,
+            BlockAppearance {
+                blocks: &self.content.blocks,
+                face_tiles: &self.content.block_face_tiles,
+                models: &self.content.models,
+                placed: &self.content.block_models,
+                baked: &self.content.baked_models,
+                fluids: &self.content.fluid_textures,
             },
             super::MESH_BUDGET,
         );
 
-        // Loose entities.
-        let (items, blocks) = (&self.items, &self.blocks);
-        let block_faces = self.block_face_tiles.clone();
-        let models = self.models.clone();
-        let item_models = self.item_models.clone();
+        // Loose entities. One `Arc` clone releases the borrow on `self` for
+        // the closure below, where three deep `Vec` clones used to.
+        let loaded = self.content.clone();
+        let (items, blocks) = (&loaded.items, &loaded.blocks);
+        let block_faces = &loaded.block_face_tiles;
+        let models = &loaded.models;
         let content = ModelContent {
-            models: &models,
-            item_models: &item_models,
+            models,
+            item_models: &loaded.item_models,
         };
         self.view.update_drops_mesh(
             ctx,
@@ -913,15 +915,15 @@ impl super::InGameState {
                     .place_block
                     .is_some_and(|b| blocks.get(b).is_transparent());
                 (
-                    super::interaction::drop_textures(item, items, blocks, &block_faces),
+                    super::interaction::drop_textures(item, items, block_faces),
                     is_transparent,
                 )
             },
             content,
         );
         self.view
-            .update_mob_meshes(ctx, &self.mobs, &mut self.remote_mobs, &models, dt);
-        self.view.update_arrows_mesh(ctx, &self.arrows);
+            .update_mob_meshes(ctx, &self.mobs.live, &mut self.mobs.remote, models, dt);
+        self.view.update_arrows_mesh(ctx, &self.mobs.arrows);
 
         // Animated humanoids. The local player settles to idle while the
         // inventory is open (movement is frozen).
@@ -932,17 +934,22 @@ impl super::InGameState {
             Vec3::new(v.x, 0.0, v.z).length()
         };
         self.view.advance_player_anim(local_speed, dt);
-        self.view
-            .update_player_mesh(ctx, &self.player, &self.inventory, &self.items, content);
+        self.view.update_player_mesh(
+            ctx,
+            &self.player,
+            &self.inventory,
+            &self.content.items,
+            content,
+        );
         self.view.update_preview_mesh(
             ctx,
             self.inventory_open,
             &self.player,
             &self.inventory,
-            &self.items,
+            &self.content.items,
             content,
         );
         self.view
-            .update_remote_meshes(ctx, &self.peers.players, &self.items, dt);
+            .update_remote_meshes(ctx, &self.peers.players, &self.content.items, dt);
     }
 }

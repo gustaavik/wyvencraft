@@ -5,12 +5,13 @@
 use glam::Vec3;
 
 use super::{BreakState, InGameState};
+use crate::art::tiles;
 use crate::core::{Aabb, BlockId, BlockPos};
 use crate::entity::DroppedItem;
 use crate::inventory::{ItemId, ItemRegistry, ItemStack};
-use crate::render::tiles;
 use crate::world::Target;
-use crate::world::block::{BlockRegistry, Drops, FaceTextures};
+use crate::world::block::Drops;
+use wyven_voxel::FaceTextures;
 
 impl InGameState {
     /// What the crosshair would hit at `pos`: the whole cell for an ordinary
@@ -26,11 +27,13 @@ impl InGameState {
         // Blockbench-authored flower is no more targetable than a `.bbmodel`
         // one. A block with neither is an ordinary cube and fills its cell.
         let hitbox = self
+            .content
             .baked_models
             .get(block.0 as usize)
             .and_then(|m| m.as_ref().and_then(|m| m.hitbox))
             .or_else(|| {
-                self.block_models
+                self.content
+                    .block_models
                     .get(block.0 as usize)
                     .and_then(|m| m.map(|m| m.hitbox))
             });
@@ -85,7 +88,7 @@ impl InGameState {
                 stack,
                 pos,
                 angle,
-                self.entities.dropped_item(),
+                self.content.entities.dropped_item(),
             ));
         }
         self.broadcast_local_edit(pos, BlockId::AIR);
@@ -95,22 +98,27 @@ impl InGameState {
     /// What breaking a block of type `block` yields, per its `drops` component
     /// (`assets/blocks.toml`) and the held tool. `None` when nothing drops.
     fn block_drop_stack(&self, block: BlockId) -> Option<ItemStack> {
-        let self_item = || self.items.item_for_block(block).map(ItemStack::single);
-        match &self.blocks.get(block).drops {
+        let self_item = || {
+            self.content
+                .items
+                .item_for_block(block)
+                .map(ItemStack::single)
+        };
+        match &self.content.blocks.get(block).drops {
             Drops::SelfItem => self_item(),
             Drops::None => None,
             Drops::SelfWithTool { kind } => {
                 let held = self
                     .inventory
                     .item_in_selected()
-                    .and_then(|id| self.items.tool(id));
+                    .and_then(|id| self.content.items.tool(id));
                 (held.is_some_and(|tool| tool.kind == *kind)).then(self_item)?
             }
             Drops::Item { name, count } => {
-                let id = self.items.find(name)?;
+                let id = self.content.items.find(name)?;
                 Some(ItemStack::new(
                     id,
-                    (*count).clamp(1, self.items.max_stack(id)),
+                    (*count).clamp(1, self.content.items.max_stack(id)),
                 ))
             }
         }
@@ -125,7 +133,7 @@ impl InGameState {
             stack,
             self.player.eye_position(),
             self.player.look_direction(),
-            self.entities.dropped_item(),
+            self.content.entities.dropped_item(),
         ));
     }
 
@@ -144,7 +152,7 @@ impl InGameState {
             if dead || !item.can_pickup() || !reach.intersects(item.aabb()) {
                 return true;
             }
-            let leftover = self.inventory.add(item.stack, &self.items);
+            let leftover = self.inventory.add(item.stack, &self.content.items);
             if leftover == 0 {
                 false
             } else {
@@ -166,7 +174,7 @@ impl InGameState {
             self.breaking = None;
             return;
         };
-        let block = self.blocks.get(self.world.block_at(hit.block));
+        let block = self.content.blocks.get(self.world.block_at(hit.block));
         if !block.is_breakable() {
             self.breaking = None;
             return;
@@ -175,7 +183,7 @@ impl InGameState {
         let tool = self
             .inventory
             .item_in_selected()
-            .and_then(|id| self.items.tool(id));
+            .and_then(|id| self.content.items.tool(id));
         let seconds = crate::inventory::break_seconds(block.hardness, block.material, tool);
 
         // Reset progress when the targeted block changes.
@@ -203,7 +211,7 @@ impl InGameState {
         let Some(item_id) = self.inventory.item_in_selected() else {
             return;
         };
-        if let Some(food) = self.items.food(item_id)
+        if let Some(food) = self.content.items.food(item_id)
             && self.player.mode.takes_damage()
             && self.player.is_hungry()
         {
@@ -218,7 +226,7 @@ impl InGameState {
     /// Place the selected item's block against the targeted face. Consumes from
     /// the inventory only in survival (creative has infinite blocks).
     fn place_block(&mut self, item_id: ItemId) {
-        let Some(block) = self.items.get(item_id).place_block else {
+        let Some(block) = self.content.items.get(item_id).place_block else {
             return;
         };
         let Some(hit) = self.targeted_block() else {
@@ -258,7 +266,6 @@ impl InGameState {
 pub(super) fn drop_textures(
     item: ItemId,
     items: &ItemRegistry,
-    blocks: &BlockRegistry,
     block_faces: &[Option<FaceTextures>],
 ) -> FaceTextures {
     let def = items.get(item);
@@ -267,7 +274,7 @@ pub(super) fn drop_textures(
             .get(block.0 as usize)
             .copied()
             .flatten()
-            .unwrap_or(blocks.get(block).textures),
+            .unwrap_or(crate::content::MISSING_FACES),
         None if def.tool.is_some() => FaceTextures::uniform(tiles::WOOD_BARK),
         None => FaceTextures::uniform(tiles::LEAVES),
     }

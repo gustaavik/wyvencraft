@@ -12,28 +12,35 @@
 //! so the same load path serves the real `assets/` directory, the
 //! builtins-only build, and test fixtures.
 
-pub mod source;
-
 use std::sync::Arc;
 
 use crate::core::Direction;
 use crate::entity::kind::VisualSpec;
 use crate::entity::{EntityRegistry, SpawnConfig};
 use crate::inventory::ItemRegistry;
-use crate::model::{ModelId, ModelRegistry, ModelSpec, blockjson};
-use crate::render::TileRegistry;
-use crate::render::block_textures::{self, AnimatedLayers, BlockTextureSet, Strip};
-use crate::render::texture::decode_png;
 use crate::world::block::{
-    BUILTIN_BLOCKS, BlockJsonSpec, BlockModel, BlockModelSpec, BlockRegistry, BlockVisuals,
-    FaceTextures, FluidVisual, model_hitbox,
+    BUILTIN_BLOCKS, BlockJsonSpec, BlockModelSpec, BlockRegistry, BlockVisuals, FluidVisual,
 };
 use crate::world::blockmodel::BakedBlockModel;
 use crate::world::generation::WorldGenConfig;
-use crate::world::meshing::BlockModels;
+pub use wyven_voxel::FluidTexture;
+use wyven_voxel::model_hitbox;
+use wyven_voxel::{BlockModel, FaceTextures};
 
-use source::load_or_builtin;
-pub use source::{ContentSource, EmbeddedSource, FsSource, MapSource};
+use wyven_assets::decode_png;
+use wyven_model::{ModelId, ModelRegistry, ModelSpec, blockjson};
+use wyven_render::TileRegistry;
+use wyven_render::block_textures::{self, AnimatedLayers, BlockTextureSet, Strip};
+
+pub mod catalog;
+
+pub use catalog::BlockAppearance;
+
+// The byte-source port lives in `wyven_assets` — the model loaders need it
+// too, and they sit below game content. Re-exported under the old name so
+// every caller and fixture keeps reading.
+use wyven_assets::load_or_builtin;
+pub use wyven_assets::{AssetSource as ContentSource, EmbeddedSource, FsSource, MapSource};
 
 /// How an item is drawn as a 2D icon in the inventory and hotbar. Computed once
 /// at content load and indexed by `ItemId`, so the UI never touches block or
@@ -47,10 +54,14 @@ pub enum ItemIcon {
     /// Anything else (tools, food, armor, fluids), drawn as one flat tile.
     Flat(u32),
     /// An item with a file-loaded model, drawn from its cell of the pre-rendered
-    /// icon sheet (see [`crate::render::icons`]). The cell index is the
+    /// icon sheet (see [`wyven_render::icons`]). The cell index is the
     /// [`ModelId`], so the sheet and the model registry share an ordering.
     Model(ModelId),
 }
+
+/// What a block with no resolvable art draws with: the missing-texture marker
+/// on every face, which is tile 0 by construction.
+pub(crate) const MISSING_FACES: FaceTextures = FaceTextures::uniform(0);
 
 /// A loaded model plus the placement its data file asked for. Resolving the
 /// path to a [`ModelId`] once at load keeps the per-frame path a plain index.
@@ -118,7 +129,7 @@ impl GameContent {
     /// Load content from `assets/` (CWD-relative, like recipes and saves),
     /// falling back to the embedded builtin copies. Never fails.
     pub fn load() -> Arc<Self> {
-        Self::from_source(&FsSource)
+        Self::from_source(&FsSource::cwd())
     }
 
     /// The embedded builtin content only — used by tests and as the fallback.
@@ -131,16 +142,16 @@ impl GameContent {
     /// file falls back to its builtin independently, so one bad file never
     /// costs more than itself.
     pub fn from_source(source: &dyn ContentSource) -> Arc<Self> {
-        let mut tiles = TileRegistry::with_engine_tiles();
+        // One tile registry serves every pass below — block faces, fluid
+        // stand-ins, item icons — because a tile index only means anything
+        // relative to the atlas it was allocated from.
+        let mut tiles = crate::art::tile_registry();
 
-        // Blocks own the tile registry: both the parsed and the builtin path
-        // must register their textures into the *same* `tiles`, or the tile
-        // indices baked into block faces won't match the atlas built below.
-        // Block models ride out on the same `ctx` channel as the tile registry,
-        // and for the same reason item models do: they are visual-only and must
-        // stay out of `content_hash`.
+        // Blocks report their texture *names*, models and fluid strips out of
+        // band in `BlockVisuals`, for the reason item models do the same: all
+        // of it is visual, and visual data must stay out of `content_hash`,
+        // which gates multiplayer joins.
         let mut block_ctx = BlockCtx {
-            tiles: &mut tiles,
             visuals: BlockVisuals::default(),
         };
         let blocks = Arc::new(load_or_builtin(
@@ -148,11 +159,12 @@ impl GameContent {
             BLOCKS_PATH,
             "blocks",
             &mut block_ctx,
-            |text, ctx| BlockRegistry::from_toml_with_models(text, ctx.tiles, &mut ctx.visuals),
+            |text, ctx| BlockRegistry::from_toml_with_models(text, &mut ctx.visuals),
             builtin_blocks,
             |reg| format!("{} blocks", reg.len()),
         ));
         let BlockVisuals {
+            textures: block_texture_names,
             models: block_model_specs,
             json: block_json_paths,
             fluids: fluid_visuals,
@@ -294,6 +306,23 @@ impl GameContent {
             fluid_textures.push(fluid);
         }
 
+        // Finally the plain `textures = ...` blocks. This is the pass that used
+        // to happen inside `BlockRegistry::from_toml`, and it runs last so a
+        // block that also carries a model or a fluid strip keeps the tiles
+        // derived from its own art.
+        for (id, names) in block_texture_names.iter().enumerate() {
+            let Some(names) = names else { continue };
+            if block_face_tiles.get(id).is_some_and(Option::is_some) {
+                continue;
+            }
+            let faces = std::array::from_fn(|face| tiles.resolve(&names[face]).tile);
+            if id >= block_face_tiles.len() {
+                block_face_tiles.resize(id + 1, None);
+            }
+            block_face_tiles[id] = Some(FaceTextures(faces));
+        }
+        block_face_tiles.resize(blocks.len(), None);
+
         let item_icons =
             build_item_icons(&mut tiles, &blocks, &items, &item_models, &block_face_tiles);
         let hash = content_hash(&blocks, &items, &entities, &worldgen, &spawning);
@@ -317,10 +346,12 @@ impl GameContent {
     }
 
     /// The model geometry the chunk mesher needs, borrowed from this content.
-    pub fn block_models(&self) -> BlockModels<'_> {
-        BlockModels {
+    pub fn appearance(&self) -> BlockAppearance<'_> {
+        BlockAppearance {
+            blocks: &self.blocks,
+            face_tiles: &self.block_face_tiles,
             models: &self.models,
-            blocks: &self.block_models,
+            placed: &self.block_models,
             baked: &self.baked_models,
             fluids: &self.fluid_textures,
         }
@@ -339,24 +370,8 @@ impl GameContent {
             .get(block.0 as usize)
             .copied()
             .flatten()
-            .unwrap_or(self.blocks.get(block).textures)
+            .unwrap_or(MISSING_FACES)
     }
-}
-
-/// Where a fluid block's animation lives in the block texture array.
-///
-/// Both columns of the strip are resolved even for a source block: the
-/// auto-registered flowing blocks share this entry, and which column a face
-/// takes is a per-face decision the mesher makes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FluidTexture {
-    /// Column 1 — top and bottom faces, and every face of a source block.
-    pub still: AnimatedLayers,
-    /// Column 0 — the side faces of a flowing block.
-    pub flowing: AnimatedLayers,
-    pub fps: u8,
-    /// `tintindex` into the biome colours; `2` is water.
-    pub tint: Option<u8>,
 }
 
 /// Column of the strip each of the two states reads. Documented in
@@ -519,7 +534,7 @@ fn build_item_icons(
                         .get(block_id.0 as usize)
                         .copied()
                         .flatten()
-                        .unwrap_or(block.textures);
+                        .unwrap_or(MISSING_FACES);
                     return ItemIcon::Cube {
                         top: faces.tile(Direction::PosY),
                         left: faces.tile(Direction::NegZ),
@@ -568,8 +583,8 @@ fn content_hash(
 /// coordinates — the same transform `world::meshing` bakes with, minus the yaw
 /// and the translation to the cell (which `model_hitbox` handles by staying
 /// square and centred).
-fn placed_bounds(model: &crate::model::Model, spec: &BlockModelSpec) -> (glam::Vec3, glam::Vec3) {
-    let transform = crate::model::mesh::placement(
+fn placed_bounds(model: &wyven_model::Model, spec: &BlockModelSpec) -> (glam::Vec3, glam::Vec3) {
+    let transform = wyven_model::mesh::placement(
         // The cell's horizontal centre but its *floor* — exactly the origin
         // `world::meshing::culled` bakes at, or the box would sit half a block
         // above the geometry.
@@ -605,13 +620,12 @@ fn placed_bounds(model: &crate::model::Model, spec: &BlockModelSpec) -> (glam::V
 
 /// What the block loader mutates on both the parse and the fallback path: the
 /// shared tile registry, plus the `[block.model]` specs it reports back.
-struct BlockCtx<'a> {
-    tiles: &'a mut TileRegistry,
+struct BlockCtx {
     visuals: BlockVisuals,
 }
 
-fn builtin_blocks(ctx: &mut BlockCtx<'_>) -> BlockRegistry {
-    BlockRegistry::from_toml_with_models(BUILTIN_BLOCKS, ctx.tiles, &mut ctx.visuals)
+fn builtin_blocks(ctx: &mut BlockCtx) -> BlockRegistry {
+    BlockRegistry::from_toml_with_models(BUILTIN_BLOCKS, &mut ctx.visuals)
         .expect("embedded blocks.toml must parse")
 }
 
@@ -766,7 +780,6 @@ mod tests {
     /// caller still falls back to the builtin blocks.
     #[test]
     fn a_block_without_textures_or_a_model_is_rejected() {
-        let mut tiles = TileRegistry::with_engine_tiles();
         let bad = r#"
             [[block]]
             name = "ghost"
@@ -775,7 +788,7 @@ mod tests {
             hardness = 1.0
             material = "stone"
         "#;
-        let err = BlockRegistry::from_toml(bad, &mut tiles).expect_err("must not parse");
+        let err = BlockRegistry::from_toml(bad).expect_err("must not parse");
         assert!(err.contains("ghost"), "{err}");
     }
 
@@ -948,9 +961,8 @@ mod tests {
         let content = GameContent::load();
         let grass = content.blocks.find("grass").expect("shipped block");
 
-        // `Block::textures` is deliberately left empty: a derived tile index
-        // must never reach `content_hash`.
-        assert_eq!(content.blocks.get(grass).textures.0, [0; 6]);
+        // `Block` carries no tile index at all any more — every one of them is
+        // derived from art, and art must never reach `content_hash`.
 
         let faces = content.face_textures(grass);
         for dir in Direction::ALL {
@@ -1141,10 +1153,8 @@ mod tests {
         let b = GameContent::builtin();
         assert_eq!(a.hash, b.hash, "identical content must hash identically");
         assert_ne!(a.hash, 0);
-
-        let mut tiles = TileRegistry::with_engine_tiles();
         let tweaked = BUILTIN_BLOCKS.replace("hardness = 1.5", "hardness = 9.0");
-        let blocks = Arc::new(BlockRegistry::from_toml(&tweaked, &mut tiles).unwrap());
+        let blocks = Arc::new(BlockRegistry::from_toml(&tweaked).unwrap());
         let items = Arc::new(ItemRegistry::from_blocks(&blocks));
         let entities = Arc::new(EntityRegistry::builtin());
         let worldgen = Arc::new(WorldGenConfig::builtin(&blocks));
@@ -1160,7 +1170,6 @@ mod tests {
         let tweaked = BUILTIN_SPAWNING.replace("max_mobs = 40", "max_mobs = 99");
         let spawning = Arc::new(SpawnConfig::from_toml(&tweaked, &entities).unwrap());
         let blocks = Arc::new(builtin_blocks(&mut BlockCtx {
-            tiles: &mut TileRegistry::with_engine_tiles(),
             visuals: BlockVisuals::default(),
         }));
         let items = Arc::new(ItemRegistry::from_blocks(&blocks));

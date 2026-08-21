@@ -4,10 +4,10 @@
 use winit::event::MouseButton;
 
 use super::{AUTOSAVE_INTERVAL, DOUBLE_TAP_WINDOW, InGameState, PREVIEW_DRAG_SENSITIVITY};
-use crate::render::{PreviewFrame, SceneFrame};
-use crate::state::{GameState, PauseMenuState, StateContext, Transition};
+use crate::state::{GameState, PauseMenuState, StateContext, Transition, Wyvencraft};
 use crate::ui::hud;
 use crate::ui::nameplate::{self, Nameplate};
+use wyven_render::{PreviewFrame, SceneFrame};
 
 impl InGameState {
     /// Paint every visible player's username above their model.
@@ -57,7 +57,7 @@ impl InGameState {
     /// this a name reads straight through terrain. The march uses `is_solid` and
     /// `Target::Cell` — the same predicate mob line-of-sight uses — so a flower
     /// or a pane of glass never hides someone.
-    fn nameplate_occluded(&self, camera: &crate::render::Camera, position: glam::Vec3) -> bool {
+    fn nameplate_occluded(&self, camera: &wyven_render::Camera, position: glam::Vec3) -> bool {
         let anchor = position + glam::Vec3::Y * nameplate::ANCHOR_HEIGHT;
         let to_anchor = anchor - camera.position;
         let distance = to_anchor.length();
@@ -74,7 +74,7 @@ impl InGameState {
     }
 }
 
-impl GameState for InGameState {
+impl GameState<Wyvencraft> for InGameState {
     fn name(&self) -> &'static str {
         "InGame"
     }
@@ -86,7 +86,7 @@ impl GameState for InGameState {
     }
 
     fn update(&mut self, ctx: &mut StateContext) -> Transition {
-        let kb = ctx.settings.controls.keybinds.clone();
+        let kb = ctx.shared.settings.controls.keybinds.clone();
         // While the chat bar is open, egui owns the keyboard and gameplay keys
         // never reach `InputState` at all. These guards cover the one frame
         // between opening the bar and the widget taking focus.
@@ -144,8 +144,8 @@ impl GameState for InGameState {
             }
 
             // Mouse look.
-            let sens = ctx.settings.controls.mouse_sensitivity * 0.0025;
-            let pitch_sign = if ctx.settings.controls.invert_y {
+            let sens = ctx.shared.settings.controls.mouse_sensitivity * 0.0025;
+            let pitch_sign = if ctx.shared.settings.controls.invert_y {
                 1.0
             } else {
                 -1.0
@@ -174,9 +174,9 @@ impl GameState for InGameState {
             // Movement + physics. Refresh the worn defense first: `update` can
             // raise fall damage internally, and it must be mitigated by whatever
             // the player is wearing right now.
-            let movement = ctx.input.movement(&kb);
+            let movement = crate::config::movement(ctx.input, &kb);
             let dt = ctx.dt.min(0.05);
-            self.player.defense = self.inventory.total_defense(&self.items);
+            self.player.defense = self.inventory.total_defense(&self.content.items);
             let health_before = self.player.health;
             // Player physics is stepped at a fixed rate, not on the frame delta,
             // so jump height is the same at every framerate.
@@ -237,7 +237,7 @@ impl GameState for InGameState {
             }
         }
 
-        self.view.fov_degrees = ctx.settings.render.fov_degrees;
+        self.view.fov_degrees = ctx.shared.settings.render.fov_degrees;
         // Wrap the animation clock so f32 precision never degrades over long
         // sessions. The period must stay a whole multiple of every animated
         // texture's loop or the wrap skips a frame: `voxel_array.frag` steps a
@@ -260,7 +260,10 @@ impl GameState for InGameState {
         // Water flow: singleplayer/host simulate authoritatively and broadcast
         // each change; clients receive them as ordinary BlockChanged edits.
         if self.session.is_authority() {
-            for (pos, block) in self.fluids.tick(&mut self.world, ctx.dt) {
+            for (pos, block) in self
+                .fluids
+                .tick(&mut self.world, &self.content.blocks, ctx.dt)
+            {
                 self.broadcast_local_edit(pos, block);
             }
             // Mobs are host-authoritative like fluids; clients only render
@@ -268,14 +271,14 @@ impl GameState for InGameState {
             self.update_mobs(ctx.dt.min(0.05));
             self.update_spawning(ctx.dt);
         }
-        self.update_streaming(ctx.settings.render.render_distance);
+        self.update_streaming(ctx.shared.settings.render.render_distance);
         // Drops and arrows keep simulating even with the inventory or death
         // screen open.
         self.update_drops(ctx.dt.min(0.05));
         self.update_arrows(ctx.dt.min(0.05));
 
         // Simulation for this frame is settled; bring the GPU state in line.
-        self.refresh_view(ctx.resources.render, ctx.dt.min(0.05));
+        self.refresh_view(&ctx.shared.render, ctx.dt.min(0.05));
         Transition::None
     }
 
@@ -313,12 +316,12 @@ impl GameState for InGameState {
             let out = crate::ui::inventory::draw_inventory(
                 egui_ctx,
                 &self.inventory,
-                &self.items,
+                &self.content.items,
                 &self.recipes,
-                &ctx.resources.content.item_icons,
+                &ctx.shared.content.item_icons,
                 self.held,
                 self.player.mode,
-                ctx.resources.ui_tex,
+                ctx.shared.ui_tex,
             );
             if let Some(look) = out.head_look {
                 self.view.preview.look = look;
@@ -326,7 +329,7 @@ impl GameState for InGameState {
             if let Some(action) = out.action {
                 match action {
                     InvAction::Slot(index) => self.handle_slot_click(index),
-                    InvAction::Pick(id) => self.held = Some(self.items.full_stack(id)),
+                    InvAction::Pick(id) => self.held = Some(self.content.items.full_stack(id)),
                     InvAction::Craft(index) => self.handle_craft(index),
                     InvAction::Rotate(dx) => {
                         self.view.preview.yaw -= dx * PREVIEW_DRAG_SENSITIVITY;
@@ -346,9 +349,9 @@ impl GameState for InGameState {
         hud::draw_hotbar(
             egui_ctx,
             &self.inventory,
-            &self.items,
-            &ctx.resources.content.item_icons,
-            ctx.resources.ui_tex,
+            &self.content.items,
+            &ctx.shared.content.item_icons,
+            ctx.shared.ui_tex,
         );
         hud::draw_mode_indicator(egui_ctx, self.player.mode.label());
 
@@ -381,8 +384,8 @@ impl GameState for InGameState {
                 format!("on_ground: {}", self.player.on_ground),
                 format!(
                     "mobs: {} live / {} arrows / {} drops",
-                    self.mobs.len() + self.remote_mobs.len(),
-                    self.arrows.len(),
+                    self.mobs.live.len() + self.mobs.remote.len(),
+                    self.mobs.arrows.len(),
                     self.drops.len()
                 ),
                 format!("net: {}", self.net_status()),

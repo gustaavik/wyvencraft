@@ -8,9 +8,9 @@
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
-use super::{GameState, MainMenuState, StateContext, Transition};
-use crate::auth::{AccountState, AuthClient, AuthError, AuthSession, HttpAuthClient, KeyCache};
+use super::{GameState, MainMenuState, StateContext, Transition, Wyvencraft};
 use crate::save::AccountProfile;
+use wyven_auth::{AccountState, AuthClient, AuthError, AuthSession, HttpAuthClient, KeyCache};
 
 /// Which form is showing.
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -209,7 +209,7 @@ impl LoginState {
     }
 }
 
-impl GameState for LoginState {
+impl GameState<Wyvencraft> for LoginState {
     fn name(&self) -> &'static str {
         "Login"
     }
@@ -335,7 +335,7 @@ impl GameState for LoginState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::FakeAuthClient;
+    use wyven_auth::FakeAuthClient;
 
     /// Drive `poll` until the worker thread lands, so a test does not depend on
     /// scheduling. Fails rather than hanging if nothing ever arrives.

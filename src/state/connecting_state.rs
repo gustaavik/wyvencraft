@@ -12,9 +12,9 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::time::Duration;
 
-use super::{GameState, InGameState, MultiplayerMenuState, StateContext, Transition};
-use crate::auth::{AccountState, AuthClient, AuthError, HttpAuthClient, JoinTicket};
+use super::{GameState, InGameState, MultiplayerMenuState, StateContext, Transition, Wyvencraft};
 use crate::net::{Client, ServerMessage};
+use wyven_auth::{AccountState, AuthClient, AuthError, HttpAuthClient, JoinTicket};
 
 const TIMEOUT_SECS: f32 = 12.0;
 
@@ -63,7 +63,12 @@ impl ConnectingState {
         // Derived from the account, so the host matches a returning player to
         // their saved inventory and position across machines. The host checks
         // that this agrees with the ticket before letting anyone in.
-        let identity = account.netcode_id();
+        // Offline there is no account to derive one from, so it falls back to
+        // the local profile id. Harmless: an offline client has no ticket to
+        // present and every verifying host will turn it away regardless.
+        let identity = account
+            .netcode_id()
+            .unwrap_or_else(crate::save::local_identity);
 
         let (tx, rx) = channel();
         let account = account.clone();
@@ -92,7 +97,12 @@ impl ConnectingState {
         match rx.try_recv() {
             Ok(Ok(ticket)) => {
                 self.pending_ticket = None;
-                match Client::connect(self.address, self.identity, Some(ticket.slot)) {
+                match Client::connect(
+                    self.address,
+                    self.identity,
+                    crate::net::PROTOCOL_ID,
+                    Some(ticket.slot),
+                ) {
                     Ok(client) => {
                         self.client = Some(client);
                         self.status = format!("Connecting to {}...", self.address);
@@ -133,7 +143,7 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
-impl GameState for ConnectingState {
+impl GameState<Wyvencraft> for ConnectingState {
     fn name(&self) -> &'static str {
         "Connecting"
     }
@@ -186,10 +196,10 @@ impl GameState for ConnectingState {
             {
                 // Raw block/item ids cross the wire, so divergent content
                 // definitions would silently corrupt the session. Refuse.
-                if content_hash != ctx.resources.content.hash {
+                if content_hash != ctx.shared.content.hash {
                     log::warn!(
                         "content mismatch: host {content_hash:#018x} vs ours {:#018x}; refusing to join",
-                        ctx.resources.content.hash
+                        ctx.shared.content.hash
                     );
                     return Transition::Replace(Box::new(MultiplayerMenuState::new()));
                 }
@@ -219,7 +229,7 @@ impl GameState for ConnectingState {
             );
             let client = self.client.take().expect("client present");
             return Transition::Replace(Box::new(InGameState::new_client(
-                ctx.resources.content.clone(),
+                ctx.shared.content.clone(),
                 seed,
                 client,
                 your_id,

@@ -8,6 +8,7 @@
 use glam::Vec3;
 
 use super::{HOST_PLAYER_ID, InGameState};
+use crate::art::{mobskin, skin};
 use crate::core::{Aabb, BlockPos, Rng64};
 use crate::entity::kind::VisualSpec;
 use crate::entity::{
@@ -15,10 +16,10 @@ use crate::entity::{
     QuadrupedModel,
 };
 use crate::inventory::ItemStack;
-use crate::model::{ModelId, ModelRegistry};
 use crate::net::{Channel, ClientMessage, PlayerId, ServerMessage};
-use crate::render::{CpuMesh, mobskin, skin};
 use crate::world::Target;
+use wyven_model::{ModelId, ModelRegistry};
+use wyven_render::CpuMesh;
 
 /// Zombie shamble: both arms held straight out (≈ 80° forward of hanging).
 const ARMS_FORWARD_ANGLE: f32 = -1.4;
@@ -197,12 +198,12 @@ impl InGameState {
     /// kind is unknown or isn't a mob. The brain's random stream is seeded
     /// from the world seed and the mob id, so runs are reproducible.
     pub(super) fn spawn_mob(&mut self, kind_name: &str, position: Vec3) -> Option<MobId> {
-        let kind = self.entities.find(kind_name)?;
-        let id = MobId(self.next_mob_id);
+        let kind = self.content.entities.find(kind_name)?;
+        let id = MobId(self.mobs.next_id);
         let seed = self.world.seed() ^ id.0.wrapping_mul(0x9E37_79B9_7F4A_7C15);
         let mob = Mob::spawn(kind, id, position, seed)?;
-        self.next_mob_id += 1;
-        self.mobs.push(mob);
+        self.mobs.next_id += 1;
+        self.mobs.live.push(mob);
         self.emit_mob_event(ServerMessage::MobSpawned {
             id: id.0,
             kind: kind_name.to_string(),
@@ -222,6 +223,7 @@ impl InGameState {
             });
         }
         let eye_height = self
+            .content
             .entities
             .player()
             .movement
@@ -247,7 +249,7 @@ impl InGameState {
         // Arrows launched this tick: (origin eye, velocity, damage, gravity, lifetime).
         let mut fired: Vec<(Vec3, Vec3, f32, f32, f32)> = Vec::new();
 
-        for mob in &mut self.mobs {
+        for mob in &mut self.mobs.live {
             // Mobs straddling the streaming edge freeze until their chunk is
             // back (unloaded chunks read as solid, which would trap them).
             if !self
@@ -312,7 +314,8 @@ impl InGameState {
                 gravity,
                 lifetime,
             });
-            self.arrows
+            self.mobs
+                .arrows
                 .push(Arrow::new(origin, velocity, damage, gravity, lifetime));
         }
 
@@ -334,12 +337,12 @@ impl InGameState {
     /// `MobDespawned { killed_by }` and rolls the identical table itself.
     fn reap_dead_mobs(&mut self) {
         let mut i = 0;
-        while i < self.mobs.len() {
-            if !self.mobs[i].dead() {
+        while i < self.mobs.live.len() {
+            if !self.mobs.live[i].dead() {
                 i += 1;
                 continue;
             }
-            let mob = self.mobs.swap_remove(i);
+            let mob = self.mobs.live.swap_remove(i);
             let killed_by = mob.last_attacker.map(PlayerId);
             self.emit_mob_event(ServerMessage::MobDespawned {
                 id: mob.id.0,
@@ -356,7 +359,7 @@ impl InGameState {
     /// — the host and the killing client roll identical loot without it ever
     /// crossing the wire. Unknown item names are skipped with a warning.
     pub(super) fn pop_drops_for(&mut self, kind_name: &str, mob_id: u64, position: Vec3) {
-        let Some(kind) = self.entities.find(kind_name) else {
+        let Some(kind) = self.content.entities.find(kind_name) else {
             return;
         };
         let Some(params) = kind.mob.clone() else {
@@ -365,7 +368,7 @@ impl InGameState {
         let mut rng = Rng64::new(self.world.seed() ^ mob_id.wrapping_mul(0xA24B_AED4_963E_E407));
         let block = BlockPos::from_world(position + Vec3::Y * 0.25);
         for drop in &params.drops {
-            let Some(item) = self.items.find(&drop.item) else {
+            let Some(item) = self.content.items.find(&drop.item) else {
                 log::warn!(
                     "mob {kind_name:?} drop references unknown item {:?}; skipping",
                     drop.item
@@ -376,13 +379,13 @@ impl InGameState {
             if count == 0 {
                 continue;
             }
-            let stack = ItemStack::new(item, (count as u8).min(self.items.max_stack(item)));
+            let stack = ItemStack::new(item, (count as u8).min(self.content.items.max_stack(item)));
             let angle = self.view.elapsed * 9.73 + rng.range_f32(0.0, std::f32::consts::TAU);
             self.drops.push(crate::entity::DroppedItem::block_drop(
                 stack,
                 block,
                 angle,
-                self.entities.dropped_item(),
+                self.content.entities.dropped_item(),
             ));
         }
     }
@@ -393,7 +396,7 @@ impl InGameState {
     pub(super) fn melee_damage(&self) -> f32 {
         self.inventory
             .item_in_selected()
-            .and_then(|id| self.items.tool(id))
+            .and_then(|id| self.content.items.tool(id))
             .and_then(|tool| tool.damage)
             .unwrap_or(PLAYER_ATTACK_DAMAGE)
     }
@@ -418,13 +421,15 @@ impl InGameState {
             })
             .unwrap_or(reach);
         if !self.session.is_authority() {
-            self.remote_mobs
+            self.mobs
+                .remote
                 .iter()
                 .filter_map(|(id, mob)| Some((*id, mob.aabb().ray_hit(eye, look, max_t)?)))
                 .min_by(|a, b| a.1.total_cmp(&b.1))
                 .map(|(id, _)| MobTargetRef::Remote(id))
         } else {
             self.mobs
+                .live
                 .iter()
                 .enumerate()
                 .filter_map(|(i, mob)| Some((i, mob.aabb().ray_hit(eye, look, max_t)?)))
@@ -443,7 +448,7 @@ impl InGameState {
                 let push = Vec3::new(look.x, 0.0, look.z).normalize_or_zero() * KNOCKBACK_PUSH
                     + Vec3::Y * KNOCKBACK_LIFT;
                 let damage = self.melee_damage();
-                if let Some(mob) = self.mobs.get_mut(index) {
+                if let Some(mob) = self.mobs.live.get_mut(index) {
                     mob.damage(damage, push);
                     mob.last_attacker = Some(HOST_PLAYER_ID.0);
                     let hurt = ServerMessage::MobHurt {
@@ -467,7 +472,7 @@ impl InGameState {
         let authority = self.session.is_authority();
         let local_box = (authority && !self.dead && self.player.mode.takes_damage())
             .then(|| self.player.aabb());
-        let player_kind = self.entities.player().physics;
+        let player_kind = self.content.entities.player().physics;
         let remote_boxes: Vec<(PlayerId, Aabb)> = if authority {
             self.peers
                 .players
@@ -491,7 +496,7 @@ impl InGameState {
 
         let mut hits: Vec<(Option<PlayerId>, f32)> = Vec::new();
         let world = &self.world;
-        self.arrows.retain_mut(|arrow| {
+        self.mobs.arrows.retain_mut(|arrow| {
             if !arrow.update(dt, |p| world.is_solid_for_collision(p)) {
                 return false;
             }
@@ -525,7 +530,7 @@ impl InGameState {
     /// The planner is pure ([`crate::entity::Spawner::tick`]); this method
     /// feeds it the live world and applies its plan.
     pub(super) fn update_spawning(&mut self, dt: f32) {
-        let cfg = self.spawning.clone();
+        let cfg = self.content.spawning.clone();
         let mut anchors = vec![self.player.position];
         anchors.extend(self.peers.players.values().map(|r| r.position()));
         let is_night = self.day_cycle.is_night();
@@ -535,8 +540,8 @@ impl InGameState {
         let top = (self.player.position.y + 24.0) as i32;
 
         let world = &self.world;
-        let mobs = &self.mobs;
-        let requests = self.spawner.tick(
+        let mobs = &self.mobs.live;
+        let requests = self.mobs.spawner.tick(
             &cfg,
             dt,
             is_night,
@@ -550,7 +555,7 @@ impl InGameState {
                 let night_rule = cfg
                     .entry(&request.entity)
                     .is_some_and(|e| e.despawn_in_daylight);
-                if night_rule && let Some(mob) = self.mobs.last_mut() {
+                if night_rule && let Some(mob) = self.mobs.live.last_mut() {
                     mob.night_spawned = true;
                 }
                 log::debug!(
@@ -567,13 +572,13 @@ impl InGameState {
         let day = !is_night;
         let despawn_sq = cfg.limits.despawn_distance * cfg.limits.despawn_distance;
         let mut index = 0;
-        while index < self.mobs.len() {
-            let mob = &self.mobs[index];
+        while index < self.mobs.live.len() {
+            let mob = &self.mobs.live[index];
             let stray = anchors
                 .iter()
                 .all(|a| (mob.position - *a).length_squared() > despawn_sq);
             if stray || (day && mob.night_spawned) {
-                let id = self.mobs.swap_remove(index).id.0;
+                let id = self.mobs.live.swap_remove(index).id.0;
                 self.emit_mob_event(ServerMessage::MobDespawned {
                     id,
                     killed_by: None,
