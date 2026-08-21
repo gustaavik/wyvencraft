@@ -38,8 +38,8 @@ use std::collections::HashMap;
 
 use glam::Vec3;
 
-use crate::content::ContentSource;
-use crate::render::Rgba8;
+use wyven_assets::AssetSource as ContentSource;
+use wyven_assets::Rgba8;
 
 pub use mesh::ModelMesh;
 
@@ -252,7 +252,7 @@ pub(crate) fn resolve_sibling(dir: &str, path: &str) -> String {
 /// Collapse `.` and `..` segments in an `assets/`-relative path.
 ///
 /// The OS would do this for a real filesystem read, but content also comes from
-/// [`crate::content::MapSource`], which looks paths up verbatim — so a block
+/// [`wyven_assets::MapSource`], which looks paths up verbatim — so a block
 /// model in `assets/blocks/` naming `"../textures/dirt.png"` only resolves the
 /// same way from both sources if the collapsing happens here.
 ///
@@ -276,7 +276,7 @@ fn normalize_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::content::{FsSource, MapSource};
+    use wyven_assets::{FsSource, MapSource};
 
     const GLTF: &str = "assets/models/vine_sword.gltf";
     const BBMODEL: &str = "assets/models/vine_sword.bbmodel";

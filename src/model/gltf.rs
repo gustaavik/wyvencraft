@@ -16,8 +16,8 @@ use std::collections::HashMap;
 use glam::{Mat3, Mat4, Quat, Vec2, Vec3};
 use serde::Deserialize;
 
-use crate::content::ContentSource;
-use crate::render::texture::decode_png;
+use wyven_assets::AssetSource as ContentSource;
+use wyven_assets::decode_png;
 
 use super::datauri::{self, Uri};
 use super::mesh::ModelMesh;
@@ -456,7 +456,7 @@ impl Document {
         dir: &str,
         source: &dyn ContentSource,
         buffers: &[Vec<u8>],
-    ) -> Result<crate::render::Rgba8, String> {
+    ) -> Result<wyven_assets::Rgba8, String> {
         if self.materials.len() > 1 {
             log::warn!(
                 "glTF has {} materials; all geometry will sample the first one's texture",

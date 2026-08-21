@@ -3,7 +3,7 @@
 
 use glam::{Mat4, Vec3, Vec4};
 
-use super::types::Direction;
+use crate::types::Direction;
 
 /// Rotate a point about the Y axis by `yaw` radians.
 ///

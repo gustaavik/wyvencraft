@@ -30,10 +30,10 @@ use std::collections::HashMap;
 use glam::Vec3;
 use serde::Deserialize;
 
-use crate::content::ContentSource;
 use crate::core::Direction;
-use crate::render::Rgba8;
-use crate::render::texture::decode_png;
+use wyven_assets::AssetSource as ContentSource;
+use wyven_assets::Rgba8;
+use wyven_assets::decode_png;
 
 use super::bbmodel::{
     FACES, FaceDir, PIXELS_PER_BLOCK, Resolution, Transform, face_corners, face_uvs,
@@ -493,7 +493,7 @@ fn texture_path(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::content::{FsSource, MapSource};
+    use wyven_assets::{FsSource, MapSource};
 
     const DIRT: &str = "assets/blocks/dirt_block.json";
     const GRASS: &str = "assets/blocks/grass_block.json";

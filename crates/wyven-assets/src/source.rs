@@ -1,11 +1,11 @@
-//! Where [`GameContent`](super::GameContent) reads its TOML definitions from.
+//! Where an asset's bytes come from.
 //!
-//! The registries don't care whether a definition file came off disk, out of the
-//! binary, or from a test fixture — only that they get its text (or a "not
-//! found", which every loader answers with its embedded builtin copy). Keeping
-//! that behind [`ContentSource`] is what lets content loading be tested without
-//! touching the filesystem, and what makes `load()` and `builtin()` the same
-//! code path with a different source.
+//! Loaders don't care whether a file came off disk, out of the binary, or from a
+//! test fixture — only that they get its bytes (or a "not found", which every
+//! caller answers with its own builtin fallback). Keeping that behind
+//! [`AssetSource`] is what lets content and model loading be tested without
+//! touching the filesystem, and what makes a real load and a builtins-only load
+//! the same code path with a different source.
 
 use std::collections::HashMap;
 use std::io;
@@ -19,9 +19,9 @@ use std::io;
 /// Bytes are the primitive and text is derived from them, rather than the other
 /// way round: the definition files are TOML, but model files bring PNG textures
 /// and binary vertex buffers along, and routing those through a `String` would
-/// mangle them. Implementors supply [`ContentSource::read_bytes`]; the TOML
-/// loaders keep calling [`ContentSource::read`] and are none the wiser.
-pub trait ContentSource {
+/// mangle them. Implementors supply [`AssetSource::read_bytes`]; the TOML
+/// loaders keep calling [`AssetSource::read`] and are none the wiser.
+pub trait AssetSource {
     fn read_bytes(&self, path: &str) -> io::Result<Vec<u8>>;
 
     /// The same file as UTF-8 text. Non-UTF-8 content reports `InvalidData`,
@@ -35,7 +35,7 @@ pub trait ContentSource {
 /// Reads from the working directory, exactly like `assets/` and `saves/`.
 pub struct FsSource;
 
-impl ContentSource for FsSource {
+impl AssetSource for FsSource {
     fn read_bytes(&self, path: &str) -> io::Result<Vec<u8>> {
         std::fs::read(path)
     }
@@ -49,7 +49,7 @@ impl ContentSource for FsSource {
 /// This is what makes `GameContent::builtin()` a plain call to `from_source`.
 pub struct EmbeddedSource;
 
-impl ContentSource for EmbeddedSource {
+impl AssetSource for EmbeddedSource {
     fn read_bytes(&self, _path: &str) -> io::Result<Vec<u8>> {
         Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -80,7 +80,7 @@ impl MapSource {
     }
 }
 
-impl ContentSource for MapSource {
+impl AssetSource for MapSource {
     fn read_bytes(&self, path: &str) -> io::Result<Vec<u8>> {
         self.0.get(path).cloned().ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, format!("no fixture for {path}"))
@@ -96,12 +96,12 @@ impl ContentSource for MapSource {
 /// `describe` renders the success message's subject ("loaded 42 blocks from ..."),
 /// since some registries report a count and others have nothing to count.
 ///
-/// `ctx` is threaded through *both* closures rather than captured, because the
-/// block loader needs `&mut TileRegistry` on the parse and the fallback paths
-/// alike — two closures can't each hold that borrow. Loaders that need no
-/// context pass `&mut ()`.
-pub(super) fn load_or_builtin<T, C: ?Sized>(
-    source: &dyn ContentSource,
+/// `ctx` is threaded through *both* closures rather than captured, because a
+/// loader may need the same `&mut` borrow on the parse and the fallback paths
+/// alike — two closures can't each hold it. Loaders that need no context pass
+/// `&mut ()`.
+pub fn load_or_builtin<T, C: ?Sized>(
+    source: &dyn AssetSource,
     path: &str,
     label: &str,
     ctx: &mut C,

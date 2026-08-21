@@ -15,9 +15,9 @@ use std::collections::HashMap;
 use glam::{EulerRot, Mat4, Quat, Vec3};
 use serde::Deserialize;
 
-use crate::content::ContentSource;
 use crate::core::Direction;
-use crate::render::texture::decode_png;
+use wyven_assets::AssetSource as ContentSource;
+use wyven_assets::decode_png;
 
 use super::datauri::{self, Uri};
 use super::mesh::ModelMesh;
@@ -375,7 +375,7 @@ impl Document {
         &self,
         dir: &str,
         source: &dyn ContentSource,
-    ) -> Result<crate::render::Rgba8, String> {
+    ) -> Result<wyven_assets::Rgba8, String> {
         let entry = self.textures.first().ok_or("bbmodel has no textures")?;
         if self.textures.len() > 1 {
             log::warn!(

@@ -14,7 +14,7 @@ pub const CHUNK_HEIGHT: i32 = 256;
 pub const CHUNK_VOLUME: usize = (CHUNK_SIZE * CHUNK_SIZE * CHUNK_HEIGHT) as usize;
 
 /// Identifier of a block *type* (e.g. air, stone, grass). Index into the
-/// [`crate::world::block::BlockRegistry`].
+/// game's block registry — the engine assigns no meaning to the number.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]

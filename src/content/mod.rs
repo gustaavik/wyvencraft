@@ -12,8 +12,6 @@
 //! so the same load path serves the real `assets/` directory, the
 //! builtins-only build, and test fixtures.
 
-pub mod source;
-
 use std::sync::Arc;
 
 use crate::core::Direction;
@@ -23,7 +21,6 @@ use crate::inventory::ItemRegistry;
 use crate::model::{ModelId, ModelRegistry, ModelSpec, blockjson};
 use crate::render::TileRegistry;
 use crate::render::block_textures::{self, AnimatedLayers, BlockTextureSet, Strip};
-use crate::render::texture::decode_png;
 use crate::world::block::{
     BUILTIN_BLOCKS, BlockJsonSpec, BlockModel, BlockModelSpec, BlockRegistry, BlockVisuals,
     FaceTextures, FluidVisual, model_hitbox,
@@ -31,9 +28,13 @@ use crate::world::block::{
 use crate::world::blockmodel::BakedBlockModel;
 use crate::world::generation::WorldGenConfig;
 use crate::world::meshing::BlockModels;
+use wyven_assets::decode_png;
 
-use source::load_or_builtin;
-pub use source::{ContentSource, EmbeddedSource, FsSource, MapSource};
+// The byte-source port lives in `wyven_assets` — the model loaders need it
+// too, and they sit below game content. Re-exported under the old name so
+// every caller and fixture keeps reading.
+use wyven_assets::load_or_builtin;
+pub use wyven_assets::{AssetSource as ContentSource, EmbeddedSource, FsSource, MapSource};
 
 /// How an item is drawn as a 2D icon in the inventory and hotbar. Computed once
 /// at content load and indexed by `ItemId`, so the UI never touches block or
