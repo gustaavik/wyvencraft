@@ -32,13 +32,14 @@ use std::sync::Arc;
 use glam::Vec3;
 
 use crate::chat::{ChatState, OpsList};
-use crate::content::ItemModel;
+use crate::content::{FluidTexture, ItemModel};
 use crate::core::{BlockPos, DayCycle};
 use crate::entity::{Arrow, DroppedItem, EntityRegistry, Mob, Player, SpawnConfig, Spawner};
 use crate::inventory::{Inventory, ItemRegistry, ItemStack, RecipeBook};
 use crate::model::ModelRegistry;
 use crate::state::session::Session;
-use crate::world::block::BlockModel;
+use crate::world::block::{BlockModel, FaceTextures};
+use crate::world::blockmodel::BakedBlockModel;
 use crate::world::{BlockRegistry, ChunkLoader, FluidSim, World};
 use peers::Peers;
 use persistence::Persistence;
@@ -97,6 +98,16 @@ pub struct InGameState {
     /// Which model each *block* is drawn as, indexed by `BlockId`. Visual-only
     /// for the same reason, and read by the chunk mesher.
     pub block_models: Arc<Vec<Option<BlockModel>>>,
+    /// The Blockbench-authored geometry for each block, indexed by `BlockId`.
+    /// Supersedes `block_models` for any block present in both, and is where
+    /// every block ends up once it has been re-authored.
+    pub baked_models: Arc<Vec<Option<BakedBlockModel>>>,
+    /// Atlas tiles derived from each Blockbench block's own textures, indexed by
+    /// `BlockId`: what a dropped stack's little cube is drawn with.
+    pub block_face_tiles: Arc<Vec<Option<FaceTextures>>>,
+    /// The animation strip each fluid block draws from, indexed by `BlockId`.
+    /// Fluids carry no model, so this is where the mesher reads their layers.
+    pub fluid_textures: Arc<Vec<Option<FluidTexture>>>,
     /// Fingerprint of the loaded content; hosts send it in `Welcome` so
     /// mismatched clients refuse the session (raw ids cross the wire).
     content_hash: u64,

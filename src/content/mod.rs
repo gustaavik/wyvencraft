@@ -20,12 +20,17 @@ use crate::core::Direction;
 use crate::entity::kind::VisualSpec;
 use crate::entity::{EntityRegistry, SpawnConfig};
 use crate::inventory::ItemRegistry;
-use crate::model::{ModelId, ModelRegistry, ModelSpec};
+use crate::model::{ModelId, ModelRegistry, ModelSpec, blockjson};
 use crate::render::TileRegistry;
+use crate::render::block_textures::{self, AnimatedLayers, BlockTextureSet, Strip};
+use crate::render::texture::decode_png;
 use crate::world::block::{
-    BUILTIN_BLOCKS, BlockModel, BlockModelSpec, BlockRegistry, model_hitbox,
+    BUILTIN_BLOCKS, BlockJsonSpec, BlockModel, BlockModelSpec, BlockRegistry, BlockVisuals,
+    FaceTextures, FluidVisual, model_hitbox,
 };
+use crate::world::blockmodel::BakedBlockModel;
 use crate::world::generation::WorldGenConfig;
+use crate::world::meshing::BlockModels;
 
 use source::load_or_builtin;
 pub use source::{ContentSource, EmbeddedSource, FsSource, MapSource};
@@ -63,6 +68,9 @@ pub struct GameContent {
     /// Texture name → atlas tile assignments plus the CPU-side atlas pixels
     /// (uploaded once by the renderer at startup).
     pub tiles: TileRegistry,
+    /// The 256×256 textures Blockbench-authored blocks sample, one array layer
+    /// each. Uploaded once by the renderer alongside the atlas.
+    pub block_textures: BlockTextureSet,
     pub blocks: Arc<BlockRegistry>,
     pub items: Arc<ItemRegistry>,
     pub entities: Arc<EntityRegistry>,
@@ -81,6 +89,17 @@ pub struct GameContent {
     /// meshed by baking that model into its cell instead of six atlas-textured
     /// cube faces. Kept off `Block` for the same reason as [`ItemModel`].
     pub block_models: Vec<Option<BlockModel>>,
+    /// Blockbench-authored geometry for each block, indexed by `BlockId`. The
+    /// direction every block is moving in; also kept off `Block`.
+    pub baked_models: Vec<Option<BakedBlockModel>>,
+    /// Atlas tiles derived from a Blockbench block's own textures, indexed by
+    /// `BlockId` — see [`GameContent::face_textures`], which is how everything
+    /// outside the chunk mesh should read them.
+    pub block_face_tiles: Vec<Option<FaceTextures>>,
+    /// The animation strip each fluid block draws from, indexed by `BlockId`
+    /// and covering the auto-registered flowing blocks too. Kept off `Block`
+    /// for the same reason as [`BlockModel`].
+    pub fluid_textures: Vec<Option<FluidTexture>>,
     /// Fingerprint of every gameplay-affecting definition. Exchanged in the
     /// multiplayer `Welcome`: raw block/item ids cross the wire, so a session
     /// between peers with divergent content would silently corrupt worlds —
@@ -122,18 +141,22 @@ impl GameContent {
         // stay out of `content_hash`.
         let mut block_ctx = BlockCtx {
             tiles: &mut tiles,
-            models: Vec::new(),
+            visuals: BlockVisuals::default(),
         };
         let blocks = Arc::new(load_or_builtin(
             source,
             BLOCKS_PATH,
             "blocks",
             &mut block_ctx,
-            |text, ctx| BlockRegistry::from_toml_with_models(text, ctx.tiles, &mut ctx.models),
+            |text, ctx| BlockRegistry::from_toml_with_models(text, ctx.tiles, &mut ctx.visuals),
             builtin_blocks,
             |reg| format!("{} blocks", reg.len()),
         ));
-        let block_model_specs = block_ctx.models;
+        let BlockVisuals {
+            models: block_model_specs,
+            json: block_json_paths,
+            fluids: fluid_visuals,
+        } = block_ctx.visuals;
         // Item models ride out on the `ctx` channel rather than on `Item`
         // itself: they are visual-only and must stay out of `content_hash`.
         let mut item_model_specs: Vec<Option<ModelSpec>> = Vec::new();
@@ -225,10 +248,58 @@ impl GameContent {
             })
             .collect();
 
-        let item_icons = build_item_icons(&mut tiles, &blocks, &items, &item_models);
+        // Blocks authored in Blockbench. Each `.json` is parsed, its textures
+        // take layers of the shared array, and the geometry is baked into quads
+        // the chunk mesher can place with a translation. Fail-soft like every
+        // other content load: a bad model costs its own block's appearance (it
+        // falls back to whatever `textures` it declared) and nothing else.
+        let mut block_textures = BlockTextureSet::new();
+        let mut baked_models: Vec<Option<BakedBlockModel>> = Vec::new();
+        let mut block_face_tiles: Vec<Option<FaceTextures>> = Vec::new();
+        for spec in &block_json_paths {
+            let baked = spec
+                .as_ref()
+                .and_then(|spec| load_block_model(spec, source, &mut block_textures));
+            block_face_tiles.push(
+                baked
+                    .as_ref()
+                    .map(|m| derive_face_tiles(m, &block_textures, &mut tiles)),
+            );
+            baked_models.push(baked);
+        }
+
+        // Fluids draw from an animation strip rather than a model: the frames
+        // take a run of array layers each, and the mesher steps through them.
+        let mut fluid_textures: Vec<Option<FluidTexture>> = Vec::new();
+        for (id, visual) in fluid_visuals.iter().enumerate() {
+            let fluid = visual
+                .as_ref()
+                .and_then(|visual| load_fluid_texture(visual, source, &mut block_textures));
+            // The inventory icon and the dropped-item cube still sample the
+            // atlas, so a fluid needs the same 16-pixel stand-in a Blockbench
+            // block gets — its first still frame, which is the frame the block
+            // spends most of its time looking like.
+            if let Some(tex) = &fluid
+                && block_face_tiles[id].is_none()
+                && let Some(image) = block_textures.layer(tex.still.first)
+            {
+                let tile = tiles
+                    .insert(
+                        &format!("blockmodel:{}", tex.still.first),
+                        block_textures::to_atlas_tile(image),
+                    )
+                    .tile;
+                block_face_tiles[id] = Some(FaceTextures::uniform(tile));
+            }
+            fluid_textures.push(fluid);
+        }
+
+        let item_icons =
+            build_item_icons(&mut tiles, &blocks, &items, &item_models, &block_face_tiles);
         let hash = content_hash(&blocks, &items, &entities, &worldgen, &spawning);
         Arc::new(Self {
             tiles,
+            block_textures,
             blocks,
             items,
             entities,
@@ -238,9 +309,182 @@ impl GameContent {
             item_icons,
             item_models,
             block_models,
+            baked_models,
+            block_face_tiles,
+            fluid_textures,
             hash,
         })
     }
+
+    /// The model geometry the chunk mesher needs, borrowed from this content.
+    pub fn block_models(&self) -> BlockModels<'_> {
+        BlockModels {
+            models: &self.models,
+            blocks: &self.block_models,
+            baked: &self.baked_models,
+            fluids: &self.fluid_textures,
+        }
+    }
+
+    /// The six atlas tiles standing in for `block` outside the chunk mesh — its
+    /// inventory icon, and the little cube a dropped stack is drawn as.
+    ///
+    /// A Blockbench-authored block has these derived from its own model
+    /// textures; every other block uses the tiles `blocks.toml` named for it.
+    /// Kept here rather than written back onto `Block` because `Block` feeds
+    /// [`content_hash`], and a derived tile index would then refuse a join over
+    /// a difference that is purely visual.
+    pub fn face_textures(&self, block: crate::core::BlockId) -> FaceTextures {
+        self.block_face_tiles
+            .get(block.0 as usize)
+            .copied()
+            .flatten()
+            .unwrap_or(self.blocks.get(block).textures)
+    }
+}
+
+/// Where a fluid block's animation lives in the block texture array.
+///
+/// Both columns of the strip are resolved even for a source block: the
+/// auto-registered flowing blocks share this entry, and which column a face
+/// takes is a per-face decision the mesher makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FluidTexture {
+    /// Column 1 — top and bottom faces, and every face of a source block.
+    pub still: AnimatedLayers,
+    /// Column 0 — the side faces of a flowing block.
+    pub flowing: AnimatedLayers,
+    pub fps: u8,
+    /// `tintindex` into the biome colours; `2` is water.
+    pub tint: Option<u8>,
+}
+
+/// Column of the strip each of the two states reads. Documented in
+/// `assets/blocks.toml`; a one-column strip collapses both onto column 0.
+const FLOWING_COLUMN: u32 = 0;
+const STILL_COLUMN: u32 = 1;
+
+/// Load a fluid's animation strip into the block texture array, or warn and
+/// give up on it — the block then falls back to whatever `textures` it
+/// declared, which for water is the magenta marker.
+fn load_fluid_texture(
+    visual: &FluidVisual,
+    source: &dyn ContentSource,
+    textures: &mut BlockTextureSet,
+) -> Option<FluidTexture> {
+    let spec = &visual.spec;
+    let path = spec.path.as_str();
+    let bytes = match source.read_bytes(path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            log::warn!("could not read fluid texture {path}: {err}");
+            return None;
+        }
+    };
+    let image = match decode_png(&bytes) {
+        Ok(image) => image,
+        Err(err) => {
+            log::warn!("could not decode fluid texture {path}: {err}");
+            return None;
+        }
+    };
+    let frames = u32::from(spec.frames);
+    // A one-column strip has no separate still art, so both states read it;
+    // `resolve_strip` rejects a column past the end rather than guessing.
+    let two_columns = image
+        .height()
+        .checked_div(frames)
+        .is_some_and(|size| size > 0 && image.width() > size);
+    let still_column = if two_columns {
+        STILL_COLUMN
+    } else {
+        FLOWING_COLUMN
+    };
+    // The flowing blocks of a fluid share their source's strip, so this runs
+    // once per block but allocates layers only the first time.
+    let before = textures.len();
+    let strip = |column| Strip {
+        column,
+        frames,
+        alpha: spec.opacity,
+    };
+    let flowing = textures.resolve_strip(path, &image, strip(FLOWING_COLUMN));
+    let still = textures.resolve_strip(path, &image, strip(still_column));
+    if still == AnimatedLayers::MISSING || flowing == AnimatedLayers::MISSING {
+        return None;
+    }
+    if textures.len() > before {
+        log::info!(
+            "loaded fluid texture {path} ({} frames per column at {} fps)",
+            spec.frames,
+            spec.fps
+        );
+    }
+    Some(FluidTexture {
+        still,
+        flowing,
+        fps: spec.fps,
+        tint: spec.tint,
+    })
+}
+
+/// Parse one Blockbench block model and bake it, or warn and give up on it.
+fn load_block_model(
+    spec: &BlockJsonSpec,
+    source: &dyn ContentSource,
+    textures: &mut BlockTextureSet,
+) -> Option<BakedBlockModel> {
+    let path = spec.path.as_str();
+    let bytes = match source.read_bytes(path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            log::warn!("could not read block model {path}: {err}");
+            return None;
+        }
+    };
+    let dir = path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+    match blockjson::load(&bytes, dir, source) {
+        Ok(model) => {
+            let baked = BakedBlockModel::bake(&model, textures, spec.random_yaw);
+            log::info!(
+                "loaded block model {path} ({} quads, {} textures)",
+                baked.quads.len(),
+                model.textures.len()
+            );
+            Some(baked)
+        }
+        Err(err) => {
+            log::warn!("could not load block model {path}: {err}");
+            None
+        }
+    }
+}
+
+/// Reduce a baked model's face textures to one atlas tile each.
+///
+/// Keyed by `"blockmodel:<layer>"` so two blocks covering a face with the same
+/// texture share a tile rather than each burning one of the atlas's few free
+/// slots. A face nothing covers keeps tile 0 — a model with no bottom has no
+/// honest bottom to show on an icon.
+fn derive_face_tiles(
+    model: &BakedBlockModel,
+    textures: &BlockTextureSet,
+    tiles: &mut TileRegistry,
+) -> FaceTextures {
+    let mut faces = [0u32; 6];
+    for (face, layer) in faces.iter_mut().zip(model.face_layers()) {
+        let Some(layer) = layer else { continue };
+        let Some(image) = textures.layer(layer) else {
+            continue;
+        };
+        *face = tiles
+            .insert(
+                &format!("blockmodel:{layer}"),
+                block_textures::to_atlas_tile(image),
+            )
+            .tile;
+    }
+    FaceTextures(faces)
 }
 
 /// Resolve an icon for every item. A placeable solid block becomes an isometric
@@ -251,6 +495,7 @@ fn build_item_icons(
     blocks: &BlockRegistry,
     items: &ItemRegistry,
     item_models: &[Option<ItemModel>],
+    block_face_tiles: &[Option<FaceTextures>],
 ) -> Vec<ItemIcon> {
     items
         .iter()
@@ -265,14 +510,36 @@ fn build_item_icons(
             if let Some(block_id) = item.place_block {
                 let block = blocks.get(block_id);
                 if block.is_visible() && block.fluid.is_none() {
+                    // A Blockbench-authored block's tiles are derived from its
+                    // own model textures; everything else uses what
+                    // `blocks.toml` named. Same shape either way, so the icon
+                    // keeps the familiar isometric cube rather than needing a
+                    // second orientation in the 3D icon sheet.
+                    let faces = block_face_tiles
+                        .get(block_id.0 as usize)
+                        .copied()
+                        .flatten()
+                        .unwrap_or(block.textures);
                     return ItemIcon::Cube {
-                        top: block.textures.tile(Direction::PosY),
-                        left: block.textures.tile(Direction::NegZ),
-                        right: block.textures.tile(Direction::PosX),
+                        top: faces.tile(Direction::PosY),
+                        left: faces.tile(Direction::NegZ),
+                        right: faces.tile(Direction::PosX),
                     };
                 }
             }
-            ItemIcon::Flat(tiles.resolve(&item.name).tile)
+            // A fluid has no cube icon but does have derived tiles; preferring
+            // them keeps it off the name lookup, which has no art to find.
+            let derived = item.place_block.and_then(|block_id| {
+                block_face_tiles
+                    .get(block_id.0 as usize)
+                    .copied()
+                    .flatten()
+                    .map(|faces| faces.tile(Direction::PosY))
+            });
+            match derived {
+                Some(tile) => ItemIcon::Flat(tile),
+                None => ItemIcon::Flat(tiles.resolve(&item.name).tile),
+            }
         })
         .collect()
 }
@@ -340,11 +607,11 @@ fn placed_bounds(model: &crate::model::Model, spec: &BlockModelSpec) -> (glam::V
 /// shared tile registry, plus the `[block.model]` specs it reports back.
 struct BlockCtx<'a> {
     tiles: &'a mut TileRegistry,
-    models: Vec<Option<BlockModelSpec>>,
+    visuals: BlockVisuals,
 }
 
 fn builtin_blocks(ctx: &mut BlockCtx<'_>) -> BlockRegistry {
-    BlockRegistry::from_toml_with_models(BUILTIN_BLOCKS, ctx.tiles, &mut ctx.models)
+    BlockRegistry::from_toml_with_models(BUILTIN_BLOCKS, ctx.tiles, &mut ctx.visuals)
         .expect("embedded blocks.toml must parse")
 }
 
@@ -515,6 +782,188 @@ mod tests {
     /// Every `[item.model]` in the shipped data must resolve to real geometry.
     ///
     /// This reads the actual `assets/` tree, so it is the check that catches a
+    /// The shipped water strip must actually load: a mistyped path or a
+    /// mis-shaped PNG degrades water to the magenta marker, since it no longer
+    /// declares any atlas `textures` to fall back to.
+    #[test]
+    fn the_shipped_water_animation_loads_for_every_fluid_block() {
+        let content = GameContent::load();
+        let water = content.blocks.find("water").expect("shipped block");
+        let tex = content.fluid_textures[water.0 as usize].expect("water is animated");
+        assert_eq!(tex.still.frames, 64);
+        assert_eq!(tex.flowing.frames, 64);
+        assert_ne!(
+            tex.still.first, tex.flowing.first,
+            "the two columns are separate runs of layers"
+        );
+        assert_eq!(tex.tint, Some(2), "water takes the biome water colour");
+
+        // The strip's own alpha is a placeholder; `opacity` is what decides how
+        // much of the riverbed shows through, since a body of water is one
+        // blended sheet however deep it is.
+        let frame = content
+            .block_textures
+            .layer(tex.still.first)
+            .expect("still frame");
+        let alpha = frame.pixels[3];
+        assert!(
+            (200..255).contains(&alpha),
+            "water should read as water, not as glass: alpha {alpha}"
+        );
+
+        // The inventory icon and the dropped-item cube still sample the atlas,
+        // so a fluid needs a real stand-in tile there rather than the marker.
+        let faces = content.face_textures(water);
+        assert_ne!(
+            faces.tile(crate::core::Direction::PosY),
+            0,
+            "water must not fall back to the missing-texture tile"
+        );
+
+        // The auto-registered flowing blocks share the source's entry, or a
+        // spreading stream would fall back to the marker halfway down a hill.
+        for level in 1..=7 {
+            let id = content.blocks.flowing(0, level);
+            assert_eq!(
+                content.fluid_textures[id.0 as usize],
+                Some(tex),
+                "water flow {level}"
+            );
+        }
+    }
+
+    /// A fluid whose strip cannot be read must not fail the load — it degrades
+    /// to the block's own `textures`, like every other content failure.
+    #[test]
+    fn an_unreadable_fluid_strip_degrades_to_no_animation() {
+        let blocks = BUILTIN_BLOCKS.replace(
+            "assets/textures/water_flow.png",
+            "assets/textures/no_such_fluid.png",
+        );
+        let content = GameContent::from_source(&MapSource::new().with(BLOCKS_PATH, &blocks));
+        let water = content.blocks.find("water").expect("declared");
+        assert!(content.fluid_textures[water.0 as usize].is_none());
+        assert_eq!(
+            content.blocks.len(),
+            BlockRegistry::with_builtins().len(),
+            "the rest of the block set is untouched"
+        );
+    }
+
+    /// Every block naming a `block_model` must actually have baked geometry —
+    /// a mistyped path or an unreadable export otherwise degrades quietly to an
+    /// invisible block, which is far harder to notice than a broken icon.
+    #[test]
+    fn every_blockbench_block_in_the_shipped_data_loads() {
+        let content = GameContent::load();
+        let modelled: Vec<&str> = content
+            .baked_models
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.is_some())
+            .map(|(id, _)| {
+                content
+                    .blocks
+                    .get(crate::core::BlockId(id as u16))
+                    .name
+                    .as_str()
+            })
+            .collect();
+        assert_eq!(
+            modelled,
+            vec![
+                "stone",
+                "dirt",
+                "grass",
+                "sand",
+                "oak log",
+                "oak leaves",
+                "gravel",
+                "coal ore",
+                "iron ore",
+                "copper ore",
+                "cobblestone",
+                "cornflower",
+            ],
+            "the blocks migrated to Blockbench so far"
+        );
+
+        // Solid terrain cubes must fill their cell so neighbours can cull
+        // against them. The other two legitimately do not: leaves are a cutout,
+        // and a cornflower is two crossed planes.
+        let see_through = ["oak leaves", "cornflower"];
+
+        for (id, baked) in content.baked_models.iter().enumerate() {
+            let Some(baked) = baked else { continue };
+            let name = content
+                .blocks
+                .get(crate::core::BlockId(id as u16))
+                .name
+                .as_str();
+            assert!(!baked.quads.is_empty(), "{name}: no geometry");
+            let expected = !see_through.contains(&name);
+            assert_eq!(
+                baked.occludes, [expected; 6],
+                "{name}: wrong occlusion for what it is"
+            );
+            for quad in &baked.quads {
+                assert_ne!(quad.layer, 0, "{name}: sampling the missing-texture layer");
+            }
+        }
+    }
+
+    /// A flower is two crossed planes, so the crosshair must not reach it from
+    /// the far corner of its cell — and its box must be a real box, not the
+    /// inverted one a model with no vertical extent used to produce.
+    #[test]
+    fn a_modelled_plant_gets_a_hitbox_smaller_than_its_cell() {
+        let content = GameContent::load();
+        let id = content.blocks.find("cornflower").expect("shipped block");
+        let baked = content.baked_models[id.0 as usize]
+            .as_ref()
+            .expect("cornflower is modelled");
+
+        assert!(baked.random_yaw, "flowers vary their angle");
+        let hitbox = baked.hitbox.expect("a plant does not fill its cell");
+        let size = hitbox.max - hitbox.min;
+        assert!(size.x > 0.0 && size.y > 0.0 && size.z > 0.0, "{size}");
+        assert!(size.y <= 1.0, "taller than its cell: {size}");
+
+        // A full cube needs no box of its own — the raycast marches through it.
+        let stone = content.blocks.find("stone").expect("shipped block");
+        let cube = content.baked_models[stone.0 as usize]
+            .as_ref()
+            .expect("stone is modelled");
+        assert!(
+            cube.hitbox.is_none(),
+            "a full cube should stay a plain cell"
+        );
+    }
+
+    /// Dropped stacks and inventory icons still draw six-sided atlas cubes, so a
+    /// Blockbench block needs a small stand-in tile per face derived from its own
+    /// textures. Without it they would all show the magenta marker.
+    #[test]
+    fn a_blockbench_block_has_derived_atlas_tiles_for_its_faces() {
+        let content = GameContent::load();
+        let grass = content.blocks.find("grass").expect("shipped block");
+
+        // `Block::textures` is deliberately left empty: a derived tile index
+        // must never reach `content_hash`.
+        assert_eq!(content.blocks.get(grass).textures.0, [0; 6]);
+
+        let faces = content.face_textures(grass);
+        for dir in Direction::ALL {
+            assert_ne!(
+                faces.tile(dir),
+                0,
+                "{dir:?} fell back to the missing marker"
+            );
+        }
+        // The top and the bottom come from different art (grass vs dirt).
+        assert_ne!(faces.tile(Direction::PosY), faces.tile(Direction::NegY));
+    }
+
     /// mistyped path, a Blockbench export the loader cannot read, or a model
     /// saved without its texture — all of which otherwise degrade quietly to a
     /// magenta icon at runtime.
@@ -712,7 +1161,7 @@ mod tests {
         let spawning = Arc::new(SpawnConfig::from_toml(&tweaked, &entities).unwrap());
         let blocks = Arc::new(builtin_blocks(&mut BlockCtx {
             tiles: &mut TileRegistry::with_engine_tiles(),
-            models: Vec::new(),
+            visuals: BlockVisuals::default(),
         }));
         let items = Arc::new(ItemRegistry::from_blocks(&blocks));
         let worldgen = Arc::new(WorldGenConfig::builtin(&blocks));

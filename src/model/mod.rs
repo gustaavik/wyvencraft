@@ -15,12 +15,21 @@
 //! [`ModelRegistry::LOADERS`]; nothing else in the module changes, and nothing
 //! outside it can tell which loader produced a given [`Model`].
 //!
+//! [`blockjson`] sits deliberately outside that arrangement. It reads
+//! Blockbench's *Java Block/Item* export — the format all blocks are authored
+//! in — which names several textures per model and carries `cullface` and
+//! `tintindex`, none of which fit a [`Model`]'s single [`Rgba8`]. It is called
+//! directly rather than through the registry, both because of that shape and
+//! because `.json` is far too generic an extension to claim in a registry that
+//! dispatches on extension alone.
+//!
 //! Boundaries: this layer is pure. It reads through the [`ContentSource`] port,
 //! never touches the filesystem or the GPU directly, and produces model-space
 //! geometry — baking a model into the world at a position and yaw is
 //! [`ModelMesh::to_cpu_mesh`], and uploading it is the caller's business.
 
 pub mod bbmodel;
+pub mod blockjson;
 pub mod datauri;
 pub mod gltf;
 pub mod mesh;
@@ -232,12 +241,36 @@ fn parent_dir(path: &str) -> &str {
 /// Resolve a reference made *by* a model file (an external buffer or texture)
 /// against the directory that file lives in.
 pub(crate) fn resolve_sibling(dir: &str, path: &str) -> String {
-    let path = path.trim_start_matches("./");
-    if dir.is_empty() {
+    let joined = if dir.is_empty() {
         path.to_string()
     } else {
         format!("{dir}/{path}")
+    };
+    normalize_path(&joined)
+}
+
+/// Collapse `.` and `..` segments in an `assets/`-relative path.
+///
+/// The OS would do this for a real filesystem read, but content also comes from
+/// [`crate::content::MapSource`], which looks paths up verbatim — so a block
+/// model in `assets/blocks/` naming `"../textures/dirt.png"` only resolves the
+/// same way from both sources if the collapsing happens here.
+///
+/// A `..` that would climb above the root is kept rather than dropped, so a
+/// bogus path stays visibly bogus instead of silently becoming a sibling of the
+/// asset root.
+fn normalize_path(path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." if matches!(parts.last(), Some(&last) if last != "..") => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
     }
+    parts.join("/")
 }
 
 #[cfg(test)]
@@ -278,6 +311,22 @@ mod tests {
             "assets/models/t.png"
         );
         assert_eq!(resolve_sibling("", "t.png"), "t.png");
+    }
+
+    /// Blockbench writes block-model texture refs relative to the exported
+    /// file, so `assets/blocks/x.json` names `../textures/dirt.png`.
+    #[test]
+    fn resolve_sibling_collapses_parent_segments() {
+        assert_eq!(
+            resolve_sibling("assets/blocks", "../textures/dirt.png"),
+            "assets/textures/dirt.png"
+        );
+        assert_eq!(
+            resolve_sibling("assets/blocks/nested", "../../textures/a.png"),
+            "assets/textures/a.png"
+        );
+        // Climbing above the root is kept, so the path stays visibly wrong.
+        assert_eq!(resolve_sibling("assets", "../../x.png"), "../x.png");
     }
 
     #[test]

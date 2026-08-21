@@ -3,12 +3,18 @@
 use glam::Vec3;
 
 use super::{BlockModels, ChunkMeshOutput};
+use crate::core::math::rotate_y;
 use crate::core::{Aabb, BlockId, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, Direction};
 use crate::render::mesh::CpuMesh;
 use crate::render::texture::atlas_uv;
-use crate::render::vertex::{ChunkVertex, FLAG_WATER};
-use crate::world::block::{BlockRegistry, FaceTextures, FluidInfo};
+use crate::render::vertex::{ChunkVertex, NO_TINT, anim_flags};
+use crate::world::block::{Block, BlockRegistry, FaceTextures, FluidInfo};
+use crate::world::blockmodel::BakedBlockModel;
 use crate::world::chunk::Chunk;
+
+/// How many biome colours a block model's `tintindex` can choose between.
+/// Minecraft's numbering: `0` grass, `1` foliage, `2` water.
+pub const TINT_SOURCES: usize = 3;
 
 /// Top of a source water block: two texels (2/16) below the block top.
 /// Flowing water scales down from here with its level.
@@ -126,11 +132,17 @@ fn block_yaw(pos: BlockPos) -> f32 {
 /// correct culling at chunk borders); it should return [`BlockId::AIR`] for
 /// not-yet-loaded chunks. `models` supplies the geometry of model-backed
 /// blocks; pass [`BlockModels::none`] when there are none.
+///
+/// `tint(x, z, index)` is the biome colour at a world column for one of the
+/// [`TINT_SOURCES`] a block model's `tintindex` can name. It is a closure rather
+/// than a table so the mesher stays pure: biome sampling belongs to the
+/// generator, and tests pass `|_, _, _| NO_TINT` and never touch one.
 pub fn mesh_chunk(
     chunk: &Chunk,
     registry: &BlockRegistry,
     models: BlockModels<'_>,
     neighbor: impl Fn(BlockPos) -> BlockId,
+    tint: impl Fn(i32, i32, u8) -> [u8; 4],
 ) -> ChunkMeshOutput {
     let mut out = ChunkMeshOutput::default();
     let origin = chunk.pos.origin();
@@ -151,6 +163,20 @@ pub fn mesh_chunk(
         }
     };
 
+    // Whether a block hides the face its neighbour shares with it.
+    //
+    // A Blockbench-authored block answers from measured geometry, so a modelled
+    // slab cannot hide what it does not actually cover; an atlas cube answers
+    // from its declared render type, which is all a `textures = [...]` block has
+    // to offer. Having one predicate for both is what lets the old and new paths
+    // cull against each other while blocks migrate over one at a time.
+    let occludes = |block: BlockId, dir: Direction| -> bool {
+        match models.baked_of(block) {
+            Some(baked) => baked.occludes[dir as usize],
+            None => registry.get(block).is_opaque(),
+        }
+    };
+
     for ly in 0..CHUNK_HEIGHT {
         for lz in 0..CHUNK_SIZE {
             for lx in 0..CHUNK_SIZE {
@@ -166,6 +192,26 @@ pub fn mesh_chunk(
                 }
 
                 let world = BlockPos::new(origin.x + lx, ly, origin.z + lz);
+
+                // A Blockbench-authored block replaces the whole cube too, but
+                // unlike the `.bbmodel` path below it stays in the chunk's own
+                // vertex buffer: its texture is a layer of the shared array, so
+                // it needs no separate draw, and its `cullface` data lets it
+                // take part in neighbour culling like an ordinary cube.
+                if let Some(baked) = models.baked_of(id) {
+                    // Same rule the cube path below uses: a transparent or
+                    // cutout block also drops the face it shares with a
+                    // neighbour of its own kind. Without it a leaf canopy —
+                    // whose texture is see-through, so it occludes nothing —
+                    // would emit every face of every block inside it.
+                    let hidden = |dir: Direction| {
+                        let neighbor = sample(world.offset(dir));
+                        occludes(neighbor, dir.opposite())
+                            || (neighbor == id && (block.is_cutout() || block.is_transparent()))
+                    };
+                    push_baked_model(&mut out, baked, block, world, hidden, &tint);
+                    continue;
+                }
 
                 // A model-backed block replaces the whole cube: its geometry
                 // brings its own texture, so it goes to a per-model bucket and
@@ -200,11 +246,14 @@ pub fn mesh_chunk(
                     Some(_) => water_corner_heights(world, &sample, registry),
                     None => [[1.0; 2]; 2],
                 };
+                // Sampled at most once per block: biome colour varies by
+                // column, and all of a block's faces share one.
+                let mut fluid_tint: [Option<[u8; 4]>; TINT_SOURCES] = [None; TINT_SOURCES];
 
                 for dir in Direction::ALL {
                     let np = world.offset(dir);
                     let neighbor_id = sample(np);
-                    let neighbor_block = registry.get(neighbor_id);
+                    let hidden = occludes(neighbor_id, dir.opposite());
 
                     // Transparent and cutout blocks also cull faces shared with
                     // a same-id neighbour (no interior faces inside a canopy or
@@ -213,11 +262,11 @@ pub fn mesh_chunk(
                         registry
                             .fluid(neighbor_id)
                             .is_none_or(|nf| nf.group != f.group)
-                            && !neighbor_block.is_opaque()
+                            && !hidden
                     } else if block.is_transparent() || block.is_cutout() {
-                        neighbor_id != id && !neighbor_block.is_opaque()
+                        neighbor_id != id && !hidden
                     } else {
-                        !neighbor_block.is_opaque()
+                        !hidden
                     };
                     if !visible {
                         continue;
@@ -227,10 +276,29 @@ pub fn mesh_chunk(
                     let normal = dir.normal().to_array();
                     let ao = face_shade(dir);
                     let tile = block.textures.tile(dir);
-                    let flags = if block.face_animated(dir) {
-                        FLAG_WATER
-                    } else {
-                        0
+
+                    // A fluid with an animation strip samples the block texture
+                    // array like a modelled block does; one without keeps the
+                    // atlas tile its `textures` named.
+                    let animated = water.and_then(|f| Some((f, models.fluid_of(id)?)));
+                    let (layer, flags, vertex_tint) = match animated {
+                        Some((f, tex)) => {
+                            // Minecraft's rule: a source is still everywhere, a
+                            // flowing block only on the faces you look down on.
+                            let still =
+                                f.is_source() || matches!(dir, Direction::PosY | Direction::NegY);
+                            let layers = if still { tex.still } else { tex.flowing };
+                            let colour = match tex.tint {
+                                Some(index) => {
+                                    let slot = usize::from(index).min(TINT_SOURCES - 1);
+                                    *fluid_tint[slot]
+                                        .get_or_insert_with(|| tint(world.x, world.z, index))
+                                }
+                                None => NO_TINT,
+                            };
+                            (layers.first, anim_flags(layers.frames, tex.fps), colour)
+                        }
+                        None => (0, 0, NO_TINT),
                     };
 
                     let base = [world.x as f32, world.y as f32, world.z as f32];
@@ -238,10 +306,21 @@ pub fn mesh_chunk(
                         // Corner y is 0 or 1: top corners take the (possibly
                         // per-corner lowered) surface height, so the top face
                         // and the side faces' upper edges move together.
-                        let y = if corners[i][1] > 0.5 {
+                        let top = corners[i][1] > 0.5;
+                        let y = if top {
                             heights[corners[i][0] as usize][corners[i][2] as usize]
                         } else {
                             0.0
+                        };
+                        let uv = match animated {
+                            // Crop the texture to the lowered surface instead of
+                            // stretching it: a side face's top edge sits `y` up
+                            // the cell, and `v` runs downward from 0.
+                            Some(_) if top && !matches!(dir, Direction::PosY | Direction::NegY) => {
+                                [uvs[i][0], 1.0 - y]
+                            }
+                            Some(_) => uvs[i],
+                            None => atlas_uv(tile, uvs[i]),
                         };
                         ChunkVertex {
                             position: [
@@ -250,16 +329,19 @@ pub fn mesh_chunk(
                                 base[2] + corners[i][2],
                             ],
                             normal,
-                            uv: atlas_uv(tile, uvs[i]),
+                            uv,
                             ao,
                             flags,
+                            layer,
+                            tint: vertex_tint,
                         }
                     });
 
-                    if block.is_transparent() {
-                        out.transparent.push_quad(quad);
-                    } else {
-                        out.opaque.push_quad(quad);
+                    match (animated.is_some(), block.is_transparent()) {
+                        (true, true) => out.array_transparent.push_quad(quad),
+                        (true, false) => out.array_opaque.push_quad(quad),
+                        (false, true) => out.transparent.push_quad(quad),
+                        (false, false) => out.opaque.push_quad(quad),
                     }
                 }
             }
@@ -267,6 +349,71 @@ pub fn mesh_chunk(
     }
 
     out
+}
+
+/// Emit one Blockbench-authored block into the chunk's array-textured buffers.
+///
+/// Each quad is already in block-local `0..1` space, so placing it is a
+/// translation; the only per-cell decisions are whether a `cullface` quad is
+/// hidden by its neighbour, and what colour a `tintindex` quad takes here.
+///
+/// `hidden(dir)` answers "does the neighbour in `dir` cover the face we share".
+fn push_baked_model(
+    out: &mut ChunkMeshOutput,
+    model: &BakedBlockModel,
+    block: &Block,
+    world: BlockPos,
+    hidden: impl Fn(Direction) -> bool,
+    tint: &impl Fn(i32, i32, u8) -> [u8; 4],
+) {
+    let base = Vec3::new(world.x as f32, world.y as f32, world.z as f32);
+    // A model that asked for a random yaw turns about its cell's centre. Its
+    // `cullface` data is dropped along with the rotation: a turned face no
+    // longer points at the neighbour it named, and anything wanting a random
+    // yaw is a plant that covers no cell face to begin with.
+    let yaw = model.random_yaw.then(|| block_yaw(world));
+    let centre = Vec3::new(0.5, 0.0, 0.5);
+    // Sampled at most once per block: biome colour varies by column, and all of
+    // a block's faces belong to the same column.
+    let mut biome_tints: [Option<[u8; 4]>; TINT_SOURCES] = [None; TINT_SOURCES];
+
+    for quad in &model.quads {
+        if let Some(dir) = quad.cull
+            && yaw.is_none()
+            && hidden(dir)
+        {
+            continue;
+        }
+        let tint = match quad.tint {
+            Some(index) => {
+                let slot = usize::from(index).min(TINT_SOURCES - 1);
+                *biome_tints[slot].get_or_insert_with(|| tint(world.x, world.z, index))
+            }
+            None => NO_TINT,
+        };
+        let place = |p: Vec3| match yaw {
+            Some(yaw) => base + centre + rotate_y(p - centre, yaw),
+            None => base + p,
+        };
+        let normal = match yaw {
+            Some(yaw) => rotate_y(Vec3::from(quad.normal), yaw).to_array(),
+            None => quad.normal,
+        };
+        let vertices = std::array::from_fn(|i| ChunkVertex {
+            position: place(quad.positions[i]).to_array(),
+            normal,
+            uv: quad.uvs[i],
+            ao: quad.shade,
+            flags: 0,
+            layer: quad.layer,
+            tint,
+        });
+        if block.is_transparent() {
+            out.array_transparent.push_quad(vertices);
+        } else {
+            out.array_opaque.push_quad(vertices);
+        }
+    }
 }
 
 /// Build an overlay mesh over `box_`, textured with `tile` on all six faces —
@@ -288,6 +435,8 @@ pub fn mesh_block_overlay(box_: Aabb, tile: u32) -> CpuMesh {
             uv: atlas_uv(tile, uvs[i]),
             ao: 1.0,
             flags: 0,
+            layer: 0,
+            tint: NO_TINT,
         });
         mesh.push_quad(quad);
     }
@@ -328,6 +477,8 @@ pub fn push_item_cube(
                 uv: atlas_uv(tile, uvs[i]),
                 ao,
                 flags: 0,
+                layer: 0,
+                tint: NO_TINT,
             }
         });
         mesh.push_quad(quad);
@@ -337,17 +488,186 @@ pub fn push_item_cube(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::content::GameContent;
+    use crate::content::{FluidTexture, GameContent};
     use crate::core::{ChunkPos, LocalPos};
+    use crate::render::block_textures::AnimatedLayers;
     use crate::render::tiles;
+    use crate::render::vertex::{ANIM_FIELD_MASK, ANIM_FPS_SHIFT, ANIM_FRAMES_SHIFT};
     use crate::world::block::blocks;
+
+    /// A fluid animation on distinct layer runs, so a face's column is
+    /// identifiable from the layer alone. Every fluid block shares one entry.
+    const WATER_ANIM: FluidTexture = FluidTexture {
+        still: AnimatedLayers {
+            first: 100,
+            frames: 64,
+        },
+        flowing: AnimatedLayers {
+            first: 200,
+            frames: 64,
+        },
+        fps: 12,
+        tint: Some(2),
+    };
+
+    /// The tint every fluid face should end up carrying in these tests.
+    const BIOME_WATER: [u8; 4] = [11, 22, 33, 255];
+
+    /// `BlockModels` where every block id is that fluid animation — the mesher
+    /// only ever asks about ids it is meshing, all of which are water here.
+    fn fluid_models(fluids: &[Option<FluidTexture>]) -> BlockModels<'_> {
+        BlockModels {
+            fluids,
+            ..BlockModels::none()
+        }
+    }
+
+    fn every_block_is_water(registry: &BlockRegistry) -> Vec<Option<FluidTexture>> {
+        (0..registry.len())
+            .map(|i| registry.fluid(BlockId(i as u16)).map(|_| WATER_ANIM))
+            .collect()
+    }
+
+    fn mesh_water(chunk: &Chunk, registry: &BlockRegistry) -> ChunkMeshOutput {
+        let fluids = every_block_is_water(registry);
+        mesh_chunk(
+            chunk,
+            registry,
+            fluid_models(&fluids),
+            |_| BlockId::AIR,
+            |_, _, index| {
+                assert_eq!(index, 2, "water asks for the water tint source");
+                BIOME_WATER
+            },
+        )
+    }
+
+    /// Water is drawn from the block texture array now, not the atlas — so the
+    /// atlas buckets must stay empty even though water is not a model.
+    #[test]
+    fn animated_water_goes_to_the_array_buckets() {
+        let registry = BlockRegistry::with_builtins();
+        let mut chunk = Chunk::new(ChunkPos::new(0, 0));
+        chunk.set(LocalPos { x: 4, y: 10, z: 4 }, blocks::WATER);
+        let out = mesh_water(&chunk, &registry);
+
+        assert_eq!(out.array_transparent.vertices.len(), 24, "all six faces");
+        assert!(out.transparent.is_empty(), "nothing left on the atlas");
+        assert!(out.opaque.is_empty());
+    }
+
+    /// Minecraft's rule: a source block is still on every face.
+    #[test]
+    fn a_source_block_is_still_on_every_face() {
+        let registry = BlockRegistry::with_builtins();
+        let mut chunk = Chunk::new(ChunkPos::new(0, 0));
+        chunk.set(LocalPos { x: 4, y: 10, z: 4 }, blocks::WATER);
+        let out = mesh_water(&chunk, &registry);
+
+        assert!(
+            out.array_transparent
+                .vertices
+                .iter()
+                .all(|v| v.layer == WATER_ANIM.still.first)
+        );
+    }
+
+    /// ...while a flowing block only keeps the still art where you look down on
+    /// it; its sides take the streaked flowing column.
+    #[test]
+    fn a_flowing_block_takes_the_flow_column_on_its_sides() {
+        let registry = BlockRegistry::with_builtins();
+        let mut chunk = Chunk::new(ChunkPos::new(0, 0));
+        chunk.set(LocalPos { x: 4, y: 10, z: 4 }, registry.flowing(0, 4));
+        let out = mesh_water(&chunk, &registry);
+
+        for vertex in &out.array_transparent.vertices {
+            let horizontal = vertex.normal[1] == 0.0;
+            let expected = if horizontal {
+                WATER_ANIM.flowing.first
+            } else {
+                WATER_ANIM.still.first
+            };
+            assert_eq!(vertex.layer, expected, "normal {:?}", vertex.normal);
+        }
+    }
+
+    #[test]
+    fn every_water_vertex_carries_the_animation_and_the_biome_colour() {
+        let registry = BlockRegistry::with_builtins();
+        let mut chunk = Chunk::new(ChunkPos::new(0, 0));
+        chunk.set(LocalPos { x: 4, y: 10, z: 4 }, blocks::WATER);
+        let out = mesh_water(&chunk, &registry);
+
+        for vertex in &out.array_transparent.vertices {
+            assert_eq!(vertex.tint, BIOME_WATER);
+            assert_eq!(
+                (vertex.flags >> ANIM_FRAMES_SHIFT) & ANIM_FIELD_MASK,
+                u32::from(WATER_ANIM.still.frames)
+            );
+            assert_eq!(
+                (vertex.flags >> ANIM_FPS_SHIFT) & ANIM_FIELD_MASK,
+                u32::from(WATER_ANIM.fps)
+            );
+        }
+    }
+
+    /// The surface sits two texels low, so a side face is shorter than the cell.
+    /// Its UVs must be cropped to match or the texture stretches, and the waves
+    /// would not line up with the top face they meet.
+    #[test]
+    fn a_side_faces_uvs_are_cropped_to_the_lowered_surface() {
+        let registry = BlockRegistry::with_builtins();
+        let mut chunk = Chunk::new(ChunkPos::new(0, 0));
+        chunk.set(LocalPos { x: 4, y: 10, z: 4 }, blocks::WATER);
+        let out = mesh_water(&chunk, &registry);
+
+        let sides = out
+            .array_transparent
+            .vertices
+            .iter()
+            .filter(|v| v.normal[1] == 0.0);
+        for vertex in sides {
+            let expected = if vertex.position[1] > 10.5 {
+                1.0 - WATER_SURFACE
+            } else {
+                1.0
+            };
+            assert_eq!(vertex.uv[1], expected, "v at y {}", vertex.position[1]);
+        }
+    }
+
+    /// A fluid whose strip failed to load keeps the old atlas path, so a bad
+    /// PNG costs the art rather than the geometry.
+    #[test]
+    fn a_fluid_without_a_strip_stays_on_the_atlas() {
+        let registry = BlockRegistry::with_builtins();
+        let mut chunk = Chunk::new(ChunkPos::new(0, 0));
+        chunk.set(LocalPos { x: 4, y: 10, z: 4 }, blocks::WATER);
+        let out = mesh_chunk(
+            &chunk,
+            &registry,
+            BlockModels::none(),
+            |_| BlockId::AIR,
+            |_, _, _| NO_TINT,
+        );
+
+        assert_eq!(out.transparent.vertices.len(), 24);
+        assert!(out.array_transparent.is_empty());
+    }
 
     #[test]
     fn water_surface_is_two_texels_low() {
         let registry = BlockRegistry::with_builtins();
         let mut chunk = Chunk::new(ChunkPos::new(0, 0));
         chunk.set(LocalPos { x: 4, y: 10, z: 4 }, blocks::WATER);
-        let out = mesh_chunk(&chunk, &registry, BlockModels::none(), |_| BlockId::AIR);
+        let out = mesh_chunk(
+            &chunk,
+            &registry,
+            BlockModels::none(),
+            |_| BlockId::AIR,
+            |_, _, _| NO_TINT,
+        );
 
         assert_eq!(out.transparent.vertices.len(), 24, "all six faces drawn");
         let max_y = out
@@ -365,7 +685,13 @@ mod tests {
         let mut chunk = Chunk::new(ChunkPos::new(0, 0));
         chunk.set(LocalPos { x: 4, y: 10, z: 4 }, blocks::WATER);
         chunk.set(LocalPos { x: 4, y: 11, z: 4 }, blocks::WATER);
-        let out = mesh_chunk(&chunk, &registry, BlockModels::none(), |_| BlockId::AIR);
+        let out = mesh_chunk(
+            &chunk,
+            &registry,
+            BlockModels::none(),
+            |_| BlockId::AIR,
+            |_, _, _| NO_TINT,
+        );
 
         // The shared face is culled from both blocks: 2 x 5 faces remain.
         assert_eq!(out.transparent.vertices.len(), 40);
@@ -391,7 +717,13 @@ mod tests {
         let registry = BlockRegistry::with_builtins();
         let mut chunk = Chunk::new(ChunkPos::new(0, 0));
         chunk.set(LocalPos { x: 4, y: 10, z: 4 }, registry.flowing(0, 4));
-        let out = mesh_chunk(&chunk, &registry, BlockModels::none(), |_| BlockId::AIR);
+        let out = mesh_chunk(
+            &chunk,
+            &registry,
+            BlockModels::none(),
+            |_| BlockId::AIR,
+            |_, _, _| NO_TINT,
+        );
 
         let max_y = out
             .transparent
@@ -408,7 +740,13 @@ mod tests {
         let mut chunk = Chunk::new(ChunkPos::new(0, 0));
         chunk.set(LocalPos { x: 4, y: 10, z: 4 }, blocks::WATER);
         chunk.set(LocalPos { x: 5, y: 10, z: 4 }, registry.flowing(0, 4));
-        let out = mesh_chunk(&chunk, &registry, BlockModels::none(), |_| BlockId::AIR);
+        let out = mesh_chunk(
+            &chunk,
+            &registry,
+            BlockModels::none(),
+            |_| BlockId::AIR,
+            |_, _, _| NO_TINT,
+        );
 
         let max_top_at = |x: f32| {
             out.transparent
@@ -435,16 +773,19 @@ mod tests {
     #[test]
     fn a_model_block_meshes_into_its_own_bucket_and_emits_no_cube_faces() {
         let content = GameContent::load();
-        let models = BlockModels {
-            models: &content.models,
-            blocks: &content.block_models,
-        };
+        let models = content.block_models();
         let plant = content.blocks.find("blue bells").expect("shipped block");
         let (placement, _) = models.of(plant).expect("blue bells declares a model");
 
         let mut chunk = Chunk::new(ChunkPos::new(0, 0));
         chunk.set(LocalPos { x: 4, y: 10, z: 6 }, plant);
-        let out = mesh_chunk(&chunk, &content.blocks, models, |_| BlockId::AIR);
+        let out = mesh_chunk(
+            &chunk,
+            &content.blocks,
+            models,
+            |_| BlockId::AIR,
+            |_, _, _| NO_TINT,
+        );
 
         assert!(out.opaque.is_empty(), "no atlas geometry");
         assert!(out.transparent.is_empty(), "no blended geometry");
@@ -458,6 +799,253 @@ mod tests {
             assert!((6.0..=7.0).contains(&v.position[2]), "z {:?}", v.position);
             assert!(v.position[1] >= 9.9, "y {:?}", v.position);
         }
+    }
+
+    // --- Blockbench-authored blocks ------------------------------------------
+
+    /// The shipped grass block against the real content: it must go to the
+    /// array buffers and emit *no* atlas geometry, since its faces sample
+    /// 256-pixel array layers that no atlas UV could address.
+    ///
+    /// `load()` rather than `builtin()`: the embedded fallback carries the TOML
+    /// but not `assets/blocks/*.json`, so nothing would have a model to bake.
+    #[test]
+    fn a_blockbench_block_meshes_into_the_array_buffers() {
+        let content = GameContent::load();
+        let models = content.block_models();
+        let grass = content.blocks.find("grass").expect("shipped block");
+        assert!(models.baked_of(grass).is_some(), "grass should be modelled");
+
+        let mut chunk = Chunk::new(ChunkPos::new(0, 0));
+        chunk.set(LocalPos { x: 4, y: 10, z: 6 }, grass);
+        let out = mesh_chunk(
+            &chunk,
+            &content.blocks,
+            models,
+            |_| BlockId::AIR,
+            |_, _, _| NO_TINT,
+        );
+
+        assert!(out.opaque.is_empty(), "no atlas geometry");
+        assert!(out.transparent.is_empty(), "no blended atlas geometry");
+        assert!(out.models.is_empty(), "no per-model bucket");
+        assert!(!out.array_opaque.is_empty());
+        // Six cube faces plus the four tinted overlay sides.
+        assert_eq!(out.array_opaque.vertices.len(), 10 * 4);
+        // Confined to its own cell, give or take the sliver the overlay is
+        // nudged out by so it wins the depth test against the cube beneath it.
+        const SLACK: f32 = 0.01;
+        for v in &out.array_opaque.vertices {
+            assert_ne!(
+                v.layer, 0,
+                "content must not sample the missing-texture layer"
+            );
+            assert!(
+                (4.0 - SLACK..=5.0 + SLACK).contains(&v.position[0]),
+                "x {:?}",
+                v.position
+            );
+            assert!(
+                (10.0 - SLACK..=11.0 + SLACK).contains(&v.position[1]),
+                "y {:?}",
+                v.position
+            );
+        }
+    }
+
+    /// `cullface` is the whole point of the format: without it every buried
+    /// block would draw all six faces.
+    #[test]
+    fn stacked_blockbench_blocks_cull_the_face_they_share() {
+        let content = GameContent::load();
+        let models = content.block_models();
+        let dirt = content.blocks.find("dirt").expect("shipped block");
+
+        let mut chunk = Chunk::new(ChunkPos::new(0, 0));
+        chunk.set(LocalPos { x: 4, y: 10, z: 6 }, dirt);
+        let lone = mesh_chunk(
+            &chunk,
+            &content.blocks,
+            models,
+            |_| BlockId::AIR,
+            |_, _, _| NO_TINT,
+        );
+        assert_eq!(lone.array_opaque.vertices.len(), 6 * 4, "all six faces");
+
+        chunk.set(LocalPos { x: 4, y: 11, z: 6 }, dirt);
+        let stacked = mesh_chunk(
+            &chunk,
+            &content.blocks,
+            models,
+            |_| BlockId::AIR,
+            |_, _, _| NO_TINT,
+        );
+        assert_eq!(
+            stacked.array_opaque.vertices.len(),
+            10 * 4,
+            "the shared face is dropped from both blocks"
+        );
+    }
+
+    /// The old and new paths have to cull against each other, or the seam
+    /// between a migrated block and one still on the atlas would show through.
+    #[test]
+    fn a_blockbench_block_and_an_atlas_block_cull_each_other() {
+        let content = GameContent::load();
+        let models = content.block_models();
+        let dirt = content.blocks.find("dirt").expect("modelled");
+        let atlas = content.blocks.find("bedrock").expect("still on the atlas");
+        assert!(
+            models.baked_of(atlas).is_none(),
+            "bedrock must not be modelled"
+        );
+
+        let mut chunk = Chunk::new(ChunkPos::new(0, 0));
+        chunk.set(LocalPos { x: 4, y: 10, z: 6 }, dirt);
+        chunk.set(LocalPos { x: 4, y: 11, z: 6 }, atlas);
+        let out = mesh_chunk(
+            &chunk,
+            &content.blocks,
+            models,
+            |_| BlockId::AIR,
+            |_, _, _| NO_TINT,
+        );
+
+        assert_eq!(out.array_opaque.vertices.len(), 5 * 4, "dirt loses its top");
+        assert_eq!(out.opaque.vertices.len(), 5 * 4, "bedrock loses its bottom");
+    }
+
+    /// A `tintindex` face takes the biome colour; everything else keeps the
+    /// colour its texture was painted with.
+    #[test]
+    fn only_tinted_faces_take_the_biome_colour() {
+        const BIOME: [u8; 4] = [10, 200, 30, 255];
+        let content = GameContent::load();
+        let models = content.block_models();
+        let grass = content.blocks.find("grass").expect("shipped block");
+
+        let mut chunk = Chunk::new(ChunkPos::new(0, 0));
+        chunk.set(LocalPos { x: 4, y: 10, z: 6 }, grass);
+        let out = mesh_chunk(
+            &chunk,
+            &content.blocks,
+            models,
+            |_| BlockId::AIR,
+            |_, _, _| BIOME,
+        );
+
+        let tinted = out.array_opaque.vertices.iter().filter(|v| v.tint == BIOME);
+        // The grass top plus the four side overlays.
+        assert_eq!(tinted.count(), 5 * 4);
+        assert!(
+            out.array_opaque.vertices.iter().any(|v| v.tint == NO_TINT),
+            "the dirt bottom and the base sides must stay untinted"
+        );
+    }
+
+    /// Leaves are a cutout, so they occlude nothing — which would leave every
+    /// face of every block inside a canopy drawn. They cull against each other
+    /// instead, exactly as the atlas path has always done.
+    #[test]
+    fn stacked_leaves_cull_the_face_they_share() {
+        let content = GameContent::load();
+        let models = content.block_models();
+        let leaves = content.blocks.find("oak leaves").expect("shipped block");
+        let baked = models.baked_of(leaves).expect("modelled");
+        assert_eq!(
+            baked.occludes, [false; 6],
+            "a see-through texture must not claim to occlude"
+        );
+
+        let mut chunk = Chunk::new(ChunkPos::new(0, 0));
+        chunk.set(LocalPos { x: 4, y: 10, z: 6 }, leaves);
+        chunk.set(LocalPos { x: 4, y: 11, z: 6 }, leaves);
+        let out = mesh_chunk(
+            &chunk,
+            &content.blocks,
+            models,
+            |_| BlockId::AIR,
+            |_, _, _| NO_TINT,
+        );
+        assert_eq!(
+            out.array_opaque.vertices.len(),
+            10 * 4,
+            "the shared face is dropped from both blocks"
+        );
+    }
+
+    /// A `random_yaw` model turns about its own cell, so two instances read as
+    /// different plants rather than a grid of clones — and a turned face no
+    /// longer points where its `cullface` claims, so culling is dropped.
+    #[test]
+    fn a_random_yaw_block_turns_with_its_position() {
+        let content = GameContent::load();
+        let models = content.block_models();
+        let flower = content.blocks.find("cornflower").expect("shipped block");
+        assert!(models.baked_of(flower).expect("modelled").random_yaw);
+
+        let mesh_at = |x: u8, z: u8| {
+            let mut chunk = Chunk::new(ChunkPos::new(0, 0));
+            chunk.set(LocalPos { x, y: 10, z }, flower);
+            mesh_chunk(
+                &chunk,
+                &content.blocks,
+                models,
+                |_| BlockId::AIR,
+                |_, _, _| NO_TINT,
+            )
+            .array_opaque
+        };
+        let a = mesh_at(0, 0);
+        let b = mesh_at(1, 0);
+        assert_eq!(a.vertices.len(), b.vertices.len());
+        assert_ne!(
+            a.vertices[0].normal, b.vertices[0].normal,
+            "neighbouring flowers must not share an angle"
+        );
+
+        // Turned or not, it stays inside its own column.
+        for (mesh, x) in [(&a, 0.0f32), (&b, 1.0)] {
+            for v in &mesh.vertices {
+                assert!(
+                    (x - 0.05..=x + 1.05).contains(&v.position[0]),
+                    "{:?} left its cell",
+                    v.position
+                );
+            }
+        }
+    }
+
+    /// Two elements sharing a box is how the grass overlay is authored; without
+    /// the nudge the overlay would lose the depth test and never appear.
+    #[test]
+    fn the_grass_overlay_sits_just_outside_the_block_it_covers() {
+        let content = GameContent::load();
+        let models = content.block_models();
+        let grass = content.blocks.find("grass").expect("shipped block");
+
+        let mut chunk = Chunk::new(ChunkPos::new(0, 0));
+        chunk.set(LocalPos { x: 0, y: 10, z: 0 }, grass);
+        let out = mesh_chunk(
+            &chunk,
+            &content.blocks,
+            models,
+            |_| BlockId::AIR,
+            |_, _, _| NO_TINT,
+        );
+
+        // North is -Z, so the overlay pokes out below z = 0.
+        let min_z = out
+            .array_opaque
+            .vertices
+            .iter()
+            .map(|v| v.position[2])
+            .fold(f32::MAX, f32::min);
+        assert!(
+            min_z < 0.0,
+            "the overlay should sit proud of the cube: {min_z}"
+        );
+        assert!(min_z > -0.01, "but only barely: {min_z}");
     }
 
     /// Two of the same plant must land at different angles, and each must

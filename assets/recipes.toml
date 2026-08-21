@@ -7,7 +7,7 @@
 #   ingredients - table of item name -> count, consumed from the inventory
 #
 # Item names containing spaces must be quoted when used as ingredient keys,
-# e.g.  ingredients = { "coal ore" = 2, wood = 1 }
+# e.g.  ingredients = { "coal ore" = 2, "oak log" = 1 }
 #
 # Recipes naming an unknown item are skipped with a warning in the log; if the
 # whole file fails to parse, the game falls back to the recipes compiled into
@@ -20,7 +20,7 @@
 [[recipe]]
 output = "stick"
 count = 4
-ingredients = { wood = 1 }
+ingredients = { "oak log" = 1 }
 
 # Tools. The shape fixes the sticks and the head count; the tier only changes
 # which material the head is beaten from — wood, stone, or (as with the armor
@@ -33,35 +33,35 @@ ingredients = { wood = 1 }
 
 [[recipe]]
 output = "wooden pickaxe"
-ingredients = { wood = 3, stick = 2 }
+ingredients = { "oak log" = 3, stick = 2 }
 
 [[recipe]]
 output = "wooden axe"
-ingredients = { wood = 3, stick = 2 }
+ingredients = { "oak log" = 3, stick = 2 }
 
 [[recipe]]
 output = "wooden shovel"
-ingredients = { wood = 1, stick = 2 }
+ingredients = { "oak log" = 1, stick = 2 }
 
 [[recipe]]
 output = "wooden sword"
-ingredients = { wood = 2, stick = 1 }
+ingredients = { "oak log" = 2, stick = 1 }
 
 [[recipe]]
 output = "stone pickaxe"
-ingredients = { stone = 3, stick = 2 }
+ingredients = { cobblestone = 3, stick = 2 }
 
 [[recipe]]
 output = "stone axe"
-ingredients = { stone = 3, stick = 2 }
+ingredients = { cobblestone = 3, stick = 2 }
 
 [[recipe]]
 output = "stone shovel"
-ingredients = { stone = 1, stick = 2 }
+ingredients = { cobblestone = 1, stick = 2 }
 
 [[recipe]]
 output = "stone sword"
-ingredients = { stone = 2, stick = 1 }
+ingredients = { cobblestone = 2, stick = 1 }
 
 [[recipe]]
 output = "iron pickaxe"
@@ -82,7 +82,7 @@ ingredients = { "iron ore" = 2, stick = 1 }
 # Shears: the only way to harvest leaf blocks.
 [[recipe]]
 output = "shears"
-ingredients = { stone = 2, wood = 1 }
+ingredients = { cobblestone = 2, "oak log" = 1 }
 
 # Stand-in for smelting until furnaces exist.
 [[recipe]]
@@ -119,8 +119,8 @@ ingredients = { "iron ore" = 4 }
 
 [[recipe]]
 output = "glove"
-ingredients = { leaves = 4 }
+ingredients = { "oak leaves" = 4 }
 
 [[recipe]]
 output = "cape"
-ingredients = { leaves = 6 }
+ingredients = { "oak leaves" = 6 }

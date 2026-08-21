@@ -7,3 +7,6 @@
 /ops.toml
 # Cached auth-server public keys, fetched at sign-in (public, but generated)
 /authkeys.toml
+
+# macOS Finder metadata
+.DS_Store

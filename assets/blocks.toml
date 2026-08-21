@@ -18,8 +18,19 @@
 #   textures  one texture name for all faces, or
 #             { top = "...", bottom = "...", side = "..." }, or the fully
 #             explicit { neg_x, pos_x, neg_y, pos_y, neg_z, pos_z }.
-#             Optional only for a block with a [block.model], whose geometry
-#             brings its own texture and never samples the atlas.
+#             Optional for a block whose geometry brings its own texture and
+#             never samples the atlas — a `block_model`, a [block.model] or a
+#             [block.fluid.texture].
+#   block_model  the block is authored in Blockbench and exported as a Java
+#             Block/Item .json under assets/blocks/, with its textures as
+#             separate 256x256 PNGs in assets/textures/. This is how blocks
+#             are made from now on; `textures` and [block.model] are the older
+#             paths, kept working while the remaining blocks are re-authored.
+#             The model is already in cell coordinates (a full cube is
+#             from [0,0,0] to [16,16,16]), so it takes no placement. Set
+#             `cullface` on every outward face or the block will draw all six
+#             faces even when buried, and `tintindex` only on faces that
+#             should take the biome colour (`tint` in assets/worldgen.toml).
 #   drops     what breaking the block yields (default: the block's own item)
 #             "self" | "none" | { requires_tool = "<tool kind>" }
 #             | { item = "<item name>", count = N }
@@ -27,6 +38,21 @@
 #             the engine auto-registers "<name> flow 1".."<name> flow N"
 #             blocks after all declared blocks, and the fluid simulation
 #             spreads/recedes between them.
+#   [block.fluid.texture] draws the fluid from an animation strip instead of
+#             an atlas tile: `frames` square frames stacked top to bottom, in
+#             as many columns as the image's width allows. COLUMN 0 IS FLOWING,
+#             COLUMN 1 IS STILL (one column serves both). A source block reads
+#             the still column on every face; a flowing block reads it on top
+#             and bottom and the flowing column on its sides. `fps` defaults to
+#             8, and `fps * 3600` must be a whole multiple of `frames` or the
+#             shader's hourly time wrap jumps (the loader rejects one that is
+#             not). `tint` is a `tintindex` into the biome colours in
+#             assets/worldgen.toml (2 = water); omit it for art that carries
+#             its own colour. `opacity` (0..1) sets how much of the riverbed
+#             shows through, rescaling the art's alpha — a body of fluid is a
+#             SINGLE blended sheet (its interior faces are culled), so depth
+#             adds no opacity and this number is the whole of it. Frames may be
+#             any square size that divides 256, like a `block_model` texture.
 #   [block.model] draws the block as a .gltf/.bbmodel from assets/models/
 #             instead of six atlas-textured cube faces — the same
 #             `path`/`scale`/`offset`/`rotation` spelling as [item.model] and
@@ -46,7 +72,8 @@ render = "opaque"
 solid = true
 hardness = 1.5
 material = "stone"
-textures = "stone"
+block_model = "assets/blocks/stone_block.json"
+drops = { item = "cobblestone" }
 
 [[block]]
 name = "dirt"
@@ -54,7 +81,7 @@ render = "opaque"
 solid = true
 hardness = 0.5
 material = "dirt"
-textures = "dirt"
+block_model = "assets/blocks/dirt_block.json"
 
 [[block]]
 name = "grass"
@@ -62,7 +89,7 @@ render = "opaque"
 solid = true
 hardness = 0.6
 material = "dirt"
-textures = { top = "grass_top", bottom = "dirt", side = "grass_side" }
+block_model = "assets/blocks/grass_block.json"
 
 [[block]]
 name = "sand"
@@ -70,7 +97,7 @@ render = "opaque"
 solid = true
 hardness = 0.5
 material = "sand"
-textures = "sand"
+block_model = "assets/blocks/sand_block.json"
 
 [[block]]
 name = "water"
@@ -78,26 +105,35 @@ render = "transparent"
 solid = false
 hardness = inf
 material = "other"
-textures = "water"
 
 [block.fluid]
 flow_levels = 7
 
+# 64 frames of 16px in two columns: flowing on the left, still on the right.
+# The art is greyscale so `tint` gives every biome its own water colour, and
+# its alpha is a placeholder `opacity` overrides — see the schema above.
+[block.fluid.texture]
+path = "assets/textures/water_flow.png"
+frames = 64
+fps = 8
+tint = 2
+opacity = 0.85
+
 [[block]]
-name = "wood"
+name = "oak log"
 render = "opaque"
 solid = true
 hardness = 2.0
 material = "wood"
-textures = { top = "wood_rings", bottom = "wood_rings", side = "wood_bark" }
+block_model = "assets/blocks/oak_log_block.json"
 
 [[block]]
-name = "leaves"
+name = "oak leaves"
 render = "cutout"
 solid = true
 hardness = 0.2
 material = "plant"
-textures = "leaves"
+block_model = "assets/blocks/oak_leaves_block.json"
 drops = { requires_tool = "shears" }
 
 [[block]]
@@ -130,7 +166,7 @@ render = "opaque"
 solid = true
 hardness = 0.6
 material = "dirt"
-textures = "gravel"
+block_model = "assets/blocks/gravel_block.json"
 
 [[block]]
 name = "clay"
@@ -146,7 +182,7 @@ render = "opaque"
 solid = true
 hardness = 3.0
 material = "stone"
-textures = "coal_ore"
+block_model = "assets/blocks/coal_ore_block.json"
 
 [[block]]
 name = "iron ore"
@@ -154,23 +190,23 @@ render = "opaque"
 solid = true
 hardness = 3.0
 material = "stone"
-textures = "iron_ore"
+block_model = "assets/blocks/iron_ore_block.json"
 
 [[block]]
-name = "gold ore"
+name = "copper ore"
 render = "opaque"
 solid = true
 hardness = 3.0
 material = "stone"
-textures = "gold_ore"
+block_model = "assets/blocks/copper_ore_block.json"
 
 [[block]]
-name = "diamond ore"
+name = "cobblestone"
 render = "opaque"
 solid = true
-hardness = 3.0
+hardness = 2.0
 material = "stone"
-textures = "diamond_ore"
+block_model = "assets/blocks/cobblestone_block.json"
 
 # Ground cover: model-backed, walk-through decoration scattered on the surface
 # by worldgen (see the per-biome `plants` lists in worldgen.toml). No `textures`
@@ -224,3 +260,14 @@ random_yaw = true
 [block.model]
 path = "assets/models/mushroom2.bbmodel"
 offset = [-0.5, 0.0, -0.5]
+
+# Authored in Blockbench as two crossed planes, so it needs no `[block.model]`
+# placement: the model is already in cell coordinates.
+[[block]]
+name = "cornflower"
+render = "cutout"
+solid = false
+hardness = 0.0
+material = "plant"
+random_yaw = true
+block_model = "assets/blocks/cornflower_block.json"

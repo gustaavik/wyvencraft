@@ -9,6 +9,7 @@ use vulkano::command_buffer::{
     AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer,
     RenderingAttachmentInfo, RenderingInfo,
 };
+use vulkano::descriptor_set::DescriptorSet;
 use vulkano::format::{ClearValue, Format};
 use vulkano::image::view::ImageView;
 use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
@@ -19,10 +20,11 @@ use vulkano::pipeline::{Pipeline, PipelineBindPoint};
 use vulkano::render_pass::{AttachmentLoadOp, AttachmentStoreOp};
 use vulkano::sync::GpuFuture;
 
+use super::block_textures::{BlockTextureArray, BlockTextureSet};
 use super::context::RenderContext;
 use super::icons;
 use super::mesh::{GpuLines, GpuMesh};
-use super::pipeline::{line, sky, voxel};
+use super::pipeline::{line, sky, voxel, voxel_array};
 use super::shaders;
 use super::texture::Texture;
 
@@ -87,6 +89,11 @@ pub struct SceneFrame<'a> {
     pub time: f32,
     pub opaque: Vec<&'a GpuMesh>,
     pub transparent: Vec<&'a GpuMesh>,
+    /// Chunk geometry from Blockbench-authored blocks, sampling the block
+    /// texture array rather than the atlas. Same two passes as `opaque` /
+    /// `transparent`; a separate list only because it binds a different set 0.
+    pub array_opaque: Vec<&'a GpuMesh>,
+    pub array_transparent: Vec<&'a GpuMesh>,
     /// Opaque geometry that brings its own texture, drawn after `opaque`.
     pub textured: Vec<TexturedMesh<'a>>,
     /// Debug lines drawn on top of the world (block selection outline).
@@ -104,38 +111,70 @@ pub struct PreviewFrame<'a> {
     pub held: Option<TexturedMesh<'a>>,
 }
 
+/// The state every world draw shares: which pipeline, and the camera and light
+/// pushed to it. Grouped because the two mesh recorders differ only in how they
+/// bind textures, and threading five positional arguments through both obscured
+/// that.
+#[derive(Clone, Copy)]
+struct Pass<'a> {
+    pipeline: &'a Arc<GraphicsPipeline>,
+    view_proj: Mat4,
+    light: &'a LightParams,
+    time: f32,
+}
+
 pub struct Renderer {
     ctx: Arc<RenderContext>,
     sky_pipeline: Arc<GraphicsPipeline>,
     voxel_pipeline: Arc<GraphicsPipeline>,
     transparent_pipeline: Arc<GraphicsPipeline>,
+    /// The same two, for chunk geometry sampling the block texture array.
+    /// They collapse back into one pair when the atlas path retires.
+    array_pipeline: Arc<GraphicsPipeline>,
+    array_transparent_pipeline: Arc<GraphicsPipeline>,
     line_pipeline: Arc<GraphicsPipeline>,
     /// Depth buffers keyed by size. The swapchain pass and the (differently
     /// sized) preview pass each keep their own entry, so alternating between
     /// them every frame doesn't thrash a single-slot cache.
     depth_cache: Vec<(Arc<ImageView>, [u32; 2])>,
     atlas: Texture,
+    block_textures: BlockTextureArray,
 }
 
 impl Renderer {
-    /// `atlas_pixels` is the packed RGBA atlas assembled by the tile registry
-    /// (the renderer stays decoupled from how content chose its textures).
-    pub fn new(ctx: Arc<RenderContext>, color_format: Format, atlas_pixels: Vec<u8>) -> Self {
+    /// `atlas_pixels` is the packed RGBA atlas assembled by the tile registry,
+    /// and `block_textures` the 256-pixel layers Blockbench-authored blocks
+    /// sample (the renderer stays decoupled from how content chose either).
+    pub fn new(
+        ctx: Arc<RenderContext>,
+        color_format: Format,
+        atlas_pixels: Vec<u8>,
+        block_textures: &BlockTextureSet,
+    ) -> Self {
         let sky_pipeline = sky::create(ctx.device().clone(), color_format, DEPTH_FORMAT);
         let voxel_pipeline = voxel::create(ctx.device().clone(), color_format, DEPTH_FORMAT, false);
         let transparent_pipeline =
             voxel::create(ctx.device().clone(), color_format, DEPTH_FORMAT, true);
+        let array_pipeline =
+            voxel_array::create(ctx.device().clone(), color_format, DEPTH_FORMAT, false);
+        let array_transparent_pipeline =
+            voxel_array::create(ctx.device().clone(), color_format, DEPTH_FORMAT, true);
         let line_pipeline = line::create(ctx.device().clone(), color_format, DEPTH_FORMAT);
         let atlas = Texture::atlas(&ctx, atlas_pixels);
+        let block_textures =
+            BlockTextureArray::create(&ctx, block_textures).expect("block texture array upload");
 
         Self {
             ctx,
             sky_pipeline,
             voxel_pipeline,
             transparent_pipeline,
+            array_pipeline,
+            array_transparent_pipeline,
             line_pipeline,
             depth_cache: Vec::new(),
             atlas,
+            block_textures,
         }
     }
 
@@ -187,27 +226,25 @@ impl Renderer {
         }
     }
 
-    /// Bind `pipeline` and push the shared per-frame constants. Split out
+    /// Bind `pass`'s pipeline and push the shared per-frame constants. Split out
     /// because the two mesh recorders below differ only in how they bind
     /// textures, not in how they set the frame up.
     fn begin_pass(
         &self,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
-        pipeline: &Arc<GraphicsPipeline>,
-        view_proj: Mat4,
-        light: &LightParams,
-        time: f32,
+        pass: Pass<'_>,
     ) {
+        let light = pass.light;
         builder
-            .bind_pipeline_graphics(pipeline.clone())
+            .bind_pipeline_graphics(pass.pipeline.clone())
             .expect("bind pipeline");
         let push = shaders::voxel_vs::PushConstants {
-            view_proj: view_proj.to_cols_array_2d(),
+            view_proj: pass.view_proj.to_cols_array_2d(),
             sun_dir: [
                 light.light_dir.x,
                 light.light_dir.y,
                 light.light_dir.z,
-                time,
+                pass.time,
             ],
             light_color: [
                 light.light_color.x,
@@ -217,7 +254,7 @@ impl Renderer {
             ],
         };
         builder
-            .push_constants(pipeline.layout().clone(), 0, push)
+            .push_constants(pass.pipeline.layout().clone(), 0, push)
             .expect("push view_proj");
     }
 
@@ -241,30 +278,29 @@ impl Renderer {
         }
     }
 
-    /// Record draws for meshes that all sample the block atlas — the world, and
-    /// every entity built from atlas tiles or skin sheets. One descriptor bind
-    /// covers the whole batch.
+    /// Record draws for meshes that all sample one texture — the world off the
+    /// block atlas or off the block texture array, and every entity built from
+    /// atlas tiles or skin sheets. One descriptor bind covers the whole batch,
+    /// which is the whole point of both shared textures.
     fn record_meshes(
         &self,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
-        pipeline: &Arc<GraphicsPipeline>,
-        view_proj: Mat4,
-        light: &LightParams,
-        time: f32,
+        pass: Pass<'_>,
+        set: Arc<DescriptorSet>,
         meshes: &[&GpuMesh],
     ) {
         if meshes.is_empty() {
             return;
         }
-        self.begin_pass(builder, pipeline, view_proj, light, time);
+        self.begin_pass(builder, pass);
         builder
             .bind_descriptor_sets(
                 PipelineBindPoint::Graphics,
-                pipeline.layout().clone(),
+                pass.pipeline.layout().clone(),
                 0,
-                self.atlas.set.clone(),
+                set,
             )
-            .expect("bind atlas set");
+            .expect("bind texture set");
         for mesh in meshes {
             self.draw_mesh(builder, mesh);
         }
@@ -277,21 +313,18 @@ impl Renderer {
     fn record_textured(
         &self,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
-        pipeline: &Arc<GraphicsPipeline>,
-        view_proj: Mat4,
-        light: &LightParams,
-        time: f32,
+        pass: Pass<'_>,
         meshes: &[TexturedMesh<'_>],
     ) {
         if meshes.is_empty() {
             return;
         }
-        self.begin_pass(builder, pipeline, view_proj, light, time);
+        self.begin_pass(builder, pass);
         for textured in meshes {
             builder
                 .bind_descriptor_sets(
                     PipelineBindPoint::Graphics,
-                    pipeline.layout().clone(),
+                    pass.pipeline.layout().clone(),
                     0,
                     textured.texture.set.clone(),
                 )
@@ -404,31 +437,42 @@ impl Renderer {
             self.record_sky(&mut builder, &scene.sky);
             let voxel_pipeline = self.voxel_pipeline.clone();
             let transparent_pipeline = self.transparent_pipeline.clone();
+            let array_pipeline = self.array_pipeline.clone();
+            let array_transparent_pipeline = self.array_transparent_pipeline.clone();
+            let pass = |pipeline| Pass {
+                pipeline,
+                view_proj: scene.view_proj,
+                light: &scene.light,
+                time: scene.time,
+            };
             self.record_meshes(
                 &mut builder,
-                &voxel_pipeline,
-                scene.view_proj,
-                &scene.light,
-                scene.time,
+                pass(&voxel_pipeline),
+                self.atlas.set.clone(),
                 &scene.opaque,
+            );
+            // Blockbench-authored blocks: opaque geometry too, just off a
+            // different texture. One bind for every block type on screen.
+            self.record_meshes(
+                &mut builder,
+                pass(&array_pipeline),
+                self.block_textures.set.clone(),
+                &scene.array_opaque,
             );
             // Model geometry is opaque too (its cutouts are alpha-tested in the
             // shader), so it goes in before the blended pass.
-            self.record_textured(
+            self.record_textured(&mut builder, pass(&voxel_pipeline), &scene.textured);
+            self.record_meshes(
                 &mut builder,
-                &voxel_pipeline,
-                scene.view_proj,
-                &scene.light,
-                scene.time,
-                &scene.textured,
+                pass(&transparent_pipeline),
+                self.atlas.set.clone(),
+                &scene.transparent,
             );
             self.record_meshes(
                 &mut builder,
-                &transparent_pipeline,
-                scene.view_proj,
-                &scene.light,
-                scene.time,
-                &scene.transparent,
+                pass(&array_transparent_pipeline),
+                self.block_textures.set.clone(),
+                &scene.array_transparent,
             );
             if let Some(lines) = scene.lines {
                 self.record_lines(&mut builder, scene.view_proj, lines);
@@ -505,10 +549,12 @@ impl Renderer {
                 .expect("set icon viewport");
             self.record_textured(
                 &mut builder,
-                &pipeline,
-                view_proj,
-                &ICON_LIGHT,
-                0.0,
+                Pass {
+                    pipeline: &pipeline,
+                    view_proj,
+                    light: &ICON_LIGHT,
+                    time: 0.0,
+                },
                 std::slice::from_ref(icon),
             );
         }
@@ -571,22 +617,14 @@ impl Renderer {
             .expect("set preview viewport");
 
         let voxel_pipeline = self.voxel_pipeline.clone();
-        self.record_meshes(
-            &mut builder,
-            &voxel_pipeline,
-            preview.view_proj,
-            &preview.light,
-            0.0,
-            &[preview.model],
-        );
-        self.record_textured(
-            &mut builder,
-            &voxel_pipeline,
-            preview.view_proj,
-            &preview.light,
-            0.0,
-            preview.held.as_slice(),
-        );
+        let pass = Pass {
+            pipeline: &voxel_pipeline,
+            view_proj: preview.view_proj,
+            light: &preview.light,
+            time: 0.0,
+        };
+        self.record_meshes(&mut builder, pass, self.atlas.set.clone(), &[preview.model]);
+        self.record_textured(&mut builder, pass, preview.held.as_slice());
 
         builder.end_rendering().expect("end preview rendering");
         let command_buffer = builder.build().expect("build preview cb");

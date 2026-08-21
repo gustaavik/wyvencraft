@@ -7,12 +7,11 @@
 //! dynamically at load; nothing outside the registry should assume a name's
 //! index.
 //!
-//! *Engine tiles* (the player skin sheet, the animated water frames, the
+//! *Engine tiles* (the player skin sheet, the mob and armor sheets, the
 //! break-crack overlay) are pre-registered at fixed indices: the skin block is
-//! blitted from [`super::skin`]; water and cracks are painted from the
-//! constants in [`super::tiles`], since the entity model and the fragment
-//! shader's water animation address them by constant. Animated textures occupy
-//! contiguous same-row slots (`<name>_<frame>.png` overrides each frame).
+//! blitted from [`super::skin`]; the cracks are painted from the constants in
+//! [`super::tiles`], since the entity model and the break overlay address them
+//! by constant.
 
 use std::collections::HashMap;
 
@@ -28,21 +27,15 @@ const MAX_TILES: usize = (ATLAS_COLUMNS * ATLAS_COLUMNS) as usize;
 /// bad tile index is immediately visible in-game.
 const MISSING_TEXTURE: [u8; 4] = [255, 0, 255, 255];
 
-/// A resolved texture: first atlas tile + frame count (1 = static).
+/// A resolved texture: the atlas tile it was assigned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TileEntry {
     pub tile: u32,
-    pub frames: u32,
 }
 
 impl TileEntry {
     /// The missing-texture marker (tile 0 is reserved for it).
-    pub const MISSING: TileEntry = TileEntry { tile: 0, frames: 1 };
-
-    #[inline]
-    pub fn is_animated(&self) -> bool {
-        self.frames > 1
-    }
+    pub const MISSING: TileEntry = TileEntry { tile: 0 };
 }
 
 /// Name → tile assignment plus the CPU-side atlas pixels.
@@ -95,29 +88,10 @@ impl TileRegistry {
             }
         }
 
-        // Water animation: the shader steps `tile + frame` horizontally from
-        // WATER_0, so the frames keep their fixed contiguous slots. The name
-        // is resolvable so blocks.toml can reference it.
-        for frame in 0..tiles::WATER_FRAMES {
-            reg.claim_fixed(tiles::WATER_0 + frame);
-        }
-        reg.by_name.insert(
-            "water".into(),
-            TileEntry {
-                tile: tiles::WATER_0,
-                frames: tiles::WATER_FRAMES,
-            },
-        );
-        reg.apply_png_overrides(
-            "water",
-            TileEntry {
-                tile: tiles::WATER_0,
-                frames: tiles::WATER_FRAMES,
-            },
-        );
         reg
     }
 
+    /// Claim `tile` for the engine art painted at that index.
     fn claim_fixed(&mut self, tile: u32) {
         self.used[tile as usize] = true;
         self.pixels[tile as usize] = tiles::paint(tile);
@@ -130,12 +104,12 @@ impl TileRegistry {
         if let Some(&entry) = self.by_name.get(name) {
             return entry;
         }
-        let art = load_png(name, None).or_else(|| tiles::paint_named(name));
+        let art = load_png(name).or_else(|| tiles::paint_named(name));
         let entry = match art {
             Some(art) => match self.allocate() {
                 Some(tile) => {
                     self.pixels[tile as usize] = Some(art);
-                    TileEntry { tile, frames: 1 }
+                    TileEntry { tile }
                 }
                 None => {
                     log::warn!(
@@ -155,15 +129,30 @@ impl TileRegistry {
         entry
     }
 
-    /// Replace a pre-registered animated entry's frames with PNGs from disk
-    /// where present (`<name>_<frame>.png`). Static names load their PNG in
-    /// [`TileRegistry::resolve`] directly.
-    fn apply_png_overrides(&mut self, name: &str, entry: TileEntry) {
-        for frame in 0..entry.frames {
-            if let Some(art) = load_png(name, Some(frame)) {
-                self.pixels[(entry.tile + frame) as usize] = Some(art);
-            }
+    /// Register `art` under `name`, allocating a slot on first use.
+    ///
+    /// For art with no PNG or painter of its own: the small stand-ins derived
+    /// from a Blockbench block model's 256-pixel textures, which the inventory
+    /// icon and the dropped-item cube still sample. Keyed by name exactly like
+    /// [`TileRegistry::resolve`], so faces sharing a texture share a tile.
+    pub fn insert(&mut self, name: &str, art: TileRgba) -> TileEntry {
+        if let Some(&entry) = self.by_name.get(name) {
+            return entry;
         }
+        let entry = match self.allocate() {
+            Some(tile) => {
+                self.pixels[tile as usize] = Some(art);
+                TileEntry { tile }
+            }
+            None => {
+                log::warn!(
+                    "texture atlas full ({MAX_TILES} tiles); {name:?} gets the missing marker"
+                );
+                TileEntry::MISSING
+            }
+        };
+        self.by_name.insert(name.to_string(), entry);
+        entry
     }
 
     fn allocate(&mut self) -> Option<u32> {
@@ -196,18 +185,10 @@ impl TileRegistry {
     }
 }
 
-/// Path of a texture override on disk (CWD-relative, like all assets).
-fn png_path(name: &str, frame: Option<u32>) -> String {
-    match frame {
-        Some(frame) => format!("assets/textures/{name}_{frame}.png"),
-        None => format!("assets/textures/{name}.png"),
-    }
-}
-
 /// Decode a 16×16 texture PNG (RGBA or RGB, 8-bit). Anything else warns and
 /// falls through to the procedural art.
-fn load_png(name: &str, frame: Option<u32>) -> Option<TileRgba> {
-    let path = png_path(name, frame);
+fn load_png(name: &str) -> Option<TileRgba> {
+    let path = format!("assets/textures/{name}.png");
     let bytes = std::fs::read(&path).ok()?;
     let decode = || -> Result<TileRgba, String> {
         let image = super::texture::decode_png(&bytes)?;
@@ -249,19 +230,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn engine_tiles_keep_fixed_indices() {
-        let mut reg = TileRegistry::with_engine_tiles();
-        let water = reg.resolve("water");
-        assert_eq!(water.tile, tiles::WATER_0);
-        assert_eq!(water.frames, tiles::WATER_FRAMES);
-        assert!(water.is_animated());
-    }
-
-    #[test]
     fn content_tiles_allocate_and_stay_stable() {
         let mut reg = TileRegistry::with_engine_tiles();
         let stone = reg.resolve("stone");
-        assert!(!stone.is_animated());
         assert_ne!(stone, TileEntry::MISSING);
         // Same name resolves to the same slot.
         assert_eq!(reg.resolve("stone"), stone);
@@ -273,7 +244,6 @@ mod tests {
             assert!(!skin::atlas_tile_indices().any(|s| s == t));
             assert!(!armor::is_armor_tile(t), "{name} landed in the armor band");
             assert!(!mobskin::is_mob_tile(t), "{name} landed in a mob sheet");
-            assert!(!(tiles::WATER_0..tiles::WATER_0 + tiles::WATER_FRAMES).contains(&t));
             assert!(!(tiles::CRACK_0..tiles::CRACK_0 + tiles::CRACK_STAGES).contains(&t));
             assert_ne!(t, 0);
         }

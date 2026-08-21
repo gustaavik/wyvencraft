@@ -72,6 +72,35 @@ pub struct BiomeGen {
     /// same vegetation clumping that groups trees into groves.
     pub plants: Vec<BlockId>,
     pub plant_chance_per_mille: f32,
+    /// The colour multiplied into faces a block model marked `tintindex = 0` —
+    /// grass tops, grass side overlays and the like. Defaults to white, which
+    /// is the identity, so a biome that says nothing tints nothing.
+    pub tint: [u8; 4],
+    /// The same for `tintindex = 1`: leaves and other hanging foliage, which
+    /// Minecraft colours a shade apart from the ground. Defaults to `tint`.
+    pub foliage_tint: [u8; 4],
+    /// The same for `tintindex = 2`: water. Defaults to
+    /// [`DEFAULT_WATER_TINT`] rather than to white — the water art is
+    /// greyscale, so an untinted sea would read as grey rather than as water.
+    pub water_tint: [u8; 4],
+}
+
+/// The water colour of a biome that does not name one. Unlike grass and
+/// foliage, white is not a sensible default here: nothing else supplies the
+/// blue.
+pub const DEFAULT_WATER_TINT: [u8; 4] = [63, 118, 228, 255];
+
+impl BiomeGen {
+    /// The colour for one of the tint sources a model's `tintindex` names.
+    /// Out-of-range indices take grass, which is the safe wrong answer: a
+    /// greyscale texture stays visible rather than turning white.
+    pub fn tint(&self, index: u8) -> [u8; 4] {
+        match index {
+            1 => self.foliage_tint,
+            2 => self.water_tint,
+            _ => self.tint,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -122,6 +151,10 @@ impl WorldGenConfig {
             .collect::<Result<_, String>>()?;
 
         let biome = |def: &BiomeDef| -> Result<BiomeGen, String> {
+            let tint = match def.tint {
+                Some([r, g, b]) => [r, g, b, 255],
+                None => crate::render::NO_TINT,
+            };
             let tree = match &def.tree {
                 Some(name) => {
                     let index = file
@@ -144,6 +177,15 @@ impl WorldGenConfig {
                     .map(|name| resolve(name))
                     .collect::<Result<_, String>>()?,
                 plant_chance_per_mille: def.plant_chance_per_mille.unwrap_or(0.0),
+                tint,
+                foliage_tint: match def.foliage_tint {
+                    Some([r, g, b]) => [r, g, b, 255],
+                    None => tint,
+                },
+                water_tint: match def.water_tint {
+                    Some([r, g, b]) => [r, g, b, 255],
+                    None => DEFAULT_WATER_TINT,
+                },
             })
         };
 
@@ -286,6 +328,17 @@ struct BiomeDef {
     plants: Vec<String>,
     #[serde(default)]
     plant_chance_per_mille: Option<f32>,
+    /// `tint = [124, 189, 107]`, the biome's grass colour (`tintindex = 0`).
+    #[serde(default)]
+    tint: Option<[u8; 3]>,
+    /// `foliage_tint = [...]`, the leaf colour (`tintindex = 1`). Defaults to
+    /// `tint`.
+    #[serde(default)]
+    foliage_tint: Option<[u8; 3]>,
+    /// `water_tint = [...]`, the water colour (`tintindex = 2`). Defaults to
+    /// [`DEFAULT_WATER_TINT`], not to `tint`.
+    #[serde(default)]
+    water_tint: Option<[u8; 3]>,
 }
 
 #[cfg(test)]
@@ -323,9 +376,8 @@ mod tests {
         assert_eq!(
             ores,
             vec![
-                (blocks::DIAMOND_ORE, 1, 16, 0.68),
-                (blocks::GOLD_ORE, 4, 32, 0.66),
                 (blocks::IRON_ORE, 8, 72, 0.60),
+                (blocks::COPPER_ORE, 8, 80, 0.58),
                 (blocks::COAL_ORE, 16, 108, 0.55),
             ]
         );
@@ -333,7 +385,10 @@ mod tests {
         assert_eq!(config.trees.len(), 2);
         let oak = &config.trees[0];
         assert_eq!(oak.shape, TreeShape::Oak);
-        assert_eq!((oak.trunk, oak.leaves), (blocks::WOOD, blocks::LEAVES));
+        assert_eq!(
+            (oak.trunk, oak.leaves),
+            (blocks::OAK_LOG, blocks::OAK_LEAVES)
+        );
         assert_eq!(oak.trunk_height, (4, 6));
         let spruce = &config.trees[1];
         assert_eq!(spruce.shape, TreeShape::Spruce);
@@ -360,6 +415,32 @@ mod tests {
             (blocks::SAND, blocks::SAND)
         );
         assert_eq!(desert.tree, None);
+    }
+
+    /// The three tint sources a `tintindex` can name, each routed to its own
+    /// biome colour.
+    #[test]
+    fn every_tint_source_resolves_to_its_own_colour() {
+        let registry = BlockRegistry::with_builtins();
+        let config = WorldGenConfig::builtin(&registry);
+        let plains = config.biome(Biome::Plains);
+        assert_eq!(plains.tint(0), [124, 189, 107, 255]);
+        assert_eq!(plains.tint(1), [93, 165, 74, 255]);
+        assert_eq!(plains.tint(2), [63, 118, 228, 255]);
+        // A desert sea is a different colour from a plains one.
+        assert_ne!(config.biome(Biome::Desert).tint(2), plains.tint(2));
+        assert_ne!(config.biome(Biome::Snowy).tint(2), plains.tint(2));
+    }
+
+    /// Grass and foliage default to white, which multiplies to no change.
+    /// Water cannot: its art is greyscale and nothing else supplies the blue.
+    #[test]
+    fn an_unstated_water_colour_takes_the_default_blue() {
+        let registry = BlockRegistry::with_builtins();
+        let text = BUILTIN_WORLDGEN.replace("water_tint = [63, 118, 228]", "");
+        let config = WorldGenConfig::from_toml(&text, &registry).expect("still valid");
+        assert_eq!(config.biome(Biome::Plains).tint(2), DEFAULT_WATER_TINT);
+        assert_ne!(DEFAULT_WATER_TINT, crate::render::NO_TINT);
     }
 
     /// Unknown block names must reject the whole file.

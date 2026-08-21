@@ -31,25 +31,14 @@ pub const IRON_ORE: u32 = 65;
 pub const GOLD_ORE: u32 = 66;
 pub const DIAMOND_ORE: u32 = 67;
 
-// Row 2: water animation. The mesher flags water faces and the fragment
-// shader steps `WATER_0 + frame` horizontally over time.
-pub const WATER_0: u32 = 32;
-pub const WATER_FRAMES: u32 = 4;
-
 // Row 3: block-break crack overlay, in order of growing damage.
 pub const CRACK_0: u32 = 48;
 pub const CRACK_STAGES: u32 = 8;
 
-/// Whether `tile` is one of the animated water frames.
-pub fn is_water(tile: u32) -> bool {
-    (WATER_0..WATER_0 + WATER_FRAMES).contains(&tile)
-}
-
 /// Paint the builtin pixel art for a texture *name* (as referenced by
 /// `assets/blocks.toml`). The painters keep the legacy tile constants as their
 /// noise seeds, so the art is identical regardless of which atlas slot the
-/// name is assigned. Animated names (water) are engine tiles, pre-registered
-/// by the tile registry, and are not painted through here.
+/// name is assigned.
 pub fn paint_named(name: &str) -> Option<TileRgba> {
     Some(match name {
         "stone" => stone(),
@@ -125,7 +114,6 @@ pub fn paint(tile: u32) -> Option<TileRgba> {
         IRON_ORE => ore(IRON_ORE, [214, 158, 110]),
         GOLD_ORE => ore(GOLD_ORE, [250, 212, 76]),
         DIAMOND_ORE => ore(DIAMOND_ORE, [104, 224, 220]),
-        t if is_water(t) => water(t - WATER_0),
         t if (CRACK_0..CRACK_0 + CRACK_STAGES).contains(&t) => cracks(t - CRACK_0),
         _ => return None,
     })
@@ -340,22 +328,6 @@ fn ore(tile: u32, color: [u8; 3]) -> TileRgba {
         }
     }
     art
-}
-
-/// One water animation frame: two diagonal wave layers whose phase advances
-/// with `frame`, so cycling the frames reads as rolling water.
-fn water(frame: u32) -> TileRgba {
-    fill(|x, y| {
-        let crest = (x + 2 * y + frame * 4) % TILE_SIZE;
-        let swell = (2 * x + y + TILE_SIZE - frame * 4 % TILE_SIZE) % TILE_SIZE;
-        if crest < 2 {
-            rgba([110, 160, 228], noise(WATER_0, x, y, 6), 185)
-        } else if swell < 2 {
-            rgba([70, 122, 208], noise(WATER_0 + 1, x, y, 6), 175)
-        } else {
-            rgba([40, 92, 190], noise(WATER_0 + 2, x, y, 6), 168)
-        }
-    })
 }
 
 // ---- break cracks -----------------------------------------------------------
@@ -897,21 +869,6 @@ mod tests {
     }
 
     #[test]
-    fn water_frames_differ_so_animation_is_visible() {
-        for frame in 1..WATER_FRAMES {
-            assert_ne!(paint(WATER_0), paint(WATER_0 + frame), "frame {frame}");
-        }
-    }
-
-    #[test]
-    fn water_is_translucent() {
-        let tile = paint(WATER_0).expect("water tile");
-        for p in tile.iter().flatten() {
-            assert!(p[3] > 0 && p[3] < 255, "alpha {}", p[3]);
-        }
-    }
-
-    #[test]
     fn opaque_block_tiles_are_fully_opaque() {
         for tile in [
             STONE,
@@ -983,7 +940,7 @@ mod tests {
     #[test]
     fn unassigned_tiles_are_missing() {
         assert!(paint(0).is_none());
-        assert!(paint(WATER_0 + WATER_FRAMES).is_none());
+        assert!(paint(32).is_none());
         assert!(paint(255).is_none());
     }
 }
