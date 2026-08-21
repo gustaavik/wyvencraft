@@ -1,0 +1,14 @@
+[package]
+name = "wyven-voxel"
+version.workspace = true
+edition.workspace = true
+description = "Voxel substrate: chunk storage, background loading, meshing and raycasting."
+
+[dependencies]
+wyven-core.workspace = true
+wyven-render.workspace = true
+wyven-model.workspace = true
+glam.workspace = true
+crossbeam-channel.workspace = true
+rayon.workspace = true
+log.workspace = true

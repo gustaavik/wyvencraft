@@ -4244,6 +4244,114 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
+name = "wyven-app"
+version = "0.1.0"
+dependencies = [
+ "egui",
+ "egui_winit_vulkano",
+ "log",
+ "serde",
+ "vulkano",
+ "vulkano-util",
+ "winit",
+ "wyven-core",
+ "wyven-input",
+ "wyven-render",
+]
+
+[[package]]
+name = "wyven-assets"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "png 0.17.16",
+]
+
+[[package]]
+name = "wyven-auth"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "log",
+ "serde",
+ "thiserror 2.0.20",
+ "toml",
+ "ureq",
+ "uuid",
+ "wcauth-ticket",
+ "wyven-core",
+]
+
+[[package]]
+name = "wyven-core"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "serde",
+]
+
+[[package]]
+name = "wyven-input"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "winit",
+ "wyven-core",
+]
+
+[[package]]
+name = "wyven-model"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "glam",
+ "log",
+ "serde",
+ "serde_json",
+ "wyven-assets",
+ "wyven-core",
+]
+
+[[package]]
+name = "wyven-net"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "log",
+ "renet",
+ "renet_netcode",
+ "serde",
+ "wyven-core",
+]
+
+[[package]]
+name = "wyven-render"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glam",
+ "log",
+ "vulkano",
+ "vulkano-shaders",
+ "vulkano-util",
+ "wyven-assets",
+ "wyven-core",
+]
+
+[[package]]
+name = "wyven-voxel"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "glam",
+ "log",
+ "rayon",
+ "wyven-core",
+ "wyven-model",
+ "wyven-render",
+]
+
+[[package]]
 name = "wyvencraft"
 version = "0.1.0"
 dependencies = [
@@ -4273,6 +4381,15 @@ dependencies = [
  "vulkano-util",
  "wcauth-ticket",
  "winit",
+ "wyven-app",
+ "wyven-assets",
+ "wyven-auth",
+ "wyven-core",
+ "wyven-input",
+ "wyven-model",
+ "wyven-net",
+ "wyven-render",
+ "wyven-voxel",
 ]
 
 [[package]]

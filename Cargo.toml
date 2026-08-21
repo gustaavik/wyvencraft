@@ -1,10 +1,22 @@
-[package]
-name = "wyvencraft"
+[workspace]
+members = ["crates/*"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-description = "A Minecraft-style voxel sandbox written in Rust with Vulkan (vulkano)."
 
-[dependencies]
+[workspace.dependencies]
+# --- Engine crates ---
+wyven-core = { path = "crates/wyven-core" }
+wyven-assets = { path = "crates/wyven-assets" }
+wyven-render = { path = "crates/wyven-render" }
+wyven-model = { path = "crates/wyven-model" }
+wyven-voxel = { path = "crates/wyven-voxel" }
+wyven-net = { path = "crates/wyven-net" }
+wyven-input = { path = "crates/wyven-input" }
+wyven-auth = { path = "crates/wyven-auth" }
+wyven-app = { path = "crates/wyven-app" }
+
 # --- Rendering (Vulkan) ---
 vulkano = "0.35"
 vulkano-shaders = "0.35"
@@ -30,6 +42,9 @@ renet_netcode = "2.0"
 # never drift. The repo is private: fetching needs a GitHub credential with
 # `repo` scope (the `gh` osxkeychain helper is enough). `Cargo.lock` pins the
 # exact ticket commit; advance it deliberately with `cargo update -p wcauth-ticket`.
+#
+# Only `wyven-auth` and the game depend on this, so every other engine crate
+# builds with no credential at all.
 wcauth-ticket = { git = "https://github.com/gustaavik/wcauthserver.git", branch = "main" }
 uuid = { version = "1", features = ["v4", "serde"] }
 # Blocking HTTP. Deliberately not `reqwest`: the game has no async runtime, and
@@ -54,6 +69,50 @@ thiserror = "2"
 log = "0.4"
 env_logger = "0.11"
 png = "0.17"
+
+[package]
+name = "wyvencraft"
+version.workspace = true
+edition.workspace = true
+description = "A Minecraft-style voxel sandbox written in Rust with Vulkan (vulkano)."
+
+[dependencies]
+wyven-core.workspace = true
+wyven-assets.workspace = true
+wyven-render.workspace = true
+wyven-model.workspace = true
+wyven-voxel.workspace = true
+wyven-net.workspace = true
+wyven-input.workspace = true
+wyven-auth.workspace = true
+wyven-app.workspace = true
+
+vulkano.workspace = true
+vulkano-shaders.workspace = true
+vulkano-util.workspace = true
+winit.workspace = true
+egui.workspace = true
+egui_winit_vulkano.workspace = true
+glam.workspace = true
+noise.workspace = true
+renet.workspace = true
+renet_netcode.workspace = true
+wcauth-ticket.workspace = true
+uuid.workspace = true
+ureq.workspace = true
+rayon.workspace = true
+crossbeam-channel.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bincode.workspace = true
+bytemuck.workspace = true
+toml.workspace = true
+base64.workspace = true
+thiserror.workspace = true
+log.workspace = true
+env_logger.workspace = true
+png.workspace = true
 
 [profile.dev]
 # Voxel meshing/generation is painfully slow in a fully-unoptimized debug build.

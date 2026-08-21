@@ -1,0 +1,17 @@
+[package]
+name = "wyven-app"
+version.workspace = true
+edition.workspace = true
+description = "Window, Vulkan surface, egui integration and the screen stack."
+
+[dependencies]
+wyven-core.workspace = true
+wyven-render.workspace = true
+wyven-input.workspace = true
+winit.workspace = true
+egui.workspace = true
+egui_winit_vulkano.workspace = true
+vulkano.workspace = true
+vulkano-util.workspace = true
+serde.workspace = true
+log.workspace = true
