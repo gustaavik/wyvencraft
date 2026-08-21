@@ -1,6 +1,6 @@
 //! Block models, baked for the chunk mesher.
 //!
-//! [`crate::model::blockjson`] turns a Blockbench export into quads in
+//! [`wyven_model::blockjson`] turns a Blockbench export into quads in
 //! block-local space; this turns those quads into something the mesher can emit
 //! per cell without doing any work per block. Two things are resolved here that
 //! the parser has no business knowing:
@@ -19,9 +19,9 @@
 use glam::Vec3;
 
 use crate::core::{Aabb, Direction};
-use crate::model::blockjson::BlockJsonModel;
-use crate::render::block_textures::BlockTextureSet;
 use crate::world::block::model_hitbox;
+use wyven_model::blockjson::BlockJsonModel;
+use wyven_render::block_textures::BlockTextureSet;
 
 /// How far a corner may sit from a cell boundary and still count as on it.
 const COVERAGE_EPSILON: f32 = 1e-3;
@@ -32,7 +32,7 @@ pub struct BakedQuad {
     pub positions: [Vec3; 4],
     pub normal: [f32; 3],
     pub uvs: [[f32; 2]; 4],
-    /// Layer of [`crate::render::block_textures`] this quad samples.
+    /// Layer of [`wyven_render::block_textures`] this quad samples.
     pub layer: u32,
     /// The neighbour that hides this quad when that neighbour is solid.
     pub cull: Option<Direction>,
@@ -176,7 +176,7 @@ fn covers_cell_face(quad: &BakedQuad, dir: Direction) -> bool {
 mod tests {
     use super::*;
     use crate::content::MapSource;
-    use crate::render::block_textures::BLOCK_TEXTURE_SIZE;
+    use wyven_render::block_textures::BLOCK_TEXTURE_SIZE;
 
     /// A block-sized PNG, since the texture array demands one exact extent.
     fn png(alpha: u8) -> Vec<u8> {
@@ -201,7 +201,7 @@ mod tests {
         let source = MapSource::new()
             .with_bytes("assets/textures/solid.png", png(255))
             .with_bytes("assets/textures/cutout.png", png(0));
-        let model = crate::model::blockjson::load(json.as_bytes(), "assets/blocks", &source)
+        let model = wyven_model::blockjson::load(json.as_bytes(), "assets/blocks", &source)
             .expect("model loads");
         let mut textures = BlockTextureSet::new();
         let baked = BakedBlockModel::bake(&model, &mut textures, false);

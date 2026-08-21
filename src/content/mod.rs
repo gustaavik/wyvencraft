@@ -18,9 +18,6 @@ use crate::core::Direction;
 use crate::entity::kind::VisualSpec;
 use crate::entity::{EntityRegistry, SpawnConfig};
 use crate::inventory::ItemRegistry;
-use crate::model::{ModelId, ModelRegistry, ModelSpec, blockjson};
-use crate::render::TileRegistry;
-use crate::render::block_textures::{self, AnimatedLayers, BlockTextureSet, Strip};
 use crate::world::block::{
     BUILTIN_BLOCKS, BlockJsonSpec, BlockModel, BlockModelSpec, BlockRegistry, BlockVisuals,
     FaceTextures, FluidVisual, model_hitbox,
@@ -29,6 +26,9 @@ use crate::world::blockmodel::BakedBlockModel;
 use crate::world::generation::WorldGenConfig;
 use crate::world::meshing::BlockModels;
 use wyven_assets::decode_png;
+use wyven_model::{ModelId, ModelRegistry, ModelSpec, blockjson};
+use wyven_render::TileRegistry;
+use wyven_render::block_textures::{self, AnimatedLayers, BlockTextureSet, Strip};
 
 // The byte-source port lives in `wyven_assets` — the model loaders need it
 // too, and they sit below game content. Re-exported under the old name so
@@ -48,7 +48,7 @@ pub enum ItemIcon {
     /// Anything else (tools, food, armor, fluids), drawn as one flat tile.
     Flat(u32),
     /// An item with a file-loaded model, drawn from its cell of the pre-rendered
-    /// icon sheet (see [`crate::render::icons`]). The cell index is the
+    /// icon sheet (see [`wyven_render::icons`]). The cell index is the
     /// [`ModelId`], so the sheet and the model registry share an ordering.
     Model(ModelId),
 }
@@ -119,7 +119,7 @@ impl GameContent {
     /// Load content from `assets/` (CWD-relative, like recipes and saves),
     /// falling back to the embedded builtin copies. Never fails.
     pub fn load() -> Arc<Self> {
-        Self::from_source(&FsSource)
+        Self::from_source(&FsSource::cwd())
     }
 
     /// The embedded builtin content only — used by tests and as the fallback.
@@ -569,8 +569,8 @@ fn content_hash(
 /// coordinates — the same transform `world::meshing` bakes with, minus the yaw
 /// and the translation to the cell (which `model_hitbox` handles by staying
 /// square and centred).
-fn placed_bounds(model: &crate::model::Model, spec: &BlockModelSpec) -> (glam::Vec3, glam::Vec3) {
-    let transform = crate::model::mesh::placement(
+fn placed_bounds(model: &wyven_model::Model, spec: &BlockModelSpec) -> (glam::Vec3, glam::Vec3) {
+    let transform = wyven_model::mesh::placement(
         // The cell's horizontal centre but its *floor* — exactly the origin
         // `world::meshing::culled` bakes at, or the box would sit half a block
         // above the geometry.

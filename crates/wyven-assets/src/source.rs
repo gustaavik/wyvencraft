@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::path::PathBuf;
 
 /// Supplies the contents of a content file by its `assets/`-relative path.
 ///
@@ -32,16 +33,44 @@ pub trait AssetSource {
     }
 }
 
-/// Reads from the working directory, exactly like `assets/` and `saves/`.
-pub struct FsSource;
+/// Reads real files, resolving each path against a root directory.
+///
+/// The root is explicit rather than implicitly the process working directory,
+/// because "relative to wherever the process happens to be" is a hidden global:
+/// it makes the same call read different files from a game binary and from a
+/// test runner. [`FsSource::cwd`] opts back into that behaviour for the game,
+/// which really does resolve `assets/` and `saves/` against its working
+/// directory.
+pub struct FsSource {
+    root: PathBuf,
+}
+
+impl FsSource {
+    /// Resolve paths against the process working directory — how the game
+    /// itself reads `assets/`.
+    pub fn cwd() -> Self {
+        Self {
+            root: PathBuf::new(),
+        }
+    }
+
+    /// Resolve paths against `root`.
+    pub fn rooted(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    fn resolve(&self, path: &str) -> PathBuf {
+        self.root.join(path)
+    }
+}
 
 impl AssetSource for FsSource {
     fn read_bytes(&self, path: &str) -> io::Result<Vec<u8>> {
-        std::fs::read(path)
+        std::fs::read(self.resolve(path))
     }
 
     fn read(&self, path: &str) -> io::Result<String> {
-        std::fs::read_to_string(path)
+        std::fs::read_to_string(self.resolve(path))
     }
 }
 

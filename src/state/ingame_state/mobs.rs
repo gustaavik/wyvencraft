@@ -16,10 +16,10 @@ use crate::entity::{
     QuadrupedModel,
 };
 use crate::inventory::ItemStack;
-use crate::model::{ModelId, ModelRegistry};
 use crate::net::{Channel, ClientMessage, PlayerId, ServerMessage};
-use crate::render::CpuMesh;
 use crate::world::Target;
+use wyven_model::{ModelId, ModelRegistry};
+use wyven_render::CpuMesh;
 
 /// Zombie shamble: both arms held straight out (≈ 80° forward of hanging).
 const ARMS_FORWARD_ANGLE: f32 = -1.4;

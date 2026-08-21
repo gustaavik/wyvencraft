@@ -20,8 +20,8 @@ use vulkano::pipeline::graphics::{GraphicsPipeline, GraphicsPipelineCreateInfo};
 use vulkano::pipeline::layout::PipelineDescriptorSetLayoutCreateInfo;
 use vulkano::pipeline::{DynamicState, PipelineLayout, PipelineShaderStageCreateInfo};
 
-use crate::render::shaders;
-use crate::render::vertex::LineVertex;
+use crate::shaders;
+use crate::vertex::LineVertex;
 
 /// Build the line pipeline targeting the given color/depth formats.
 pub fn create(

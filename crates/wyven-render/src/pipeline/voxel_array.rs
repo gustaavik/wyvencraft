@@ -1,7 +1,7 @@
 //! The chunk pipeline for Blockbench-authored blocks.
 //!
 //! Identical to [`super::voxel`] in every respect except set 0: this one binds
-//! [`crate::render::block_textures`]'s `sampler2DArray` rather than the 16-pixel
+//! [`crate::block_textures`]'s `sampler2DArray` rather than the 16-pixel
 //! atlas, and its fragment shader applies the per-vertex biome tint. It shares
 //! `voxel.vert` verbatim, so the two pipelines consume the same
 //! [`ChunkVertex`] buffers and a chunk's atlas and array geometry differ only
@@ -31,8 +31,8 @@ use vulkano::pipeline::layout::PipelineDescriptorSetLayoutCreateInfo;
 use vulkano::pipeline::{DynamicState, PipelineLayout, PipelineShaderStageCreateInfo};
 use vulkano::shader::EntryPoint;
 
-use crate::render::shaders;
-use crate::render::vertex::ChunkVertex;
+use crate::shaders;
+use crate::vertex::ChunkVertex;
 
 fn entry_points(device: &Arc<Device>) -> (EntryPoint, EntryPoint) {
     let vs = shaders::voxel_vs::load(device.clone())

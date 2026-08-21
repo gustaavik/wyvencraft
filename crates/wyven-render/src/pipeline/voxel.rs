@@ -20,8 +20,8 @@ use vulkano::pipeline::layout::PipelineDescriptorSetLayoutCreateInfo;
 use vulkano::pipeline::{DynamicState, PipelineLayout, PipelineShaderStageCreateInfo};
 use vulkano::shader::EntryPoint;
 
-use crate::render::shaders;
-use crate::render::vertex::ChunkVertex;
+use crate::shaders;
+use crate::vertex::ChunkVertex;
 
 fn entry_points(device: &Arc<Device>) -> (EntryPoint, EntryPoint) {
     let vs = shaders::voxel_vs::load(device.clone())

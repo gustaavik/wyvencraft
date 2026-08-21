@@ -11,8 +11,8 @@ use crate::core::Direction;
 use crate::core::math::rotate_y as rot_y;
 use crate::entity::kind::QuadrupedVisual;
 use crate::inventory::{ARMOR_SIZE, ArmorSlot, ItemId, ItemRegistry};
-use crate::render::mesh::CpuMesh;
-use crate::render::vertex::{ChunkVertex, NO_TINT};
+use wyven_render::mesh::CpuMesh;
+use wyven_render::vertex::{ChunkVertex, NO_TINT};
 
 /// One rectangular box part of a model, in model-local space (origin at feet).
 #[derive(Debug, Clone, Copy)]

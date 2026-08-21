@@ -9,9 +9,9 @@
 
 use glam::{EulerRot, Mat3, Mat4, Vec3};
 
-use crate::core::math::yaw_matrix;
-use crate::render::mesh::CpuMesh;
-use crate::render::vertex::{ChunkVertex, NO_TINT};
+use wyven_core::math::yaw_matrix;
+use wyven_render::mesh::CpuMesh;
+use wyven_render::vertex::{ChunkVertex, NO_TINT};
 
 /// Triangle geometry in model space: Y-up, right-handed, one block = 1.0, UVs
 /// with a top-left origin. `positions`, `normals` and `uvs` are parallel arrays
@@ -78,7 +78,7 @@ impl ModelMesh {
     /// transform.
     ///
     /// Vertices come out in world space because the voxel pipeline has no model
-    /// matrix — this mirrors what [`crate::entity::model`] does for box parts.
+    /// matrix — this mirrors what the game does when it bakes box parts.
     pub fn bake(&self, transform: Mat4) -> CpuMesh {
         let normal_matrix = Mat3::from_mat4(transform).inverse().transpose();
         let mut mesh = CpuMesh::new();

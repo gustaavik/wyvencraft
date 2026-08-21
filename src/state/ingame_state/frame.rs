@@ -4,10 +4,10 @@
 use winit::event::MouseButton;
 
 use super::{AUTOSAVE_INTERVAL, DOUBLE_TAP_WINDOW, InGameState, PREVIEW_DRAG_SENSITIVITY};
-use crate::render::{PreviewFrame, SceneFrame};
 use crate::state::{GameState, PauseMenuState, StateContext, Transition};
 use crate::ui::hud;
 use crate::ui::nameplate::{self, Nameplate};
+use wyven_render::{PreviewFrame, SceneFrame};
 
 impl InGameState {
     /// Paint every visible player's username above their model.
@@ -57,7 +57,7 @@ impl InGameState {
     /// this a name reads straight through terrain. The march uses `is_solid` and
     /// `Target::Cell` — the same predicate mob line-of-sight uses — so a flower
     /// or a pane of glass never hides someone.
-    fn nameplate_occluded(&self, camera: &crate::render::Camera, position: glam::Vec3) -> bool {
+    fn nameplate_occluded(&self, camera: &wyven_render::Camera, position: glam::Vec3) -> bool {
         let anchor = position + glam::Vec3::Y * nameplate::ANCHOR_HEIGHT;
         let to_anchor = anchor - camera.position;
         let distance = to_anchor.length();

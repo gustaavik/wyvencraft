@@ -28,16 +28,16 @@ use crate::entity::{
     AnimationState, Arrow, DroppedItem, HandAnchor, HumanoidModel, Mob, Perspective, Player,
 };
 use crate::inventory::{ARMOR_SIZE, Inventory, ItemId, ItemRegistry};
-use crate::model::mesh as model_mesh;
-use crate::model::{ModelId, ModelRegistry};
 use crate::net::{PlayerId, RemotePlayer};
-use crate::render::{
-    Camera, CpuMesh, GpuLines, GpuMesh, LightParams, PreviewFrame, RenderContext, SceneFrame,
-    SkyParams, Texture, TexturedMesh, debug,
-};
 use crate::world::World;
 use crate::world::block::{BlockRegistry, FaceTextures};
 use crate::world::meshing::{BlockModels, mesh_block_overlay, mesh_chunk, push_item_cube};
+use wyven_model::mesh as model_mesh;
+use wyven_model::{ModelId, ModelRegistry};
+use wyven_render::{
+    Camera, CpuMesh, GpuLines, GpuMesh, LightParams, PreviewFrame, RenderContext, SceneFrame,
+    SkyParams, Texture, TexturedMesh, debug,
+};
 
 /// Animation state for a remote player plus the position used to derive their
 /// speed (no extra protocol data needed — movement is inferred from the change

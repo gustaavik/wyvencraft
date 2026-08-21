@@ -28,14 +28,14 @@ use crate::config::Settings;
 use crate::content::GameContent;
 use crate::core::{Clock, GameMode};
 use crate::input::InputState;
-use crate::model::ModelRegistry;
 use crate::net::Host;
-use crate::render::{GpuMesh, RenderContext, Renderer, Texture, TexturedMesh, icons};
 use crate::save::{self, SaveError, SavedGame, WorldSave};
 use crate::state::{
     ConnectingState, GameState, InGameState, LoadingState, MainMenuState, Resources, StateContext,
     StateStack, UiTextures,
 };
+use wyven_model::ModelRegistry;
+use wyven_render::{GpuMesh, RenderContext, Renderer, Texture, TexturedMesh, icons};
 
 /// Fixed size of the inventory player-model preview image, in pixels. The 0.48
 /// aspect (tall and narrow) matches the mockup's black box; the image is
@@ -190,7 +190,7 @@ fn build_icon_sheet(
     // cell stays empty rather than taking the whole sheet down with it.
     let uploaded: Vec<(GpuMesh, Texture)> = (0..count)
         .filter_map(|i| {
-            let model = models.get(crate::model::ModelId(i))?;
+            let model = models.get(wyven_model::ModelId(i))?;
             let mesh = model.mesh.bake(icons::frame(model.bounds));
             let gpu = GpuMesh::upload(&ctx.memory_allocator, &mesh)
                 .ok()

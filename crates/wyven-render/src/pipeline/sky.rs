@@ -21,7 +21,7 @@ use vulkano::pipeline::graphics::{GraphicsPipeline, GraphicsPipelineCreateInfo};
 use vulkano::pipeline::layout::PipelineDescriptorSetLayoutCreateInfo;
 use vulkano::pipeline::{DynamicState, PipelineLayout, PipelineShaderStageCreateInfo};
 
-use crate::render::shaders;
+use crate::shaders;
 
 /// Build the fullscreen sky pipeline targeting the given color/depth formats.
 pub fn create(

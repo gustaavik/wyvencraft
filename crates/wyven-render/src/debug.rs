@@ -6,7 +6,7 @@
 use glam::Vec3;
 
 use super::vertex::LineVertex;
-use crate::core::Aabb;
+use wyven_core::Aabb;
 
 /// How far the outline box is inflated beyond the block, so its edges (which
 /// are coplanar with the block's faces) don't z-fight with them.

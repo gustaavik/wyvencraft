@@ -3,7 +3,7 @@
 //! None of this is engine work. `grass_block_side`, a zombie's face and the
 //! eight stages of a block breaking are this game's assets; they lived inside
 //! `render` only because that is where the atlas is assembled. The renderer now
-//! asks for art through [`crate::render::TileSource`], and [`WyvencraftArt`] is
+//! asks for art through [`wyven_render::TileSource`], and [`WyvencraftArt`] is
 //! the answer — which is why a second game built on these crates would not
 //! inherit a pickaxe sprite.
 //!
@@ -17,7 +17,7 @@ pub mod mobskin;
 pub mod skin;
 pub mod tiles;
 
-use crate::render::{ReservedTiles, TileRegistry, TileRgba, TileSource, decode_tile};
+use wyven_render::{ReservedTiles, TileRegistry, TileRgba, TileSource, decode_tile};
 
 /// Where Wyvencraft looks for a named tile: a PNG under `assets/textures/`
 /// first, then the procedural painter of the same name.
@@ -81,7 +81,7 @@ pub fn tile_registry() -> TileRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::TileEntry;
+    use wyven_render::TileEntry;
 
     /// The reserved bands exist so art addressed by constant keeps its index.
     /// Content allocated by name must never be handed one of those slots.

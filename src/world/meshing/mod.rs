@@ -13,10 +13,10 @@ use std::sync::OnceLock;
 
 use crate::content::FluidTexture;
 use crate::core::{BlockId, Direction};
-use crate::model::{Model, ModelId, ModelRegistry};
-use crate::render::mesh::CpuMesh;
 use crate::world::block::BlockModel;
 use crate::world::blockmodel::BakedBlockModel;
+use wyven_model::{Model, ModelId, ModelRegistry};
+use wyven_render::mesh::CpuMesh;
 
 /// The model geometry a chunk mesh may need: the parsed `.bbmodel`/`.gltf`
 /// models plus the per-block assignment (`content::GameContent::block_models`,

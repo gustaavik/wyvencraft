@@ -14,7 +14,7 @@
 use crate::core::Direction;
 
 use super::skin::{self, BODY, CAPE, HEAD, LEFT_ARM, LEFT_LEG, RIGHT_ARM, RIGHT_LEG, SkinPart};
-use crate::render::TileRgba;
+use wyven_render::TileRgba;
 
 /// The six armor pieces, in [`inventory::ArmorSlot`](crate::inventory::ArmorSlot)
 /// order.

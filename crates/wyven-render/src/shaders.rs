@@ -5,48 +5,48 @@
 pub mod voxel_vs {
     vulkano_shaders::shader! {
         ty: "vertex",
-        path: "assets/shaders/voxel.vert",
+        path: "shaders/voxel.vert",
     }
 }
 
 pub mod voxel_fs {
     vulkano_shaders::shader! {
         ty: "fragment",
-        path: "assets/shaders/voxel.frag",
+        path: "shaders/voxel.frag",
     }
 }
 
 pub mod voxel_array_fs {
     vulkano_shaders::shader! {
         ty: "fragment",
-        path: "assets/shaders/voxel_array.frag",
+        path: "shaders/voxel_array.frag",
     }
 }
 
 pub mod sky_vs {
     vulkano_shaders::shader! {
         ty: "vertex",
-        path: "assets/shaders/sky.vert",
+        path: "shaders/sky.vert",
     }
 }
 
 pub mod sky_fs {
     vulkano_shaders::shader! {
         ty: "fragment",
-        path: "assets/shaders/sky.frag",
+        path: "shaders/sky.frag",
     }
 }
 
 pub mod line_vs {
     vulkano_shaders::shader! {
         ty: "vertex",
-        path: "assets/shaders/line.vert",
+        path: "shaders/line.vert",
     }
 }
 
 pub mod line_fs {
     vulkano_shaders::shader! {
         ty: "fragment",
-        path: "assets/shaders/line.frag",
+        path: "shaders/line.frag",
     }
 }

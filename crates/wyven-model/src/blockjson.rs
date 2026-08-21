@@ -23,17 +23,17 @@
 //!
 //! Boundaries: pure. Geometry comes out in block-local `0..1` space with no
 //! notion of atlas layers, block ids or neighbours — turning that into
-//! something the chunk mesher can emit is [`crate::world::blockmodel`].
+//! something the chunk mesher can emit is the game's block-model baker.
 
 use std::collections::HashMap;
 
 use glam::Vec3;
 use serde::Deserialize;
 
-use crate::core::Direction;
 use wyven_assets::AssetSource as ContentSource;
 use wyven_assets::Rgba8;
 use wyven_assets::decode_png;
+use wyven_core::Direction;
 
 use super::bbmodel::{
     FACES, FaceDir, PIXELS_PER_BLOCK, Resolution, Transform, face_corners, face_uvs,
@@ -493,15 +493,24 @@ fn texture_path(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wyven_assets::{FsSource, MapSource};
+    use wyven_assets::{AssetSource, FsSource, MapSource};
+
+    /// `assets/` sits at the workspace root; a test runner starts in the
+    /// crate directory, so the shipped-export fixtures need it named.
+    fn assets() -> FsSource {
+        FsSource::rooted(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+    }
 
     const DIRT: &str = "assets/blocks/dirt_block.json";
     const GRASS: &str = "assets/blocks/grass_block.json";
 
     fn load_file(path: &str) -> BlockJsonModel {
-        let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let source = assets();
+        let bytes = source
+            .read_bytes(path)
+            .unwrap_or_else(|e| panic!("{path}: {e}"));
         let dir = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
-        load(&bytes, dir, &FsSource).unwrap_or_else(|e| panic!("{path}: {e}"))
+        load(&bytes, dir, &source).unwrap_or_else(|e| panic!("{path}: {e}"))
     }
 
     /// A 1×1×1-pixel cube so a model can be written inline without a PNG the

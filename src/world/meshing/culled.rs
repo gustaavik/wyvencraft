@@ -5,12 +5,12 @@ use glam::Vec3;
 use super::{BlockModels, ChunkMeshOutput};
 use crate::core::math::rotate_y;
 use crate::core::{Aabb, BlockId, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, Direction};
-use crate::render::mesh::CpuMesh;
-use crate::render::texture::atlas_uv;
-use crate::render::vertex::{ChunkVertex, NO_TINT, anim_flags};
 use crate::world::block::{Block, BlockRegistry, FaceTextures, FluidInfo};
 use crate::world::blockmodel::BakedBlockModel;
 use crate::world::chunk::Chunk;
+use wyven_render::mesh::CpuMesh;
+use wyven_render::texture::atlas_uv;
+use wyven_render::vertex::{ChunkVertex, NO_TINT, anim_flags};
 
 /// How many biome colours a block model's `tintindex` can choose between.
 /// Minecraft's numbering: `0` grass, `1` foliage, `2` water.
@@ -491,9 +491,9 @@ mod tests {
     use crate::art::tiles;
     use crate::content::{FluidTexture, GameContent};
     use crate::core::{ChunkPos, LocalPos};
-    use crate::render::block_textures::AnimatedLayers;
-    use crate::render::vertex::{ANIM_FIELD_MASK, ANIM_FPS_SHIFT, ANIM_FRAMES_SHIFT};
     use crate::world::block::blocks;
+    use wyven_render::block_textures::AnimatedLayers;
+    use wyven_render::vertex::{ANIM_FIELD_MASK, ANIM_FPS_SHIFT, ANIM_FRAMES_SHIFT};
 
     /// A fluid animation on distinct layer runs, so a face's column is
     /// identifiable from the layer alone. Every fluid block shares one entry.

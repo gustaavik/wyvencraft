@@ -55,7 +55,7 @@ pub struct ChunkVertex {
     /// Bit flags for shader effects (see [`anim_flags`]).
     #[format(R32_UINT)]
     pub flags: u32,
-    /// Layer of [`crate::render::block_textures`] to sample. Ignored by the
+    /// Layer of [`crate::block_textures`] to sample. Ignored by the
     /// atlas pipeline, which addresses its texture through `uv` alone.
     #[format(R32_UINT)]
     pub layer: u32,

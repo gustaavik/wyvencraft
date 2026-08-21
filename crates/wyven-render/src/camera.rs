@@ -5,7 +5,7 @@
 
 use glam::{Mat4, Vec2, Vec3};
 
-use crate::core::Frustum;
+use wyven_core::Frustum;
 
 pub struct Camera {
     pub position: Vec3,

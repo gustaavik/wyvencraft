@@ -12,9 +12,9 @@ use egui::epaint::{Mesh, Vertex};
 use egui::{Color32, Painter, Pos2, Rect, Shape, pos2};
 
 use crate::content::ItemIcon;
-use crate::render::icons;
-use crate::render::texture::{ATLAS_COLUMNS, ATLAS_SIZE};
 use crate::state::UiTextures;
+use wyven_render::icons;
+use wyven_render::texture::{ATLAS_COLUMNS, ATLAS_SIZE};
 
 /// Isometric cube face tints (gamma space — egui linearizes them). The lit top
 /// reads brightest, the two visible sides progressively darker, giving a small

@@ -34,6 +34,8 @@
 
 pub use wyven_assets;
 pub use wyven_core;
+pub use wyven_model;
+pub use wyven_render;
 
 pub mod app;
 pub mod art;
@@ -46,9 +48,7 @@ pub mod core;
 pub mod entity;
 pub mod input;
 pub mod inventory;
-pub mod model;
 pub mod net;
-pub mod render;
 pub mod save;
 pub mod state;
 pub mod ui;

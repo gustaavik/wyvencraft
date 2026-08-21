@@ -10,8 +10,8 @@
 use glam::Vec3;
 
 use crate::core::{Aabb, BlockId, Direction};
-use crate::model::{ModelId, ModelSpec};
-use crate::render::TileRegistry;
+use wyven_model::{ModelId, ModelSpec};
+use wyven_render::TileRegistry;
 
 /// Embedded copy of the shipped block definitions, used when
 /// `assets/blocks.toml` is missing or invalid (the assets dir is CWD-relative).

@@ -31,6 +31,6 @@ pub trait WorldGenerator: Send + Sync {
     ///
     /// White by default: a generator with no climate model tints nothing.
     fn biome_tint(&self, _x: i32, _z: i32, _index: u8) -> [u8; 4] {
-        crate::render::NO_TINT
+        wyven_render::NO_TINT
     }
 }

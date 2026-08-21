@@ -153,7 +153,7 @@ impl WorldGenConfig {
         let biome = |def: &BiomeDef| -> Result<BiomeGen, String> {
             let tint = match def.tint {
                 Some([r, g, b]) => [r, g, b, 255],
-                None => crate::render::NO_TINT,
+                None => wyven_render::NO_TINT,
             };
             let tree = match &def.tree {
                 Some(name) => {
@@ -440,7 +440,7 @@ mod tests {
         let text = BUILTIN_WORLDGEN.replace("water_tint = [63, 118, 228]", "");
         let config = WorldGenConfig::from_toml(&text, &registry).expect("still valid");
         assert_eq!(config.biome(Biome::Plains).tint(2), DEFAULT_WATER_TINT);
-        assert_ne!(DEFAULT_WATER_TINT, crate::render::NO_TINT);
+        assert_ne!(DEFAULT_WATER_TINT, wyven_render::NO_TINT);
     }
 
     /// Unknown block names must reject the whole file.
