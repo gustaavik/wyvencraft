@@ -4273,13 +4273,14 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "log",
+ "parking_lot",
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
  "toml",
  "ureq",
  "uuid",
  "wcauth-ticket",
- "wyven-core",
 ]
 
 [[package]]

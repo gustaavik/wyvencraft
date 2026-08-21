@@ -33,13 +33,13 @@
 //! `chat`. Commands depend on the port; `state` implements it.
 
 pub use wyven_assets;
+pub use wyven_auth;
 pub use wyven_core;
 pub use wyven_model;
 pub use wyven_render;
 
 pub mod app;
 pub mod art;
-pub mod auth;
 pub mod boot;
 pub mod chat;
 pub mod config;

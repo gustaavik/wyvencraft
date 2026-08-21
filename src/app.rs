@@ -67,7 +67,7 @@ fn open_boot_world(world: &WorldChoice, mode: GameMode) -> Option<Result<SavedGa
 ///
 /// This is a *developer* path, not a way around the login gate — an offline
 /// client still cannot join anyone, because it has no ticket to present.
-fn boot_account(account: &crate::auth::AccountState) {
+fn boot_account(account: &wyven_auth::AccountState) {
     let Ok(username) = std::env::var("WYVEN_USERNAME") else {
         log::info!("no WYVEN_USERNAME; booting offline");
         account.set_offline();
@@ -79,15 +79,15 @@ fn boot_account(account: &crate::auth::AccountState) {
         return;
     };
 
-    let client = crate::auth::HttpAuthClient::from_env();
-    match crate::auth::AuthClient::login(&client, &username, &password) {
+    let client = wyven_auth::HttpAuthClient::from_env();
+    match wyven_auth::AuthClient::login(&client, &username, &password) {
         Ok(session) => {
             log::info!("booted signed in as {}", session.identity);
             // Cache the ticket keys too, so a `WYVEN_HOST=1` boot can verify the
             // clients that join it.
-            if let Ok(keys) = crate::auth::AuthClient::public_keys(&client)
+            if let Ok(keys) = wyven_auth::AuthClient::public_keys(&client)
                 && !keys.is_empty()
-                && let Err(err) = crate::auth::KeyCache::new().store(&keys)
+                && let Err(err) = wyven_auth::KeyCache::new().store(&keys)
             {
                 log::warn!("could not cache auth keys: {err}");
             }
@@ -105,7 +105,7 @@ fn boot_account(account: &crate::auth::AccountState) {
 fn initial_state(
     plan: BootPlan,
     content: &Arc<GameContent>,
-    account: &crate::auth::AccountState,
+    account: &wyven_auth::AccountState,
 ) -> Box<dyn GameState> {
     // Only the menu path is gated. Every other plan is a dev-boot flag, which
     // must stay usable without a window to click in.
@@ -132,7 +132,12 @@ fn initial_state(
                 }
                 None => (EPHEMERAL_SEED, None),
             };
-            match Host::bind(port, seed) {
+            match Host::bind(
+                port,
+                seed,
+                crate::net::host_config(),
+                crate::net::TicketJoin::from_cache(),
+            ) {
                 Ok(host) => match game {
                     Some(game) => {
                         Box::new(InGameState::new_host_saved(content.clone(), game, host))
@@ -237,7 +242,7 @@ struct App {
     content: Arc<GameContent>,
     /// Who this client is signed in as. Owned here and lent to every state
     /// through `Resources`, so nothing needs a global.
-    account: crate::auth::AccountState,
+    account: wyven_auth::AccountState,
     windows: VulkanoWindows,
     gui: Option<Gui>,
     renderer: Option<Renderer>,
@@ -277,7 +282,7 @@ impl App {
         // Dev convenience env vars skip the menus — see `boot` for the rules:
         //   WYVEN_BOOT_INGAME / WYVEN_HOST / WYVEN_JOIN / WYVEN_MODE /
         //   WYVEN_WORLD / WYVEN_SEED.
-        let account = crate::auth::AccountState::new();
+        let account = wyven_auth::AccountState::new();
         let initial = initial_state(BootPlan::from_env(&SystemEnv), &content, &account);
 
         Self {

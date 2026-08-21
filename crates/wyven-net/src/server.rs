@@ -1,49 +1,63 @@
-//! Authoritative host: owns world truth, validates client requests, and
-//! broadcasts state to peers. Runs in-process alongside the host's own player.
+//! Authoritative host: accepts peers, checks who they are, and carries messages
+//! both ways. Runs in-process alongside the host's own player.
 //!
 //! Built on `renet::RenetServer` + `renet_netcode::NetcodeServerTransport` over
-//! UDP, using unsecure auth (LAN / direct-connect).
+//! UDP. netcode's own "unsecure" auth is *not* the security boundary — the
+//! [`JoinVerifier`] is, and it runs before a peer is assigned a
+//! [`PlayerId`].
 
 use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use renet::{ClientId, ConnectionConfig, RenetServer, ServerEvent};
 use renet_netcode::{NetcodeServerTransport, ServerAuthentication, ServerConfig};
 
-use crate::auth::{AccountIdentity, TicketVerifier};
-use crate::net::protocol::{self, Channel, ClientMessage, PlayerId, ServerMessage};
+use crate::session::{JoinVerifier, Protocol};
+use crate::wire::{self, Channel, PlayerId};
 
 /// Default UDP port the host listens on.
 pub const DEFAULT_PORT: u16 = 25_565;
-/// Application/protocol id — clients must match to connect.
-pub const PROTOCOL_ID: u64 = 0x5759_564E_0001; // "WYVN" v1
+
+/// What a host needs settling before it binds.
+#[derive(Debug, Clone, Copy)]
+pub struct HostConfig {
+    /// Application/protocol id — clients must present the same one. The game
+    /// picks it; two games on one LAN must not share a value.
+    pub protocol_id: u64,
+    pub max_clients: usize,
+}
 
 /// The host-side networking driver.
-pub struct Host {
+///
+/// Generic over the protocol it speaks and the verifier that guards it, both
+/// fixed at construction: a `Host` cannot be half-wired to another game's
+/// messages, and cannot be built without deciding who may join.
+pub struct Host<P: Protocol, V: JoinVerifier> {
     server: RenetServer,
     transport: NetcodeServerTransport,
     seed: u64,
     next_player_id: u64,
     /// Map of transport client id -> assigned player id.
     players: HashMap<ClientId, PlayerId>,
-    /// The verified account behind each connected player.
+    /// The verified identity behind each connected player.
     ///
-    /// Populated only from a checked signature, so an entry here *is* proof of
-    /// identity — which is what makes `ops.toml` a permission rather than a
-    /// suggestion, and what gives a nameplate a name nobody chose for themselves.
-    accounts: HashMap<PlayerId, AccountIdentity>,
-    /// Checks join tickets. `None` when this host has no auth keys cached, which
-    /// means it cannot verify anyone.
-    verifier: Option<TicketVerifier>,
+    /// Populated only from a successful [`JoinVerifier::verify`], so an entry
+    /// here *is* proof — which is what lets a game treat it as a permission
+    /// rather than a suggestion, and give a nameplate a name nobody chose for
+    /// themselves.
+    accounts: HashMap<PlayerId, V::Identity>,
+    verifier: V,
     /// Detected this frame (drained by the caller).
     joined: Vec<ClientId>,
     left: Vec<PlayerId>,
+    protocol: PhantomData<fn() -> P>,
 }
 
-impl Host {
-    /// Bind a host on `port` serving a world with `seed`.
-    pub fn bind(port: u16, seed: u64) -> std::io::Result<Self> {
+impl<P: Protocol, V: JoinVerifier> Host<P, V> {
+    /// Bind a host on `port` serving a world with `seed`, guarded by `verifier`.
+    pub fn bind(port: u16, seed: u64, config: HostConfig, verifier: V) -> std::io::Result<Self> {
         let socket = UdpSocket::bind(("0.0.0.0", port))?;
         let current_time = unix_now();
         let public_addr: SocketAddr = format!("127.0.0.1:{port}")
@@ -52,29 +66,19 @@ impl Host {
 
         let server_config = ServerConfig {
             current_time,
-            max_clients: 16,
-            protocol_id: PROTOCOL_ID,
+            max_clients: config.max_clients,
+            protocol_id: config.protocol_id,
             public_addresses: vec![public_addr],
             authentication: ServerAuthentication::Unsecure,
         };
         let transport = NetcodeServerTransport::new(server_config, socket)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
 
-        // Loaded once, at bind. A host that has never reached the auth server
-        // has no keys and turns everyone away — the safe direction, and the one
-        // that keeps "I could not check you" from silently meaning "you're in".
-        let keys = crate::auth::KeyCache::new().load();
-        let verifier = if keys.is_empty() {
-            log::warn!(
-                "no {} — this host cannot verify players and will refuse every join. \
-                 Sign in once to fetch the auth keys.",
-                crate::auth::keys::KEYS_FILE
-            );
-            None
-        } else {
-            log::info!("verifying joins against {} auth key(s)", keys.len());
-            Some(TicketVerifier::new(keys))
-        };
+        // Checked once, at bind, so a host that cannot admit anybody says so
+        // now rather than at the first silent refusal.
+        if !verifier.is_ready() {
+            log::warn!("this host cannot verify players and will refuse every join");
+        }
 
         log::info!("hosting on port {port} (seed {seed})");
         Ok(Self {
@@ -87,6 +91,7 @@ impl Host {
             verifier,
             joined: Vec::new(),
             left: Vec::new(),
+            protocol: PhantomData,
         })
     }
 
@@ -127,7 +132,7 @@ impl Host {
 
                     let pid = PlayerId(self.next_player_id);
                     self.next_player_id += 1;
-                    log::info!("player {} joined as {identity}", pid.0);
+                    log::info!("player {} joined", pid.0);
                     self.players.insert(client_id, pid);
                     self.accounts.insert(pid, identity);
                     self.joined.push(client_id);
@@ -143,38 +148,21 @@ impl Host {
         }
     }
 
-    /// Check the ticket a connecting client presented.
-    fn verify_join(&mut self, client_id: ClientId) -> Result<AccountIdentity, String> {
-        let Some(verifier) = self.verifier.as_mut() else {
-            return Err("this host has no auth keys and cannot verify anyone".to_string());
-        };
-
+    /// Ask the verifier about a connecting peer.
+    fn verify_join(&mut self, client_id: ClientId) -> Result<V::Identity, String> {
         let user_data = self.transport.user_data(client_id);
-        let identity = verifier
-            .verify(user_data.as_ref(), unix_now().as_secs())
-            .map_err(|err| err.to_string())?;
-
-        // The netcode id is derived from the account, so a client claiming one
-        // id while holding a ticket for another is trying something. Refusing
-        // keeps `identity -> save record` a function rather than a suggestion.
-        if identity.netcode_id() != client_id {
-            return Err(format!(
-                "ticket is for {} but the client connected as {client_id}",
-                identity.netcode_id()
-            ));
-        }
-
-        Ok(identity)
+        self.verifier
+            .verify(user_data.as_ref(), client_id, unix_now().as_secs())
     }
 
-    /// The verified account behind a player, if they are still connected.
-    pub fn account(&self, pid: PlayerId) -> Option<&AccountIdentity> {
+    /// The verified identity behind a player, if they are still connected.
+    pub fn account(&self, pid: PlayerId) -> Option<&V::Identity> {
         self.accounts.get(&pid)
     }
 
     /// Whether this host is able to verify joining players at all.
     pub fn can_verify(&self) -> bool {
-        self.verifier.is_some()
+        self.verifier.is_ready()
     }
 
     /// Newly connected clients this frame (transport ids).
@@ -192,7 +180,7 @@ impl Host {
     }
 
     /// Drain all incoming client messages across channels.
-    pub fn receive(&mut self) -> Vec<(PlayerId, ClientMessage)> {
+    pub fn receive(&mut self) -> Vec<(PlayerId, P::ToServer)> {
         let mut out = Vec::new();
         let channels = [Channel::Unreliable, Channel::Reliable, Channel::Chunk];
         for client_id in self.server.clients_id() {
@@ -201,7 +189,7 @@ impl Host {
             };
             for channel in channels {
                 while let Some(bytes) = self.server.receive_message(client_id, channel.id()) {
-                    if let Some(msg) = protocol::decode::<ClientMessage>(&bytes) {
+                    if let Some(msg) = wire::decode::<P::ToServer>(&bytes) {
                         out.push((pid, msg));
                     }
                 }
@@ -210,13 +198,13 @@ impl Host {
         out
     }
 
-    pub fn send(&mut self, client: ClientId, msg: &ServerMessage, channel: Channel) {
+    pub fn send(&mut self, client: ClientId, msg: &P::ToClient, channel: Channel) {
         self.server
-            .send_message(client, channel.id(), protocol::encode(msg));
+            .send_message(client, channel.id(), wire::encode(msg));
     }
 
     /// Send a message to the single client owning `pid` (no-op if they've left).
-    pub fn send_to_player(&mut self, pid: PlayerId, msg: &ServerMessage, channel: Channel) {
+    pub fn send_to_player(&mut self, pid: PlayerId, msg: &P::ToClient, channel: Channel) {
         let mut target = None;
         for (&cid, &p) in &self.players {
             if p == pid {
@@ -226,13 +214,13 @@ impl Host {
         }
         if let Some(cid) = target {
             self.server
-                .send_message(cid, channel.id(), protocol::encode(msg));
+                .send_message(cid, channel.id(), wire::encode(msg));
         }
     }
 
-    pub fn broadcast(&mut self, msg: &ServerMessage, channel: Channel) {
+    pub fn broadcast(&mut self, msg: &P::ToClient, channel: Channel) {
         self.server
-            .broadcast_message(channel.id(), protocol::encode(msg));
+            .broadcast_message(channel.id(), wire::encode(msg));
     }
 
     /// Flush queued messages to the network. Call once per frame, last.

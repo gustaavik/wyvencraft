@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use crate::auth::client::{AuthClient, AuthError, JoinTicket};
-use crate::auth::session::{AccountIdentity, AuthSession};
+use crate::client::{AuthClient, AuthError, JoinTicket};
+use crate::session::{AccountIdentity, AuthSession};
 
 /// How this client is signed in.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,14 +127,12 @@ impl AccountState {
 
     /// The `u64` this client presents in the netcode handshake.
     ///
-    /// Derived from the account when signed in, so a world save follows the
-    /// player rather than the machine. Offline, it falls back to the local
-    /// profile id — which is what it always used to be, and is fine because an
-    /// offline player never reaches a multiplayer session anyway.
-    pub fn netcode_id(&self) -> u64 {
-        self.identity()
-            .map(|identity| identity.netcode_id())
-            .unwrap_or_else(crate::save::local_identity)
+    /// Derived from the account, so a world save follows the player rather than
+    /// the machine. `None` while offline — what to fall back to then is the
+    /// caller's policy, not this crate's, and an offline player never reaches a
+    /// multiplayer session anyway.
+    pub fn netcode_id(&self) -> Option<u64> {
+        self.identity().map(|identity| identity.netcode_id())
     }
 
     /// Get a join ticket, refreshing the access token first if it is close to
@@ -178,7 +176,7 @@ impl Default for AccountState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::client::FakeAuthClient;
+    use crate::client::FakeAuthClient;
 
     fn session(username: &str) -> AuthSession {
         AuthSession {
@@ -234,7 +232,7 @@ mod tests {
         let state = AccountState::signed_in(session("gustav"));
         let expected = state.identity().unwrap().netcode_id();
 
-        assert_eq!(state.netcode_id(), expected);
+        assert_eq!(state.netcode_id(), Some(expected));
     }
 
     #[test]
@@ -245,7 +243,7 @@ mod tests {
 
         let ticket = state.issue_ticket(&client, 1_800_000_000).unwrap();
 
-        let mut verifier = crate::auth::TicketVerifier::new(client.key_set());
+        let mut verifier = crate::TicketVerifier::new(client.key_set());
         assert_eq!(
             verifier
                 .verify(Some(&ticket.slot), 1_800_000_000)

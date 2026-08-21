@@ -429,8 +429,8 @@ mod tests {
 
     /// A stable test account, so a uuid does not have to be spelled out at
     /// every call site.
-    fn account(n: u128) -> crate::auth::AccountIdentity {
-        crate::auth::AccountIdentity {
+    fn account(n: u128) -> wyven_auth::AccountIdentity {
+        wyven_auth::AccountIdentity {
             account_id: uuid::Uuid::from_u128(n),
             username: format!("player{n}"),
         }
@@ -457,7 +457,7 @@ mod tests {
         handle: &FakeHandle,
         pid: PlayerId,
         identity: u64,
-        account: Option<crate::auth::AccountIdentity>,
+        account: Option<wyven_auth::AccountIdentity>,
     ) {
         handle.deliver(Inbound::Joined {
             player: pid,
@@ -862,7 +862,7 @@ mod tests {
             &handle,
             pid,
             42,
-            Some(crate::auth::AccountIdentity {
+            Some(wyven_auth::AccountIdentity {
                 account_id: uuid::Uuid::from_u128(42),
                 username: "gustav".to_string(),
             }),

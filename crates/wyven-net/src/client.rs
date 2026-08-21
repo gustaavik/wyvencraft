@@ -3,46 +3,54 @@
 //!
 //! Built on `renet::RenetClient` + `renet_netcode::NetcodeClientTransport`.
 
+use std::marker::PhantomData;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use renet::{ConnectionConfig, RenetClient};
 use renet_netcode::{ClientAuthentication, NetcodeClientTransport};
 
-use crate::net::protocol::{self, Channel, ClientMessage, ServerMessage};
-use crate::net::server::PROTOCOL_ID;
+use crate::session::{Protocol, UserData};
+use crate::wire::{self, Channel};
 
 /// Client-side networking driver.
-pub struct Client {
+///
+/// Generic over the protocol it speaks, fixed at construction, so it cannot be
+/// pointed at a host expecting different messages without saying so.
+pub struct Client<P: Protocol> {
     client: RenetClient,
     transport: NetcodeClientTransport,
+    protocol: PhantomData<fn() -> P>,
 }
 
-impl Client {
+impl<P: Protocol> Client<P> {
     /// Open a connection to `server_addr` (does not block; poll [`Client::is_connected`]).
     ///
     /// `client_id` is the netcode identity we present — derived from the signed-in
     /// account, so a host recognises a returning player across sessions and
     /// machines.
     ///
-    /// `ticket` is the signed proof of who that account is, obtained from the
-    /// auth server just before connecting. It rides in netcode's `user_data`,
-    /// which is the only thing a client can say before the host decides whether
-    /// to keep it — so the host can reject an unauthenticated peer without ever
-    /// having spoken to it at the application level. A `None` ticket connects,
-    /// but any host with auth keys will drop it immediately.
+    /// `credentials` is whatever this game's [`JoinVerifier`] expects to see —
+    /// a signed ticket, typically. It rides in netcode's `user_data`, the only
+    /// thing a client can say before the host decides whether to keep it, so a
+    /// host can reject an unauthenticated peer without ever having spoken to it
+    /// at the application level. `None` connects, but a host that verifies will
+    /// drop it immediately.
+    ///
+    /// [`JoinVerifier`]: crate::JoinVerifier
     pub fn connect(
         server_addr: SocketAddr,
         client_id: u64,
-        ticket: Option<[u8; wcauth_ticket::SLOT_LEN]>,
+        protocol_id: u64,
+        credentials: Option<UserData>,
     ) -> std::io::Result<Self> {
         let socket = UdpSocket::bind("0.0.0.0:0")?;
         let current_time = unix_now();
         let authentication = ClientAuthentication::Unsecure {
-            protocol_id: PROTOCOL_ID,
+            protocol_id,
             client_id,
             server_addr,
-            user_data: ticket,
+            user_data: credentials,
         };
         let transport = NetcodeClientTransport::new(current_time, authentication, socket)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -50,6 +58,7 @@ impl Client {
         Ok(Self {
             client: RenetClient::new(ConnectionConfig::default()),
             transport,
+            protocol: PhantomData,
         })
     }
 
@@ -70,11 +79,11 @@ impl Client {
     }
 
     /// Drain all incoming server messages across channels.
-    pub fn receive(&mut self) -> Vec<ServerMessage> {
+    pub fn receive(&mut self) -> Vec<P::ToClient> {
         let mut out = Vec::new();
         for channel in [Channel::Unreliable, Channel::Reliable, Channel::Chunk] {
             while let Some(bytes) = self.client.receive_message(channel.id()) {
-                if let Some(msg) = protocol::decode::<ServerMessage>(&bytes) {
+                if let Some(msg) = wire::decode::<P::ToClient>(&bytes) {
                     out.push(msg);
                 }
             }
@@ -82,10 +91,9 @@ impl Client {
         out
     }
 
-    pub fn send(&mut self, msg: &ClientMessage, channel: Channel) {
+    pub fn send(&mut self, msg: &P::ToServer, channel: Channel) {
         if self.client.is_connected() {
-            self.client
-                .send_message(channel.id(), protocol::encode(msg));
+            self.client.send_message(channel.id(), wire::encode(msg));
         }
     }
 

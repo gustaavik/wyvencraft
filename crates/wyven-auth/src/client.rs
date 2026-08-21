@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use wcauth_ticket::SLOT_LEN;
 
-use crate::auth::keys::base64_decode;
-use crate::auth::session::{AccountIdentity, AuthSession};
+use crate::keys::base64_decode;
+use crate::session::{AccountIdentity, AuthSession};
 
 /// How long any single request may take.
 ///
@@ -108,7 +108,7 @@ impl HttpAuthClient {
 
     /// Point at whatever `WYVEN_AUTH_URL` says, or the default.
     pub fn from_env() -> Self {
-        Self::new(crate::auth::auth_url())
+        Self::new(crate::auth_url())
     }
 
     fn url(&self, path: &str) -> String {
@@ -585,7 +585,7 @@ mod tests {
         let session = client.login("gustav", "hunter2hunter2").unwrap();
         let ticket = client.issue_ticket(&session.access_token).unwrap();
 
-        let mut verifier = crate::auth::TicketVerifier::new(client.key_set());
+        let mut verifier = crate::TicketVerifier::new(client.key_set());
         let identity = verifier.verify(Some(&ticket.slot), 1_800_000_000).unwrap();
 
         assert_eq!(identity.username, "gustav");
@@ -600,7 +600,7 @@ mod tests {
         let first = client.issue_ticket(&session.access_token).unwrap();
         let second = client.issue_ticket(&session.access_token).unwrap();
 
-        let mut verifier = crate::auth::TicketVerifier::new(client.key_set());
+        let mut verifier = crate::TicketVerifier::new(client.key_set());
         assert!(verifier.verify(Some(&first.slot), 1_800_000_000).is_ok());
         assert!(
             verifier.verify(Some(&second.slot), 1_800_000_000).is_ok(),

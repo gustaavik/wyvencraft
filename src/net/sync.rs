@@ -4,7 +4,7 @@
 use glam::Vec3;
 
 use crate::core::GameMode;
-use crate::net::protocol::PlayerId;
+use wyven_net::PlayerId;
 
 /// Display placeholders until the first `PlayerStats` sync arrives (the
 /// authoritative values live in the host's player entity).

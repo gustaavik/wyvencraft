@@ -27,7 +27,7 @@ pub(super) struct Peers {
     /// Only ever written from a checked ticket signature, which is what lets
     /// `ops.toml` key on it. Empty in singleplayer and in tests, where there is
     /// no remote peer to verify.
-    pub accounts: HashMap<PlayerId, crate::auth::AccountIdentity>,
+    pub accounts: HashMap<PlayerId, wyven_auth::AccountIdentity>,
     /// Host: latest inventory each client reported, kept in wire form and
     /// converted to the name-based disk form only when a record is written.
     pub inventories: HashMap<PlayerId, (Vec<Option<NetItemStack>>, u32)>,

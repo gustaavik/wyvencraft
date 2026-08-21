@@ -4,17 +4,13 @@
 //! Design: *command/message pattern*. Positions use plain `[f32; 3]` (not glam
 //! types) to keep the wire format stable and glam-feature-independent.
 
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::core::{BlockId, BlockPos, GameMode};
+use wyven_net::PlayerId;
 
 /// 3D vector as it appears on the wire.
 pub type NetVec3 = [f32; 3];
-
-/// Server-assigned identifier for a connected player.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct PlayerId(pub u64);
 
 /// One crafting recipe as it travels on the wire. Items are referenced by name
 /// (not id) so the mapping stays stable even if registries differ across
@@ -243,40 +239,10 @@ pub enum ServerMessage {
     },
 }
 
-/// Logical network channels, mapped to renet channel ids.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum Channel {
-    /// Frequent, loss-tolerant updates (movement snapshots).
-    Unreliable = 0,
-    /// Ordered, guaranteed delivery (block edits, inventory, chat).
-    Reliable = 1,
-    /// Large transfers sliced across frames (initial modified-chunk sync).
-    Chunk = 2,
-}
-
-impl Channel {
-    pub fn id(self) -> u8 {
-        self as u8
-    }
-}
-
-/// Serialize a message to bytes (bincode).
-pub fn encode<T: Serialize>(msg: &T) -> Vec<u8> {
-    bincode::serde::encode_to_vec(msg, bincode::config::standard())
-        .expect("message serialization should not fail")
-}
-
-/// Deserialize a message; returns `None` on malformed input.
-pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Option<T> {
-    bincode::serde::decode_from_slice(bytes, bincode::config::standard())
-        .ok()
-        .map(|(value, _)| value)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wyven_net::{decode, encode};
 
     #[test]
     fn client_message_roundtrips() {

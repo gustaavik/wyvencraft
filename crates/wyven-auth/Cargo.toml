@@ -5,7 +5,8 @@ edition.workspace = true
 description = "Account sessions, key caching and Ed25519 join-ticket verification."
 
 [dependencies]
-wyven-core.workspace = true
+parking_lot.workspace = true
+serde_json.workspace = true
 wcauth-ticket.workspace = true
 uuid.workspace = true
 ureq.workspace = true

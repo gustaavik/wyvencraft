@@ -1,18 +1,31 @@
-//! Peer-to-peer (host-authoritative) networking.
+//! Wyvencraft's multiplayer: what peers say to each other, and who is allowed
+//! to say it.
 //!
-//! One peer runs a [`server::GameServer`]; others connect with a
-//! [`client::GameClient`]. Singleplayer runs the server in-process. The wire
-//! format lives in [`protocol`]; remote-player smoothing in [`sync`].
+//! The transport is [`wyven_net`] — sockets, channels, connection events, the
+//! join gate. It carries bytes and knows nothing about blocks or inventories.
+//! Two declarations wire this game into it:
+//!
+//! * [`WyvenProtocol`] names the message pair, so `Host` and `Client` below are
+//!   plain aliases rather than types anyone has to spell.
+//! * [`TicketJoin`] is the join gate: an Ed25519 ticket checked against
+//!   `authkeys.toml`, refusing anyone it cannot verify. **No keys means no
+//!   joins**, never "everyone joins".
+//!
+//! The wire format itself lives in [`protocol`]; remote-player smoothing in
+//! [`sync`].
 
-pub mod client;
+pub mod join;
 pub mod protocol;
-pub mod server;
 pub mod sync;
 
-pub use client::Client;
+pub use join::{PROTOCOL_ID, TicketJoin, WyvenProtocol, host_config};
 pub use protocol::{
-    Channel, ChatKind, ClientMessage, NetItemStack, NetVec3, PlayerId, PlayerRestore, RecipeData,
-    ServerMessage,
+    ChatKind, ClientMessage, NetItemStack, NetVec3, PlayerRestore, RecipeData, ServerMessage,
 };
-pub use server::{DEFAULT_PORT, Host};
 pub use sync::RemotePlayer;
+pub use wyven_net::{Channel, DEFAULT_PORT, PlayerId};
+
+/// The host driver, speaking Wyvencraft's protocol behind its join gate.
+pub type Host = wyven_net::Host<WyvenProtocol, TicketJoin>;
+/// The client driver, speaking the same protocol.
+pub type Client = wyven_net::Client<WyvenProtocol>;

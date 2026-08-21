@@ -70,7 +70,12 @@ impl MultiplayerMenuState {
             }
         };
         // Bind with the world's own seed so `Host::seed()` matches the world.
-        match Host::bind(DEFAULT_PORT, game.save.meta.seed) {
+        match Host::bind(
+            DEFAULT_PORT,
+            game.save.meta.seed,
+            crate::net::host_config(),
+            crate::net::TicketJoin::from_cache(),
+        ) {
             Ok(host) => {
                 Transition::Replace(Box::new(InGameState::new_host_saved(content, game, host)))
             }

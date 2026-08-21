@@ -79,7 +79,7 @@ impl InGameState {
         &mut self,
         pid: PlayerId,
         identity: u64,
-        account: Option<crate::auth::AccountIdentity>,
+        account: Option<wyven_auth::AccountIdentity>,
     ) {
         let restored = self
             .save

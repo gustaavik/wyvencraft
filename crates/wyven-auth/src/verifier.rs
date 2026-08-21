@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use wcauth_ticket::{KeySet, Nonce, SLOT_LEN, TicketError};
 
-use crate::auth::session::AccountIdentity;
+use crate::session::AccountIdentity;
 
 /// Why a joining player was turned away.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

@@ -64,7 +64,7 @@ pub struct Resources<'a> {
     /// Who this client is signed in as. Read by the menus (to decide whether
     /// multiplayer is available) and by `ConnectingState` (to fetch a join
     /// ticket). Passed rather than global, like everything else here.
-    pub account: &'a crate::auth::AccountState,
+    pub account: &'a wyven_auth::AccountState,
 }
 
 /// Shared, per-frame context handed to states.

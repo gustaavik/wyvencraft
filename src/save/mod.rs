@@ -421,7 +421,7 @@ pub fn local_identity() -> u64 {
 /// a returning player and hand back their saved inventory/position.
 /// `WYVEN_CLIENT_ID` overrides it (e.g. to run two clients from one directory).
 ///
-/// Prefer [`crate::auth::AccountState::netcode_id`] where an account may be
+/// Prefer [`wyven_auth::AccountState::netcode_id`] where an account may be
 /// signed in: it derives the id from the account, so a save follows the player
 /// rather than the machine.
 pub fn client_identity() -> u64 {
