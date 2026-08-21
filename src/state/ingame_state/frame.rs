@@ -384,8 +384,8 @@ impl GameState<Wyvencraft> for InGameState {
                 format!("on_ground: {}", self.player.on_ground),
                 format!(
                     "mobs: {} live / {} arrows / {} drops",
-                    self.mobs.len() + self.remote_mobs.len(),
-                    self.arrows.len(),
+                    self.mobs.live.len() + self.mobs.remote.len(),
+                    self.mobs.arrows.len(),
                     self.drops.len()
                 ),
                 format!("net: {}", self.net_status()),

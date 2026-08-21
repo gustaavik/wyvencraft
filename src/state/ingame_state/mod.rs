@@ -81,6 +81,32 @@ struct BreakState {
     progress: f32,
 }
 
+/// The living population of a session.
+struct MobWorld {
+    /// Mobs this peer simulates (the authority) or renders from snapshots.
+    live: Vec<Mob>,
+    next_id: u64,
+    /// Seeded spawn planner — deterministic in (seed, tick), so a host and its
+    /// clients agree without exchanging the decision.
+    spawner: Spawner,
+    /// Mobs a client knows about only from the host's snapshots.
+    remote: HashMap<u64, mobs::RemoteMob>,
+    arrows: Vec<Arrow>,
+}
+
+impl MobWorld {
+    /// Empty, with a spawn planner seeded from the world.
+    fn new(seed: u64) -> Self {
+        Self {
+            live: Vec::new(),
+            next_id: 0,
+            spawner: Spawner::new(seed),
+            remote: HashMap::new(),
+            arrows: Vec::new(),
+        }
+    }
+}
+
 pub struct InGameState {
     pub world: World,
     pub player: Player,
@@ -120,17 +146,16 @@ pub struct InGameState {
     fluids: FluidSim,
     /// Progressive block-break state for survival timed mining.
     breaking: Option<BreakState>,
-    /// Live mobs, simulated by the authority (singleplayer/host) only.
-    /// Clients keep interpolated replicas in `remote_mobs` instead.
-    mobs: Vec<Mob>,
-    /// Next value for a host-allocated [`crate::entity::MobId`].
-    next_mob_id: u64,
-    spawner: Spawner,
-    /// Client: replicas of the host's mobs, keyed by wire id.
-    remote_mobs: HashMap<u64, mobs::RemoteMob>,
-    /// Arrows in flight. Every peer simulates the ones it knows about; only
-    /// the authority applies their damage.
-    arrows: Vec<Arrow>,
+    /// Everything alive that is not a player: the mobs this peer simulates,
+    /// the ones a host told it about, and the arrows in flight.
+    ///
+    /// Grouped because they are one concern with one lifetime — a mob spawns,
+    /// shoots, dies and drops together, and nothing outside `mobs` and `view`
+    /// touches any of them. The *methods* stay on `InGameState`: mob AI
+    /// perceives the world and attacks the player, so moving them here would
+    /// replace one honest `&mut self` with six borrows threaded through every
+    /// call — not less coupling, only less visible coupling.
+    mobs: MobWorld,
     /// Item drops lying in the world. Local-only: not synced over the network.
     drops: Vec<DroppedItem>,
     /// True while the player is dead and awaiting respawn (control frozen).
@@ -239,7 +264,7 @@ mod tests {
             state.attack_mob(mobs::MobTargetRef::Local(index));
         }
         state.update_mobs(1.0 / 60.0);
-        assert!(state.mobs.is_empty(), "cow should be dead and reaped");
+        assert!(state.mobs.live.is_empty(), "cow should be dead and reaped");
         assert!(!state.drops.is_empty(), "death should drop loot");
         let beef = state.content.items.find("raw beef").unwrap();
         let dropped: u32 = state
@@ -402,8 +427,8 @@ mod tests {
         state
             .spawn_mob("zombie", Vec3::new(6.0, 80.0, 6.0))
             .expect("zombie spawns");
-        state.mobs[0].health = 11.0;
-        state.mobs[0].night_spawned = true;
+        state.mobs.live[0].health = 11.0;
+        state.mobs.live[0].night_spawned = true;
         state.save_world();
         drop(state);
 
@@ -424,11 +449,11 @@ mod tests {
             ))
         );
         assert_eq!(state.inventory.selected_index(), 8);
-        assert_eq!(state.mobs.len(), 1, "the zombie survives the reload");
-        assert_eq!(state.mobs[0].kind_name, "zombie");
-        assert_eq!(state.mobs[0].position, Vec3::new(6.0, 80.0, 6.0));
-        assert_eq!(state.mobs[0].health, 11.0);
-        assert!(state.mobs[0].night_spawned, "daylight rule survives");
+        assert_eq!(state.mobs.live.len(), 1, "the zombie survives the reload");
+        assert_eq!(state.mobs.live[0].kind_name, "zombie");
+        assert_eq!(state.mobs.live[0].position, Vec3::new(6.0, 80.0, 6.0));
+        assert_eq!(state.mobs.live[0].health, 11.0);
+        assert!(state.mobs.live[0].night_spawned, "daylight rule survives");
 
         let _ = std::fs::remove_dir_all(&root);
     }

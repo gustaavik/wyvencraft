@@ -1,11 +1,11 @@
 //! Construction of [`InGameState`] for each kind of session: fresh
 //! singleplayer/host, a world loaded from disk, or a client joining a host.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use glam::Vec3;
 
+use super::MobWorld;
 use super::net::recipes_from_wire;
 use super::peers::Peers;
 use super::persistence::Persistence;
@@ -14,7 +14,7 @@ use super::{DOUBLE_TAP_WINDOW, InGameState, SPAWN_RADIUS};
 use crate::chat::{ChatState, OpsList};
 use crate::content::GameContent;
 use crate::core::{BlockPos, CHUNK_HEIGHT, ChunkPos, DayCycle, GameMode};
-use crate::entity::{Player, Spawner};
+use crate::entity::Player;
 use crate::inventory::{Inventory, RecipeBook};
 use crate::net::{Client, Host, NetVec3, PlayerId, PlayerRestore, RecipeData};
 use crate::save::{FileWorldRepository, SavedGame};
@@ -110,7 +110,7 @@ impl InGameState {
             let position = Vec3::from_array(data.position);
             match state.spawn_mob(&data.kind, position) {
                 Some(_) => {
-                    if let Some(mob) = state.mobs.last_mut() {
+                    if let Some(mob) = state.mobs.live.last_mut() {
                         mob.health = data.health.min(mob.params.max_health);
                         mob.night_spawned = data.night_spawned;
                     }
@@ -122,7 +122,10 @@ impl InGameState {
             }
         }
         if saved_mobs > 0 {
-            log::info!("restored {} of {saved_mobs} saved mobs", state.mobs.len());
+            log::info!(
+                "restored {} of {saved_mobs} saved mobs",
+                state.mobs.live.len()
+            );
         }
         log::info!(
             "loaded world '{}' (seed {}, time {:.3}, player {})",
@@ -256,11 +259,7 @@ impl InGameState {
             spawn,
             fluids: FluidSim::new(),
             breaking: None,
-            mobs: Vec::new(),
-            next_mob_id: 0,
-            spawner: Spawner::new(seed ^ 0x5EED_0F5B_A3B1_E5B0),
-            remote_mobs: HashMap::new(),
-            arrows: Vec::new(),
+            mobs: MobWorld::new(seed ^ 0x5EED_0F5B_A3B1_E5B0),
             drops: Vec::new(),
             dead: false,
             jump_tap_timer: DOUBLE_TAP_WINDOW * 2.0,

@@ -199,11 +199,11 @@ impl InGameState {
     /// from the world seed and the mob id, so runs are reproducible.
     pub(super) fn spawn_mob(&mut self, kind_name: &str, position: Vec3) -> Option<MobId> {
         let kind = self.content.entities.find(kind_name)?;
-        let id = MobId(self.next_mob_id);
+        let id = MobId(self.mobs.next_id);
         let seed = self.world.seed() ^ id.0.wrapping_mul(0x9E37_79B9_7F4A_7C15);
         let mob = Mob::spawn(kind, id, position, seed)?;
-        self.next_mob_id += 1;
-        self.mobs.push(mob);
+        self.mobs.next_id += 1;
+        self.mobs.live.push(mob);
         self.emit_mob_event(ServerMessage::MobSpawned {
             id: id.0,
             kind: kind_name.to_string(),
@@ -249,7 +249,7 @@ impl InGameState {
         // Arrows launched this tick: (origin eye, velocity, damage, gravity, lifetime).
         let mut fired: Vec<(Vec3, Vec3, f32, f32, f32)> = Vec::new();
 
-        for mob in &mut self.mobs {
+        for mob in &mut self.mobs.live {
             // Mobs straddling the streaming edge freeze until their chunk is
             // back (unloaded chunks read as solid, which would trap them).
             if !self
@@ -314,7 +314,8 @@ impl InGameState {
                 gravity,
                 lifetime,
             });
-            self.arrows
+            self.mobs
+                .arrows
                 .push(Arrow::new(origin, velocity, damage, gravity, lifetime));
         }
 
@@ -336,12 +337,12 @@ impl InGameState {
     /// `MobDespawned { killed_by }` and rolls the identical table itself.
     fn reap_dead_mobs(&mut self) {
         let mut i = 0;
-        while i < self.mobs.len() {
-            if !self.mobs[i].dead() {
+        while i < self.mobs.live.len() {
+            if !self.mobs.live[i].dead() {
                 i += 1;
                 continue;
             }
-            let mob = self.mobs.swap_remove(i);
+            let mob = self.mobs.live.swap_remove(i);
             let killed_by = mob.last_attacker.map(PlayerId);
             self.emit_mob_event(ServerMessage::MobDespawned {
                 id: mob.id.0,
@@ -420,13 +421,15 @@ impl InGameState {
             })
             .unwrap_or(reach);
         if !self.session.is_authority() {
-            self.remote_mobs
+            self.mobs
+                .remote
                 .iter()
                 .filter_map(|(id, mob)| Some((*id, mob.aabb().ray_hit(eye, look, max_t)?)))
                 .min_by(|a, b| a.1.total_cmp(&b.1))
                 .map(|(id, _)| MobTargetRef::Remote(id))
         } else {
             self.mobs
+                .live
                 .iter()
                 .enumerate()
                 .filter_map(|(i, mob)| Some((i, mob.aabb().ray_hit(eye, look, max_t)?)))
@@ -445,7 +448,7 @@ impl InGameState {
                 let push = Vec3::new(look.x, 0.0, look.z).normalize_or_zero() * KNOCKBACK_PUSH
                     + Vec3::Y * KNOCKBACK_LIFT;
                 let damage = self.melee_damage();
-                if let Some(mob) = self.mobs.get_mut(index) {
+                if let Some(mob) = self.mobs.live.get_mut(index) {
                     mob.damage(damage, push);
                     mob.last_attacker = Some(HOST_PLAYER_ID.0);
                     let hurt = ServerMessage::MobHurt {
@@ -493,7 +496,7 @@ impl InGameState {
 
         let mut hits: Vec<(Option<PlayerId>, f32)> = Vec::new();
         let world = &self.world;
-        self.arrows.retain_mut(|arrow| {
+        self.mobs.arrows.retain_mut(|arrow| {
             if !arrow.update(dt, |p| world.is_solid_for_collision(p)) {
                 return false;
             }
@@ -537,8 +540,8 @@ impl InGameState {
         let top = (self.player.position.y + 24.0) as i32;
 
         let world = &self.world;
-        let mobs = &self.mobs;
-        let requests = self.spawner.tick(
+        let mobs = &self.mobs.live;
+        let requests = self.mobs.spawner.tick(
             &cfg,
             dt,
             is_night,
@@ -552,7 +555,7 @@ impl InGameState {
                 let night_rule = cfg
                     .entry(&request.entity)
                     .is_some_and(|e| e.despawn_in_daylight);
-                if night_rule && let Some(mob) = self.mobs.last_mut() {
+                if night_rule && let Some(mob) = self.mobs.live.last_mut() {
                     mob.night_spawned = true;
                 }
                 log::debug!(
@@ -569,13 +572,13 @@ impl InGameState {
         let day = !is_night;
         let despawn_sq = cfg.limits.despawn_distance * cfg.limits.despawn_distance;
         let mut index = 0;
-        while index < self.mobs.len() {
-            let mob = &self.mobs[index];
+        while index < self.mobs.live.len() {
+            let mob = &self.mobs.live[index];
             let stray = anchors
                 .iter()
                 .all(|a| (mob.position - *a).length_squared() > despawn_sq);
             if stray || (day && mob.night_spawned) {
-                let id = self.mobs.swap_remove(index).id.0;
+                let id = self.mobs.live.swap_remove(index).id.0;
                 self.emit_mob_event(ServerMessage::MobDespawned {
                     id,
                     killed_by: None,

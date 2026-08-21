@@ -238,6 +238,7 @@ impl InGameState {
         }
         let spawned: Vec<ServerMessage> = self
             .mobs
+            .live
             .iter()
             .map(|mob| ServerMessage::MobSpawned {
                 id: mob.id.0,
@@ -274,7 +275,7 @@ impl InGameState {
             return;
         };
         let damage = self.client_melee_damage(pid);
-        if let Some(mob) = self.mobs.iter_mut().find(|m| m.id.0 == mob_id)
+        if let Some(mob) = self.mobs.live.iter_mut().find(|m| m.id.0 == mob_id)
             && mobs::attack_in_range(attacker, mob.position)
         {
             let to_mob = mob.position - attacker;
@@ -346,7 +347,8 @@ impl InGameState {
                 match self.content.entities.find(&kind) {
                     Some(k) if k.mob.is_some() => {
                         log::debug!("replicating mob {id} ({kind}) from host");
-                        self.remote_mobs
+                        self.mobs
+                            .remote
                             .insert(id, RemoteMob::new(k, Vec3::from_array(position)));
                     }
                     // Shouldn't happen (the content hash gates divergent builds),
@@ -358,7 +360,7 @@ impl InGameState {
                 for (id, position, yaw) in mobs {
                     // Unknown ids are fine: an unreliable snapshot can outrun
                     // its reliable MobSpawned.
-                    if let Some(mob) = self.remote_mobs.get_mut(&id) {
+                    if let Some(mob) = self.mobs.remote.get_mut(&id) {
                         mob.push_snapshot(Vec3::from_array(position), yaw);
                     }
                 }
@@ -368,7 +370,7 @@ impl InGameState {
                 // outcome arrives as MobDespawned.
             }
             ServerMessage::MobDespawned { id, killed_by } => {
-                if let Some(mob) = self.remote_mobs.remove(&id)
+                if let Some(mob) = self.mobs.remote.remove(&id)
                     && killed_by == Some(local_id)
                 {
                     // This player made the kill: roll the loot locally.
@@ -384,7 +386,7 @@ impl InGameState {
             } => {
                 // Visual-only on clients: damage is host-side, so the local
                 // copy carries none.
-                self.arrows.push(Arrow::new(
+                self.mobs.arrows.push(Arrow::new(
                     Vec3::from_array(position),
                     Vec3::from_array(velocity),
                     0.0,
@@ -483,10 +485,11 @@ impl InGameState {
         for msg in std::mem::take(&mut self.peers.mob_events) {
             self.session.broadcast(&msg, Channel::Reliable);
         }
-        if !self.mobs.is_empty() {
+        if !self.mobs.live.is_empty() {
             let states = ServerMessage::MobStates {
                 mobs: self
                     .mobs
+                    .live
                     .iter()
                     .map(|m| (m.id.0, m.position.to_array(), m.yaw))
                     .collect(),
@@ -1067,27 +1070,27 @@ mod tests {
 
         // In reach: the swing lands.
         let near = state.spawn_mob("cow", attacker).expect("cow spawns");
-        let full_health = state.mobs[0].health;
+        let full_health = state.mobs.live[0].health;
         handle.deliver(Inbound::Request {
             player: pid,
             msg: ClientMessage::Attack { id: near.0 },
         });
         state.pump_network(1.0 / 60.0);
         assert!(
-            state.mobs[0].health < full_health,
+            state.mobs.live[0].health < full_health,
             "a swing from next to the mob lands"
         );
 
         // Out of reach: the same message does nothing.
-        let hurt_health = state.mobs[0].health;
-        state.mobs[0].position = attacker + Vec3::new(500.0, 0.0, 0.0);
+        let hurt_health = state.mobs.live[0].health;
+        state.mobs.live[0].position = attacker + Vec3::new(500.0, 0.0, 0.0);
         handle.deliver(Inbound::Request {
             player: pid,
             msg: ClientMessage::Attack { id: near.0 },
         });
         state.pump_network(1.0 / 60.0);
         assert_eq!(
-            state.mobs[0].health, hurt_health,
+            state.mobs.live[0].health, hurt_health,
             "the same swing from 500 blocks away is rejected"
         );
     }

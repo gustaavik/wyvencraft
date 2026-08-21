@@ -922,8 +922,8 @@ impl super::InGameState {
             content,
         );
         self.view
-            .update_mob_meshes(ctx, &self.mobs, &mut self.remote_mobs, models, dt);
-        self.view.update_arrows_mesh(ctx, &self.arrows);
+            .update_mob_meshes(ctx, &self.mobs.live, &mut self.mobs.remote, models, dt);
+        self.view.update_arrows_mesh(ctx, &self.mobs.arrows);
 
         // Animated humanoids. The local player settles to idle while the
         // inventory is open (movement is frozen).

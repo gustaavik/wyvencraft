@@ -1,7 +1,7 @@
 //! Turning a [`BootPlan`] into the screen the app opens on.
 //!
 //! This is where the plan's decisions become effects: opening saves, binding
-//! sockets, signing in. Kept apart from [`plan`], which is pure — it reads the
+//! sockets, signing in. Kept apart from [`super::plan`], which is pure — it reads the
 //! environment and decides, and is tested with no window, GPU or socket.
 
 use std::sync::Arc;

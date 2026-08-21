@@ -62,7 +62,7 @@ impl InGameState {
         }
         let world = WorldData::from_world(&self.world, &self.content.blocks);
         let player = PlayerData::capture(&self.player, &self.inventory, &self.content.items);
-        let mobs = MobsData::from_mobs(&self.mobs);
+        let mobs = MobsData::from_mobs(&self.mobs.live);
         let snapshot = WorldSnapshot {
             world: &world,
             player: &player,

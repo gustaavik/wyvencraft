@@ -1,31 +1,66 @@
-//! Wyvencraft — a Minecraft-style voxel sandbox engine.
+//! Wyvencraft — a Minecraft-style voxel sandbox.
 //!
-//! The crate is organised into domain modules with deliberately one-directional
-//! dependencies:
+//! This crate is the **game**. The engine it is built on is the `wyven-*`
+//! workspace members under `crates/`, which know nothing about grass, zombies or
+//! survival mode:
 //!
 //! ```text
-//! core  ← (everything)
-//! render ← core
-//! model  ← core, render        (.gltf/.bbmodel files → geometry + texture)
-//! world  ← core, render(mesh/vertex)
-//! entity ← core, model
-//! inventory ← core, world, model
-//! content ← world, inventory, model   (registries loaded from assets/*.toml)
-//! input  ← core, config, entity
-//! net    ← core
-//! chat   ← core, net           (message log, command parsing, the ops list)
-//! save   ← core, world, inventory, entity   (world/player persistence)
-//! ui     ← inventory, net, (egui)
-//! state  ← all of the above
-//! boot   ← core, net, save     (pure env → BootPlan; no window or GPU)
-//! app    ← state, boot, content, render, config   (owns the window + event loop)
+//! wyven-core     coordinate/voxel types, math, RNG, frame timing
+//! wyven-assets   AssetSource port (Fs/Embedded/Map), PNG decoding
+//! wyven-render   Vulkan: context, pipelines, meshes, textures, atlas, camera
+//! wyven-model    .gltf / .bbmodel / Blockbench block JSON -> ModelMesh
+//! wyven-voxel    chunk store, background loader, culled mesher, raycast, World
+//! wyven-net      renet transport, generic over the protocol and the join gate
+//! wyven-input    winit events -> frame-coherent InputState
+//! wyven-auth     account sessions, key cache, Ed25519 ticket verification
+//! wyven-app      window, egui, event loop, screen stack
+//! ```
+//!
+//! The dependency direction is one-way and enforced by cargo, not by
+//! convention: no `wyven-*` crate lists this one, so a violation stops
+//! compiling rather than being noticed in review.
+//!
+//! # Where the line sits
+//!
+//! Anything a *different* game would want unchanged is engine. Anything that
+//! encodes what Wyvencraft is — a block's name and hardness, a 20-minute day,
+//! survival versus creative, what a pickaxe is for — is here. Five traits carry
+//! the meaning across:
+//!
+//! | Trait | Declared by | Implemented here by |
+//! |---|---|---|
+//! | [`wyven_render::TileSource`] | render | [`art::WyvencraftArt`] |
+//! | [`wyven_voxel::BlockCatalog`] | voxel | [`content::BlockAppearance`] |
+//! | [`wyven_voxel::BlockProperties`] | voxel | [`world::BlockRegistry`] |
+//! | [`wyven_voxel::WorldGenerator`] | voxel | [`world::NoiseGenerator`] |
+//! | [`wyven_net::Protocol`] / [`wyven_net::JoinVerifier`] | net | [`net::WyvenProtocol`] / [`net::TicketJoin`] |
+//! | [`wyven_app::Game`] | app | [`state::Wyvencraft`] |
+//!
+//! # This crate's own modules
+//!
+//! ```text
+//! core      ← wyven-core + GameMode and DayCycle (rules, not primitives)
+//! art       ← render        procedural tiles, skin, armor and mob sheets
+//! world     ← voxel         block table, worldgen, fluid rules
+//! inventory ← world         items, stacks, crafting, mining
+//! entity    ← inventory     player, physics, mobs, brains, projectiles
+//! content   ← all of it     registries loaded from assets/*.toml
+//! chat      ← net           message log, commands, the ops list
+//! save      ← world, entity world/player persistence under saves/
+//! ui        ← inventory     HUD and inventory egui views
+//! net       ← wyven-net     the wire protocol and the join gate
+//! config    ← wyven-input   settings, keybinds, and the movement intent
+//! boot      ← save, net     pure env -> BootPlan, then plan -> first screen
+//! state     ← everything    the screens, and the Game impl that starts them
+//! app       ← state         twenty lines: name the game, hand it to the runner
 //! ```
 //!
 //! I/O boundaries are crossed through ports, each with a real implementation and
 //! a test double: [`content::ContentSource`], [`save::WorldRepository`],
 //! [`state::session::Session`], [`boot::Environment`]. Hot paths (meshing, chunk
 //! generation, fluid ticking) deliberately use none — the indirection buys
-//! nothing there and would cost frame time.
+//! nothing there and would cost frame time, which is why `mesh_chunk` takes
+//! `&impl BlockCatalog` and not `&dyn`.
 //!
 //! [`chat::CommandContext`] is a port for a different reason: not I/O, but to
 //! invert a dependency. Chat commands are policy and belong in `chat`, yet they
