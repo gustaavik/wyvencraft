@@ -4,7 +4,7 @@
 //! All fallible disk I/O happens *before* this state (in the menus / boot code),
 //! so entering the world is infallible here.
 
-use super::{GameState, InGameState, StateContext, Transition};
+use super::{GameState, InGameState, StateContext, Transition, Wyvencraft};
 use crate::core::GameMode;
 use crate::save::{self, SavedGame};
 
@@ -41,7 +41,7 @@ impl LoadingState {
     }
 }
 
-impl GameState for LoadingState {
+impl GameState<Wyvencraft> for LoadingState {
     fn name(&self) -> &'static str {
         "Loading"
     }
@@ -51,10 +51,10 @@ impl GameState for LoadingState {
         // are ready. For now, enter the world immediately.
         match self.kind.take() {
             Some(LoadKind::Ephemeral { seed, mode }) => Transition::Replace(Box::new(
-                InGameState::new(ctx.resources.content.clone(), seed, mode),
+                InGameState::new(ctx.shared.content.clone(), seed, mode),
             )),
             Some(LoadKind::Saved(game)) => Transition::Replace(Box::new(InGameState::new_saved(
-                ctx.resources.content.clone(),
+                ctx.shared.content.clone(),
                 *game,
             ))),
             None => Transition::None,

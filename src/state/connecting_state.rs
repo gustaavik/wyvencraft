@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::time::Duration;
 
-use super::{GameState, InGameState, MultiplayerMenuState, StateContext, Transition};
+use super::{GameState, InGameState, MultiplayerMenuState, StateContext, Transition, Wyvencraft};
 use crate::net::{Client, ServerMessage};
 use wyven_auth::{AccountState, AuthClient, AuthError, HttpAuthClient, JoinTicket};
 
@@ -143,7 +143,7 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
-impl GameState for ConnectingState {
+impl GameState<Wyvencraft> for ConnectingState {
     fn name(&self) -> &'static str {
         "Connecting"
     }
@@ -196,10 +196,10 @@ impl GameState for ConnectingState {
             {
                 // Raw block/item ids cross the wire, so divergent content
                 // definitions would silently corrupt the session. Refuse.
-                if content_hash != ctx.resources.content.hash {
+                if content_hash != ctx.shared.content.hash {
                     log::warn!(
                         "content mismatch: host {content_hash:#018x} vs ours {:#018x}; refusing to join",
-                        ctx.resources.content.hash
+                        ctx.shared.content.hash
                     );
                     return Transition::Replace(Box::new(MultiplayerMenuState::new()));
                 }
@@ -229,7 +229,7 @@ impl GameState for ConnectingState {
             );
             let client = self.client.take().expect("client present");
             return Transition::Replace(Box::new(InGameState::new_client(
-                ctx.resources.content.clone(),
+                ctx.shared.content.clone(),
                 seed,
                 client,
                 your_id,

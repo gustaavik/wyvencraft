@@ -9,9 +9,6 @@ use glam::Vec2;
 use winit::event::{ElementState, MouseButton};
 use winit::keyboard::KeyCode;
 
-use crate::config::Keybinds;
-use crate::entity::MovementInput;
-
 #[derive(Default)]
 pub struct InputState {
     held: HashSet<KeyCode>,
@@ -96,20 +93,6 @@ impl InputState {
 
     pub fn scroll_delta(&self) -> f32 {
         self.scroll_delta
-    }
-
-    /// Build the movement intent for the player from current key state.
-    pub fn movement(&self, binds: &Keybinds) -> MovementInput {
-        let axis = |pos: KeyCode, neg: KeyCode| {
-            (self.is_held(pos) as i32 - self.is_held(neg) as i32) as f32
-        };
-        MovementInput {
-            forward: axis(binds.forward, binds.back),
-            strafe: axis(binds.right, binds.left),
-            jump: self.is_held(binds.jump),
-            sneak: self.is_held(binds.sneak),
-            sprint: self.is_held(binds.sprint),
-        }
     }
 
     /// Clear per-frame deltas and edge-triggered sets. Call at end of each frame.

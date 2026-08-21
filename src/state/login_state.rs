@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
-use super::{GameState, MainMenuState, StateContext, Transition};
+use super::{GameState, MainMenuState, StateContext, Transition, Wyvencraft};
 use crate::save::AccountProfile;
 use wyven_auth::{AccountState, AuthClient, AuthError, AuthSession, HttpAuthClient, KeyCache};
 
@@ -209,7 +209,7 @@ impl LoginState {
     }
 }
 
-impl GameState for LoginState {
+impl GameState<Wyvencraft> for LoginState {
     fn name(&self) -> &'static str {
         "Login"
     }

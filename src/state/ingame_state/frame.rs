@@ -4,7 +4,7 @@
 use winit::event::MouseButton;
 
 use super::{AUTOSAVE_INTERVAL, DOUBLE_TAP_WINDOW, InGameState, PREVIEW_DRAG_SENSITIVITY};
-use crate::state::{GameState, PauseMenuState, StateContext, Transition};
+use crate::state::{GameState, PauseMenuState, StateContext, Transition, Wyvencraft};
 use crate::ui::hud;
 use crate::ui::nameplate::{self, Nameplate};
 use wyven_render::{PreviewFrame, SceneFrame};
@@ -74,7 +74,7 @@ impl InGameState {
     }
 }
 
-impl GameState for InGameState {
+impl GameState<Wyvencraft> for InGameState {
     fn name(&self) -> &'static str {
         "InGame"
     }
@@ -86,7 +86,7 @@ impl GameState for InGameState {
     }
 
     fn update(&mut self, ctx: &mut StateContext) -> Transition {
-        let kb = ctx.settings.controls.keybinds.clone();
+        let kb = ctx.shared.settings.controls.keybinds.clone();
         // While the chat bar is open, egui owns the keyboard and gameplay keys
         // never reach `InputState` at all. These guards cover the one frame
         // between opening the bar and the widget taking focus.
@@ -144,8 +144,8 @@ impl GameState for InGameState {
             }
 
             // Mouse look.
-            let sens = ctx.settings.controls.mouse_sensitivity * 0.0025;
-            let pitch_sign = if ctx.settings.controls.invert_y {
+            let sens = ctx.shared.settings.controls.mouse_sensitivity * 0.0025;
+            let pitch_sign = if ctx.shared.settings.controls.invert_y {
                 1.0
             } else {
                 -1.0
@@ -174,7 +174,7 @@ impl GameState for InGameState {
             // Movement + physics. Refresh the worn defense first: `update` can
             // raise fall damage internally, and it must be mitigated by whatever
             // the player is wearing right now.
-            let movement = ctx.input.movement(&kb);
+            let movement = crate::config::movement(ctx.input, &kb);
             let dt = ctx.dt.min(0.05);
             self.player.defense = self.inventory.total_defense(&self.items);
             let health_before = self.player.health;
@@ -237,7 +237,7 @@ impl GameState for InGameState {
             }
         }
 
-        self.view.fov_degrees = ctx.settings.render.fov_degrees;
+        self.view.fov_degrees = ctx.shared.settings.render.fov_degrees;
         // Wrap the animation clock so f32 precision never degrades over long
         // sessions. The period must stay a whole multiple of every animated
         // texture's loop or the wrap skips a frame: `voxel_array.frag` steps a
@@ -268,14 +268,14 @@ impl GameState for InGameState {
             self.update_mobs(ctx.dt.min(0.05));
             self.update_spawning(ctx.dt);
         }
-        self.update_streaming(ctx.settings.render.render_distance);
+        self.update_streaming(ctx.shared.settings.render.render_distance);
         // Drops and arrows keep simulating even with the inventory or death
         // screen open.
         self.update_drops(ctx.dt.min(0.05));
         self.update_arrows(ctx.dt.min(0.05));
 
         // Simulation for this frame is settled; bring the GPU state in line.
-        self.refresh_view(ctx.resources.render, ctx.dt.min(0.05));
+        self.refresh_view(&ctx.shared.render, ctx.dt.min(0.05));
         Transition::None
     }
 
@@ -315,10 +315,10 @@ impl GameState for InGameState {
                 &self.inventory,
                 &self.items,
                 &self.recipes,
-                &ctx.resources.content.item_icons,
+                &ctx.shared.content.item_icons,
                 self.held,
                 self.player.mode,
-                ctx.resources.ui_tex,
+                ctx.shared.ui_tex,
             );
             if let Some(look) = out.head_look {
                 self.view.preview.look = look;
@@ -347,8 +347,8 @@ impl GameState for InGameState {
             egui_ctx,
             &self.inventory,
             &self.items,
-            &ctx.resources.content.item_icons,
-            ctx.resources.ui_tex,
+            &ctx.shared.content.item_icons,
+            ctx.shared.ui_tex,
         );
         hud::draw_mode_indicator(egui_ctx, self.player.mode.label());
 

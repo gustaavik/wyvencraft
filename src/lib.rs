@@ -32,11 +32,15 @@
 //! act on registries and inventories owned by `state` — which already depends on
 //! `chat`. Commands depend on the port; `state` implements it.
 
+pub use wyven_app;
 pub use wyven_assets;
 pub use wyven_auth;
 pub use wyven_core;
+pub use wyven_input;
 pub use wyven_model;
+pub use wyven_net;
 pub use wyven_render;
+pub use wyven_voxel;
 
 pub mod app;
 pub mod art;
@@ -46,7 +50,6 @@ pub mod config;
 pub mod content;
 pub mod core;
 pub mod entity;
-pub mod input;
 pub mod inventory;
 pub mod net;
 pub mod save;

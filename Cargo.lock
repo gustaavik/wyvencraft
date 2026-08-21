@@ -4251,6 +4251,7 @@ dependencies = [
  "egui_winit_vulkano",
  "log",
  "serde",
+ "thiserror 2.0.20",
  "vulkano",
  "vulkano-util",
  "winit",
