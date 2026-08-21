@@ -3,7 +3,7 @@
 // Blocks authored in Blockbench sample render::block_textures — one 256x256
 // array layer per texture, chosen per vertex — instead of the shared 16px
 // atlas voxel.frag reads. Same vertex shader, same push constants; only the
-// texture binding and the tint differ.
+// texture binding, the tint and the animated layer step differ.
 
 layout(location = 0) in vec2 v_uv;
 layout(location = 1) in float v_ao;
@@ -23,8 +23,23 @@ layout(push_constant) uniform PushConstants {
 
 layout(location = 0) out vec4 f_color;
 
+// Must match render::vertex::{ANIM_FRAMES_SHIFT, ANIM_FPS_SHIFT, ANIM_FIELD_MASK}.
+const uint ANIM_FRAMES_SHIFT = 8u;
+const uint ANIM_FPS_SHIFT = 16u;
+const uint ANIM_FIELD_MASK = 0xffu;
+
 void main() {
-    vec4 tex = texture(block_textures, vec3(v_uv, float(v_layer)));
+    // An animated texture occupies `frames` consecutive layers, so stepping the
+    // layer index is the array's answer to the atlas's UV step. Time comes in as
+    // pc.sun_dir.w and wraps at 3600 s, which stays phase-continuous as long as
+    // fps * 3600 is a multiple of the frame count.
+    uint layer = v_layer;
+    uint frames = (v_flags >> ANIM_FRAMES_SHIFT) & ANIM_FIELD_MASK;
+    if (frames > 1u) {
+        float fps = float((v_flags >> ANIM_FPS_SHIFT) & ANIM_FIELD_MASK);
+        layer += uint(mod(floor(pc.sun_dir.w * fps), float(frames)));
+    }
+    vec4 tex = texture(block_textures, vec3(v_uv, float(layer)));
     // Alpha-test for cutout foliage / sprites in the opaque pass.
     if (tex.a < 0.1) {
         discard;

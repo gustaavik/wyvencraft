@@ -107,7 +107,10 @@ differs is only the texture bound as descriptor set 0, which is what splits
   block names, chosen per vertex by `ChunkVertex::layer`, mipmapped with nearest
   magnification. Also one bind per pass, however many block types are on screen.
   Drawn by the `voxel_array` pipeline, which shares `voxel.vert` with `voxel` and
-  differs only in its fragment shader.
+  differs only in its fragment shader. An **animated** texture takes one layer
+  per frame, consecutively; `ChunkVertex::flags` carries the frame count and fps
+  (`render::vertex::anim_flags`) and `voxel_array.frag` steps the layer from
+  `pc.sun_dir.w`. Water is the only user so far, at 128 layers.
 - `textured` carries meshes that bring their own `render::Texture` and rebind set
   0 **per draw** — file-loaded `.gltf`/`.bbmodel` models.
 
@@ -120,11 +123,14 @@ feeds to `SceneFrame::textured`.
 The atlas/array split is **temporary**. Blocks are migrating to Blockbench models
 one at a time; when the last one moves over, the atlas keeps only the entity
 sheets and cracks, and `voxel` / `voxel_array` collapse back into one pipeline.
-Twelve blocks have moved so far — everything except `water`, `glass`, `bedrock`,
-`snow`, `clay` and the four `.bbmodel` plants. The now-unused painters in
-`render::tiles` are deliberately left in place: they stay reachable through
-`paint_named`, so nothing warns, and deleting them is a single clean sweep once
-the last block migrates.
+Twelve blocks have moved so far — everything except `glass`, `bedrock`, `snow`,
+`clay` and the four `.bbmodel` plants. Water is off the atlas too, by a third
+route: it cannot be a `block_model` (its surface height is per-corner and
+per-fluid-level, which baked quads cannot express), so it keeps the cube mesher's
+fluid branch and takes its layers from `[block.fluid.texture]` instead. The
+now-unused painters in `render::tiles` are deliberately left in place: they stay
+reachable through `paint_named`, so nothing warns, and deleting them is a single
+clean sweep once the last block migrates.
 
 Its mirror: **only `state::ingame_state::view` touches `RenderContext`.** Chunk
 streaming, mob AI, fluids and interaction are plain logic; `InGameState::refresh_view`
@@ -175,7 +181,7 @@ those systems are testable without a Vulkan device.
 | ----------------------- | ------------------------------------------------------------------------------------------ |
 | Add a block type        | Model it in Blockbench (**Java Block/Item** format, per-face UV), export *Block/Item Model* to `assets/blocks/<name>.json` with its textures as separate PNGs in `assets/textures/`, then one `[[block]]` in `assets/blocks.toml` with `block_model = "assets/blocks/<name>.json"`. A full cube is `from [0,0,0]` → `to [16,16,16]`; set `cullface` on **each face's own direction** or it draws all six even when buried (and hides itself in the wrong one); set `tintindex` only on faces taking a biome colour. Textures may be 16px or 256px — anything square that divides 256 is scaled up to it. Parsing is `model::blockjson`, baking `world::blockmodel`, layers `render::block_textures`. The older `textures = "<name>"` atlas path still works for the blocks not yet re-authored |
 | A non-cube block, the new way | Same as above — the model is already in cell coordinates, so it needs no placement. `random_yaw` on the `[[block]]` table turns each instance about its cell (and drops its `cullface`, which a turned face can no longer honour). The hitbox is derived from the geometry: a model that covers all six cell faces stays a plain `Target::Cell`, anything else gets a measured box. `assets/blocks/cornflower_block.json` is the worked example |
-| Biome tint (grass, foliage) | `tint` and `foliage_tint` per biome in `assets/worldgen.toml`, selected by a face's `tintindex` — **0 grass, 1 foliage**, Minecraft's numbering — resolved through `WorldGenerator::biome_tint` at mesh time. Greyscale art (`grass_block_top`, `grass_block_side_overlay`, `oak_leaves`) is what lets one texture serve every climate; a *coloured* texture must not be tinted |
+| Biome tint (grass, foliage, water) | `tint`, `foliage_tint` and `water_tint` per biome in `assets/worldgen.toml`, selected by a face's `tintindex` — **0 grass, 1 foliage, 2 water**, Minecraft's numbering — resolved through `WorldGenerator::biome_tint` at mesh time. Greyscale art (`grass_block_top`, `grass_block_side_overlay`, `oak_leaves`, `water_flow`) is what lets one texture serve every climate; a *coloured* texture must not be tinted. Grass and foliage default to white (the identity); `water_tint` defaults to `DEFAULT_WATER_TINT` instead, because nothing else in the water art supplies any colour |
 | A non-cube block (plant, prop) | `[block.model]` in `assets/blocks.toml` — same `path`/`scale`/`offset`/`rotation` spelling as `[item.model]`, plus `random_yaw`. The block then emits **no** cube faces (`textures` becomes optional) and is baked into its cell by `world::meshing::culled`. Give it `solid = false` to walk through: `World::is_solid` is collision only, `is_targetable` is what the crosshair uses, and `is_replaceable` decides whether placing swallows it. Add a matching `[item.model]` on the same path so the drop, the hand and the icon agree — the registry memoises by path, so both share one `ModelId` |
 | Block hitbox (crosshair, outline, cracks) | Not authored — `content::placed_bounds` measures the placed model and `world::block::model_hitbox` turns it into a square, centred, cell-clamped box on `BlockModel::hitbox`, so it can never drift from what is drawn. The raycast predicate returns `world::Target::{Cell,Box}`; a `Box` the ray misses does **not** stop the march. `InGameState::{target_at,hitbox_at}` are the single source for targeting *and* both overlays. Mob line-of-sight deliberately stays `is_solid` + `Target::Cell` — a flower must not hide you |
 | Add an item / tool / food / armor | `assets/items.toml` (`[item.tool]` with `harvests`/`dig_speed`/`durability` and optional `damage`, `[item.food]`, `[item.armor]` with `slot`/`defense`/`durability`, `[item.model]` with `path`/`scale`/`offset`/`rotation`); starter kit in the same file |
@@ -197,6 +203,7 @@ those systems are testable without a Vulkan device.
 | Ground cover / scatter  | per-biome `plants = [...]` + `plant_chance_per_mille` in `assets/worldgen.toml`; placement in `world::generation::features::try_plant`, which runs **after** trees and only into air so it can never punch a hole in a trunk |
 | Meshing                 | `world::meshing::culled` (face culling; greedy is a TODO)                                  |
 | Water / fluids          | `[block.fluid]` component in `assets/blocks.toml` (auto-registers flow blocks); sim in `world::fluid` (fluid-agnostic, ticked from `state::ingame_state`) |
+| Fluid art / animation   | `[block.fluid.texture]` on the same `[[block]]`: an animation strip of `frames` square frames stacked top to bottom, **column 0 flowing, column 1 still** (one column serves both). Loaded by `content::load_fluid_texture` into consecutive layers via `render::block_textures::resolve_strip`, meshed in the fluid branch of `world::meshing::culled` — source blocks are still on every face, flowing blocks still on top/bottom and flowing on the sides. `fps` defaults to 8 and the loader **rejects** an `fps * 3600` that is not a whole multiple of `frames` — the shader's animation clock wraps hourly and would otherwise jump mid-swell. `tint` is a `tintindex` (2 = water); `opacity` (0..1) rescales the art's alpha, and is the *only* thing controlling how much of the riverbed shows through, because a body of fluid is one blended sheet however deep it is (its interior faces are culled). A fluid still needs an atlas stand-in for its inventory icon, derived from its first still frame in `content` — read it through `GameContent::face_textures` |
 | Player movement/physics | numbers in `assets/entities.toml`; formulas in `entity::player`, `entity::physics`         |
 | Crafting recipes        | `assets/recipes.toml` (data); logic in `inventory::crafting`; panel in `ui::inventory`     |
 | A new screen            | implement `state::GameState`, push/replace via `Transition`                                |

@@ -79,7 +79,16 @@ pub struct BiomeGen {
     /// The same for `tintindex = 1`: leaves and other hanging foliage, which
     /// Minecraft colours a shade apart from the ground. Defaults to `tint`.
     pub foliage_tint: [u8; 4],
+    /// The same for `tintindex = 2`: water. Defaults to
+    /// [`DEFAULT_WATER_TINT`] rather than to white — the water art is
+    /// greyscale, so an untinted sea would read as grey rather than as water.
+    pub water_tint: [u8; 4],
 }
+
+/// The water colour of a biome that does not name one. Unlike grass and
+/// foliage, white is not a sensible default here: nothing else supplies the
+/// blue.
+pub const DEFAULT_WATER_TINT: [u8; 4] = [63, 118, 228, 255];
 
 impl BiomeGen {
     /// The colour for one of the tint sources a model's `tintindex` names.
@@ -88,6 +97,7 @@ impl BiomeGen {
     pub fn tint(&self, index: u8) -> [u8; 4] {
         match index {
             1 => self.foliage_tint,
+            2 => self.water_tint,
             _ => self.tint,
         }
     }
@@ -171,6 +181,10 @@ impl WorldGenConfig {
                 foliage_tint: match def.foliage_tint {
                     Some([r, g, b]) => [r, g, b, 255],
                     None => tint,
+                },
+                water_tint: match def.water_tint {
+                    Some([r, g, b]) => [r, g, b, 255],
+                    None => DEFAULT_WATER_TINT,
                 },
             })
         };
@@ -321,6 +335,10 @@ struct BiomeDef {
     /// `tint`.
     #[serde(default)]
     foliage_tint: Option<[u8; 3]>,
+    /// `water_tint = [...]`, the water colour (`tintindex = 2`). Defaults to
+    /// [`DEFAULT_WATER_TINT`], not to `tint`.
+    #[serde(default)]
+    water_tint: Option<[u8; 3]>,
 }
 
 #[cfg(test)]
@@ -397,6 +415,32 @@ mod tests {
             (blocks::SAND, blocks::SAND)
         );
         assert_eq!(desert.tree, None);
+    }
+
+    /// The three tint sources a `tintindex` can name, each routed to its own
+    /// biome colour.
+    #[test]
+    fn every_tint_source_resolves_to_its_own_colour() {
+        let registry = BlockRegistry::with_builtins();
+        let config = WorldGenConfig::builtin(&registry);
+        let plains = config.biome(Biome::Plains);
+        assert_eq!(plains.tint(0), [124, 189, 107, 255]);
+        assert_eq!(plains.tint(1), [93, 165, 74, 255]);
+        assert_eq!(plains.tint(2), [63, 118, 228, 255]);
+        // A desert sea is a different colour from a plains one.
+        assert_ne!(config.biome(Biome::Desert).tint(2), plains.tint(2));
+        assert_ne!(config.biome(Biome::Snowy).tint(2), plains.tint(2));
+    }
+
+    /// Grass and foliage default to white, which multiplies to no change.
+    /// Water cannot: its art is greyscale and nothing else supplies the blue.
+    #[test]
+    fn an_unstated_water_colour_takes_the_default_blue() {
+        let registry = BlockRegistry::with_builtins();
+        let text = BUILTIN_WORLDGEN.replace("water_tint = [63, 118, 228]", "");
+        let config = WorldGenConfig::from_toml(&text, &registry).expect("still valid");
+        assert_eq!(config.biome(Biome::Plains).tint(2), DEFAULT_WATER_TINT);
+        assert_ne!(DEFAULT_WATER_TINT, crate::render::NO_TINT);
     }
 
     /// Unknown block names must reject the whole file.

@@ -3,7 +3,6 @@
 layout(location = 0) in vec2 v_uv;
 layout(location = 1) in float v_ao;
 layout(location = 2) in vec3 v_normal;
-layout(location = 3) flat in uint v_flags;
 
 layout(set = 0, binding = 0) uniform sampler2D atlas;
 
@@ -16,22 +15,8 @@ layout(push_constant) uniform PushConstants {
 
 layout(location = 0) out vec4 f_color;
 
-// Must match render::vertex::FLAG_WATER.
-const uint FLAG_WATER = 1u;
-// Must match render::texture::ATLAS_COLUMNS and render::tiles::WATER_FRAMES.
-const float ATLAS_COLUMNS = 16.0;
-const float WATER_FRAMES = 4.0;
-const float WATER_FPS = 5.0;
-
 void main() {
-    vec2 uv = v_uv;
-    // Water animation: step through the frames laid out to the right of the
-    // base water tile in the atlas.
-    if ((v_flags & FLAG_WATER) != 0u) {
-        float frame = floor(mod(pc.sun_dir.w * WATER_FPS, WATER_FRAMES));
-        uv.x += frame / ATLAS_COLUMNS;
-    }
-    vec4 tex = texture(atlas, uv);
+    vec4 tex = texture(atlas, v_uv);
     // Alpha-test for cutout foliage / sprites in the opaque pass.
     if (tex.a < 0.1) {
         discard;

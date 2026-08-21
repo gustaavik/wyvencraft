@@ -890,6 +890,7 @@ impl super::InGameState {
                 models: &self.models,
                 blocks: &self.block_models,
                 baked: &self.baked_models,
+                fluids: &self.fluid_textures,
             },
             super::MESH_BUDGET,
         );

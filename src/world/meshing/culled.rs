@@ -7,14 +7,14 @@ use crate::core::math::rotate_y;
 use crate::core::{Aabb, BlockId, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, Direction};
 use crate::render::mesh::CpuMesh;
 use crate::render::texture::atlas_uv;
-use crate::render::vertex::{ChunkVertex, FLAG_WATER, NO_TINT};
+use crate::render::vertex::{ChunkVertex, NO_TINT, anim_flags};
 use crate::world::block::{Block, BlockRegistry, FaceTextures, FluidInfo};
 use crate::world::blockmodel::BakedBlockModel;
 use crate::world::chunk::Chunk;
 
 /// How many biome colours a block model's `tintindex` can choose between.
-/// Minecraft's numbering: `0` grass, `1` foliage.
-pub const TINT_SOURCES: usize = 2;
+/// Minecraft's numbering: `0` grass, `1` foliage, `2` water.
+pub const TINT_SOURCES: usize = 3;
 
 /// Top of a source water block: two texels (2/16) below the block top.
 /// Flowing water scales down from here with its level.
@@ -246,6 +246,9 @@ pub fn mesh_chunk(
                     Some(_) => water_corner_heights(world, &sample, registry),
                     None => [[1.0; 2]; 2],
                 };
+                // Sampled at most once per block: biome colour varies by
+                // column, and all of a block's faces share one.
+                let mut fluid_tint: [Option<[u8; 4]>; TINT_SOURCES] = [None; TINT_SOURCES];
 
                 for dir in Direction::ALL {
                     let np = world.offset(dir);
@@ -273,10 +276,29 @@ pub fn mesh_chunk(
                     let normal = dir.normal().to_array();
                     let ao = face_shade(dir);
                     let tile = block.textures.tile(dir);
-                    let flags = if block.face_animated(dir) {
-                        FLAG_WATER
-                    } else {
-                        0
+
+                    // A fluid with an animation strip samples the block texture
+                    // array like a modelled block does; one without keeps the
+                    // atlas tile its `textures` named.
+                    let animated = water.and_then(|f| Some((f, models.fluid_of(id)?)));
+                    let (layer, flags, vertex_tint) = match animated {
+                        Some((f, tex)) => {
+                            // Minecraft's rule: a source is still everywhere, a
+                            // flowing block only on the faces you look down on.
+                            let still =
+                                f.is_source() || matches!(dir, Direction::PosY | Direction::NegY);
+                            let layers = if still { tex.still } else { tex.flowing };
+                            let colour = match tex.tint {
+                                Some(index) => {
+                                    let slot = usize::from(index).min(TINT_SOURCES - 1);
+                                    *fluid_tint[slot]
+                                        .get_or_insert_with(|| tint(world.x, world.z, index))
+                                }
+                                None => NO_TINT,
+                            };
+                            (layers.first, anim_flags(layers.frames, tex.fps), colour)
+                        }
+                        None => (0, 0, NO_TINT),
                     };
 
                     let base = [world.x as f32, world.y as f32, world.z as f32];
@@ -284,10 +306,21 @@ pub fn mesh_chunk(
                         // Corner y is 0 or 1: top corners take the (possibly
                         // per-corner lowered) surface height, so the top face
                         // and the side faces' upper edges move together.
-                        let y = if corners[i][1] > 0.5 {
+                        let top = corners[i][1] > 0.5;
+                        let y = if top {
                             heights[corners[i][0] as usize][corners[i][2] as usize]
                         } else {
                             0.0
+                        };
+                        let uv = match animated {
+                            // Crop the texture to the lowered surface instead of
+                            // stretching it: a side face's top edge sits `y` up
+                            // the cell, and `v` runs downward from 0.
+                            Some(_) if top && !matches!(dir, Direction::PosY | Direction::NegY) => {
+                                [uvs[i][0], 1.0 - y]
+                            }
+                            Some(_) => uvs[i],
+                            None => atlas_uv(tile, uvs[i]),
                         };
                         ChunkVertex {
                             position: [
@@ -296,20 +329,19 @@ pub fn mesh_chunk(
                                 base[2] + corners[i][2],
                             ],
                             normal,
-                            uv: atlas_uv(tile, uvs[i]),
+                            uv,
                             ao,
                             flags,
-                            // Atlas geometry: the block texture array's layer
-                            // and tint are the modelled path's business.
-                            layer: 0,
-                            tint: NO_TINT,
+                            layer,
+                            tint: vertex_tint,
                         }
                     });
 
-                    if block.is_transparent() {
-                        out.transparent.push_quad(quad);
-                    } else {
-                        out.opaque.push_quad(quad);
+                    match (animated.is_some(), block.is_transparent()) {
+                        (true, true) => out.array_transparent.push_quad(quad),
+                        (true, false) => out.array_opaque.push_quad(quad),
+                        (false, true) => out.transparent.push_quad(quad),
+                        (false, false) => out.opaque.push_quad(quad),
                     }
                 }
             }
@@ -456,10 +488,173 @@ pub fn push_item_cube(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::content::GameContent;
+    use crate::content::{FluidTexture, GameContent};
     use crate::core::{ChunkPos, LocalPos};
+    use crate::render::block_textures::AnimatedLayers;
     use crate::render::tiles;
+    use crate::render::vertex::{ANIM_FIELD_MASK, ANIM_FPS_SHIFT, ANIM_FRAMES_SHIFT};
     use crate::world::block::blocks;
+
+    /// A fluid animation on distinct layer runs, so a face's column is
+    /// identifiable from the layer alone. Every fluid block shares one entry.
+    const WATER_ANIM: FluidTexture = FluidTexture {
+        still: AnimatedLayers {
+            first: 100,
+            frames: 64,
+        },
+        flowing: AnimatedLayers {
+            first: 200,
+            frames: 64,
+        },
+        fps: 12,
+        tint: Some(2),
+    };
+
+    /// The tint every fluid face should end up carrying in these tests.
+    const BIOME_WATER: [u8; 4] = [11, 22, 33, 255];
+
+    /// `BlockModels` where every block id is that fluid animation — the mesher
+    /// only ever asks about ids it is meshing, all of which are water here.
+    fn fluid_models(fluids: &[Option<FluidTexture>]) -> BlockModels<'_> {
+        BlockModels {
+            fluids,
+            ..BlockModels::none()
+        }
+    }
+
+    fn every_block_is_water(registry: &BlockRegistry) -> Vec<Option<FluidTexture>> {
+        (0..registry.len())
+            .map(|i| registry.fluid(BlockId(i as u16)).map(|_| WATER_ANIM))
+            .collect()
+    }
+
+    fn mesh_water(chunk: &Chunk, registry: &BlockRegistry) -> ChunkMeshOutput {
+        let fluids = every_block_is_water(registry);
+        mesh_chunk(
+            chunk,
+            registry,
+            fluid_models(&fluids),
+            |_| BlockId::AIR,
+            |_, _, index| {
+                assert_eq!(index, 2, "water asks for the water tint source");
+                BIOME_WATER
+            },
+        )
+    }
+
+    /// Water is drawn from the block texture array now, not the atlas — so the
+    /// atlas buckets must stay empty even though water is not a model.
+    #[test]
+    fn animated_water_goes_to_the_array_buckets() {
+        let registry = BlockRegistry::with_builtins();
+        let mut chunk = Chunk::new(ChunkPos::new(0, 0));
+        chunk.set(LocalPos { x: 4, y: 10, z: 4 }, blocks::WATER);
+        let out = mesh_water(&chunk, &registry);
+
+        assert_eq!(out.array_transparent.vertices.len(), 24, "all six faces");
+        assert!(out.transparent.is_empty(), "nothing left on the atlas");
+        assert!(out.opaque.is_empty());
+    }
+
+    /// Minecraft's rule: a source block is still on every face.
+    #[test]
+    fn a_source_block_is_still_on_every_face() {
+        let registry = BlockRegistry::with_builtins();
+        let mut chunk = Chunk::new(ChunkPos::new(0, 0));
+        chunk.set(LocalPos { x: 4, y: 10, z: 4 }, blocks::WATER);
+        let out = mesh_water(&chunk, &registry);
+
+        assert!(
+            out.array_transparent
+                .vertices
+                .iter()
+                .all(|v| v.layer == WATER_ANIM.still.first)
+        );
+    }
+
+    /// ...while a flowing block only keeps the still art where you look down on
+    /// it; its sides take the streaked flowing column.
+    #[test]
+    fn a_flowing_block_takes_the_flow_column_on_its_sides() {
+        let registry = BlockRegistry::with_builtins();
+        let mut chunk = Chunk::new(ChunkPos::new(0, 0));
+        chunk.set(LocalPos { x: 4, y: 10, z: 4 }, registry.flowing(0, 4));
+        let out = mesh_water(&chunk, &registry);
+
+        for vertex in &out.array_transparent.vertices {
+            let horizontal = vertex.normal[1] == 0.0;
+            let expected = if horizontal {
+                WATER_ANIM.flowing.first
+            } else {
+                WATER_ANIM.still.first
+            };
+            assert_eq!(vertex.layer, expected, "normal {:?}", vertex.normal);
+        }
+    }
+
+    #[test]
+    fn every_water_vertex_carries_the_animation_and_the_biome_colour() {
+        let registry = BlockRegistry::with_builtins();
+        let mut chunk = Chunk::new(ChunkPos::new(0, 0));
+        chunk.set(LocalPos { x: 4, y: 10, z: 4 }, blocks::WATER);
+        let out = mesh_water(&chunk, &registry);
+
+        for vertex in &out.array_transparent.vertices {
+            assert_eq!(vertex.tint, BIOME_WATER);
+            assert_eq!(
+                (vertex.flags >> ANIM_FRAMES_SHIFT) & ANIM_FIELD_MASK,
+                u32::from(WATER_ANIM.still.frames)
+            );
+            assert_eq!(
+                (vertex.flags >> ANIM_FPS_SHIFT) & ANIM_FIELD_MASK,
+                u32::from(WATER_ANIM.fps)
+            );
+        }
+    }
+
+    /// The surface sits two texels low, so a side face is shorter than the cell.
+    /// Its UVs must be cropped to match or the texture stretches, and the waves
+    /// would not line up with the top face they meet.
+    #[test]
+    fn a_side_faces_uvs_are_cropped_to_the_lowered_surface() {
+        let registry = BlockRegistry::with_builtins();
+        let mut chunk = Chunk::new(ChunkPos::new(0, 0));
+        chunk.set(LocalPos { x: 4, y: 10, z: 4 }, blocks::WATER);
+        let out = mesh_water(&chunk, &registry);
+
+        let sides = out
+            .array_transparent
+            .vertices
+            .iter()
+            .filter(|v| v.normal[1] == 0.0);
+        for vertex in sides {
+            let expected = if vertex.position[1] > 10.5 {
+                1.0 - WATER_SURFACE
+            } else {
+                1.0
+            };
+            assert_eq!(vertex.uv[1], expected, "v at y {}", vertex.position[1]);
+        }
+    }
+
+    /// A fluid whose strip failed to load keeps the old atlas path, so a bad
+    /// PNG costs the art rather than the geometry.
+    #[test]
+    fn a_fluid_without_a_strip_stays_on_the_atlas() {
+        let registry = BlockRegistry::with_builtins();
+        let mut chunk = Chunk::new(ChunkPos::new(0, 0));
+        chunk.set(LocalPos { x: 4, y: 10, z: 4 }, blocks::WATER);
+        let out = mesh_chunk(
+            &chunk,
+            &registry,
+            BlockModels::none(),
+            |_| BlockId::AIR,
+            |_, _, _| NO_TINT,
+        );
+
+        assert_eq!(out.transparent.vertices.len(), 24);
+        assert!(out.array_transparent.is_empty());
+    }
 
     #[test]
     fn water_surface_is_two_texels_low() {

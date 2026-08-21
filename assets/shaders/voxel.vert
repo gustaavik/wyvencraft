@@ -19,9 +19,9 @@ layout(push_constant) uniform PushConstants {
 layout(location = 0) out vec2 v_uv;
 layout(location = 1) out float v_ao;
 layout(location = 2) out vec3 v_normal;
-layout(location = 3) flat out uint v_flags;
-// Only voxel_array.frag reads these two; voxel.frag addresses the atlas through
+// Only voxel_array.frag reads these; voxel.frag addresses the atlas through
 // v_uv alone and simply does not declare them.
+layout(location = 3) flat out uint v_flags;
 layout(location = 4) flat out uint v_layer;
 layout(location = 5) out vec4 v_tint;
 

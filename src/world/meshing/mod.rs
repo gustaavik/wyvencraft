@@ -11,6 +11,7 @@ pub use culled::{mesh_block_overlay, mesh_chunk, push_item_cube};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+use crate::content::FluidTexture;
 use crate::core::{BlockId, Direction};
 use crate::model::{Model, ModelId, ModelRegistry};
 use crate::render::mesh::CpuMesh;
@@ -31,6 +32,10 @@ pub struct BlockModels<'a> {
     /// Blocks authored as Blockbench `.json`. These supersede `blocks` for any
     /// id present in both, and are the direction all blocks are moving in.
     pub baked: &'a [Option<BakedBlockModel>],
+    /// The animation strip each fluid draws from
+    /// (`content::GameContent::fluid_textures`). A fluid has no model — its
+    /// surface height is per-corner — so it takes its layers from here instead.
+    pub fluids: &'a [Option<FluidTexture>],
 }
 
 impl<'a> BlockModels<'a> {
@@ -42,6 +47,7 @@ impl<'a> BlockModels<'a> {
             models: EMPTY.get_or_init(ModelRegistry::new),
             blocks: &[],
             baked: &[],
+            fluids: &[],
         }
     }
 
@@ -55,6 +61,11 @@ impl<'a> BlockModels<'a> {
     /// The Blockbench-authored geometry for `block`, if it has any.
     pub fn baked_of(&self, block: BlockId) -> Option<&'a BakedBlockModel> {
         self.baked.get(block.0 as usize)?.as_ref()
+    }
+
+    /// The animation strip `block` draws from, if it is a fluid with one.
+    pub fn fluid_of(&self, block: BlockId) -> Option<&'a FluidTexture> {
+        self.fluids.get(block.0 as usize)?.as_ref()
     }
 
     /// Whether `block` fills the cell face pointing `dir` with an opaque

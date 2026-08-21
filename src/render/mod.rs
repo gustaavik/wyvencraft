@@ -28,4 +28,4 @@ pub use mesh::{CpuMesh, GpuLines, GpuMesh};
 pub use renderer::{LightParams, PreviewFrame, Renderer, SceneFrame, SkyParams, TexturedMesh};
 pub use texture::{Rgba8, Texture};
 pub use tile_registry::{TileEntry, TileRegistry};
-pub use vertex::{ChunkVertex, EntityVertex, FLAG_WATER, LineVertex, NO_TINT};
+pub use vertex::{ChunkVertex, EntityVertex, LineVertex, NO_TINT, anim_flags};

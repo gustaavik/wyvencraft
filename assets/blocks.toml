@@ -19,7 +19,8 @@
 #             { top = "...", bottom = "...", side = "..." }, or the fully
 #             explicit { neg_x, pos_x, neg_y, pos_y, neg_z, pos_z }.
 #             Optional for a block whose geometry brings its own texture and
-#             never samples the atlas — a `block_model` or a [block.model].
+#             never samples the atlas — a `block_model`, a [block.model] or a
+#             [block.fluid.texture].
 #   block_model  the block is authored in Blockbench and exported as a Java
 #             Block/Item .json under assets/blocks/, with its textures as
 #             separate 256x256 PNGs in assets/textures/. This is how blocks
@@ -37,6 +38,21 @@
 #             the engine auto-registers "<name> flow 1".."<name> flow N"
 #             blocks after all declared blocks, and the fluid simulation
 #             spreads/recedes between them.
+#   [block.fluid.texture] draws the fluid from an animation strip instead of
+#             an atlas tile: `frames` square frames stacked top to bottom, in
+#             as many columns as the image's width allows. COLUMN 0 IS FLOWING,
+#             COLUMN 1 IS STILL (one column serves both). A source block reads
+#             the still column on every face; a flowing block reads it on top
+#             and bottom and the flowing column on its sides. `fps` defaults to
+#             8, and `fps * 3600` must be a whole multiple of `frames` or the
+#             shader's hourly time wrap jumps (the loader rejects one that is
+#             not). `tint` is a `tintindex` into the biome colours in
+#             assets/worldgen.toml (2 = water); omit it for art that carries
+#             its own colour. `opacity` (0..1) sets how much of the riverbed
+#             shows through, rescaling the art's alpha — a body of fluid is a
+#             SINGLE blended sheet (its interior faces are culled), so depth
+#             adds no opacity and this number is the whole of it. Frames may be
+#             any square size that divides 256, like a `block_model` texture.
 #   [block.model] draws the block as a .gltf/.bbmodel from assets/models/
 #             instead of six atlas-textured cube faces — the same
 #             `path`/`scale`/`offset`/`rotation` spelling as [item.model] and
@@ -89,10 +105,19 @@ render = "transparent"
 solid = false
 hardness = inf
 material = "other"
-textures = "water"
 
 [block.fluid]
 flow_levels = 7
+
+# 64 frames of 16px in two columns: flowing on the left, still on the right.
+# The art is greyscale so `tint` gives every biome its own water colour, and
+# its alpha is a placeholder `opacity` overrides — see the schema above.
+[block.fluid.texture]
+path = "assets/textures/water_flow.png"
+frames = 64
+fps = 8
+tint = 2
+opacity = 0.85
 
 [[block]]
 name = "oak log"

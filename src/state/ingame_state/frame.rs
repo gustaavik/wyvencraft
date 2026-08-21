@@ -239,8 +239,11 @@ impl GameState for InGameState {
 
         self.view.fov_degrees = ctx.settings.render.fov_degrees;
         // Wrap the animation clock so f32 precision never degrades over long
-        // sessions. The period must stay a whole multiple of the water loop
-        // (WATER_FRAMES / WATER_FPS = 0.8 s in voxel.frag) to wrap seamlessly.
+        // sessions. The period must stay a whole multiple of every animated
+        // texture's loop or the wrap skips a frame: `voxel_array.frag` steps a
+        // layer at `fps`, so what has to divide 3600 * fps is the frame count
+        // (water's `[block.fluid.texture]` is 64 frames at 8 fps, and the
+        // blocks loader refuses a pairing that does not divide evenly).
         self.view.elapsed = (self.view.elapsed + ctx.dt) % 3600.0;
         // Ages the chat lines so old ones fade off the HUD.
         self.chat.log.tick(ctx.dt);

@@ -22,10 +22,11 @@ use crate::entity::{EntityRegistry, SpawnConfig};
 use crate::inventory::ItemRegistry;
 use crate::model::{ModelId, ModelRegistry, ModelSpec, blockjson};
 use crate::render::TileRegistry;
-use crate::render::block_textures::{self, BlockTextureSet};
+use crate::render::block_textures::{self, AnimatedLayers, BlockTextureSet, Strip};
+use crate::render::texture::decode_png;
 use crate::world::block::{
     BUILTIN_BLOCKS, BlockJsonSpec, BlockModel, BlockModelSpec, BlockRegistry, BlockVisuals,
-    FaceTextures, model_hitbox,
+    FaceTextures, FluidVisual, model_hitbox,
 };
 use crate::world::blockmodel::BakedBlockModel;
 use crate::world::generation::WorldGenConfig;
@@ -95,6 +96,10 @@ pub struct GameContent {
     /// `BlockId` — see [`GameContent::face_textures`], which is how everything
     /// outside the chunk mesh should read them.
     pub block_face_tiles: Vec<Option<FaceTextures>>,
+    /// The animation strip each fluid block draws from, indexed by `BlockId`
+    /// and covering the auto-registered flowing blocks too. Kept off `Block`
+    /// for the same reason as [`BlockModel`].
+    pub fluid_textures: Vec<Option<FluidTexture>>,
     /// Fingerprint of every gameplay-affecting definition. Exchanged in the
     /// multiplayer `Welcome`: raw block/item ids cross the wire, so a session
     /// between peers with divergent content would silently corrupt worlds —
@@ -150,6 +155,7 @@ impl GameContent {
         let BlockVisuals {
             models: block_model_specs,
             json: block_json_paths,
+            fluids: fluid_visuals,
         } = block_ctx.visuals;
         // Item models ride out on the `ctx` channel rather than on `Item`
         // itself: they are visual-only and must stay out of `content_hash`.
@@ -262,6 +268,32 @@ impl GameContent {
             baked_models.push(baked);
         }
 
+        // Fluids draw from an animation strip rather than a model: the frames
+        // take a run of array layers each, and the mesher steps through them.
+        let mut fluid_textures: Vec<Option<FluidTexture>> = Vec::new();
+        for (id, visual) in fluid_visuals.iter().enumerate() {
+            let fluid = visual
+                .as_ref()
+                .and_then(|visual| load_fluid_texture(visual, source, &mut block_textures));
+            // The inventory icon and the dropped-item cube still sample the
+            // atlas, so a fluid needs the same 16-pixel stand-in a Blockbench
+            // block gets — its first still frame, which is the frame the block
+            // spends most of its time looking like.
+            if let Some(tex) = &fluid
+                && block_face_tiles[id].is_none()
+                && let Some(image) = block_textures.layer(tex.still.first)
+            {
+                let tile = tiles
+                    .insert(
+                        &format!("blockmodel:{}", tex.still.first),
+                        block_textures::to_atlas_tile(image),
+                    )
+                    .tile;
+                block_face_tiles[id] = Some(FaceTextures::uniform(tile));
+            }
+            fluid_textures.push(fluid);
+        }
+
         let item_icons =
             build_item_icons(&mut tiles, &blocks, &items, &item_models, &block_face_tiles);
         let hash = content_hash(&blocks, &items, &entities, &worldgen, &spawning);
@@ -279,6 +311,7 @@ impl GameContent {
             block_models,
             baked_models,
             block_face_tiles,
+            fluid_textures,
             hash,
         })
     }
@@ -289,6 +322,7 @@ impl GameContent {
             models: &self.models,
             blocks: &self.block_models,
             baked: &self.baked_models,
+            fluids: &self.fluid_textures,
         }
     }
 
@@ -307,6 +341,91 @@ impl GameContent {
             .flatten()
             .unwrap_or(self.blocks.get(block).textures)
     }
+}
+
+/// Where a fluid block's animation lives in the block texture array.
+///
+/// Both columns of the strip are resolved even for a source block: the
+/// auto-registered flowing blocks share this entry, and which column a face
+/// takes is a per-face decision the mesher makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FluidTexture {
+    /// Column 1 — top and bottom faces, and every face of a source block.
+    pub still: AnimatedLayers,
+    /// Column 0 — the side faces of a flowing block.
+    pub flowing: AnimatedLayers,
+    pub fps: u8,
+    /// `tintindex` into the biome colours; `2` is water.
+    pub tint: Option<u8>,
+}
+
+/// Column of the strip each of the two states reads. Documented in
+/// `assets/blocks.toml`; a one-column strip collapses both onto column 0.
+const FLOWING_COLUMN: u32 = 0;
+const STILL_COLUMN: u32 = 1;
+
+/// Load a fluid's animation strip into the block texture array, or warn and
+/// give up on it — the block then falls back to whatever `textures` it
+/// declared, which for water is the magenta marker.
+fn load_fluid_texture(
+    visual: &FluidVisual,
+    source: &dyn ContentSource,
+    textures: &mut BlockTextureSet,
+) -> Option<FluidTexture> {
+    let spec = &visual.spec;
+    let path = spec.path.as_str();
+    let bytes = match source.read_bytes(path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            log::warn!("could not read fluid texture {path}: {err}");
+            return None;
+        }
+    };
+    let image = match decode_png(&bytes) {
+        Ok(image) => image,
+        Err(err) => {
+            log::warn!("could not decode fluid texture {path}: {err}");
+            return None;
+        }
+    };
+    let frames = u32::from(spec.frames);
+    // A one-column strip has no separate still art, so both states read it;
+    // `resolve_strip` rejects a column past the end rather than guessing.
+    let two_columns = image
+        .height()
+        .checked_div(frames)
+        .is_some_and(|size| size > 0 && image.width() > size);
+    let still_column = if two_columns {
+        STILL_COLUMN
+    } else {
+        FLOWING_COLUMN
+    };
+    // The flowing blocks of a fluid share their source's strip, so this runs
+    // once per block but allocates layers only the first time.
+    let before = textures.len();
+    let strip = |column| Strip {
+        column,
+        frames,
+        alpha: spec.opacity,
+    };
+    let flowing = textures.resolve_strip(path, &image, strip(FLOWING_COLUMN));
+    let still = textures.resolve_strip(path, &image, strip(still_column));
+    if still == AnimatedLayers::MISSING || flowing == AnimatedLayers::MISSING {
+        return None;
+    }
+    if textures.len() > before {
+        log::info!(
+            "loaded fluid texture {path} ({} frames per column at {} fps)",
+            spec.frames,
+            spec.fps
+        );
+    }
+    Some(FluidTexture {
+        still,
+        flowing,
+        fps: spec.fps,
+        tint: spec.tint,
+    })
 }
 
 /// Parse one Blockbench block model and bake it, or warn and give up on it.
@@ -408,7 +527,19 @@ fn build_item_icons(
                     };
                 }
             }
-            ItemIcon::Flat(tiles.resolve(&item.name).tile)
+            // A fluid has no cube icon but does have derived tiles; preferring
+            // them keeps it off the name lookup, which has no art to find.
+            let derived = item.place_block.and_then(|block_id| {
+                block_face_tiles
+                    .get(block_id.0 as usize)
+                    .copied()
+                    .flatten()
+                    .map(|faces| faces.tile(Direction::PosY))
+            });
+            match derived {
+                Some(tile) => ItemIcon::Flat(tile),
+                None => ItemIcon::Flat(tiles.resolve(&item.name).tile),
+            }
         })
         .collect()
 }
@@ -651,6 +782,74 @@ mod tests {
     /// Every `[item.model]` in the shipped data must resolve to real geometry.
     ///
     /// This reads the actual `assets/` tree, so it is the check that catches a
+    /// The shipped water strip must actually load: a mistyped path or a
+    /// mis-shaped PNG degrades water to the magenta marker, since it no longer
+    /// declares any atlas `textures` to fall back to.
+    #[test]
+    fn the_shipped_water_animation_loads_for_every_fluid_block() {
+        let content = GameContent::load();
+        let water = content.blocks.find("water").expect("shipped block");
+        let tex = content.fluid_textures[water.0 as usize].expect("water is animated");
+        assert_eq!(tex.still.frames, 64);
+        assert_eq!(tex.flowing.frames, 64);
+        assert_ne!(
+            tex.still.first, tex.flowing.first,
+            "the two columns are separate runs of layers"
+        );
+        assert_eq!(tex.tint, Some(2), "water takes the biome water colour");
+
+        // The strip's own alpha is a placeholder; `opacity` is what decides how
+        // much of the riverbed shows through, since a body of water is one
+        // blended sheet however deep it is.
+        let frame = content
+            .block_textures
+            .layer(tex.still.first)
+            .expect("still frame");
+        let alpha = frame.pixels[3];
+        assert!(
+            (200..255).contains(&alpha),
+            "water should read as water, not as glass: alpha {alpha}"
+        );
+
+        // The inventory icon and the dropped-item cube still sample the atlas,
+        // so a fluid needs a real stand-in tile there rather than the marker.
+        let faces = content.face_textures(water);
+        assert_ne!(
+            faces.tile(crate::core::Direction::PosY),
+            0,
+            "water must not fall back to the missing-texture tile"
+        );
+
+        // The auto-registered flowing blocks share the source's entry, or a
+        // spreading stream would fall back to the marker halfway down a hill.
+        for level in 1..=7 {
+            let id = content.blocks.flowing(0, level);
+            assert_eq!(
+                content.fluid_textures[id.0 as usize],
+                Some(tex),
+                "water flow {level}"
+            );
+        }
+    }
+
+    /// A fluid whose strip cannot be read must not fail the load — it degrades
+    /// to the block's own `textures`, like every other content failure.
+    #[test]
+    fn an_unreadable_fluid_strip_degrades_to_no_animation() {
+        let blocks = BUILTIN_BLOCKS.replace(
+            "assets/textures/water_flow.png",
+            "assets/textures/no_such_fluid.png",
+        );
+        let content = GameContent::from_source(&MapSource::new().with(BLOCKS_PATH, &blocks));
+        let water = content.blocks.find("water").expect("declared");
+        assert!(content.fluid_textures[water.0 as usize].is_none());
+        assert_eq!(
+            content.blocks.len(),
+            BlockRegistry::with_builtins().len(),
+            "the rest of the block set is untouched"
+        );
+    }
+
     /// Every block naming a `block_model` must actually have baked geometry —
     /// a mistyped path or an unreadable export otherwise degrades quietly to an
     /// invisible block, which is far harder to notice than a broken icon.

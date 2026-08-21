@@ -189,6 +189,7 @@ impl InGameState {
         let item_models = Arc::new(content.item_models.clone());
         let block_models = Arc::new(content.block_models.clone());
         let baked_models = Arc::new(content.baked_models.clone());
+        let fluid_textures = Arc::new(content.fluid_textures.clone());
         let block_face_tiles = Arc::new(content.block_face_tiles.clone());
         let recipes = match recipe_data {
             Some(data) => {
@@ -245,6 +246,7 @@ impl InGameState {
             item_models,
             block_models,
             baked_models,
+            fluid_textures,
             block_face_tiles,
             content_hash: content.hash,
             inventory,

@@ -22,6 +22,13 @@
 //! Mip levels are built here on the CPU rather than blitted on the GPU: the
 //! data is a few hundred kilobytes per layer, the filter is then testable
 //! without a device, and it keeps the upload a single plain buffer copy.
+//!
+//! An **animated** texture is a strip of frames that takes one layer each,
+//! consecutively ([`BlockTextureSet::resolve_strip`]); the shader steps the
+//! vertex's layer index through them. Packing the frames into one layer instead
+//! would be far cheaper, but it would give back both properties above — frames
+//! would bleed into each other and their shared mip chain would be meaningless.
+//! Water's two 64-frame columns are 128 layers, about 45 MB with mips.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -62,6 +69,37 @@ pub const MAX_BLOCK_LAYERS: u32 = 512;
 /// invisible. Matches the atlas's reserved tile 0.
 const MISSING_TEXTURE: [u8; 4] = [255, 0, 255, 255];
 
+/// Where an animation's frames live: `frames` consecutive layers starting at
+/// `first`. A `frames` of 1 is an ordinary still texture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnimatedLayers {
+    pub first: u32,
+    pub frames: u8,
+}
+
+impl AnimatedLayers {
+    /// The missing-texture marker, as one static frame.
+    pub const MISSING: Self = Self {
+        first: 0,
+        frames: 1,
+    };
+}
+
+/// Which part of an animation strip to cut out, and how opaque to make it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Strip {
+    /// Column index; the column count follows from the frame size.
+    pub column: u32,
+    /// How many square frames are stacked top to bottom.
+    pub frames: u32,
+    /// Alpha the most opaque texel ends up at, everything else scaled with it.
+    ///
+    /// Fluid art is a greyscale *template* — the game decides its colour, and
+    /// for the same reason it decides how much of the riverbed shows through.
+    /// `None` keeps the alpha as authored.
+    pub alpha: Option<u8>,
+}
+
 /// The CPU side: which layer each texture path was given, and its pixels.
 ///
 /// Keyed by `assets/`-relative path, so two block models naming the same PNG
@@ -73,6 +111,11 @@ pub struct BlockTextureSet {
     /// it occlude its neighbour.
     opaque: Vec<bool>,
     by_path: HashMap<String, u32>,
+    /// Animation strips, keyed `<path>#<column>`. Separate from `by_path`
+    /// because a strip's entry is a *run* of layers, and the run length has to
+    /// come back from the cache rather than from the caller — two blocks naming
+    /// the same strip with different frame counts must not read past it.
+    strips: HashMap<String, AnimatedLayers>,
 }
 
 impl Default for BlockTextureSet {
@@ -87,6 +130,7 @@ impl BlockTextureSet {
             layers: vec![solid(MISSING_TEXTURE)],
             opaque: vec![true],
             by_path: HashMap::new(),
+            strips: HashMap::new(),
         }
     }
 
@@ -121,6 +165,97 @@ impl BlockTextureSet {
         };
         self.by_path.insert(path.to_string(), layer);
         layer
+    }
+
+    /// The consecutive layers a `columns`-wide animation strip's `column` was
+    /// given, adding its frames on first use.
+    ///
+    /// The strip is `frames` square frames stacked top to bottom, side by side
+    /// in as many columns as its width allows — so the frame size, and with it
+    /// the column count, are derived from the image rather than authored.
+    /// Each frame then goes through [`BlockTextureSet::resolve`]'s own
+    /// validation and scaling, so a 16-pixel frame is enlarged exactly like a
+    /// 16-pixel texture.
+    ///
+    /// Fail-soft: a strip whose geometry does not work out warns and takes the
+    /// missing-texture layer as a single static frame, so one bad asset costs
+    /// its own block's appearance rather than the boot.
+    pub fn resolve_strip(&mut self, path: &str, image: &Rgba8, strip: Strip) -> AnimatedLayers {
+        // The requested opacity is part of the identity: two fluids sharing one
+        // PNG at different opacities are two different runs of layers.
+        let key = match strip.alpha {
+            Some(alpha) => format!("{path}#{}@{alpha}", strip.column),
+            None => format!("{path}#{}", strip.column),
+        };
+        if let Some(&cached) = self.strips.get(&key) {
+            return cached;
+        }
+        let layers = match self.slice_strip(path, image, strip) {
+            Ok(strip) => strip,
+            Err(err) => {
+                log::warn!("ignoring block texture strip {path}: {err}");
+                AnimatedLayers::MISSING
+            }
+        };
+        self.strips.insert(key, layers);
+        layers
+    }
+
+    /// Cut one column out of the strip and register every frame of it.
+    fn slice_strip(
+        &mut self,
+        path: &str,
+        image: &Rgba8,
+        strip: Strip,
+    ) -> Result<AnimatedLayers, String> {
+        let Strip {
+            column,
+            frames,
+            alpha,
+        } = strip;
+        let [width, height] = image.size;
+        if !(2..=u32::from(u8::MAX)).contains(&frames) {
+            return Err(format!("frames must be 2..=255, got {frames}"));
+        }
+        if height == 0 || !height.is_multiple_of(frames) {
+            return Err(format!(
+                "{height}px tall does not divide into {frames} frames"
+            ));
+        }
+        let size = height / frames;
+        if size == 0 || !width.is_multiple_of(size) {
+            return Err(format!(
+                "{width}x{height} is not a whole number of {size}px columns"
+            ));
+        }
+        let columns = width / size;
+        if column >= columns {
+            return Err(format!("column {column} of a {columns}-column strip"));
+        }
+        // Reserve the whole run before taking any of it: a strip half-registered
+        // against a full array would animate into whatever came next.
+        if self.layers.len() as u32 + frames > MAX_BLOCK_LAYERS {
+            return Err(format!(
+                "block texture array has no room for {frames} frames                  ({MAX_BLOCK_LAYERS} layers)"
+            ));
+        }
+        // Scaled from the whole strip, not per frame, so every frame keeps the
+        // same relationship to the others.
+        let gain = alpha.and_then(|target| alpha_gain(image, target));
+        let first = self.layers.len() as u32;
+        for frame in 0..frames {
+            let mut cropped = crop(image, column * size, frame * size, size);
+            if let Some(gain) = gain {
+                apply_alpha_gain(&mut cropped, gain);
+            }
+            let prepared = self.prepare(path, &cropped)?;
+            self.opaque.push(is_opaque(&prepared));
+            self.layers.push(prepared);
+        }
+        Ok(AnimatedLayers {
+            first,
+            frames: frames as u8,
+        })
     }
 
     /// Validate `image` and bring it up to the array's extent.
@@ -197,6 +332,34 @@ fn solid(rgba: [u8; 4]) -> Rgba8 {
 
 fn is_opaque(image: &Rgba8) -> bool {
     image.pixels.chunks_exact(4).all(|px| px[3] == 255)
+}
+
+/// Factor that brings `image`'s most opaque texel to `target`, or `None` when
+/// there is nothing to scale (fully transparent art, or already exact).
+fn alpha_gain(image: &Rgba8, target: u8) -> Option<f32> {
+    let peak = image.pixels.chunks_exact(4).map(|px| px[3]).max()?;
+    (peak > 0 && peak != target).then(|| f32::from(target) / f32::from(peak))
+}
+
+/// Scale every texel's alpha by `gain`, saturating at fully opaque.
+fn apply_alpha_gain(image: &mut Rgba8, gain: f32) {
+    for px in image.pixels.chunks_exact_mut(4) {
+        px[3] = (f32::from(px[3]) * gain).round().clamp(0.0, 255.0) as u8;
+    }
+}
+
+/// The `size`-square region of `image` with its top-left corner at (`x`, `y`).
+fn crop(image: &Rgba8, x: u32, y: u32, size: u32) -> Rgba8 {
+    let [w, _] = image.size;
+    let mut pixels = Vec::with_capacity((size * size * 4) as usize);
+    for row in y..y + size {
+        let start = ((row * w + x) * 4) as usize;
+        pixels.extend_from_slice(&image.pixels[start..start + (size * 4) as usize]);
+    }
+    Rgba8 {
+        pixels,
+        size: [size; 2],
+    }
 }
 
 /// Replicate every texel of `image` into a `factor`×`factor` block.
@@ -452,6 +615,32 @@ mod tests {
         image(BLOCK_TEXTURE_SIZE, |_, _| rgba)
     }
 
+    /// The plain, as-authored cut of one column.
+    fn cut(column: u32, frames: u32) -> Strip {
+        Strip {
+            column,
+            frames,
+            alpha: None,
+        }
+    }
+
+    /// An animation strip: `columns` columns of `frames` square frames, every
+    /// texel of a frame painted `[column, frame, 0, alpha]` so a single sample
+    /// identifies which crop it came from.
+    fn strip_art(size: u32, columns: u32, frames: u32, alpha: u8) -> Rgba8 {
+        let (w, h) = (size * columns, size * frames);
+        let mut pixels = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                pixels.extend_from_slice(&[(x / size) as u8, (y / size) as u8, 0, alpha]);
+            }
+        }
+        Rgba8 {
+            pixels,
+            size: [w, h],
+        }
+    }
+
     #[test]
     fn layer_zero_is_the_missing_marker() {
         let set = BlockTextureSet::new();
@@ -612,5 +801,141 @@ mod tests {
             })
             .sum();
         assert_eq!(set.upload_bytes().len() as u64, expected);
+    }
+
+    /// A strip of animation frames takes one layer each, consecutively — the
+    /// shader steps the layer index, so the run must be unbroken.
+    #[test]
+    fn a_strip_column_takes_one_layer_per_frame() {
+        let mut set = BlockTextureSet::new();
+        let art = strip_art(16, 2, 4, 255);
+        let flow = set.resolve_strip("water.png", &art, cut(0, 4));
+        assert_eq!(flow.frames, 4);
+        assert_eq!(flow.first, 1, "straight after the missing marker");
+        assert_eq!(set.len(), 5);
+
+        let still = set.resolve_strip("water.png", &art, cut(1, 4));
+        assert_eq!(still.first, 5, "the second column follows the first");
+        assert_eq!(still.frames, 4);
+        assert_eq!(set.len(), 9, "the two columns share no layer");
+    }
+
+    /// Each frame is the cropped sub-image, enlarged exactly as a texture of
+    /// that size would have been.
+    #[test]
+    fn every_frame_is_its_own_crop_scaled_up() {
+        let mut set = BlockTextureSet::new();
+        let art = strip_art(16, 2, 4, 255);
+        let column = set.resolve_strip("water.png", &art, cut(1, 4));
+        for frame in 0..4u32 {
+            let layer = set.layer(column.first + frame).expect("frame layer");
+            assert_eq!(layer.size, [BLOCK_TEXTURE_SIZE; 2]);
+            // The strip paints every texel with its column and frame index, so
+            // one sample identifies which crop landed here.
+            assert_eq!(&layer.pixels[..4], &[1, frame as u8, 0, 255]);
+        }
+    }
+
+    #[test]
+    fn the_same_column_of_the_same_strip_is_resolved_once() {
+        let mut set = BlockTextureSet::new();
+        let art = strip_art(16, 2, 4, 255);
+        let first = set.resolve_strip("water.png", &art, cut(0, 4));
+        let second = set.resolve_strip("water.png", &art, cut(0, 4));
+        assert_eq!(first, second);
+        assert_eq!(set.len(), 5, "one marker plus four frames");
+        // The run length comes back from the cache, not from the caller: a
+        // second block asking for more frames than were reserved would
+        // otherwise animate off the end of the run.
+        assert_eq!(set.resolve_strip("water.png", &art, cut(0, 64)), first);
+    }
+
+    #[test]
+    fn a_strip_that_does_not_divide_evenly_falls_back_to_the_marker() {
+        let mut set = BlockTextureSet::new();
+        for (name, art, strip) in [
+            ("uneven height", strip_art(16, 2, 4, 255), cut(0, 3)),
+            (
+                "frame size not a fraction of the extent",
+                strip_art(17, 2, 4, 255),
+                cut(0, 4),
+            ),
+            ("column past the end", strip_art(16, 2, 4, 255), cut(2, 4)),
+            ("not an animation", strip_art(16, 2, 4, 255), cut(0, 1)),
+            (
+                "more frames than the format holds",
+                strip_art(1, 1, 256, 255),
+                cut(0, 256),
+            ),
+        ] {
+            assert_eq!(
+                set.resolve_strip(name, &art, strip),
+                AnimatedLayers::MISSING,
+                "{name} should be refused"
+            );
+        }
+        assert_eq!(set.len(), 1, "no bad strip may take a layer");
+    }
+
+    /// Fluid art is a template: the game decides how much of the riverbed shows
+    /// through, so a strip's alpha is rescaled to what the block asked for —
+    /// upward as readily as downward.
+    #[test]
+    fn opacity_rescales_the_strips_alpha() {
+        let mut set = BlockTextureSet::new();
+        let art = strip_art(16, 2, 4, 89);
+        let column = set.resolve_strip(
+            "water.png",
+            &art,
+            Strip {
+                column: 0,
+                frames: 4,
+                alpha: Some(217),
+            },
+        );
+        let layer = set.layer(column.first).expect("frame layer");
+        assert_eq!(layer.pixels[3], 217);
+        assert!(
+            !set.is_opaque(column.first),
+            "still blends, so it occludes nothing"
+        );
+    }
+
+    /// Two fluids sharing one PNG at different opacities are two different runs
+    /// of layers — one must not be served the other's cached alpha.
+    #[test]
+    fn opacity_is_part_of_a_strips_identity() {
+        let mut set = BlockTextureSet::new();
+        let art = strip_art(16, 2, 4, 89);
+        let strip = |alpha| Strip {
+            column: 0,
+            frames: 4,
+            alpha,
+        };
+        let thin = set.resolve_strip("water.png", &art, strip(Some(60)));
+        let thick = set.resolve_strip("water.png", &art, strip(Some(217)));
+        let plain = set.resolve_strip("water.png", &art, strip(None));
+        assert_ne!(thin.first, thick.first);
+        assert_ne!(plain.first, thick.first);
+        assert_eq!(set.layer(thin.first).expect("layer").pixels[3], 60);
+        assert_eq!(set.layer(thick.first).expect("layer").pixels[3], 217);
+        assert_eq!(set.layer(plain.first).expect("layer").pixels[3], 89);
+    }
+
+    /// A strip half-registered against a full array would animate into whatever
+    /// texture came after it, so the whole run is reserved or none of it is.
+    #[test]
+    fn a_strip_with_no_room_takes_no_layers_at_all() {
+        let mut set = BlockTextureSet::new();
+        while (set.len() as u32) < MAX_BLOCK_LAYERS - 2 {
+            let name = format!("filler{}.png", set.len());
+            set.resolve(&name, &block_texture([0, 0, 0, 255]));
+        }
+        let before = set.len();
+        assert_eq!(
+            set.resolve_strip("water.png", &strip_art(16, 2, 4, 255), cut(0, 4)),
+            AnimatedLayers::MISSING
+        );
+        assert_eq!(set.len(), before, "the partial run must not be kept");
     }
 }

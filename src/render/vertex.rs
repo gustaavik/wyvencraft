@@ -4,9 +4,31 @@
 use vulkano::buffer::BufferContents;
 use vulkano::pipeline::graphics::vertex_input::Vertex;
 
-/// Marks water faces: the fragment shader cycles their tile through the
-/// [`crate::render::tiles::WATER_FRAMES`] animation frames.
-pub const FLAG_WATER: u32 = 1;
+/// Bit layout of [`ChunkVertex::flags`]. Bits `0..8` are reserved for boolean
+/// effect flags (there are none today); the animation of a block texture is
+/// packed into the two bytes above them, so an animated face costs no extra
+/// vertex attribute and no extra descriptor.
+///
+/// The array fragment shader mirrors these three constants — keep them in step
+/// with `assets/shaders/voxel_array.frag`.
+pub const ANIM_FRAMES_SHIFT: u32 = 8;
+/// Frames per second, in the byte above the frame count.
+pub const ANIM_FPS_SHIFT: u32 = 16;
+/// Width of both animation fields.
+pub const ANIM_FIELD_MASK: u32 = 0xff;
+
+/// Pack an animation into [`ChunkVertex::flags`].
+///
+/// `frames` is how many consecutive block-texture-array layers the animation
+/// occupies; the shader steps the vertex's layer through them at `fps`. Fewer
+/// than two frames is static, and packs to no animation at all.
+#[inline]
+pub const fn anim_flags(frames: u8, fps: u8) -> u32 {
+    if frames < 2 {
+        return 0;
+    }
+    ((frames as u32) << ANIM_FRAMES_SHIFT) | ((fps as u32) << ANIM_FPS_SHIFT)
+}
 
 /// A vertex that draws its texture's own colour.
 ///
@@ -30,7 +52,7 @@ pub struct ChunkVertex {
     /// Ambient occlusion / shading multiplier in `[0,1]`.
     #[format(R32_SFLOAT)]
     pub ao: f32,
-    /// Bit flags for shader effects (see [`FLAG_WATER`]).
+    /// Bit flags for shader effects (see [`anim_flags`]).
     #[format(R32_UINT)]
     pub flags: u32,
     /// Layer of [`crate::render::block_textures`] to sample. Ignored by the
@@ -77,4 +99,25 @@ pub struct LineVertex {
     pub position: [f32; 3],
     #[format(R32G32B32_SFLOAT)]
     pub color: [f32; 3],
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn animation_packs_into_the_high_bytes() {
+        let flags = anim_flags(64, 12);
+        assert_eq!((flags >> ANIM_FRAMES_SHIFT) & ANIM_FIELD_MASK, 64);
+        assert_eq!((flags >> ANIM_FPS_SHIFT) & ANIM_FIELD_MASK, 12);
+        assert_eq!(flags & ANIM_FIELD_MASK, 0, "the low byte stays free");
+    }
+
+    /// A single frame is not an animation; the shader must see zero so it does
+    /// not step the layer at all.
+    #[test]
+    fn a_static_texture_packs_to_no_animation() {
+        assert_eq!(anim_flags(1, 12), 0);
+        assert_eq!(anim_flags(0, 12), 0);
+    }
 }

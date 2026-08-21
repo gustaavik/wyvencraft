@@ -133,6 +133,43 @@ pub struct BlockVisuals {
     pub models: Vec<Option<BlockModelSpec>>,
     /// `block_model` — a Blockbench Java Block/Item `.json` and its placement.
     pub json: Vec<Option<BlockJsonSpec>>,
+    /// `[block.fluid.texture]` — the animation strip a fluid draws from, copied
+    /// onto each of its auto-registered flowing blocks with `flowing` set.
+    pub fluids: Vec<Option<FluidVisual>>,
+}
+
+/// A fluid's animation strip, still unresolved, plus which of its two columns
+/// this particular block reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FluidVisual {
+    pub spec: FluidTextureSpec,
+    /// Set on the auto-registered `<source> flow N` blocks. Their side faces
+    /// take the flowing column; a source reads the still one everywhere.
+    pub flowing: bool,
+}
+
+/// `[block.fluid.texture]`: an animation strip of `frames` square frames
+/// stacked top to bottom, in as many columns as the image's width allows.
+///
+/// **Column 0 is flowing, column 1 is still** (a one-column strip serves both).
+/// Only the frame count is authored — the frame size, and with it the column
+/// count, follow from the image.
+///
+/// Kept *off* [`Block`] like every other visual assignment: `Block` feeds
+/// `content_hash`, which gates multiplayer joins.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FluidTextureSpec {
+    pub path: String,
+    pub frames: u8,
+    pub fps: u8,
+    /// Which biome colour multiplies the (greyscale) art, in Minecraft's
+    /// `tintindex` numbering — `2` is water. `None` leaves it as authored.
+    pub tint: Option<u8>,
+    /// How opaque the surface is, `0..=255`. A body of water is a *single*
+    /// blended sheet — the faces inside it are culled — so depth adds no
+    /// opacity and this alone decides how much of the riverbed shows through.
+    /// `None` keeps the art's own alpha.
+    pub opacity: Option<u8>,
 }
 
 /// A block's `block_model`, still unresolved. The path is read after the block
@@ -202,10 +239,6 @@ pub struct Block {
     /// Whether entities collide with this block.
     pub solid: bool,
     pub textures: FaceTextures,
-    /// Per-face "texture is animated" bits, indexed by [`Direction`] like
-    /// [`FaceTextures`]. Precomputed at load so the mesher's hot loop can set
-    /// the shader's animation flag without a registry lookup.
-    pub animated_faces: u8,
     /// Relative mining time; `f32::INFINITY` means unbreakable (e.g. bedrock).
     pub hardness: f32,
     /// What the block is made of, for tool matching.
@@ -214,14 +247,6 @@ pub struct Block {
     pub drops: Drops,
     /// Set when the block is part of a fluid (source or flowing).
     pub fluid: Option<FluidInfo>,
-}
-
-impl Block {
-    /// Whether the face towards `dir` shows an animated texture.
-    #[inline]
-    pub fn face_animated(&self, dir: Direction) -> bool {
-        self.animated_faces & (1 << dir as usize) != 0
-    }
 }
 
 impl Block {
@@ -372,13 +397,32 @@ fn default_drop_count() -> u8 {
 #[serde(deny_unknown_fields)]
 struct FluidDef {
     flow_levels: u8,
+    texture: Option<FluidTextureDef>,
+}
+
+/// `[block.fluid.texture]`; see [`FluidTextureSpec`].
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FluidTextureDef {
+    path: String,
+    frames: u8,
+    #[serde(default = "default_fluid_fps")]
+    fps: u8,
+    tint: Option<u8>,
+    /// `opacity = 0.85`; see [`FluidTextureSpec::opacity`].
+    opacity: Option<f32>,
+}
+
+/// Slow enough to read as a swell rather than a flicker. `fps * 3600` must stay
+/// a multiple of the frame count, or the shader's hourly time wrap jumps.
+fn default_fluid_fps() -> u8 {
+    8
 }
 
 impl TexturesDef {
     /// Resolve texture names to atlas tiles via the tile registry (which
-    /// warns and substitutes the missing marker for unknown names). Returns
-    /// the per-face tiles plus the per-face animation bitmask.
-    fn resolve(&self, tiles: &mut TileRegistry) -> (FaceTextures, u8) {
+    /// warns and substitutes the missing marker for unknown names).
+    fn resolve(&self, tiles: &mut TileRegistry) -> FaceTextures {
         let names: [&str; 6] = match self {
             Self::Uniform(name) => [name; 6],
             // order: -X,+X,-Y,+Y,-Z,+Z  =>  side,side,bottom,top,side,side
@@ -393,15 +437,10 @@ impl TexturesDef {
             } => [neg_x, pos_x, neg_y, pos_y, neg_z, pos_z],
         };
         let mut faces = [0u32; 6];
-        let mut animated = 0u8;
         for (i, name) in names.iter().enumerate() {
-            let entry = tiles.resolve(name);
-            faces[i] = entry.tile;
-            if entry.is_animated() {
-                animated |= 1 << i;
-            }
+            faces[i] = tiles.resolve(name).tile;
         }
-        (FaceTextures(faces), animated)
+        FaceTextures(faces)
     }
 }
 
@@ -470,9 +509,14 @@ impl BlockRegistry {
             return Err("no [[block]] entries".into());
         }
 
-        let BlockVisuals { models, json } = visuals;
+        let BlockVisuals {
+            models,
+            json,
+            fluids: fluid_visuals,
+        } = visuals;
         models.clear();
         json.clear();
+        fluid_visuals.clear();
         let mut reg = Self {
             blocks: Vec::new(),
             fluid_flow: Vec::new(),
@@ -482,7 +526,6 @@ impl BlockRegistry {
             render: RenderType::Invisible,
             solid: false,
             textures: FaceTextures::uniform(0),
-            animated_faces: 0,
             hardness: 0.0,
             material: BlockMaterial::Other,
             drops: Drops::None,
@@ -490,9 +533,10 @@ impl BlockRegistry {
         });
         models.push(None); // air
         json.push(None);
+        fluid_visuals.push(None);
 
         // Fluid sources, in declaration order: (source id, flow_levels).
-        let mut fluids: Vec<(BlockId, u8)> = Vec::new();
+        let mut fluids: Vec<(BlockId, u8, Option<FluidTextureSpec>)> = Vec::new();
         for def in file.block {
             if def.name == "air" {
                 return Err("\"air\" is built in and may not be declared".into());
@@ -506,10 +550,51 @@ impl BlockRegistry {
                     .map_err(|e| format!("block {:?}: {e}", def.name))?,
                 None => Drops::SelfItem,
             };
+            let mut fluid_texture = None;
             let fluid = match &def.fluid {
                 Some(f) => {
                     if !(1..=15).contains(&f.flow_levels) {
                         return Err(format!("block {:?}: flow_levels must be 1..=15", def.name));
+                    }
+                    if let Some(t) = &f.texture {
+                        if t.frames < 2 {
+                            return Err(format!(
+                                "block {:?}: a fluid texture needs at least 2 frames",
+                                def.name
+                            ));
+                        }
+                        if t.fps == 0 {
+                            return Err(format!(
+                                "block {:?}: fluid texture fps must be > 0",
+                                def.name
+                            ));
+                        }
+                        // The shader's animation clock wraps hourly; a loop
+                        // that does not divide it evenly jumps at the wrap.
+                        if !(3600 * u32::from(t.fps)).is_multiple_of(u32::from(t.frames)) {
+                            return Err(format!(
+                                "block {:?}: {} frames at {} fps does not divide the \
+                                 3600 s animation clock evenly",
+                                def.name, t.frames, t.fps
+                            ));
+                        }
+                        let opacity = match t.opacity {
+                            Some(o) if (0.0..=1.0).contains(&o) => Some((o * 255.0).round() as u8),
+                            Some(o) => {
+                                return Err(format!(
+                                    "block {:?}: fluid texture opacity must be 0..=1, got {o}",
+                                    def.name
+                                ));
+                            }
+                            None => None,
+                        };
+                        fluid_texture = Some(FluidTextureSpec {
+                            path: t.path.clone(),
+                            frames: t.frames,
+                            fps: t.fps,
+                            tint: t.tint,
+                            opacity,
+                        });
                     }
                     Some(FluidInfo {
                         group: fluids.len() as u16,
@@ -530,13 +615,15 @@ impl BlockRegistry {
             // from its own art later, in `content`. Anything else without
             // `textures` would silently render as the magenta marker, which is
             // worth rejecting loudly.
-            let modelled = def.model.is_some() || def.block_model.is_some();
-            let (textures, animated_faces) = match &def.textures {
+            let modelled =
+                def.model.is_some() || def.block_model.is_some() || fluid_texture.is_some();
+            let textures = match &def.textures {
                 Some(t) => t.resolve(tiles),
-                None if modelled => (FaceTextures::uniform(0), 0),
+                None if modelled => FaceTextures::uniform(0),
                 None => {
                     return Err(format!(
-                        "block {:?}: needs `textures`, a `block_model` or a `[block.model]`",
+                        "block {:?}: needs `textures`, a `block_model`, a `[block.model]` \
+                         or a `[block.fluid.texture]`",
                         def.name
                     ));
                 }
@@ -547,12 +634,15 @@ impl BlockRegistry {
                 def.block_model
                     .map(|path| BlockJsonSpec { path, random_yaw }),
             );
+            fluid_visuals.push(fluid_texture.clone().map(|spec| FluidVisual {
+                spec,
+                flowing: false,
+            }));
             let id = reg.register(Block {
                 name: def.name,
                 render: def.render,
                 solid: def.solid,
                 textures,
-                animated_faces,
                 hardness: def.hardness,
                 material: def.material,
                 drops,
@@ -560,23 +650,26 @@ impl BlockRegistry {
             });
             models.push(model);
             if let Some(f) = &def.fluid {
-                fluids.push((id, f.flow_levels));
+                fluids.push((id, f.flow_levels, fluid_texture));
             }
         }
 
         // Auto-register the flowing blocks: same look and physics as their
         // source, one per level, named "<source> flow <level>" (these names
         // are the save format — see the fluid module docs).
-        for (group, (source_id, levels)) in fluids.into_iter().enumerate() {
+        for (group, (source_id, levels, texture)) in fluids.into_iter().enumerate() {
             let source = reg.get(source_id).clone();
             let flow: Vec<BlockId> = (1..=levels)
                 .map(|level| {
+                    fluid_visuals.push(texture.clone().map(|spec| FluidVisual {
+                        spec,
+                        flowing: true,
+                    }));
                     reg.register(Block {
                         name: format!("{} flow {}", source.name, level),
                         render: source.render,
                         solid: source.solid,
                         textures: source.textures,
-                        animated_faces: source.animated_faces,
                         hardness: source.hardness,
                         material: source.material,
                         drops: Drops::None,
@@ -590,10 +683,12 @@ impl BlockRegistry {
                 .collect();
             reg.fluid_flow.push(flow);
         }
-        // The auto-registered flowing blocks never carry a model, but the
-        // vectors are indexed by `BlockId` and so must cover every block.
+        // The auto-registered flowing blocks never carry a model — they do
+        // carry their source's fluid texture — but every vector is indexed by
+        // `BlockId` and so must cover every block.
         models.resize(reg.len(), None);
         json.resize(reg.len(), None);
+        fluid_visuals.resize(reg.len(), None);
         Ok(reg)
     }
 
@@ -670,6 +765,27 @@ impl Default for BlockRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shader's animation clock wraps every 3600 s. A loop that does not
+    /// divide that evenly jumps mid-swell once an hour — subtle enough to ship
+    /// by accident, so the loader refuses it outright.
+    #[test]
+    fn a_fluid_loop_that_does_not_divide_the_animation_clock_is_rejected() {
+        let mut tiles = TileRegistry::with_engine_tiles();
+        // 64 frames at 6 fps: 6 * 3600 leaves 32 frames over.
+        let bad = BUILTIN_BLOCKS.replace("fps = 8", "fps = 6");
+        let err = BlockRegistry::from_toml(&bad, &mut tiles).expect_err("must not parse");
+        assert!(err.contains("3600"), "{err}");
+
+        // ...while the shipped pairing, and every other multiple of 4, is fine.
+        for fps in ["4", "8", "12", "20"] {
+            let text = BUILTIN_BLOCKS.replace("fps = 8", &format!("fps = {fps}"));
+            assert!(
+                BlockRegistry::from_toml(&text, &mut tiles).is_ok(),
+                "{fps} fps over 64 frames should be accepted"
+            );
+        }
+    }
 
     /// Golden snapshot of the shipped block set. The data-driven loader must
     /// reproduce this exactly: names are the save format (matched verbatim by

@@ -77,11 +77,14 @@ chance_per_mille = 300
 # both keys for a bare biome. Like every other name here these are strict — a
 # typo rejects the whole file.
 #
-# `tint` and `foliage_tint` are the colours multiplied into the block-model
-# faces Blockbench marked `tintindex` — 0 takes `tint` (the grass top and side
-# overlay), 1 takes `foliage_tint` (leaves). Those textures are deliberately
-# greyscale so one set of art serves every climate. Omit `tint` for white, which
-# multiplies to no change at all; omit `foliage_tint` and it follows `tint`.
+# `tint`, `foliage_tint` and `water_tint` are the colours multiplied into the
+# faces marked `tintindex` — 0 takes `tint` (the grass top and side overlay), 1
+# takes `foliage_tint` (leaves), 2 takes `water_tint` (the fluid animation in
+# assets/textures/water_flow.png). Those textures are deliberately greyscale so
+# one set of art serves every climate. Omit `tint` for white, which multiplies to
+# no change at all; omit `foliage_tint` and it follows `tint`. `water_tint` is
+# the exception — omitting it takes a default blue, because nothing else in the
+# water art supplies any colour at all.
 [biome.plains]
 surface = "grass"
 subsurface = "dirt"
@@ -91,6 +94,7 @@ plants = ["blue bells", "red flower", "cornflower", "red mushroom", "brown mushr
 plant_chance_per_mille = 90
 tint = [124, 189, 107]
 foliage_tint = [93, 165, 74]
+water_tint = [63, 118, 228]
 
 [biome.snowy]
 surface = "snow"
@@ -103,6 +107,8 @@ plant_chance_per_mille = 15
 # Washed-out and blue-shifted, for grass poking through the snow line.
 tint = [128, 180, 151]
 foliage_tint = [98, 152, 122]
+# Cold and pale, as if half-frozen.
+water_tint = [90, 150, 200]
 
 [biome.desert]
 surface = "sand"
@@ -110,3 +116,5 @@ subsurface = "sand"
 # Dry and yellowed; barely used, since desert grows no grass.
 tint = [191, 183, 85]
 foliage_tint = [174, 164, 42]
+# Shallow, warm and turquoise.
+water_tint = [46, 176, 176]
