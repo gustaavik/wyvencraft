@@ -3,7 +3,7 @@
 //! Everything here is pure data and pure functions — no GPU, no session, and
 //! the single filesystem read (`ops.toml`) is fail-soft in the same shape as
 //! `profile.toml`. That is deliberate: the interesting parts of a chat system
-//! are *parsing* (`/give raw beef 5` → an item name and a count) and *deciding*
+//! are *parsing* (`/give raw raw_beef 5` → an item name and a count) and *deciding*
 //! (may this person run it?), and both are worth testing without a window, a
 //! socket, or a world.
 //!

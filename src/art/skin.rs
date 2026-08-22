@@ -132,6 +132,37 @@ impl SkinPart {
 /// Edge length of a 64×64 sheet in atlas tiles (skin and armor share it).
 pub const SHEET_TILES: u32 = SKIN_SIZE / TILE_SIZE;
 
+/// How many whole sheets fit across one atlas row-band.
+pub const SHEETS_PER_ROW: u32 = ATLAS_COLUMNS / SHEET_TILES;
+
+/// The atlas origin of the `index`th sheet of a band starting at `base_row`,
+/// laid out left to right and wrapping onto the next `SHEET_TILES` rows.
+///
+/// Armor and mob sheets both address the atlas this way rather than with a
+/// hand-written table, so a change to [`TILE_SIZE`] — which changes how many
+/// tiles a 64×64 sheet spans — cannot silently make two sheets overlap.
+pub fn sheet_origin(base_row: u32, index: u32) -> [u32; 2] {
+    [
+        (index % SHEETS_PER_ROW) * SHEET_TILES,
+        base_row + (index / SHEETS_PER_ROW) * SHEET_TILES,
+    ]
+}
+
+/// How many atlas rows a band of `count` sheets occupies, so the next band
+/// knows where it may start.
+pub fn band_rows(count: u32) -> u32 {
+    count.div_ceil(SHEETS_PER_ROW) * SHEET_TILES
+}
+
+/// A sheet with no art: every texel the magenta missing-texture marker.
+///
+/// Reserved sheets never reach the registry's own marker — they are pinned
+/// pixels, not a name it failed to resolve — so a piece whose PNG has not been
+/// drawn yet paints this instead, and reads the same way in-game.
+pub fn missing_sheet() -> Box<SkinRgba> {
+    Box::new([[wyven_render::MISSING_TEXTURE; SKIN_SIZE as usize]; SKIN_SIZE as usize])
+}
+
 /// Map a face rect + local image uv (u → right, v → down) into atlas texture
 /// coordinates for a sheet whose top-left tile is `origin_tile` (`[col, row]`).
 /// Generic over the sheet position so armor sheets reuse it; the skin-space
@@ -270,9 +301,18 @@ mod tests {
     #[test]
     fn face_uv_lands_in_the_skin_atlas_block() {
         let rect = HEAD.face_rect(Direction::NegZ);
-        // Sheet origin is (192, 0); the head front rect starts 8px in.
-        assert_eq!(face_uv(rect, [0.0, 0.0]), [200.0 / 256.0, 8.0 / 256.0]);
-        assert_eq!(face_uv(rect, [1.0, 1.0]), [208.0 / 256.0, 16.0 / 256.0]);
+        // The head's front rect starts 8px into the sheet and is 8px square,
+        // wherever in the atlas the sheet itself happens to sit.
+        let origin = (SKIN_COL * TILE_SIZE) as f32;
+        let atlas = ATLAS_SIZE as f32;
+        assert_eq!(
+            face_uv(rect, [0.0, 0.0]),
+            [(origin + 8.0) / atlas, 8.0 / atlas]
+        );
+        assert_eq!(
+            face_uv(rect, [1.0, 1.0]),
+            [(origin + 16.0) / atlas, 16.0 / atlas]
+        );
     }
 
     #[test]

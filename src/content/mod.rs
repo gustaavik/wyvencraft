@@ -65,6 +65,17 @@ pub enum ItemIcon {
 /// on every face, which is tile 0 by construction.
 pub(crate) const MISSING_FACES: FaceTextures = FaceTextures::uniform(0);
 
+/// How a loose stack is shaped where it lies in the world.
+///
+/// A block item is a miniature of the block, each face its own texture. Anything
+/// else has only a flat icon, and wrapping that around a cube reads as six
+/// apples rather than one — so it is drawn as the icon itself, one texel thick.
+#[derive(Debug, Clone, Copy)]
+pub enum ItemShape {
+    Cube(FaceTextures),
+    Sprite(u32),
+}
+
 /// A loaded model plus the placement its data file asked for. Resolving the
 /// path to a [`ModelId`] once at load keeps the per-frame path a plain index.
 #[derive(Debug, Clone, Copy)]
@@ -109,6 +120,15 @@ pub struct GameContent {
     /// `BlockId` — see [`GameContent::face_textures`], which is how everything
     /// outside the chunk mesh should read them.
     pub block_face_tiles: Vec<Option<FaceTextures>>,
+    /// The cube faces the arrow projectile is drawn with, resolved once from
+    /// the `arrow` item. A projectile in flight is not an inventory stack, so
+    /// nothing would otherwise look this up — and looking it up by id every
+    /// frame would be the only string search in the render path.
+    ///
+    /// Still a cube, unlike a *dropped* arrow: an arrow in flight is oriented by
+    /// its own yaw, so a flat sprite would turn edge-on to the way it is going.
+    /// It wants a model, not a sprite.
+    pub arrow_faces: FaceTextures,
     /// The animation strip each fluid block draws from, indexed by `BlockId`
     /// and covering the auto-registered flowing blocks too. Kept off `Block`
     /// for the same reason as [`BlockModel`].
@@ -131,6 +151,9 @@ pub struct GameContent {
     /// (visual-only divergence is harmless).
     pub hash: u64,
 }
+
+/// The item a fired arrow borrows its art from.
+const ARROW_ITEM: &str = "arrow";
 
 const BLOCKS_PATH: &str = "assets/blocks.toml";
 const ITEMS_PATH: &str = "assets/items.toml";
@@ -347,6 +370,13 @@ impl GameContent {
 
         let item_icons =
             build_item_icons(&mut tiles, &blocks, &items, &item_models, &block_face_tiles);
+        let arrow_faces = items
+            .find(ARROW_ITEM)
+            .and_then(|id| match item_icons.get(id.0 as usize) {
+                Some(&ItemIcon::Flat(tile)) => Some(FaceTextures::uniform(tile)),
+                _ => None,
+            })
+            .unwrap_or(MISSING_FACES);
         let hash = content_hash(&blocks, &items, &entities, &worldgen, &spawning);
         Arc::new(Self {
             tiles,
@@ -362,6 +392,7 @@ impl GameContent {
             block_models,
             baked_models,
             block_face_tiles,
+            arrow_faces,
             fluid_textures,
             block_display_names,
             item_display_names,
@@ -395,6 +426,30 @@ impl GameContent {
             .copied()
             .flatten()
             .unwrap_or(MISSING_FACES)
+    }
+
+    /// What shape a loose `item` takes where it lies in the world.
+    ///
+    /// An item with a `[item.model]` is drawn as that model instead and never
+    /// reaches here; anything else with no art at all gets the missing marker,
+    /// which is the same thing its inventory icon shows.
+    pub fn item_shape(&self, item: ItemId) -> ItemShape {
+        // Read the decision off the icon rather than re-deriving it from
+        // `place_block`: the two must agree, and a fluid is the case that proves
+        // it — water places a block but its icon is the flat still frame, so
+        // asking `place_block` would give a dropped bucket-of-nothing a cube the
+        // inventory never shows.
+        match self.item_icons.get(item.0 as usize) {
+            Some(&ItemIcon::Flat(tile)) => ItemShape::Sprite(tile),
+            Some(&ItemIcon::Cube { .. }) => ItemShape::Cube(
+                self.items
+                    .get(item)
+                    .place_block
+                    .map_or(MISSING_FACES, |block| self.face_textures(block)),
+            ),
+            // A model-backed item is drawn as its model and never reaches here.
+            _ => ItemShape::Cube(MISSING_FACES),
+        }
     }
 
     /// What the player reads for `block`. Falls back to the id, which is always
@@ -1117,6 +1172,43 @@ mod tests {
         let repointed = base.replace("assets/models/vine_sword", "assets/models/elsewhere");
         assert_ne!(base, repointed, "fixture substituted nothing");
         repointed
+    }
+
+    /// A dropped block is a miniature of itself; a dropped apple is its icon.
+    /// Wrapping a flat icon around a cube is what this split exists to stop.
+    #[test]
+    fn only_block_items_are_shaped_as_cubes() {
+        let content = GameContent::builtin();
+        let shape = |id: &str| {
+            let item = content.items.find(id).unwrap_or_else(|| panic!("no {id}"));
+            content.item_shape(item)
+        };
+        assert!(matches!(shape("dirt"), ItemShape::Cube(_)), "dirt");
+        assert!(matches!(shape("apple"), ItemShape::Sprite(_)), "apple");
+        assert!(matches!(shape("coal"), ItemShape::Sprite(_)), "coal");
+        // Water is a fluid: its icon is derived from the still frame, so it is
+        // flat art like any other icon rather than six faces of a cube.
+        assert!(matches!(shape("water"), ItemShape::Sprite(_)), "water");
+    }
+
+    /// The shipped apple art has transparent corners, so its extruded silhouette
+    /// must come out smaller than a full card. This is what proves the alpha
+    /// tracing reads real art and not just the synthetic fixtures in the mesher.
+    #[test]
+    fn a_real_icon_traces_less_than_a_full_card() {
+        let content = GameContent::builtin();
+        let apple = content.items.find("apple").expect("no apple");
+        let ItemShape::Sprite(tile) = content.item_shape(apple) else {
+            panic!("apple should be a sprite");
+        };
+        let art = content.tiles.art(tile).expect("apple art");
+        let full = wyven_voxel::ItemSprite::new(tile, None).rim_len();
+        let traced = wyven_voxel::ItemSprite::new(tile, Some(art)).rim_len();
+        assert!(traced > 0, "apple traced no silhouette at all");
+        assert!(
+            traced < full,
+            "apple traced a full card ({traced} of {full})"
+        );
     }
 
     /// A model is visual-only: swapping one must not change the fingerprint that

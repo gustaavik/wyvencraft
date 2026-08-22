@@ -13,3 +13,7 @@ vulkano-util.workspace = true
 glam.workspace = true
 bytemuck.workspace = true
 log.workspace = true
+
+[dev-dependencies]
+# Only the `decode_tile` size-rule fixtures encode PNGs.
+png.workspace = true

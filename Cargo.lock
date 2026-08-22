@@ -4335,6 +4335,7 @@ dependencies = [
  "bytemuck",
  "glam",
  "log",
+ "png 0.17.16",
  "vulkano",
  "vulkano-shaders",
  "vulkano-util",

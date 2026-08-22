@@ -9,8 +9,10 @@
 //! placed model, or a fluid surface. It never sees a name or a hardness.
 
 pub mod culled;
+pub mod sprite;
 
 pub use culled::{mesh_block_overlay, mesh_chunk, push_item_cube};
+pub use sprite::{ItemSprite, push_item_sprite};
 
 use std::collections::HashMap;
 
@@ -22,7 +24,7 @@ use wyven_render::mesh::CpuMesh;
 /// and sorted.
 #[derive(Default)]
 pub struct ChunkMeshOutput {
-    /// Cube faces sampling the shared 16-pixel atlas.
+    /// Cube faces sampling the shared 32-pixel atlas.
     pub opaque: CpuMesh,
     pub transparent: CpuMesh,
     /// Geometry from Blockbench-authored blocks, sampling the block texture

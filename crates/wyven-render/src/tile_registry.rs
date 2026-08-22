@@ -18,6 +18,7 @@
 
 use std::collections::HashMap;
 
+use super::block_textures::upscale;
 use super::texture::{ATLAS_COLUMNS, ATLAS_SIZE, TILE_SIZE};
 use wyven_assets::decode_png;
 
@@ -27,7 +28,11 @@ const MAX_TILES: usize = (ATLAS_COLUMNS * ATLAS_COLUMNS) as usize;
 
 /// The magenta marker painted into any atlas tile without assigned art, so a
 /// bad tile index is immediately visible in-game.
-const MISSING_TEXTURE: [u8; 4] = [255, 0, 255, 255];
+///
+/// Public so a caller assembling *reserved* art — which never goes through
+/// [`TileSource`] and so can't fall back to the registry's own marker — can
+/// paint the same "nothing here yet" colour.
+pub const MISSING_TEXTURE: [u8; 4] = [255, 0, 255, 255];
 
 const N: usize = TILE_SIZE as usize;
 
@@ -95,15 +100,26 @@ impl ReservedTiles {
 ///
 /// Exposed because a [`TileSource`] reading PNGs off disk should not have to
 /// re-derive "which PNG flavours do we accept, and at what size".
+///
+/// The art must be square, and either exactly [`TILE_SIZE`] or an exact integer
+/// fraction of it — smaller art is replicated up, which is pixel-identical on
+/// screen under the atlas's nearest sampling. The same rule the block texture
+/// array applies at 256px, so one PNG can serve either store.
 pub fn decode_tile(bytes: &[u8]) -> Result<TileRgba, String> {
-    let image = decode_png(bytes)?;
-    if image.size != [TILE_SIZE; 2] {
-        return Err(format!(
-            "must be {TILE_SIZE}x{TILE_SIZE}, got {}x{}",
-            image.width(),
-            image.height()
-        ));
+    let decoded = decode_png(bytes)?;
+    let [width, height] = decoded.size;
+    if width != height {
+        return Err(format!("must be square, got {width}x{height}"));
     }
+    let image = if width == TILE_SIZE {
+        decoded
+    } else if width == 0 || !TILE_SIZE.is_multiple_of(width) {
+        return Err(format!(
+            "must be {TILE_SIZE}x{TILE_SIZE} or an exact fraction of it, got {width}x{height}"
+        ));
+    } else {
+        upscale(&decoded, TILE_SIZE / width)
+    };
     let mut art: TileRgba = [[[0; 4]; N]; N];
     for (y, row) in art.iter_mut().enumerate() {
         for (x, px) in row.iter_mut().enumerate() {
@@ -207,6 +223,15 @@ impl TileRegistry {
         Some(free as u32)
     }
 
+    /// The pixels assigned to `tile`, or `None` for a slot with no art (which
+    /// the atlas fills with the magenta marker).
+    ///
+    /// Exposed for geometry derived from the art itself — extruding a flat item
+    /// icon needs to know where the drawn shape ends.
+    pub fn art(&self, tile: u32) -> Option<&TileRgba> {
+        self.pixels.get(tile as usize)?.as_ref()
+    }
+
     /// Generate the atlas as tightly packed RGBA8 pixels
     /// (`ATLAS_SIZE^2 * 4` bytes) for the GPU upload.
     pub fn atlas_rgba(&self) -> Vec<u8> {
@@ -250,6 +275,60 @@ mod tests {
 
     fn registry(reserved: ReservedTiles) -> TileRegistry {
         TileRegistry::new(Box::new(Swatch), &reserved)
+    }
+
+    /// A `w`×`h` PNG whose pixel at `(x, y)` encodes its own coordinates, so a
+    /// scaling bug shows up as the wrong texel rather than the wrong colour.
+    fn png(w: u32, h: u32) -> Vec<u8> {
+        let mut data = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                data.extend_from_slice(&[x as u8, y as u8, 0, 255]);
+            }
+        }
+        let mut out = Vec::new();
+        let mut encoder = png::Encoder::new(&mut out, w, h);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&data)
+            .unwrap();
+        out
+    }
+
+    #[test]
+    fn tile_sized_art_is_taken_verbatim() {
+        let art = decode_tile(&png(TILE_SIZE, TILE_SIZE)).expect("exact size");
+        assert_eq!(art[0][0], [0, 0, 0, 255]);
+        assert_eq!(art[N - 1][N - 1], [(N - 1) as u8, (N - 1) as u8, 0, 255]);
+    }
+
+    /// Smaller art is replicated up by an integer factor, so every source texel
+    /// becomes a whole square block and nearest sampling shows it unchanged.
+    #[test]
+    fn smaller_art_upscales_into_whole_blocks() {
+        let half = TILE_SIZE / 2;
+        let art = decode_tile(&png(half, half)).expect("exact fraction");
+        for (y, row) in art.iter().enumerate() {
+            for (x, px) in row.iter().enumerate() {
+                assert_eq!(
+                    *px,
+                    [(x / 2) as u8, (y / 2) as u8, 0, 255],
+                    "texel ({x}, {y})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn non_square_and_non_dividing_art_is_rejected() {
+        let err = decode_tile(&png(TILE_SIZE, TILE_SIZE / 2)).unwrap_err();
+        assert!(err.contains("square"), "{err}");
+        let odd = TILE_SIZE + TILE_SIZE / 2;
+        let err = decode_tile(&png(odd, odd)).unwrap_err();
+        assert!(err.contains("fraction"), "{err}");
     }
 
     #[test]

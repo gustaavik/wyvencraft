@@ -99,23 +99,53 @@ ingredients = { apple = 2 }
 output = "stone"
 ingredients = { gravel = 4 }
 
-# Armor. The plate pieces are beaten straight from ore — another stand-in for
-# smelting. Glove and cape are woven from leaves until a proper cloth exists.
+# Smelting stand-ins. Coal is the fuel in every one of them, so it reads as a
+# furnace even though the craft is shapeless.
 [[recipe]]
-output = "helmet"
-ingredients = { iron_ore = 5 }
+output = "copper_ingot"
+ingredients = { copper_ore = 1, coal = 1 }
 
 [[recipe]]
-output = "chestplate"
-ingredients = { iron_ore = 8 }
+output = "cooked_beef"
+ingredients = { raw_beef = 1, coal = 1 }
 
 [[recipe]]
-output = "leggings"
-ingredients = { iron_ore = 7 }
+output = "cooked_mutton"
+ingredients = { mutton = 1, coal = 1 }
 
 [[recipe]]
-output = "boots"
-ingredients = { iron_ore = 4 }
+output = "cooked_chicken"
+ingredients = { raw_chicken = 1, coal = 1 }
+
+# Knap a shard off a handful of gravel. Drops have no chance roll, so this is
+# where flint comes from rather than off the block itself.
+[[recipe]]
+output = "flint"
+ingredients = { gravel = 3 }
+
+# Fletching.
+[[recipe]]
+output = "arrow"
+count = 4
+ingredients = { flint = 1, stick = 1, feather = 1 }
+
+# Armor. The plate pieces are the copper tier, beaten from ingots. Glove and
+# cape are woven from leaves until a proper cloth exists.
+[[recipe]]
+output = "copper_helmet"
+ingredients = { copper_ingot = 5 }
+
+[[recipe]]
+output = "copper_chestplate"
+ingredients = { copper_ingot = 8 }
+
+[[recipe]]
+output = "copper_leggings"
+ingredients = { copper_ingot = 7 }
+
+[[recipe]]
+output = "copper_boots"
+ingredients = { copper_ingot = 4 }
 
 [[recipe]]
 output = "glove"

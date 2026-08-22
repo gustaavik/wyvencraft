@@ -154,11 +154,14 @@ mod tests {
 
     #[test]
     fn a_known_command_resolves_with_its_raw_arguments() {
-        let Invocation::Command { command, args } = resolve("/give raw beef 3") else {
+        let Invocation::Command { command, args } = resolve("/give raw raw_beef 3") else {
             panic!("/give is registered");
         };
         assert_eq!(command.name(), "give");
-        assert_eq!(args, "raw beef 3", "the command parses its own arguments");
+        assert_eq!(
+            args, "raw raw_beef 3",
+            "the command parses its own arguments"
+        );
     }
 
     #[test]
@@ -210,10 +213,10 @@ mod tests {
 
     #[test]
     fn a_near_miss_gets_a_suggestion() {
-        let items = ["bread", "raw_beef", "wooden_pickaxe"];
+        let items = ["bread", "cooked_beef", "wooden_pickaxe"];
         assert_eq!(suggest("brea", items), Some("bread"));
         assert_eq!(suggest("BREAD", items), Some("bread"));
-        assert_eq!(suggest("beef", items), Some("raw_beef"));
+        assert_eq!(suggest("beef", items), Some("cooked_beef"));
         assert_eq!(suggest("zzz", items), None);
         assert_eq!(suggest("", items), None);
     }

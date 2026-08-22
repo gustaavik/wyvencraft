@@ -238,9 +238,9 @@ mod tests {
     }
 
     /// End-to-end combat: spawn a cow next to the player, punch it to death,
-    /// and confirm its raw-beef loot pops as dropped items.
+    /// and confirm its raw-raw_beef loot pops as dropped items.
     #[test]
-    fn killing_a_cow_drops_raw_beef() {
+    fn killing_a_cow_drops_beef() {
         let mut state = InGameState::new(GameContent::builtin(), 7, GameMode::Survival);
         let cow_kind = state.content.entities.find("cow").expect("cow kind");
         let max_health = cow_kind.mob.as_ref().unwrap().max_health;
@@ -269,16 +269,16 @@ mod tests {
         state.update_mobs(1.0 / 60.0);
         assert!(state.mobs.live.is_empty(), "cow should be dead and reaped");
         assert!(!state.drops.is_empty(), "death should drop loot");
-        let beef = state.content.items.find("raw_beef").unwrap();
+        let raw_beef = state.content.items.find("raw_beef").unwrap();
         let dropped: u32 = state
             .drops
             .iter()
-            .filter(|d| d.stack.item == beef)
+            .filter(|d| d.stack.item == raw_beef)
             .map(|d| u32::from(d.stack.count))
             .sum();
         assert!(
             (1..=3).contains(&dropped),
-            "cow drops 1..=3 raw beef, got {dropped}"
+            "cow drops 1..=3 raw raw_beef, got {dropped}"
         );
     }
 

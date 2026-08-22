@@ -54,8 +54,8 @@ struct Args {
 
 /// Parse `<item> [count]`.
 ///
-/// An id is a single token (`raw_beef`), so `/give raw_beef 5` is the ordinary
-/// form. Spaces are still folded to underscores, because "Raw Beef" is how the
+/// An id is a single token (`cooked_beef`), so `/give cooked_beef 5` is the ordinary
+/// form. Spaces are still folded to underscores, because "Cooked Beef" is how the
 /// item reads in the inventory and typing what you see should work. That is why
 /// the *last* token is what becomes the count — and only when it looks like a
 /// number and something is left over to name.
@@ -101,7 +101,7 @@ mod tests {
     use super::*;
 
     fn run(line: &str) -> FakeContext {
-        let mut ctx = FakeContext::new(true, ["bread", "raw_beef", "wooden_pickaxe"]);
+        let mut ctx = FakeContext::new(true, ["bread", "cooked_beef", "wooden_pickaxe"]);
         GiveCommand.run(line, &mut ctx);
         ctx
     }
@@ -116,10 +116,10 @@ mod tests {
         assert_eq!(run("bread 12").given, [("bread".to_string(), 12)]);
     }
 
-    /// An id is one token, so `/give raw_beef 3` is the plain form.
+    /// An id is one token, so `/give cooked_beef 3` is the plain form.
     #[test]
     fn an_id_is_a_single_token() {
-        assert_eq!(run("raw_beef 3").given, [("raw_beef".to_string(), 3)]);
+        assert_eq!(run("cooked_beef 3").given, [("cooked_beef".to_string(), 3)]);
         assert_eq!(
             run("wooden_pickaxe").given,
             [("wooden_pickaxe".to_string(), 1)]
@@ -131,17 +131,17 @@ mod tests {
     /// before the count.
     #[test]
     fn spaces_fold_to_underscores_so_the_displayed_name_also_works() {
-        assert_eq!(run("raw beef 3").given, [("raw_beef".to_string(), 3)]);
+        assert_eq!(run("cooked beef 3").given, [("cooked_beef".to_string(), 3)]);
     }
 
     /// The registry holds the canonical id, so a differently-cased request still
     /// resolves — and the confirmation echoes the *display name*, not the id.
     #[test]
     fn ids_are_matched_case_insensitively() {
-        let ctx = run("RAW BEEF 2");
-        assert_eq!(ctx.given, [("raw_beef".to_string(), 2)]);
+        let ctx = run("COOKED BEEF 2");
+        assert_eq!(ctx.given, [("cooked_beef".to_string(), 2)]);
         assert!(
-            ctx.said(ChatKind::System).contains("Raw Beef"),
+            ctx.said(ChatKind::System).contains("Cooked Beef"),
             "got {:?}",
             ctx.replies
         );

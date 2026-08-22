@@ -21,9 +21,9 @@ use glam::Vec3;
 
 use super::mobs::{RemoteMob, mob_mesh};
 use super::{OUTLINE_COLOR, REMOTE_MAX_SPEED, THIRD_PERSON_DISTANCE};
-use crate::art::tiles;
+use crate::art::cracks;
 use crate::content::BlockAppearance;
-use crate::content::ItemModel;
+use crate::content::{ItemModel, ItemShape};
 use crate::core::{Aabb, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, ChunkPos, DayCycle};
 use crate::entity::{
     AnimationState, Arrow, DroppedItem, HandAnchor, HumanoidModel, Mob, Perspective, Player,
@@ -31,12 +31,14 @@ use crate::entity::{
 use crate::inventory::{ARMOR_SIZE, Inventory, ItemId, ItemRegistry};
 use crate::net::{PlayerId, RemotePlayer};
 use crate::world::World;
-use crate::world::meshing::{mesh_block_overlay, mesh_chunk, push_item_cube};
+use crate::world::meshing::{
+    ItemSprite, mesh_block_overlay, mesh_chunk, push_item_cube, push_item_sprite,
+};
 use wyven_model::mesh as model_mesh;
 use wyven_model::{ModelId, ModelRegistry};
 use wyven_render::{
     Camera, CpuMesh, GpuLines, GpuMesh, LightParams, PreviewFrame, RenderContext, SceneFrame,
-    SkyParams, Texture, TexturedMesh, debug,
+    SkyParams, Texture, TexturedMesh, TileRegistry, debug,
 };
 use wyven_voxel::FaceTextures;
 
@@ -138,6 +140,10 @@ pub(super) struct SceneCache {
     /// Combined GPU meshes for all drops, split by render pass.
     drops_mesh: Option<GpuMesh>,
     drops_mesh_transparent: Option<GpuMesh>,
+    /// Extruded silhouettes for flat item icons, keyed by atlas tile. Tracing
+    /// one walks the whole tile's alpha, so it is done once and kept rather than
+    /// repeated for every drop on every frame.
+    item_sprites: HashMap<u32, ItemSprite>,
 
     pub fov_degrees: f32,
     /// Fraction `[0,1)` through the current physics step, for camera
@@ -178,6 +184,7 @@ impl SceneCache {
             arrows_mesh: None,
             drops_mesh: None,
             drops_mesh_transparent: None,
+            item_sprites: HashMap::new(),
             fov_degrees: 70.0,
             render_alpha: 0.0,
             elapsed: 0.0,
@@ -540,9 +547,16 @@ impl SceneCache {
     }
 
     /// Rebuild the combined arrow mesh (small cubes, like the drops pass).
-    pub fn update_arrows_mesh(&mut self, ctx: &Arc<RenderContext>, arrows: &[Arrow]) {
+    ///
+    /// `shaft` is the arrow item's own faces, resolved by the caller — an arrow
+    /// in flight is not an inventory stack, so it cannot look itself up.
+    pub fn update_arrows_mesh(
+        &mut self,
+        ctx: &Arc<RenderContext>,
+        arrows: &[Arrow],
+        shaft: FaceTextures,
+    ) {
         let mut mesh = CpuMesh::new();
-        let shaft = FaceTextures::uniform(tiles::WOOD_BARK);
         for arrow in arrows {
             push_item_cube(&mut mesh, arrow.position, 0.15, arrow.yaw(), &shaft);
         }
@@ -557,7 +571,8 @@ impl SceneCache {
         &mut self,
         ctx: &Arc<RenderContext>,
         drops: &[DroppedItem],
-        textures: impl Fn(ItemId) -> (FaceTextures, bool),
+        shape: impl Fn(ItemId) -> (ItemShape, bool),
+        tiles: &TileRegistry,
         content: ModelContent<'_>,
     ) {
         let mut opaque = CpuMesh::new();
@@ -584,19 +599,34 @@ impl SceneCache {
                 entry.push_indexed(mesh.vertices, mesh.indices);
                 continue;
             }
-            let (faces, is_transparent) = textures(item.stack.item);
+            let (shape, is_transparent) = shape(item.stack.item);
             let target = if is_transparent {
                 &mut transparent
             } else {
                 &mut opaque
             };
-            push_item_cube(
-                target,
-                item.render_center(),
-                item.size(),
-                item.spin_yaw(),
-                &faces,
-            );
+            match shape {
+                ItemShape::Cube(faces) => push_item_cube(
+                    target,
+                    item.render_center(),
+                    item.render_size(),
+                    item.spin_yaw(),
+                    &faces,
+                ),
+                ItemShape::Sprite(tile) => {
+                    let sprite = self
+                        .item_sprites
+                        .entry(tile)
+                        .or_insert_with(|| ItemSprite::new(tile, tiles.art(tile)));
+                    push_item_sprite(
+                        target,
+                        sprite,
+                        item.render_center(),
+                        item.render_size(),
+                        item.spin_yaw(),
+                    );
+                }
+            }
         }
         self.drops_mesh = GpuMesh::upload(&ctx.memory_allocator, &opaque)
             .ok()
@@ -622,7 +652,10 @@ impl SceneCache {
         breaking: Option<(BlockPos, Aabb, f32)>,
     ) {
         self.break_mesh = breaking.and_then(|(block, box_, progress)| {
-            let overlay = mesh_block_overlay(box_, tiles::crack_tile(progress));
+            // No crack art on disk means no overlay at all: it is drawn *over*
+            // the block being mined, so a missing-texture marker would hide the
+            // thing you are looking at rather than read as art that is absent.
+            let overlay = mesh_block_overlay(box_, cracks::tile(progress)?);
             match GpuMesh::upload(&ctx.memory_allocator, &overlay) {
                 Ok(mesh) => mesh,
                 Err(err) => {
@@ -900,7 +933,6 @@ impl super::InGameState {
         // the closure below, where three deep `Vec` clones used to.
         let loaded = self.content.clone();
         let (items, blocks) = (&loaded.items, &loaded.blocks);
-        let block_faces = &loaded.block_face_tiles;
         let models = &loaded.models;
         let content = ModelContent {
             models,
@@ -914,16 +946,15 @@ impl super::InGameState {
                     .get(item)
                     .place_block
                     .is_some_and(|b| blocks.get(b).is_transparent());
-                (
-                    super::interaction::drop_textures(item, items, block_faces),
-                    is_transparent,
-                )
+                (loaded.item_shape(item), is_transparent)
             },
+            &loaded.tiles,
             content,
         );
         self.view
             .update_mob_meshes(ctx, &self.mobs.live, &mut self.mobs.remote, models, dt);
-        self.view.update_arrows_mesh(ctx, &self.mobs.arrows);
+        self.view
+            .update_arrows_mesh(ctx, &self.mobs.arrows, loaded.arrow_faces);
 
         // Animated humanoids. The local player settles to idle while the
         // inventory is open (movement is frozen).

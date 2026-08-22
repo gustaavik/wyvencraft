@@ -40,7 +40,7 @@
 //!
 //! ```text
 //! core      ← wyven-core + GameMode and DayCycle (rules, not primitives)
-//! art       ← render        procedural tiles, skin, armor and mob sheets
+//! art       ← render        PNG tiles; atlas layout for skin, armor, mob and crack sheets
 //! world     ← voxel         block table, worldgen, fluid rules
 //! inventory ← world         items, stacks, crafting, mining
 //! entity    ← inventory     player, physics, mobs, brains, projectiles

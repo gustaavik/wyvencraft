@@ -494,8 +494,8 @@ mod tests {
     #[test]
     fn a_multi_word_item_can_be_given() {
         let mut state = InGameState::new(GameContent::builtin(), 5, GameMode::Creative);
-        state.submit_chat("/give raw beef 3".to_string());
-        assert_eq!(count_of(&state, "raw_beef"), 3);
+        state.submit_chat("/give cooked beef 3".to_string());
+        assert_eq!(count_of(&state, "cooked_beef"), 3);
     }
 
     /// A tool has durability, so five of them are five stacks of one — not one

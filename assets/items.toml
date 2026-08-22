@@ -294,7 +294,8 @@ id = "bread"
 hunger = 5.0
 saturation = 6.0
 
-# Mob drops (see the mob `drops` lists in entities.toml).
+# Mob drops (see the mob `drops` lists in entities.toml). Raw meat is thin
+# food; cooking roughly doubles it.
 
 [[item]]
 id = "raw_beef"
@@ -304,18 +305,88 @@ hunger = 3.0
 saturation = 1.8
 
 [[item]]
-id = "raw_mutton"
+id = "mutton"
 
 [item.food]
 hunger = 2.0
 saturation = 1.2
 
+[[item]]
+id = "raw_chicken"
+
+[item.food]
+hunger = 2.0
+saturation = 1.2
+
+[[item]]
+id = "cooked_beef"
+
+[item.food]
+hunger = 8.0
+saturation = 12.8
+
+[[item]]
+id = "cooked_mutton"
+
+[item.food]
+hunger = 6.0
+saturation = 9.6
+
+[[item]]
+id = "cooked_chicken"
+
+[item.food]
+hunger = 6.0
+saturation = 7.2
+
+# No pig walks the world yet and no raw porkchop art was drawn, so this one has
+# neither a drop nor a recipe — `/give cooked_porkchop` is the only way to it
+# until both exist.
+
+[[item]]
+id = "cooked_porkchop"
+
+[item.food]
+hunger = 8.0
+saturation = 12.8
+
+# Mob and block materials. Plain stackables: no components, so their icons are
+# whatever `assets/textures/<id>.png` holds.
+
+[[item]]
+id = "leather"
+
+[[item]]
+id = "feather"
+
+[[item]]
+id = "string"
+
+[[item]]
+id = "arrow"
+
+[[item]]
+id = "coal"
+
+[[item]]
+id = "clay_ball"
+
+[[item]]
+id = "flint"
+
+[[item]]
+id = "copper_ingot"
+
 # Armor. Worn pieces live in the six equipment slots; their `defense` sums into
 # the damage reduction applied by `Player::damage`, and every hit wears each worn
 # piece by one point. A piece only fits the slot it names.
+#
+# The four plate pieces are the copper tier and are named for it, so a second
+# tier can be added beside them rather than replacing them. `glove` and `cape`
+# are tierless and keep their bare ids.
 
 [[item]]
-id = "helmet"
+id = "copper_helmet"
 
 [item.armor]
 slot = "helmet"
@@ -323,7 +394,7 @@ defense = 2.0
 durability = 120
 
 [[item]]
-id = "chestplate"
+id = "copper_chestplate"
 
 [item.armor]
 slot = "chestplate"
@@ -331,7 +402,7 @@ defense = 6.0
 durability = 240
 
 [[item]]
-id = "leggings"
+id = "copper_leggings"
 
 [item.armor]
 slot = "leggings"
@@ -339,7 +410,7 @@ defense = 5.0
 durability = 200
 
 [[item]]
-id = "boots"
+id = "copper_boots"
 
 [item.armor]
 slot = "boots"
@@ -363,8 +434,7 @@ defense = 1.0
 durability = 80
 
 # Crafting intermediate: the handle every tool is built around. No components,
-# so it is a plain stackable and its icon comes from the painter in
-# `render::tiles::paint_named`.
+# so it is a plain stackable drawing its icon from `assets/textures/stick.png`.
 
 [[item]]
 id = "stick"

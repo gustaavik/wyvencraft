@@ -28,6 +28,7 @@ pub use mesh::{CpuMesh, GpuLines, GpuMesh};
 pub use renderer::{LightParams, PreviewFrame, Renderer, SceneFrame, SkyParams, TexturedMesh};
 pub use texture::{Rgba8, Texture};
 pub use tile_registry::{
-    NoTiles, ReservedTiles, TileEntry, TileRegistry, TileRgba, TileSource, decode_tile,
+    MISSING_TEXTURE, NoTiles, ReservedTiles, TileEntry, TileRegistry, TileRgba, TileSource,
+    decode_tile,
 };
 pub use vertex::{ChunkVertex, EntityVertex, LineVertex, NO_TINT, anim_flags};

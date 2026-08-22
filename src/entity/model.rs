@@ -675,13 +675,13 @@ mod tests {
 
         // A chestplate covers body + both arms: three extra boxes, 24 verts each.
         let mut armor = [None; ARMOR_SIZE];
-        armor[ArmorSlot::Chestplate.index()] = items.find("chestplate");
+        armor[ArmorSlot::Chestplate.index()] = items.find("copper_chestplate");
         let mesh = model.build_mesh_armored(Vec3::ZERO, 0.0, &Pose::default(), &armor, &items);
         assert_eq!(mesh.vertices.len(), bare + 3 * 24, "chestplate = 3 boxes");
 
         // A helmet adds one box; the cape adds its own standalone box.
         let mut armor = [None; ARMOR_SIZE];
-        armor[ArmorSlot::Helmet.index()] = items.find("helmet");
+        armor[ArmorSlot::Helmet.index()] = items.find("copper_helmet");
         armor[ArmorSlot::Cape.index()] = items.find("cape");
         let mesh = model.build_mesh_armored(Vec3::ZERO, 0.0, &Pose::default(), &armor, &items);
         assert_eq!(

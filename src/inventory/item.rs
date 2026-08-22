@@ -558,14 +558,31 @@ mod tests {
             ("apple", 4.0, 2.4),
             ("bread", 5.0, 6.0),
             ("raw_beef", 3.0, 1.8),
-            ("raw_mutton", 2.0, 1.2),
+            ("mutton", 2.0, 1.2),
+            ("raw_chicken", 2.0, 1.2),
+            ("cooked_beef", 8.0, 12.8),
+            ("cooked_mutton", 6.0, 9.6),
+            ("cooked_chicken", 6.0, 7.2),
+            ("cooked_porkchop", 8.0, 12.8),
+        ];
+        // Plain stackables declared between the foods and the armor: mob and
+        // block materials with no components at all.
+        let materials = [
+            "leather",
+            "feather",
+            "string",
+            "arrow",
+            "coal",
+            "clay_ball",
+            "flint",
+            "copper_ingot",
         ];
         // (name, slot, defense, durability)
         let armors = [
-            ("helmet", ArmorSlot::Helmet, 2.0, 120),
-            ("chestplate", ArmorSlot::Chestplate, 6.0, 240),
-            ("leggings", ArmorSlot::Leggings, 5.0, 200),
-            ("boots", ArmorSlot::Boots, 2.0, 120),
+            ("copper_helmet", ArmorSlot::Helmet, 2.0, 120),
+            ("copper_chestplate", ArmorSlot::Chestplate, 6.0, 240),
+            ("copper_leggings", ArmorSlot::Leggings, 5.0, 200),
+            ("copper_boots", ArmorSlot::Boots, 2.0, 120),
             ("glove", ArmorSlot::Glove, 1.0, 80),
             ("cape", ArmorSlot::Cape, 1.0, 80),
         ];
@@ -575,7 +592,12 @@ mod tests {
 
         assert_eq!(
             items.len(),
-            block_items.len() + tools.len() + foods.len() + armors.len() + plain.len(),
+            block_items.len()
+                + tools.len()
+                + foods.len()
+                + materials.len()
+                + armors.len()
+                + plain.len(),
             "item count changed"
         );
 
@@ -621,8 +643,25 @@ mod tests {
             assert_eq!(items.find(name), Some(id), "{name}: find");
         }
 
-        for (offset, &(name, slot, defense, durability)) in armors.iter().enumerate() {
+        for (offset, &name) in materials.iter().enumerate() {
             let id = ItemId((block_items.len() + tools.len() + foods.len() + offset) as u16);
+            let item = items.get(id);
+            assert_eq!(item.id, name, "material: name");
+            assert_eq!(item.max_stack, 64, "{name}: max_stack");
+            assert!(
+                item.tool.is_none()
+                    && item.food.is_none()
+                    && item.armor.is_none()
+                    && item.place_block.is_none(),
+                "{name}: carries no components"
+            );
+            assert_eq!(items.find(name), Some(id), "{name}: find");
+        }
+
+        for (offset, &(name, slot, defense, durability)) in armors.iter().enumerate() {
+            let id = ItemId(
+                (block_items.len() + tools.len() + foods.len() + materials.len() + offset) as u16,
+            );
             let item = items.get(id);
             assert_eq!(item.id, name, "armor: name");
             assert_eq!(item.max_stack, 1, "{name}: max_stack");
@@ -641,7 +680,12 @@ mod tests {
 
         for (offset, &name) in plain.iter().enumerate() {
             let id = ItemId(
-                (block_items.len() + tools.len() + foods.len() + armors.len() + offset) as u16,
+                (block_items.len()
+                    + tools.len()
+                    + foods.len()
+                    + materials.len()
+                    + armors.len()
+                    + offset) as u16,
             );
             let item = items.get(id);
             assert_eq!(item.id, name, "plain: name");

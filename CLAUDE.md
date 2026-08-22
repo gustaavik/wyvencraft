@@ -127,7 +127,7 @@ the game as a dependency of a `wyven-*` crate is always wrong.**
 
 ```
 core      ← wyven-core        re-export + GameMode and DayCycle (rules, not primitives)
-art       ← render            procedural tiles, player skin, armor and mob sheets
+art       ← render            PNG tiles: atlas layout for the skin, armor, mob and crack sheets
 world     ← voxel             block table, worldgen, fluid spreading rules
 inventory ← world             item/stack/inventory data model (no rendering)
 entity    ← inventory, model  player, swept-AABB physics, humanoid/quadruped models, drops, mobs
@@ -158,7 +158,7 @@ All geometry — voxels, box models and file-loaded models alike — is `CpuMesh
 differs is only the texture bound as descriptor set 0, which is what splits
 `SceneFrame` into its lists:
 
-- `opaque` / `transparent` sample the shared **16px atlas** (`wyven_render::texture`) —
+- `opaque` / `transparent` sample the shared **32px atlas** (`wyven_render::texture`) —
   the older block path, entity skins, armor and mob sheets. One bind per pass.
 - `array_opaque` / `array_transparent` sample the **block texture array**
   (`wyven_render::block_textures`): one 256×256 layer per texture a Blockbench-authored
@@ -186,9 +186,10 @@ Twelve blocks have moved so far — everything except `glass`, `bedrock`, `snow`
 route: it cannot be a `block_model` (its surface height is per-corner and
 per-fluid-level, which baked quads cannot express), so it keeps the cube mesher's
 fluid branch and takes its layers from `[block.fluid.texture]` instead. The
-now-unused painters in `art::tiles` are deliberately left in place: they stay
-reachable through `paint_named`, so nothing warns, and deleting them is a single
-clean sweep once the last block migrates.
+procedural painters that used to draw the remaining atlas tiles are gone: every
+tile is now a PNG under `assets/textures/`, and a name with no file resolves to
+the magenta missing-texture marker plus one `warn!` — which is the to-do list for
+art that has not been drawn yet.
 
 Its mirror: **only `state::ingame_state::view` touches `RenderContext`.** Chunk
 streaming, mob AI, fluids and interaction are plain logic; `InGameState::refresh_view`
@@ -258,13 +259,15 @@ those systems are testable without a Vulkan device.
 | Add an item / tool / food / armor | `assets/items.toml`: `id` (lowercase, `_`-separated — what `/give` takes and what saves store), optional `display_name`, then `[item.tool]` with `harvests`/`dig_speed`/`durability` and optional `damage`, `[item.food]`, `[item.armor]` with `slot`/`defense`/`durability`, `[item.model]` with `path`/`scale`/`offset`/`rotation`; starter kit in the same file |
 | Tool tiers / melee damage | Tiers are data only — `dig_speed` + `durability` (+ `damage` on swords and axes) in `assets/items.toml`. There is deliberately **no** harvest-level gate: `harvests` decides *what* a tool is for, never *whether* a block drops. A tool without `damage` swings for `mobs::PLAYER_ATTACK_DAMAGE` (the fist); the local swing resolves in `InGameState::melee_damage`, a client's in `client_melee_damage`, which reads the inventory that client last reported |
 | Load a 3D model from a file | drop a `.gltf` or `.bbmodel` in `assets/models/`, then point at it: `[entity.visual] kind = "model"` in `assets/entities.toml`, or `[item.model]` in `assets/items.toml`. Parsing is `wyven_model::{gltf,bbmodel}` behind the `ModelLoader` trait (a new format = a new impl + one line in `ModelRegistry::LOADERS`); placement math in `wyven_model::mesh`; GPU textures uploaded lazily in `state::ingame_state::view`. Exports disagree on which plane a flat object lies in (the tiered tools are flat in XY, `vine_sword` in YZ), so `ModelSpec::rotation` turns a model about its own axes — applied after `offset` re-centres it |
-| Armor (slots, defense, wear, render) | data in `assets/items.toml` `[item.armor]`; slots 36..42 in `inventory::inventory`; defense math in `entity::player::damage`; equip gate + wear in `state::ingame_state`; worn-model shells + cape in `entity::model::build_mesh_armored`; procedural sheets in `art::armor`; net via `ServerMessage::PlayerEquipment` |
-| Item icons              | `ItemIcon` is computed in `content`: `Cube` (from block faces), `Flat` (painters in `art::tiles::paint_named`, PNG-overridable), or `Model` for items with `[item.model]`. Drawn by `ui::icon::draw_item_icon`; the atlas and the 3D icon sheet are registered with egui in `state::shared`. A `block_model` block's cube faces are 16px stand-ins **downsampled from its own 256px art** (`content::derive_face_tiles`), so the icon and the dropped-item cube keep working unchanged — read them through `GameContent::face_textures`, never `Block::textures` |
+| Armor (slots, defense, wear, render) | data in `assets/items.toml` `[item.armor]`; slots 36..42 in `inventory::inventory`; defense math in `entity::player::damage`; equip gate + wear in `state::ingame_state`; worn-model shells + cape in `entity::model::build_mesh_armored`; sheet layout in `art::armor` (art: `assets/textures/armor_<piece>.png`, 64×64); net via `ServerMessage::PlayerEquipment` |
+| Item icons              | `ItemIcon` is computed in `content`: `Cube` (from block faces), `Flat` (`assets/textures/<item id>.png` — the file stem *is* the id), or `Model` for items with `[item.model]`. Drawn by `ui::icon::draw_item_icon`; the atlas and the 3D icon sheet are registered with egui in `state::shared`. A `block_model` block's cube faces are 32px stand-ins **downsampled from its own 256px art** (`content::derive_face_tiles`), so the icon and the dropped-item cube keep working unchanged — read them through `GameContent::face_textures`, never `Block::textures` |
+| A dropped item's shape  | `GameContent::item_shape` decides, off the *icon* so the world and the inventory can never disagree: `ItemShape::Cube` for a block item (a miniature of the block, `wyven_voxel::push_item_cube`), `ItemShape::Sprite` for anything with only a flat icon — the icon itself, one texel thick, with a rim traced from its alpha (`wyven_voxel::meshing::sprite`). The traced silhouette is cached per atlas tile in `SceneCache::item_sprites`. An item with `[item.model]` is drawn as that model and reaches neither |
+| A dropped item's size   | `scale` on `[entity.visual] kind = "item_cube"` in `assets/entities.toml` — how much larger a drop is *drawn* than the `[entity.physics] width`/`height` it collides with. `DroppedItem::render_size` applies it and `render_center` lifts by the difference, so a bigger drop still rests on the ground instead of sinking into it |
 | 3D item icons           | `wyven_render::icons` (cell layout, framing transform, ortho camera) + `Renderer::draw_icons`; the sheet is rendered **once** at startup by `state::shared::build_icon_sheet`, one cell per `ModelId`. Tune presentation with `ICON_YAW`/`ICON_PITCH`/`ICON_ROLL`/`FILL` in `wyven_render::icons` |
 | Live player preview     | offscreen pass `wyven_render::Renderer::draw_model` + `PreviewFrame`; mesh/camera in `state::ingame_state::{update_preview_mesh,preview_frame}`; image + egui `TextureId` in `state::shared` (the runner draws it *before* the world pass, which is the ordering `wyven_app` owns) |
 | Block drop rules        | `drops = ...` on the block in `assets/blocks.toml` (`"self"`, `"none"`, `{ requires_tool }`, `{ item, count }`) |
 | Entity tuning / new kind | `assets/entities.toml` (physics/movement/vitals/item/mob components); a new *behavior* = one new component in `entity::kind` + its code hook |
-| Add / tune a mob        | `assets/entities.toml` (`[entity.mob]`: health, speeds, `behavior`, `knockback_resistance`, `[entity.mob.ranged]`, `drops`; `[entity.visual]` humanoid `skin=`/`arms_forward` or quadruped) + a `[[spawn]]` entry in `assets/spawning.toml`; skin painter in `art::mobskin` (PNG override `assets/textures/mob_<name>.png`) |
+| Add / tune a mob        | `assets/entities.toml` (`[entity.mob]`: health, speeds, `behavior`, `knockback_resistance`, `[entity.mob.ranged]`, `drops`; `[entity.visual]` humanoid `skin=`/`arms_forward` or quadruped) + a `[[spawn]]` entry in `assets/spawning.toml`; sheet layout in `art::mobskin` (art: `assets/textures/mob_<name>.png`, 64×64) |
 | Mob AI behavior         | `entity::brain` (pure state machine: Idle/Wander/Chase/Flee, perception → intent); body/physics in `entity::mob`; state-layer tick/perception/combat in `state::ingame_state::mobs`. Disposition is the `entity::kind::Behavior` enum (`passive`/`hostile`/`inert`) — a new disposition is a variant plus its arm in `MobBrain::think`, never a new boolean |
 | A static prop / statue  | an `[[entity]]` with `[entity.mob] behavior = "inert"` and no `spawning.toml` entry. `knockback_resistance` is the separate axis: `1.0` bolts it down, `0.0` lets a hit send it flying |
 | Mob spawning rules      | `assets/spawning.toml` (caps, ring distances, weights, groups, night rules — strict: unknown entity rejects the file); planner in `entity::spawning` (pure, seeded); world sampling in `state::ingame_state::mobs::update_spawning` |
@@ -321,7 +324,10 @@ those systems are testable without a Vulkan device.
   replicated up to it at load (`wyven_render::block_textures::upscale`) — nearest, at
   an integer factor, so a 16px texture is pixel-identical on screen under the
   array's nearest magnification. Anything else warns and renders magenta. The
-  16px atlas is stricter — it hard-rejects anything that *isn't* 16×16.
+  32px atlas applies the same rule at its own size: exactly 32×32, or an exact
+  fraction of it upscaled the same way. Skin, armor and mob sheets are the
+  exception — those are 64×64 whatever `TILE_SIZE` is, sliced across
+  `SHEET_TILES`² atlas tiles.
 - **A cutout block must cull against itself.** `BakedBlockModel::occludes` is
   measured from the texture's opacity, so a leaves cube correctly occludes
   nothing — which alone would leave every face of every block inside a canopy
@@ -393,8 +399,8 @@ those systems are testable without a Vulkan device.
 ## Verifying a change
 
 1. `cargo build --workspace` / `cargo clippy --workspace --all-targets` clean.
-2. `cargo test --workspace` green (521 tests: 54 auth, 8 core, 54 model,
-   43 render, 14 voxel, 348 game).
+2. `cargo test --workspace` green (527 tests: 54 auth, 8 core, 54 model,
+   46 render, 19 voxel, 346 game).
 3. Run it: `WYVEN_BOOT_INGAME=1 cargo run` (or host/join for net changes) and
    confirm no panic over several seconds. In a sandbox, launch in the background and
    poll the log rather than blocking on a foreground `sleep` — `timeout` is not

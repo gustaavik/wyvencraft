@@ -31,6 +31,8 @@ pub use chunk::Chunk;
 pub use fluid_texture::FluidTexture;
 pub use generate::WorldGenerator;
 pub use loader::ChunkLoader;
-pub use meshing::{ChunkMeshOutput, mesh_block_overlay, mesh_chunk, push_item_cube};
+pub use meshing::{
+    ChunkMeshOutput, ItemSprite, mesh_block_overlay, mesh_chunk, push_item_cube, push_item_sprite,
+};
 pub use raycast::{RaycastHit, Target, raycast};
 pub use world::World;

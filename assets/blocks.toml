@@ -24,7 +24,9 @@
 #             (matched against a tool's `harvests` list for mining speed)
 #   textures  one texture name for all faces, or
 #             { top = "...", bottom = "...", side = "..." }, or the fully
-#             explicit { neg_x, pos_x, neg_y, pos_y, neg_z, pos_z }.
+#             explicit { neg_x, pos_x, neg_y, pos_y, neg_z, pos_z }. A name is
+#             the stem of a PNG in assets/textures/ — 32x32, or an exact
+#             fraction of it. A name with no file draws magenta.
 #             Optional for a block whose geometry brings its own texture and
 #             never samples the atlas — a `block_model`, a [block.model] or a
 #             [block.fluid.texture].
@@ -182,6 +184,7 @@ solid = true
 hardness = 0.6
 material = "dirt"
 textures = "clay"
+drops = { item = "clay_ball", count = 4 }
 
 [[block]]
 id = "coal_ore"
@@ -190,6 +193,7 @@ solid = true
 hardness = 3.0
 material = "stone"
 block_model = "assets/blocks/coal_ore_block.json"
+drops = { item = "coal" }
 
 [[block]]
 id = "iron_ore"

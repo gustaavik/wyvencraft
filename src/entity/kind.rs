@@ -205,13 +205,36 @@ pub struct MobDrop {
 }
 
 /// Spin/bob tuning for the item-cube visual.
-#[derive(Debug, Clone, Copy, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
 pub struct ItemCubeParams {
     /// Rad/s around Y.
     pub spin_rate: f32,
     /// Idle bob height (blocks) and rate (rad/s).
     pub bob_amplitude: f32,
     pub bob_rate: f32,
+    /// How much larger the drop is *drawn* than its collision box.
+    ///
+    /// Separate from `[entity.physics] width` on purpose: a drop you can see
+    /// from across the room should not also be a bigger obstacle, or catch on
+    /// scenery it visually clears. The rendered box is lifted so it still rests
+    /// on the ground rather than sinking into it.
+    #[serde(default = "one")]
+    pub scale: f32,
+}
+
+fn one() -> f32 {
+    1.0
+}
+
+impl Default for ItemCubeParams {
+    fn default() -> Self {
+        Self {
+            spin_rate: 0.0,
+            bob_amplitude: 0.0,
+            bob_rate: 0.0,
+            scale: 1.0,
+        }
+    }
 }
 
 /// Humanoid-model options. Defaults reproduce the player: its own skin sheet
@@ -360,7 +383,7 @@ mod tests {
     #[test]
     fn builtin_entities_golden() {
         let reg = EntityRegistry::builtin();
-        assert_eq!(reg.len(), 7);
+        assert_eq!(reg.len(), 8);
 
         let player = reg.player();
         assert_eq!(player.physics.gravity, 28.0);
@@ -403,6 +426,7 @@ mod tests {
                 assert_eq!(cube.spin_rate, 1.8);
                 assert_eq!(cube.bob_amplitude, 0.03);
                 assert_eq!(cube.bob_rate, 2.4);
+                assert_eq!(cube.scale, 2.0);
             }
             other => panic!("dropped item should be an item cube, got {other:?}"),
         }
@@ -417,9 +441,11 @@ mod tests {
         assert_eq!(mob.behavior, Behavior::Passive);
         assert!(mob.ranged.is_none());
         assert_eq!(mob.attack_cooldown, 1.0, "defaulted");
-        assert_eq!(mob.drops.len(), 1);
+        assert_eq!(mob.drops.len(), 2);
         assert_eq!(mob.drops[0].item, "raw_beef");
         assert_eq!((mob.drops[0].min, mob.drops[0].max), (1, 3));
+        assert_eq!(mob.drops[1].item, "leather");
+        assert_eq!((mob.drops[1].min, mob.drops[1].max), (1, 2));
         match &cow.visual {
             VisualSpec::Quadruped(v) => {
                 assert_eq!(v.skin, "cow");
@@ -434,7 +460,7 @@ mod tests {
         let mob = sheep.mob.as_ref().expect("sheep mob params");
         assert_eq!(mob.max_health, 8.0);
         assert_eq!(mob.behavior, Behavior::Passive);
-        assert_eq!(mob.drops[0].item, "raw_mutton");
+        assert_eq!(mob.drops[0].item, "mutton");
         assert_eq!((mob.drops[0].min, mob.drops[0].max), (1, 2));
         assert!(matches!(&sheep.visual, VisualSpec::Quadruped(v) if v.skin == "sheep"));
 
@@ -543,6 +569,11 @@ mod tests {
         "#;
         let reg = EntityRegistry::from_toml(plain).expect("plain file parses");
         assert!(reg.player().mob.is_none());
+        // `scale` is optional: a visual that omits it is drawn at its collision size.
+        match &reg.dropped_item().visual {
+            VisualSpec::ItemCube(cube) => assert_eq!(cube.scale, 1.0, "scale defaults to 1"),
+            other => panic!("expected an item cube, got {other:?}"),
+        }
 
         // ... while a misspelled mob field rejects the file.
         let bad = format!(
