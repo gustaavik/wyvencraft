@@ -4,10 +4,16 @@
 //! Design: *Registry pattern*, loaded from data. Blocks are declared in
 //! `assets/blocks.toml` (with an embedded fallback copy compiled in); the file
 //! order defines the numeric [`BlockId`]s and save files reference blocks by
-//! name. Behavior is expressed as components on the block ([`Drops`],
-//! [`FluidInfo`]) rather than hard-coded `match` arms on identity.
+//! **id** (see [`crate::core::ident`]). Behavior is expressed as components on
+//! the block ([`Drops`], [`FluidInfo`]) rather than hard-coded `match` arms on
+//! identity.
+//!
+//! What the player *reads* is not here: display names are presentation, so like
+//! textures and models they ride out of the parse in [`BlockVisuals`] and are
+//! resolved by `content`, keeping them off [`Block`] and out of `content_hash`.
 
 use crate::core::BlockId;
+use crate::core::ident::is_valid_id;
 use wyven_model::ModelSpec;
 use wyven_voxel::{BlockProperties, FluidInfo, RenderType};
 
@@ -39,8 +45,8 @@ pub enum Drops {
     /// The block's own item, but only when the held tool's kind matches
     /// (e.g. leaves require shears).
     SelfWithTool { kind: String },
-    /// A different item, by name (resolved against the item registry at use).
-    Item { name: String, count: u8 },
+    /// A different item, by id (resolved against the item registry at use).
+    Item { id: String, count: u8 },
 }
 
 /// A block's `[block.model]`, still unresolved: the model registry does not
@@ -53,14 +59,16 @@ pub struct BlockModelSpec {
     pub random_yaw: bool,
 }
 
-/// The visual-only model assignments a block file carries, reported out of the
-/// parse rather than stored on [`Block`].
+/// The presentation-only data a block file carries — art assignments and the
+/// label the player reads — reported out of the parse rather than stored on
+/// [`Block`], which feeds `content_hash`.
 ///
-/// Both vectors are indexed by [`BlockId`] and cover every block, including the
-/// auto-registered flowing fluids. They are separate because the two paths are
-/// resolved differently — one through the [`ModelId`] registry, one straight
-/// into baked quads — and because this is where the migration is visible: the
-/// `json` column grows as blocks are re-authored, `models` shrinks to nothing.
+/// Every vector is indexed by [`BlockId`] and covers every block, including the
+/// auto-registered flowing fluids. `models` and `json` are separate because the
+/// two paths are resolved differently — one through the [`ModelId`] registry,
+/// one straight into baked quads — and because this is where the migration is
+/// visible: the `json` column grows as blocks are re-authored, `models` shrinks
+/// to nothing.
 #[derive(Debug, Default)]
 pub struct BlockVisuals {
     /// `textures = ...` — the six texture *names*, in [`Direction`] order,
@@ -75,6 +83,12 @@ pub struct BlockVisuals {
     /// `[block.fluid.texture]` — the animation strip a fluid draws from, copied
     /// onto each of its auto-registered flowing blocks with `flowing` set.
     pub fluids: Vec<Option<FluidVisual>>,
+    /// `display_name = "..."` — an explicit label, where title-casing the id
+    /// would get it wrong. `None` means "derive it", which `content` does with
+    /// [`crate::core::ident::title_case`]; carrying the `Option` rather than the
+    /// resolved string is what lets a block *item* tell an authored name from a
+    /// derived one.
+    pub display_names: Vec<Option<String>>,
 }
 
 /// A fluid's animation strip, still unresolved, plus which of its two columns
@@ -123,7 +137,10 @@ pub struct BlockJsonSpec {
 /// Static description of a block type.
 #[derive(Debug, Clone)]
 pub struct Block {
-    pub name: String,
+    /// Machine-readable key: `[a-z0-9_]`, unique, and the save/wire format.
+    /// The player-facing label lives on `content`, not here — see
+    /// [`BlockVisuals::display_names`].
+    pub id: String,
     pub render: RenderType,
     /// Whether entities collide with this block.
     pub solid: bool,
@@ -202,8 +219,8 @@ impl BlockProperties for BlockRegistry {
 
 /// Ids of the *builtin* block set, in its declared order — a convenience for
 /// tests. Gameplay code must never use these: content files may reorder or
-/// extend the set (ids are session-local; saves and cross-file references
-/// resolve by name).
+/// extend the set (numeric ids are session-local; saves and cross-file
+/// references resolve by the string id).
 pub mod blocks {
     use super::BlockId;
     pub const AIR: BlockId = BlockId(0);
@@ -245,7 +262,9 @@ struct BlockFile {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BlockDef {
-    name: String,
+    id: String,
+    /// Overrides the label derived from `id`, for the ids the rule gets wrong.
+    display_name: Option<String>,
     render: RenderType,
     solid: bool,
     hardness: f32,
@@ -370,7 +389,7 @@ impl DropsDef {
                 kind: requires_tool.clone(),
             }),
             Self::OtherItem { item, count } => Ok(Drops::Item {
-                name: item.clone(),
+                id: item.clone(),
                 count: *count,
             }),
         }
@@ -399,8 +418,8 @@ impl BlockRegistry {
     /// `[[block]]` entry, then the auto-generated flowing blocks of each fluid
     /// (so declared blocks keep their ids regardless of fluids).
     ///
-    /// Structural errors (bad TOML, duplicate/reserved names) fail the whole
-    /// file — the caller falls back to [`BlockRegistry::with_builtins`].
+    /// Structural errors (bad TOML, malformed/duplicate/reserved ids) fail the
+    /// whole file — the caller falls back to [`BlockRegistry::with_builtins`].
     /// Unknown texture names only degrade that block, once `content` fails to
     /// find art for them.
     pub fn from_toml(text: &str) -> Result<Self, String> {
@@ -408,7 +427,7 @@ impl BlockRegistry {
     }
 
     /// Like [`BlockRegistry::from_toml`], but also reports each block's model
-    /// assignment in [`BlockVisuals`], indexed by [`BlockId`].
+    /// assignment and display name in [`BlockVisuals`], indexed by [`BlockId`].
     ///
     /// Model assignment rides out of band because it cannot be resolved yet —
     /// blocks are parsed before the model registry exists — and because it must
@@ -424,18 +443,21 @@ impl BlockRegistry {
             models,
             json,
             fluids: fluid_visuals,
+            display_names,
         } = visuals;
         texture_names.clear();
         models.clear();
         json.clear();
         fluid_visuals.clear();
+        display_names.clear();
         let mut reg = Self {
             blocks: Vec::new(),
             fluid_flow: Vec::new(),
         };
         texture_names.push(None);
+        display_names.push(None);
         reg.register(Block {
-            name: "air".into(),
+            id: "air".into(),
             render: RenderType::Invisible,
             solid: false,
             hardness: 0.0,
@@ -450,35 +472,45 @@ impl BlockRegistry {
         // Fluid sources, in declaration order: (source id, flow_levels).
         let mut fluids: Vec<(BlockId, u8, Option<FluidTextureSpec>)> = Vec::new();
         for def in file.block {
-            if def.name == "air" {
+            // An id is a reference key in five other files, so a malformed one
+            // rejects the whole table rather than just its own entry: skipping
+            // an entry would renumber every later `BlockId` and silently orphan
+            // the worldgen/recipe/drop references pointing past it.
+            if !is_valid_id(&def.id) {
+                return Err(format!(
+                    "block {:?}: an id must be lowercase letters, digits and underscores",
+                    def.id
+                ));
+            }
+            if def.id == "air" {
                 return Err("\"air\" is built in and may not be declared".into());
             }
-            if reg.find(&def.name).is_some() {
-                return Err(format!("duplicate block {:?}", def.name));
+            if reg.find(&def.id).is_some() {
+                return Err(format!("duplicate block {:?}", def.id));
             }
             let drops = match &def.drops {
                 Some(d) => d
                     .resolve()
-                    .map_err(|e| format!("block {:?}: {e}", def.name))?,
+                    .map_err(|e| format!("block {:?}: {e}", def.id))?,
                 None => Drops::SelfItem,
             };
             let mut fluid_texture = None;
             let fluid = match &def.fluid {
                 Some(f) => {
                     if !(1..=15).contains(&f.flow_levels) {
-                        return Err(format!("block {:?}: flow_levels must be 1..=15", def.name));
+                        return Err(format!("block {:?}: flow_levels must be 1..=15", def.id));
                     }
                     if let Some(t) = &f.texture {
                         if t.frames < 2 {
                             return Err(format!(
                                 "block {:?}: a fluid texture needs at least 2 frames",
-                                def.name
+                                def.id
                             ));
                         }
                         if t.fps == 0 {
                             return Err(format!(
                                 "block {:?}: fluid texture fps must be > 0",
-                                def.name
+                                def.id
                             ));
                         }
                         // The shader's animation clock wraps hourly; a loop
@@ -487,7 +519,7 @@ impl BlockRegistry {
                             return Err(format!(
                                 "block {:?}: {} frames at {} fps does not divide the \
                                  3600 s animation clock evenly",
-                                def.name, t.frames, t.fps
+                                def.id, t.frames, t.fps
                             ));
                         }
                         let opacity = match t.opacity {
@@ -495,7 +527,7 @@ impl BlockRegistry {
                             Some(o) => {
                                 return Err(format!(
                                     "block {:?}: fluid texture opacity must be 0..=1, got {o}",
-                                    def.name
+                                    def.id
                                 ));
                             }
                             None => None,
@@ -519,7 +551,7 @@ impl BlockRegistry {
             if def.model.is_some() && def.block_model.is_some() {
                 return Err(format!(
                     "block {:?}: declares both `block_model` and a `[block.model]`",
-                    def.name
+                    def.id
                 ));
             }
             // A modelled block's geometry carries its own texture, so it needs
@@ -536,7 +568,7 @@ impl BlockRegistry {
                     return Err(format!(
                         "block {:?}: needs `textures`, a `block_model`, a `[block.model]` \
                          or a `[block.fluid.texture]`",
-                        def.name
+                        def.id
                     ));
                 }
             };
@@ -551,8 +583,9 @@ impl BlockRegistry {
                 spec,
                 flowing: false,
             }));
+            display_names.push(def.display_name);
             let id = reg.register(Block {
-                name: def.name,
+                id: def.id,
                 render: def.render,
                 solid: def.solid,
                 hardness: def.hardness,
@@ -567,11 +600,14 @@ impl BlockRegistry {
         }
 
         // Auto-register the flowing blocks: same look and physics as their
-        // source, one per level, named "<source> flow <level>" (these names
+        // source, one per level, with the id "<source>_flow_<level>" (these ids
         // are the save format — see the fluid module docs).
         for (group, (source_id, levels, texture)) in fluids.into_iter().enumerate() {
             let source = reg.get(source_id).clone();
             let source_textures = texture_names.get(source_id.0 as usize).cloned().flatten();
+            // Only worth carrying when the source spelled its own label out:
+            // otherwise the derived "Water Flow 1" is already what it would say.
+            let source_label = display_names.get(source_id.0 as usize).cloned().flatten();
             let flow: Vec<BlockId> = (1..=levels)
                 .map(|level| {
                     texture_names.push(source_textures.clone());
@@ -579,8 +615,9 @@ impl BlockRegistry {
                         spec,
                         flowing: true,
                     }));
+                    display_names.push(source_label.as_ref().map(|l| format!("{l} Flow {level}")));
                     reg.register(Block {
-                        name: format!("{} flow {}", source.name, level),
+                        id: format!("{}_flow_{}", source.id, level),
                         render: source.render,
                         solid: source.solid,
                         hardness: source.hardness,
@@ -602,6 +639,7 @@ impl BlockRegistry {
         models.resize(reg.len(), None);
         json.resize(reg.len(), None);
         fluid_visuals.resize(reg.len(), None);
+        display_names.resize(reg.len(), None);
         Ok(reg)
     }
 
@@ -659,12 +697,12 @@ impl BlockRegistry {
             .map(|(i, b)| (BlockId(i as u16), b))
     }
 
-    /// Look up a block by its registered name (save files reference blocks by
-    /// name because numeric ids shift when the registry changes across builds).
-    pub fn find(&self, name: &str) -> Option<BlockId> {
+    /// Look up a block by its id (save files reference blocks by id because
+    /// numeric ids shift when the registry changes across builds).
+    pub fn find(&self, id: &str) -> Option<BlockId> {
         self.blocks
             .iter()
-            .position(|b| b.name == name)
+            .position(|b| b.id == id)
             .map(|i| BlockId(i as u16))
     }
 }
@@ -700,7 +738,7 @@ mod tests {
     }
 
     /// Golden snapshot of the shipped block set. The data-driven loader must
-    /// reproduce this exactly: names are the save format (matched verbatim by
+    /// reproduce this exactly: ids are the save format (matched verbatim by
     /// [`BlockRegistry::find`]) and registration order defines the numeric ids
     /// used in chunk storage and on the wire.
     #[test]
@@ -715,39 +753,48 @@ mod tests {
             ("grass", R::Opaque, true, 0.6, M::Dirt),
             ("sand", R::Opaque, true, 0.5, M::Sand),
             ("water", R::Transparent, false, INF, M::Other),
-            ("oak log", R::Opaque, true, 2.0, M::Wood),
-            ("oak leaves", R::Cutout, true, 0.2, M::Plant),
+            ("oak_log", R::Opaque, true, 2.0, M::Wood),
+            ("oak_leaves", R::Cutout, true, 0.2, M::Plant),
             ("glass", R::Transparent, true, 0.3, M::Glass),
             ("bedrock", R::Opaque, true, INF, M::Other),
             ("snow", R::Opaque, true, 0.2, M::Dirt),
             ("gravel", R::Opaque, true, 0.6, M::Dirt),
             ("clay", R::Opaque, true, 0.6, M::Dirt),
-            ("coal ore", R::Opaque, true, 3.0, M::Stone),
-            ("iron ore", R::Opaque, true, 3.0, M::Stone),
-            ("copper ore", R::Opaque, true, 3.0, M::Stone),
+            ("coal_ore", R::Opaque, true, 3.0, M::Stone),
+            ("iron_ore", R::Opaque, true, 3.0, M::Stone),
+            ("copper_ore", R::Opaque, true, 3.0, M::Stone),
             ("cobblestone", R::Opaque, true, 2.0, M::Stone),
-            ("blue bells", R::Cutout, false, 0.0, M::Plant),
-            ("red flower", R::Cutout, false, 0.0, M::Plant),
-            ("red mushroom", R::Cutout, false, 0.0, M::Plant),
-            ("brown mushroom", R::Cutout, false, 0.0, M::Plant),
+            ("blue_bells", R::Cutout, false, 0.0, M::Plant),
+            ("red_flower", R::Cutout, false, 0.0, M::Plant),
+            ("red_mushroom", R::Cutout, false, 0.0, M::Plant),
+            ("brown_mushroom", R::Cutout, false, 0.0, M::Plant),
             ("cornflower", R::Cutout, false, 0.0, M::Plant),
-            ("water flow 1", R::Transparent, false, INF, M::Other),
-            ("water flow 2", R::Transparent, false, INF, M::Other),
-            ("water flow 3", R::Transparent, false, INF, M::Other),
-            ("water flow 4", R::Transparent, false, INF, M::Other),
-            ("water flow 5", R::Transparent, false, INF, M::Other),
-            ("water flow 6", R::Transparent, false, INF, M::Other),
-            ("water flow 7", R::Transparent, false, INF, M::Other),
+            ("water_flow_1", R::Transparent, false, INF, M::Other),
+            ("water_flow_2", R::Transparent, false, INF, M::Other),
+            ("water_flow_3", R::Transparent, false, INF, M::Other),
+            ("water_flow_4", R::Transparent, false, INF, M::Other),
+            ("water_flow_5", R::Transparent, false, INF, M::Other),
+            ("water_flow_6", R::Transparent, false, INF, M::Other),
+            ("water_flow_7", R::Transparent, false, INF, M::Other),
         ];
         let reg = BlockRegistry::with_builtins();
         assert_eq!(reg.len(), expected.len(), "block count changed");
-        for (i, &(name, render, solid, hardness, material)) in expected.iter().enumerate() {
+        for (i, &(id, render, solid, hardness, material)) in expected.iter().enumerate() {
             let block = reg.get(BlockId(i as u16));
-            assert_eq!(block.name, name, "block {i}: name");
-            assert_eq!(block.render, render, "{name}: render");
-            assert_eq!(block.solid, solid, "{name}: solid");
-            assert_eq!(block.hardness, hardness, "{name}: hardness");
-            assert_eq!(block.material, material, "{name}: material");
+            assert_eq!(block.id, id, "block {i}: id");
+            assert_eq!(block.render, render, "{id}: render");
+            assert_eq!(block.solid, solid, "{id}: solid");
+            assert_eq!(block.hardness, hardness, "{id}: hardness");
+            assert_eq!(block.material, material, "{id}: material");
+        }
+    }
+
+    /// Every shipped id is well formed. The loader enforces this, but asserting
+    /// it here names the rule where the block set is snapshotted.
+    #[test]
+    fn every_builtin_block_id_is_well_formed() {
+        for (_, block) in BlockRegistry::with_builtins().iter() {
+            assert!(is_valid_id(&block.id), "malformed block id {:?}", block.id);
         }
     }
 
@@ -755,8 +802,8 @@ mod tests {
     fn water_levels_match_registry_order() {
         let reg = BlockRegistry::with_builtins();
         assert_eq!(reg.find("water"), Some(blocks::WATER));
-        assert_eq!(reg.find("water flow 1"), Some(blocks::WATER_FLOW_1));
-        assert_eq!(reg.find("water flow 7"), Some(blocks::WATER_FLOW_7));
+        assert_eq!(reg.find("water_flow_1"), Some(blocks::WATER_FLOW_1));
+        assert_eq!(reg.find("water_flow_7"), Some(blocks::WATER_FLOW_7));
 
         let source = reg.fluid(blocks::WATER).expect("water is a fluid");
         assert!(source.is_source());
@@ -787,7 +834,7 @@ mod tests {
         assert_eq!(
             reg.get(blocks::STONE).drops,
             Drops::Item {
-                name: "cobblestone".into(),
+                id: "cobblestone".into(),
                 count: 1
             }
         );
@@ -812,7 +859,7 @@ mod tests {
         assert!(parse("").is_err());
         let air = r#"
             [[block]]
-            name = "air"
+            id = "air"
             render = "opaque"
             solid = true
             hardness = 1.0
@@ -822,7 +869,7 @@ mod tests {
         assert!(parse(air).is_err());
         let dup = r#"
             [[block]]
-            name = "stone"
+            id = "stone"
             render = "opaque"
             solid = true
             hardness = 1.0
@@ -830,7 +877,7 @@ mod tests {
             textures = "stone"
 
             [[block]]
-            name = "stone"
+            id = "stone"
             render = "opaque"
             solid = true
             hardness = 1.0
@@ -838,12 +885,12 @@ mod tests {
             textures = "stone"
         "#;
         assert!(parse(dup).is_err());
-        // A minimal but valid file parses fine — ids are session-local, so
-        // files are free to define any block set.
+        // A minimal but valid file parses fine — numeric ids are session-local,
+        // so files are free to define any block set.
         let minimal = parse(
             r#"
             [[block]]
-            name = "dirt"
+            id = "dirt"
             render = "opaque"
             solid = true
             hardness = 0.5
@@ -853,5 +900,92 @@ mod tests {
         )
         .expect("valid file");
         assert_eq!(minimal.len(), 2, "air + dirt");
+    }
+
+    /// A malformed id rejects the whole table rather than just its own entry:
+    /// dropping one block would renumber every later `BlockId` and silently
+    /// orphan the worldgen/recipe/drop references pointing past it.
+    #[test]
+    fn a_malformed_id_rejects_the_whole_file() {
+        for bad in ["Oak Log", "oak log", "oak-log", "OAKLOG", ""] {
+            let text = format!(
+                r#"
+                [[block]]
+                id = "dirt"
+                render = "opaque"
+                solid = true
+                hardness = 0.5
+                material = "dirt"
+                textures = "dirt"
+
+                [[block]]
+                id = "{bad}"
+                render = "opaque"
+                solid = true
+                hardness = 2.0
+                material = "wood"
+                textures = "wood_bark"
+            "#
+            );
+            let err = parse(&text)
+                .err()
+                .unwrap_or_else(|| panic!("{bad:?} should be rejected"));
+            assert!(err.contains("id"), "{bad:?}: unhelpful error {err:?}");
+        }
+    }
+
+    /// A block's label is presentation, so it never reaches `Block` — it rides
+    /// out in `BlockVisuals`, unresolved, for `content` to derive or override.
+    #[test]
+    fn display_names_ride_out_of_band_and_stay_off_block() {
+        let mut visuals = BlockVisuals::default();
+        let reg = BlockRegistry::from_toml_with_models(
+            r#"
+            [[block]]
+            id = "dirt"
+            render = "opaque"
+            solid = true
+            hardness = 0.5
+            material = "dirt"
+            textures = "dirt"
+
+            [[block]]
+            id = "tnt"
+            display_name = "TNT"
+            render = "opaque"
+            solid = true
+            hardness = 0.5
+            material = "other"
+            textures = "stone"
+        "#,
+            &mut visuals,
+        )
+        .expect("valid file");
+
+        assert_eq!(visuals.display_names.len(), reg.len(), "one per block");
+        let dirt = reg.find("dirt").expect("declared");
+        let tnt = reg.find("tnt").expect("declared");
+        assert_eq!(visuals.display_names[dirt.0 as usize], None, "derived");
+        assert_eq!(
+            visuals.display_names[tnt.0 as usize].as_deref(),
+            Some("TNT"),
+            "authored"
+        );
+        // The label must not leak onto the hashed struct.
+        assert!(
+            !format!("{:?}", reg.get(tnt)).contains("TNT"),
+            "display name must stay off Block"
+        );
+    }
+
+    /// A fluid's auto-registered flow blocks take the source's id, so they stay
+    /// typeable and stay valid save keys.
+    #[test]
+    fn flow_block_ids_are_derived_from_the_source_id() {
+        let reg = BlockRegistry::with_builtins();
+        for level in 1..=7u8 {
+            let id = reg.flowing(0, level);
+            assert_eq!(reg.get(id).id, format!("water_flow_{level}"));
+        }
     }
 }

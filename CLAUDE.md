@@ -250,12 +250,12 @@ those systems are testable without a Vulkan device.
 ### Where to make common changes
 | Task                    | Location                                                                                   |
 | ----------------------- | ------------------------------------------------------------------------------------------ |
-| Add a block type        | Model it in Blockbench (**Java Block/Item** format, per-face UV), export *Block/Item Model* to `assets/blocks/<name>.json` with its textures as separate PNGs in `assets/textures/`, then one `[[block]]` in `assets/blocks.toml` with `block_model = "assets/blocks/<name>.json"`. A full cube is `from [0,0,0]` → `to [16,16,16]`; set `cullface` on **each face's own direction** or it draws all six even when buried (and hides itself in the wrong one); set `tintindex` only on faces taking a biome colour. Textures may be 16px or 256px — anything square that divides 256 is scaled up to it. Parsing is `wyven_model::blockjson`, baking `wyven_voxel::blockmodel`, layers `wyven_render::block_textures`. The older `textures = "<name>"` atlas path still works for the blocks not yet re-authored |
+| Add a block type        | Model it in Blockbench (**Java Block/Item** format, per-face UV), export *Block/Item Model* to `assets/blocks/<name>.json` with its textures as separate PNGs in `assets/textures/`, then one `[[block]]` in `assets/blocks.toml` with `id = "<name>"` (lowercase, `_`-separated — it is the save/reference key) and `block_model = "assets/blocks/<name>.json"`. Add `display_name` only if title-casing the id reads wrong. A full cube is `from [0,0,0]` → `to [16,16,16]`; set `cullface` on **each face's own direction** or it draws all six even when buried (and hides itself in the wrong one); set `tintindex` only on faces taking a biome colour. Textures may be 16px or 256px — anything square that divides 256 is scaled up to it. Parsing is `wyven_model::blockjson`, baking `wyven_voxel::blockmodel`, layers `wyven_render::block_textures`. The older `textures = "<name>"` atlas path still works for the blocks not yet re-authored |
 | A non-cube block, the new way | Same as above — the model is already in cell coordinates, so it needs no placement. `random_yaw` on the `[[block]]` table turns each instance about its cell (and drops its `cullface`, which a turned face can no longer honour). The hitbox is derived from the geometry: a model that covers all six cell faces stays a plain `Target::Cell`, anything else gets a measured box. `assets/blocks/cornflower_block.json` is the worked example |
 | Biome tint (grass, foliage, water) | `tint`, `foliage_tint` and `water_tint` per biome in `assets/worldgen.toml`, selected by a face's `tintindex` — **0 grass, 1 foliage, 2 water**, Minecraft's numbering — resolved through `WorldGenerator::biome_tint` at mesh time. Greyscale art (`grass_block_top`, `grass_block_side_overlay`, `oak_leaves`, `water_flow`) is what lets one texture serve every climate; a *coloured* texture must not be tinted. Grass and foliage default to white (the identity); `water_tint` defaults to `DEFAULT_WATER_TINT` instead, because nothing else in the water art supplies any colour |
 | A non-cube block (plant, prop) | `[block.model]` in `assets/blocks.toml` — same `path`/`scale`/`offset`/`rotation` spelling as `[item.model]`, plus `random_yaw`. The block then emits **no** cube faces (`textures` becomes optional) and is baked into its cell by `wyven_voxel::meshing::culled`. Give it `solid = false` to walk through: `World::is_solid` is collision only, `is_targetable` is what the crosshair uses, and `is_replaceable` decides whether placing swallows it. Add a matching `[item.model]` on the same path so the drop, the hand and the icon agree — the registry memoises by path, so both share one `ModelId` |
 | Block hitbox (crosshair, outline, cracks) | Not authored — `content::placed_bounds` measures the placed model and `wyven_voxel::model_hitbox` turns it into a square, centred, cell-clamped box on `BlockModel::hitbox`, so it can never drift from what is drawn. The raycast predicate returns `wyven_voxel::Target::{Cell,Box}`; a `Box` the ray misses does **not** stop the march. `InGameState::{target_at,hitbox_at}` are the single source for targeting *and* both overlays. Mob line-of-sight deliberately stays `is_solid` + `Target::Cell` — a flower must not hide you |
-| Add an item / tool / food / armor | `assets/items.toml` (`[item.tool]` with `harvests`/`dig_speed`/`durability` and optional `damage`, `[item.food]`, `[item.armor]` with `slot`/`defense`/`durability`, `[item.model]` with `path`/`scale`/`offset`/`rotation`); starter kit in the same file |
+| Add an item / tool / food / armor | `assets/items.toml`: `id` (lowercase, `_`-separated — what `/give` takes and what saves store), optional `display_name`, then `[item.tool]` with `harvests`/`dig_speed`/`durability` and optional `damage`, `[item.food]`, `[item.armor]` with `slot`/`defense`/`durability`, `[item.model]` with `path`/`scale`/`offset`/`rotation`; starter kit in the same file |
 | Tool tiers / melee damage | Tiers are data only — `dig_speed` + `durability` (+ `damage` on swords and axes) in `assets/items.toml`. There is deliberately **no** harvest-level gate: `harvests` decides *what* a tool is for, never *whether* a block drops. A tool without `damage` swings for `mobs::PLAYER_ATTACK_DAMAGE` (the fist); the local swing resolves in `InGameState::melee_damage`, a client's in `client_melee_damage`, which reads the inventory that client last reported |
 | Load a 3D model from a file | drop a `.gltf` or `.bbmodel` in `assets/models/`, then point at it: `[entity.visual] kind = "model"` in `assets/entities.toml`, or `[item.model]` in `assets/items.toml`. Parsing is `wyven_model::{gltf,bbmodel}` behind the `ModelLoader` trait (a new format = a new impl + one line in `ModelRegistry::LOADERS`); placement math in `wyven_model::mesh`; GPU textures uploaded lazily in `state::ingame_state::view`. Exports disagree on which plane a flat object lies in (the tiered tools are flat in XY, `vine_sword` in YZ), so `ModelSpec::rotation` turns a model about its own axes — applied after `offset` re-centres it |
 | Armor (slots, defense, wear, render) | data in `assets/items.toml` `[item.armor]`; slots 36..42 in `inventory::inventory`; defense math in `entity::player::damage`; equip gate + wear in `state::ingame_state`; worn-model shells + cape in `entity::model::build_mesh_armored`; procedural sheets in `art::armor`; net via `ServerMessage::PlayerEquipment` |
@@ -279,6 +279,7 @@ those systems are testable without a Vulkan device.
 | Crafting recipes        | `assets/recipes.toml` (data); logic in `inventory::crafting`; panel in `ui::inventory`     |
 | A new screen            | implement `wyven_app::Screen`, push/replace via `Transition`                                |
 | HUD / inventory UI      | `ui::hud`, `ui::inventory`                                                                 |
+| Item names on screen    | Read them through `GameContent::item_display_name` — never `Item::id`, which is the machine key. Slot tooltips come free from `ui::inventory::View::slot` (the one path the storage grid, hotbar row and armor column share); the fading label above the hotbar is `ui::hud::draw_held_label`, timed by the pure `inventory::HeldLabel` that `InGameState` ticks each frame |
 | Add a chat command      | **one new file in `src/chat/command/` + one entry in `COMMANDS`** — nothing else changes (the `ModelLoader::LOADERS` pattern). Implement `ChatCommand` (`name`/`usage`/`permission`/`run`); the command parses its own arguments and phrases its own messages. It reaches the world only through the `CommandContext` port, so it never sees a `PlayerId` and works identically for the local player and a remote client. Test it against `chat::FakeContext` with no world, socket or GPU. **Caveat:** a command needing a capability the port doesn't expose yet also grows `CommandContext` + its two impls — and if that capability must reach a *client*, a `ServerMessage` too (`GrantItems`, `Teleport`) |
 | Authorize a player      | `ops.toml` in the working directory (`ops = [{ id = "<account uuid>", name = "..." }]`), parsed by `chat::ops`. Keyed by the **account id from the verified join ticket**, never by anything a client asserts. The host/singleplayer player is always an op; only the authority loads the file |
 | Chat log / input bar    | `chat::{log,composer}` (pure state), drawn by `ui::chat::draw_chat`; keys `chat`/`chat_command` in `config::Keybinds` (T and /) |
@@ -362,8 +363,22 @@ those systems are testable without a Vulkan device.
   `TextEdit` means gameplay keys never reach `InputState`. The `!typing` guards
   in `ingame_state::frame` only cover the frame between opening the bar and the
   widget taking focus.
-- **Saves are name-based, not id-based.** `saves/<slug>/` stores blocks/items by
-  registry *name* (numeric ids are insertion-order indices and shift across code
+- **Content is identified by a string `id`, never by a number or a label.**
+  Every `[[block]]` and `[[item]]` declares `id = "oak_log"` — lowercase ASCII,
+  digits and `_` only, enforced by `core::ident::is_valid_id`; anything else
+  **rejects the whole file** and falls back to the embedded builtin, because
+  dropping one entry would renumber every later `BlockId` and orphan the
+  worldgen/recipe/drop references past it. That id is what saves, the wire,
+  `place_block`, `drops`, recipe keys, worldgen and `/give` all spell. What the
+  player *reads* is a separate `display_name`, defaulting to
+  `core::ident::title_case(id)` — and it lives on `GameContent`
+  (`item_display_names` / `block_display_names`), **never** on `Item`/`Block`,
+  for the same reason models don't: those feed `content_hash`, and a peer whose
+  pickaxe is merely labelled differently should still be able to join. A block
+  item with no `display_name` of its own inherits the block's. Entity *kinds*
+  are a separate registry and still use spaced `name`s.
+- **Saves are id-based, not index-based.** `saves/<slug>/` stores blocks/items by
+  registry *id* (numeric ids are insertion-order indices and shift across code
   changes). `saves/` and `profile.toml` are CWD-relative (like `assets/`) and
   gitignored. Worlds regenerate terrain from the seed; only the edit overlay,
   players, mobs (`mobs.dat`, kind-by-name, fail-soft), and metadata are
@@ -378,8 +393,8 @@ those systems are testable without a Vulkan device.
 ## Verifying a change
 
 1. `cargo build --workspace` / `cargo clippy --workspace --all-targets` clean.
-2. `cargo test --workspace` green (495 tests: 54 auth, 8 core, 54 model,
-   43 render, 14 voxel, 322 game).
+2. `cargo test --workspace` green (521 tests: 54 auth, 8 core, 54 model,
+   43 render, 14 voxel, 348 game).
 3. Run it: `WYVEN_BOOT_INGAME=1 cargo run` (or host/join for net changes) and
    confirm no panic over several seconds. In a sandbox, launch in the background and
    poll the log rather than blocking on a foreground `sleep` — `timeout` is not

@@ -313,7 +313,7 @@ fn adjacent_water_levels_connect_at_shared_corners() {
 fn a_model_block_meshes_into_its_own_bucket_and_emits_no_cube_faces() {
     let content = GameContent::load();
     let catalog = content.appearance();
-    let plant = content.blocks.find("blue bells").expect("shipped block");
+    let plant = content.blocks.find("blue_bells").expect("shipped block");
     let (placement, _) = catalog
         .placed_model(plant)
         .expect("blue bells declares a model");
@@ -455,7 +455,7 @@ fn only_tinted_faces_take_the_biome_colour() {
 fn stacked_leaves_cull_the_face_they_share() {
     let content = GameContent::load();
     let catalog = content.appearance();
-    let leaves = content.blocks.find("oak leaves").expect("shipped block");
+    let leaves = content.blocks.find("oak_leaves").expect("shipped block");
     let baked = catalog.baked(leaves).expect("modelled");
     assert_eq!(
         baked.occludes, [false; 6],

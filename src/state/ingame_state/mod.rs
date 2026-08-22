@@ -35,7 +35,7 @@ use crate::chat::{ChatState, OpsList};
 use crate::content::GameContent;
 use crate::core::{BlockPos, DayCycle};
 use crate::entity::{Arrow, DroppedItem, Mob, Player, Spawner};
-use crate::inventory::{Inventory, ItemStack, RecipeBook};
+use crate::inventory::{HeldLabel, Inventory, ItemStack, RecipeBook};
 use crate::state::session::Session;
 use crate::world::{ChunkLoader, FluidSim, World};
 use peers::Peers;
@@ -118,6 +118,9 @@ pub struct InGameState {
     /// growing a field every time content does.
     pub content: Arc<GameContent>,
     pub inventory: Inventory,
+    /// The fading name of the item in hand, shown above the hotbar. Ephemeral
+    /// presentation state, so it is never saved and never crosses the wire.
+    held_label: HeldLabel,
     /// Crafting recipes, loaded from `assets/recipes.toml` at world start.
     pub recipes: RecipeBook,
     pub show_debug: bool,
@@ -266,7 +269,7 @@ mod tests {
         state.update_mobs(1.0 / 60.0);
         assert!(state.mobs.live.is_empty(), "cow should be dead and reaped");
         assert!(!state.drops.is_empty(), "death should drop loot");
-        let beef = state.content.items.find("raw beef").unwrap();
+        let beef = state.content.items.find("raw_beef").unwrap();
         let dropped: u32 = state
             .drops
             .iter()
@@ -306,7 +309,7 @@ mod tests {
         let expected = state
             .content
             .items
-            .find("red mushroom")
+            .find("red_mushroom")
             .expect("shipped item");
         let dropped: u32 = state
             .drops
@@ -389,8 +392,8 @@ mod tests {
         }
         for id in [blocks::BLUE_BELLS, blocks::RED_MUSHROOM] {
             let block = registry.get(id);
-            assert!(!block.solid, "{} walks through", block.name);
-            assert!(block.is_replaceable(), "{} is built over", block.name);
+            assert!(!block.solid, "{} walks through", block.id);
+            assert!(block.is_replaceable(), "{} is built over", block.id);
         }
     }
 

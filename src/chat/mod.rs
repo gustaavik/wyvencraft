@@ -26,8 +26,8 @@ pub mod log;
 pub mod ops;
 
 pub use command::{
-    COMMANDS, ChatCommand, CommandContext, FakeContext, Invocation, Permission, Position, resolve,
-    suggest, unauthorized_message, unknown_command_message,
+    COMMANDS, ChatCommand, CommandContext, FakeContext, Invocation, ItemName, Permission, Position,
+    resolve, suggest, unauthorized_message, unknown_command_message,
 };
 pub use composer::Composer;
 pub use log::{ChatLine, ChatLog};

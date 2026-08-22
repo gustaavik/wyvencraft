@@ -418,7 +418,7 @@ mod tests {
         assert!(mob.ranged.is_none());
         assert_eq!(mob.attack_cooldown, 1.0, "defaulted");
         assert_eq!(mob.drops.len(), 1);
-        assert_eq!(mob.drops[0].item, "raw beef");
+        assert_eq!(mob.drops[0].item, "raw_beef");
         assert_eq!((mob.drops[0].min, mob.drops[0].max), (1, 3));
         match &cow.visual {
             VisualSpec::Quadruped(v) => {
@@ -434,7 +434,7 @@ mod tests {
         let mob = sheep.mob.as_ref().expect("sheep mob params");
         assert_eq!(mob.max_health, 8.0);
         assert_eq!(mob.behavior, Behavior::Passive);
-        assert_eq!(mob.drops[0].item, "raw mutton");
+        assert_eq!(mob.drops[0].item, "raw_mutton");
         assert_eq!((mob.drops[0].min, mob.drops[0].max), (1, 2));
         assert!(matches!(&sheep.visual, VisualSpec::Quadruped(v) if v.skin == "sheep"));
 

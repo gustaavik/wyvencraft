@@ -64,6 +64,10 @@ struct View<'a> {
     inventory: &'a Inventory,
     items: &'a ItemRegistry,
     icons: &'a [ItemIcon],
+    /// Display name per `ItemId` — what a hovered slot names. Passed as a
+    /// slice rather than read off `Item`, because a label is presentation and
+    /// deliberately lives on `content`, not in the hashed registry.
+    names: &'a [String],
     tex: UiTextures,
 }
 
@@ -75,6 +79,7 @@ pub fn draw_inventory(
     items: &ItemRegistry,
     recipes: &RecipeBook,
     icons: &[ItemIcon],
+    names: &[String],
     held: Option<ItemStack>,
     mode: GameMode,
     tex: UiTextures,
@@ -83,6 +88,7 @@ pub fn draw_inventory(
         inventory,
         items,
         icons,
+        names,
         tex,
     };
     let frame = egui::Frame::new()
@@ -219,6 +225,15 @@ impl View<'_> {
         self.icons[item.0 as usize]
     }
 
+    /// What a hovered slot names. Falls back to the id so a registry and a
+    /// label list that have drifted out of step still say *something*.
+    fn name_of(&self, item: ItemId) -> &str {
+        self.names
+            .get(item.0 as usize)
+            .map(String::as_str)
+            .unwrap_or_else(|| &self.items.get(item).id)
+    }
+
     /// One inventory slot: background, optional ghost hint, item icon, count and
     /// durability. Returns the click action, if any.
     fn slot(
@@ -259,6 +274,14 @@ impl View<'_> {
             Stroke::new(1.0_f32, SLOT_STROKE)
         };
         painter.rect_stroke(rect, 3.0, stroke, StrokeKind::Inside);
+
+        // Naming the item on hover happens here rather than at each caller,
+        // because `slot` is the one path the storage grid, the hotbar row and
+        // the armor column all go through.
+        let resp = match self.inventory.slot(index) {
+            Some(stack) => resp.on_hover_text(self.name_of(stack.item)),
+            None => resp,
+        };
 
         resp.clicked().then_some(InvAction::Slot(index))
     }
@@ -371,12 +394,12 @@ impl View<'_> {
                 ui.set_width(width);
                 ui.horizontal_wrapped(|ui| {
                     let mut a = None;
-                    for (id, item) in self.items.iter() {
+                    for (id, _) in self.items.iter() {
                         let (rect, resp) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::click());
                         let painter = ui.painter();
                         painter.rect_filled(rect, 3.0, SLOT_BG);
                         draw_item_icon(painter, rect.shrink(4.0), self.icon_of(id), self.tex);
-                        let resp = resp.on_hover_text(&item.name);
+                        let resp = resp.on_hover_text(self.name_of(id));
                         if resp.clicked() {
                             a = a.or(Some(InvAction::Pick(id)));
                         }
@@ -459,11 +482,11 @@ impl View<'_> {
         let out = Rect::from_min_size(pos2(x, mid - icon / 2.0), vec2(icon, icon));
         draw_item_icon(painter, out, self.icon_of(recipe.output), self.tex);
         x += icon + 8.0;
-        let name = &self.items.get(recipe.output).name;
+        let name = self.name_of(recipe.output);
         let label = if recipe.count > 1 {
             format!("{}× {name}", recipe.count)
         } else {
-            name.clone()
+            name.to_string()
         };
         painter.text(
             pos2(x, mid),

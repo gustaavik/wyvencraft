@@ -560,7 +560,7 @@ mod tests {
             saturation: 3.0,
             selected_slot: 4,
             slots: vec![Some(ItemStackData {
-                name: "stone".into(),
+                id: "stone".into(),
                 count: 12,
                 durability: None,
             })],

@@ -114,8 +114,8 @@ impl InGameState {
                     .and_then(|id| self.content.items.tool(id));
                 (held.is_some_and(|tool| tool.kind == *kind)).then(self_item)?
             }
-            Drops::Item { name, count } => {
-                let id = self.content.items.find(name)?;
+            Drops::Item { id: drop, count } => {
+                let id = self.content.items.find(drop)?;
                 Some(ItemStack::new(
                     id,
                     (*count).clamp(1, self.content.items.max_stack(id)),

@@ -58,20 +58,21 @@ pub fn paint_named(name: &str) -> Option<TileRgba> {
         "iron_ore" => ore(IRON_ORE, [214, 158, 110]),
         "gold_ore" => ore(GOLD_ORE, [250, 212, 76]),
         "diamond_ore" => ore(DIAMOND_ORE, [104, 224, 220]),
-        // Item icons. These are resolved by their in-game item name (spaces and
-        // all), so the inventory can ask the tile registry for "wooden pickaxe".
-        "wooden pickaxe" => tool_icon(PICKAXE, WOOD_HANDLE, STONE_HEAD),
-        "wooden axe" => tool_icon(AXE, WOOD_HANDLE, STONE_HEAD),
-        "wooden shovel" => tool_icon(SHOVEL, WOOD_HANDLE, STONE_HEAD),
+        // Item icons, keyed by the item's *id* — the same string `items.toml`
+        // declares — so the inventory can ask the tile registry for
+        // "wooden_pickaxe" without knowing what the player reads.
+        "wooden_pickaxe" => tool_icon(PICKAXE, WOOD_HANDLE, STONE_HEAD),
+        "wooden_axe" => tool_icon(AXE, WOOD_HANDLE, STONE_HEAD),
+        "wooden_shovel" => tool_icon(SHOVEL, WOOD_HANDLE, STONE_HEAD),
         "shears" => sprite(SHEARS, SHEARS_PALETTE),
-        "vine sword" => sprite(VINE_SWORD, VINE_SWORD_PALETTE),
+        "vine_sword" => sprite(VINE_SWORD, VINE_SWORD_PALETTE),
         // The tiered tools draw from their .bbmodel files instead, so they need
         // no painter here — only `stick`, which has no model, does.
         "stick" => sprite(STICK, STICK_PALETTE),
         "apple" => sprite(APPLE, APPLE_PALETTE),
         "bread" => sprite(BREAD, BREAD_PALETTE),
-        "raw beef" => sprite(RAW_BEEF, RAW_BEEF_PALETTE),
-        "raw mutton" => sprite(RAW_MUTTON, RAW_MUTTON_PALETTE),
+        "raw_beef" => sprite(RAW_BEEF, RAW_BEEF_PALETTE),
+        "raw_mutton" => sprite(RAW_MUTTON, RAW_MUTTON_PALETTE),
         "helmet" => sprite(HELMET, IRON_ARMOR_PALETTE),
         "chestplate" => sprite(CHESTPLATE, IRON_ARMOR_PALETTE),
         "leggings" => sprite(LEGGINGS, IRON_ARMOR_PALETTE),
@@ -843,16 +844,16 @@ mod tests {
     #[test]
     fn item_icons_paint_a_recognisable_silhouette() {
         for name in [
-            "wooden pickaxe",
-            "wooden axe",
-            "wooden shovel",
+            "wooden_pickaxe",
+            "wooden_axe",
+            "wooden_shovel",
             "shears",
-            "vine sword",
+            "vine_sword",
             "stick",
             "apple",
             "bread",
-            "raw beef",
-            "raw mutton",
+            "raw_beef",
+            "raw_mutton",
             "helmet",
             "chestplate",
             "leggings",

@@ -3,13 +3,20 @@
 # Every block in the game is declared here; the engine registers them in file
 # order. "air" is built in (always id 0) and may not be declared.
 #
-# NAMES ARE THE SAVE FORMAT. Save files and multiplayer identify blocks by the
-# exact `name` string, so renaming a block orphans it in existing worlds.
-# Reordering entries is safe for saves (they resolve by name) but changes the
-# numeric ids used within a single session.
+# IDS ARE THE SAVE FORMAT. Save files, multiplayer, worldgen, recipes and drops
+# all identify blocks by the exact `id` string, so renaming a block orphans it
+# in existing worlds. Reordering entries is safe for saves (they resolve by id)
+# but changes the numeric ids used within a single session.
 #
 # Fields:
-#   name      unique display/save name
+#   id        unique key: lowercase letters, digits and underscores only, so it
+#             stays typeable as a single token (`/give oak_log 5`) and needs no
+#             quoting when another file refers to it. Anything else rejects the
+#             whole file and the game falls back to its builtin copy.
+#   display_name  what the player reads, in the inventory tooltip and above the
+#             hotbar. Optional: the default title-cases the id, so `oak_log`
+#             already reads as "Oak Log". Spell it out only where that rule
+#             gets it wrong.
 #   render    opaque | transparent | cutout | invisible
 #   solid     whether entities collide with it
 #   hardness  relative mining time; `inf` = unbreakable
@@ -33,9 +40,9 @@
 #             should take the biome colour (`tint` in assets/worldgen.toml).
 #   drops     what breaking the block yields (default: the block's own item)
 #             "self" | "none" | { requires_tool = "<tool kind>" }
-#             | { item = "<item name>", count = N }
+#             | { item = "<item id>", count = N }
 #   [block.fluid] with `flow_levels = N` marks the block as a fluid source;
-#             the engine auto-registers "<name> flow 1".."<name> flow N"
+#             the engine auto-registers "<id>_flow_1".."<id>_flow_N"
 #             blocks after all declared blocks, and the fluid simulation
 #             spreads/recedes between them.
 #   [block.fluid.texture] draws the fluid from an animation strip instead of
@@ -67,7 +74,7 @@
 #             alongside [block.model].
 
 [[block]]
-name = "stone"
+id = "stone"
 render = "opaque"
 solid = true
 hardness = 1.5
@@ -76,7 +83,7 @@ block_model = "assets/blocks/stone_block.json"
 drops = { item = "cobblestone" }
 
 [[block]]
-name = "dirt"
+id = "dirt"
 render = "opaque"
 solid = true
 hardness = 0.5
@@ -84,7 +91,7 @@ material = "dirt"
 block_model = "assets/blocks/dirt_block.json"
 
 [[block]]
-name = "grass"
+id = "grass"
 render = "opaque"
 solid = true
 hardness = 0.6
@@ -92,7 +99,7 @@ material = "dirt"
 block_model = "assets/blocks/grass_block.json"
 
 [[block]]
-name = "sand"
+id = "sand"
 render = "opaque"
 solid = true
 hardness = 0.5
@@ -100,7 +107,7 @@ material = "sand"
 block_model = "assets/blocks/sand_block.json"
 
 [[block]]
-name = "water"
+id = "water"
 render = "transparent"
 solid = false
 hardness = inf
@@ -120,7 +127,7 @@ tint = 2
 opacity = 0.85
 
 [[block]]
-name = "oak log"
+id = "oak_log"
 render = "opaque"
 solid = true
 hardness = 2.0
@@ -128,7 +135,7 @@ material = "wood"
 block_model = "assets/blocks/oak_log_block.json"
 
 [[block]]
-name = "oak leaves"
+id = "oak_leaves"
 render = "cutout"
 solid = true
 hardness = 0.2
@@ -137,7 +144,7 @@ block_model = "assets/blocks/oak_leaves_block.json"
 drops = { requires_tool = "shears" }
 
 [[block]]
-name = "glass"
+id = "glass"
 render = "transparent"
 solid = true
 hardness = 0.3
@@ -145,7 +152,7 @@ material = "glass"
 textures = "glass"
 
 [[block]]
-name = "bedrock"
+id = "bedrock"
 render = "opaque"
 solid = true
 hardness = inf
@@ -153,7 +160,7 @@ material = "other"
 textures = "bedrock"
 
 [[block]]
-name = "snow"
+id = "snow"
 render = "opaque"
 solid = true
 hardness = 0.2
@@ -161,7 +168,7 @@ material = "dirt"
 textures = "snow"
 
 [[block]]
-name = "gravel"
+id = "gravel"
 render = "opaque"
 solid = true
 hardness = 0.6
@@ -169,7 +176,7 @@ material = "dirt"
 block_model = "assets/blocks/gravel_block.json"
 
 [[block]]
-name = "clay"
+id = "clay"
 render = "opaque"
 solid = true
 hardness = 0.6
@@ -177,7 +184,7 @@ material = "dirt"
 textures = "clay"
 
 [[block]]
-name = "coal ore"
+id = "coal_ore"
 render = "opaque"
 solid = true
 hardness = 3.0
@@ -185,7 +192,7 @@ material = "stone"
 block_model = "assets/blocks/coal_ore_block.json"
 
 [[block]]
-name = "iron ore"
+id = "iron_ore"
 render = "opaque"
 solid = true
 hardness = 3.0
@@ -193,7 +200,7 @@ material = "stone"
 block_model = "assets/blocks/iron_ore_block.json"
 
 [[block]]
-name = "copper ore"
+id = "copper_ore"
 render = "opaque"
 solid = true
 hardness = 3.0
@@ -201,7 +208,7 @@ material = "stone"
 block_model = "assets/blocks/copper_ore_block.json"
 
 [[block]]
-name = "cobblestone"
+id = "cobblestone"
 render = "opaque"
 solid = true
 hardness = 2.0
@@ -214,7 +221,7 @@ block_model = "assets/blocks/cobblestone_block.json"
 # `hardness = 0.0` still costs one mining tick (break_seconds floors at 0.05 s).
 
 [[block]]
-name = "blue bells"
+id = "blue_bells"
 render = "cutout"
 solid = false
 hardness = 0.0
@@ -226,7 +233,7 @@ path = "assets/models/plant1.bbmodel"
 offset = [-0.5, 0.0, -0.5]
 
 [[block]]
-name = "red flower"
+id = "red_flower"
 render = "cutout"
 solid = false
 hardness = 0.0
@@ -238,7 +245,7 @@ path = "assets/models/plant2.bbmodel"
 offset = [-0.5, 0.0, -0.5]
 
 [[block]]
-name = "red mushroom"
+id = "red_mushroom"
 render = "cutout"
 solid = false
 hardness = 0.0
@@ -250,7 +257,7 @@ path = "assets/models/mushroom1.bbmodel"
 offset = [-0.5, 0.0, -0.5]
 
 [[block]]
-name = "brown mushroom"
+id = "brown_mushroom"
 render = "cutout"
 solid = false
 hardness = 0.0
@@ -264,7 +271,7 @@ offset = [-0.5, 0.0, -0.5]
 # Authored in Blockbench as two crossed planes, so it needs no `[block.model]`
 # placement: the model is already in cell coordinates.
 [[block]]
-name = "cornflower"
+id = "cornflower"
 render = "cutout"
 solid = false
 hardness = 0.0

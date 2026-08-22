@@ -264,7 +264,7 @@ mod tests {
     #[test]
     fn welcome_carries_game_mode_and_recipes() {
         let recipe = RecipeData {
-            output: "wooden pickaxe".to_string(),
+            output: "wooden_pickaxe".to_string(),
             count: 1,
             ingredients: vec![("wood".to_string(), 3)],
         };

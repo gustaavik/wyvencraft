@@ -223,13 +223,13 @@ mod tests {
             [[recipe]]
             output = "glass"
             count = 2
-            ingredients = { sand = 3, "coal ore" = 1 }
+            ingredients = { sand = 3, "coal_ore" = 1 }
         "#;
         let book = RecipeBook::from_toml(text, &items).expect("valid TOML");
         let recipe = book.get(0).unwrap();
 
         let sand = items.find("sand").unwrap();
-        let coal = items.find("coal ore").unwrap();
+        let coal = items.find("coal_ore").unwrap();
         let mut inv = Inventory::new();
         inv.add(ItemStack::new(sand, 4), &items);
 
@@ -250,22 +250,22 @@ mod tests {
         let items = registry();
         let text = r#"
             [[recipe]]
-            output = "wooden pickaxe"
-            ingredients = { "oak log" = 3 }
+            output = "wooden_pickaxe"
+            ingredients = { "oak_log" = 3 }
         "#;
         let book = RecipeBook::from_toml(text, &items).expect("valid TOML");
         let mut inv = Inventory::new();
-        inv.add(ItemStack::new(items.find("oak log").unwrap(), 3), &items);
+        inv.add(ItemStack::new(items.find("oak_log").unwrap(), 3), &items);
 
         let out = book
             .get(0)
             .unwrap()
             .craft(&mut inv, &items)
             .expect("crafts");
-        assert_eq!(out.item, items.find("wooden pickaxe").unwrap());
+        assert_eq!(out.item, items.find("wooden_pickaxe").unwrap());
         assert_eq!(
             out.durability,
-            items.max_durability(items.find("wooden pickaxe").unwrap())
+            items.max_durability(items.find("wooden_pickaxe").unwrap())
         );
     }
 }

@@ -319,6 +319,7 @@ impl GameState<Wyvencraft> for InGameState {
                 &self.content.items,
                 &self.recipes,
                 &ctx.shared.content.item_icons,
+                &ctx.shared.content.item_display_names,
                 self.held,
                 self.player.mode,
                 ctx.shared.ui_tex,
@@ -353,10 +354,20 @@ impl GameState<Wyvencraft> for InGameState {
             &ctx.shared.content.item_icons,
             ctx.shared.ui_tex,
         );
+        // Name whatever is in hand, until it fades. Observing here rather than
+        // wherever the selection changes catches every route into the hand —
+        // scrolling, the number keys, picking a block up, a tool breaking.
+        let survival = self.player.mode.takes_damage();
+        self.held_label.observe(self.inventory.item_in_selected());
+        self.held_label.tick(ctx.dt);
+        if let Some((item, alpha)) = self.held_label.visible() {
+            let name = ctx.shared.content.item_display_name(item);
+            hud::draw_held_label(egui_ctx, name, alpha, survival);
+        }
         hud::draw_mode_indicator(egui_ctx, self.player.mode.label());
 
         // Survival HUD: vitals and break progress.
-        if self.player.mode.takes_damage() {
+        if survival {
             hud::draw_vitals(
                 egui_ctx,
                 self.player.health,

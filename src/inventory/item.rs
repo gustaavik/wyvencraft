@@ -5,8 +5,14 @@
 //! foods, armor) as data, expressing behavior through typed components
 //! ([`ToolSpec`], [`FoodValue`], [`ArmorSpec`]) that the gameplay code
 //! dispatches on — never on item identity.
+//!
+//! An item is identified by its **id** (see [`crate::core::ident`]) — the key
+//! saves, recipes, the wire and `/give` all use. The label the player reads is
+//! presentation and rides out of the parse in [`ItemVisuals`] alongside the
+//! models, so it never reaches [`Item`] and never feeds `content_hash`.
 
 use crate::core::BlockId;
+use crate::core::ident::is_valid_id;
 use crate::world::block::{BlockMaterial, BlockRegistry};
 use wyven_model::ModelSpec;
 
@@ -105,7 +111,10 @@ pub struct ArmorSpec {
 /// Static description of an item type.
 #[derive(Debug, Clone)]
 pub struct Item {
-    pub name: String,
+    /// Machine-readable key: `[a-z0-9_]`, unique, and the save/wire format.
+    /// The player-facing label lives on `content`, not here — see
+    /// [`ItemVisuals::display_names`].
+    pub id: String,
     pub max_stack: u8,
     /// If set, using this item places the given block.
     pub place_block: Option<BlockId>,
@@ -118,10 +127,10 @@ pub struct Item {
 }
 
 impl Item {
-    /// A placeable block item (stacks to 64).
-    pub fn block(name: impl Into<String>, block: BlockId) -> Self {
+    /// A placeable block item (stacks to 64), sharing the block's id.
+    pub fn block(id: impl Into<String>, block: BlockId) -> Self {
         Self {
-            name: name.into(),
+            id: id.into(),
             max_stack: 64,
             place_block: Some(block),
             tool: None,
@@ -202,7 +211,9 @@ struct ItemFile {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ItemDef {
-    name: String,
+    id: String,
+    /// Overrides the label derived from `id`, for the ids the rule gets wrong.
+    display_name: Option<String>,
     max_stack: Option<u8>,
     place_block: Option<String>,
     tool: Option<ToolSpec>,
@@ -233,6 +244,26 @@ fn default_kit_count() -> u8 {
     1
 }
 
+/// The presentation-only data an item file carries, reported out of the parse
+/// rather than stored on [`Item`] — the item-side twin of
+/// [`crate::world::block::BlockVisuals`].
+///
+/// Both vectors are indexed by [`ItemId`] and cover every item, block items
+/// included. Keeping them here rather than on [`Item`] is what stops them
+/// reaching `content_hash`, which gates multiplayer joins: two players whose
+/// sword is drawn — or labelled — differently have no reason to be refused a
+/// shared world.
+#[derive(Debug, Default)]
+pub struct ItemVisuals {
+    /// `[item.model]` — what a held or dropped stack is drawn as.
+    pub models: Vec<Option<ModelSpec>>,
+    /// `display_name = "..."` — an explicit label, where title-casing the id
+    /// would get it wrong. `None` means "derive it", which `content` does;
+    /// carrying the `Option` is what lets a block item fall back to the
+    /// *block's* label rather than to its own derived one.
+    pub display_names: Vec<Option<String>>,
+}
+
 /// Lookup table of item types. Index alignment with block ids is *not* assumed;
 /// use [`ItemRegistry::item_for_block`] to map.
 #[derive(Debug)]
@@ -253,31 +284,38 @@ impl ItemRegistry {
 
     /// Parse an items file against the loaded blocks. An item is auto-generated
     /// for every visible, non-flowing block first; `[[item]]` entries then
-    /// override an auto item by name or append new items (declared order
-    /// defines the numeric [`ItemId`]s after the block items).
+    /// override an auto item by id or append new items (declared order defines
+    /// the numeric [`ItemId`]s after the block items).
     ///
-    /// Structural errors (bad TOML) fail the whole file — the caller falls
-    /// back to [`ItemRegistry::from_blocks`]. Bad names inside entries only
-    /// degrade that entry (warning), following the recipes-file precedent.
+    /// Structural errors — bad TOML, or a malformed id — fail the whole file,
+    /// and the caller falls back to [`ItemRegistry::from_blocks`]. Bad
+    /// *references* inside entries (an unknown `place_block`) only degrade that
+    /// entry with a warning, following the recipes-file precedent.
     pub fn from_toml(text: &str, blocks: &BlockRegistry) -> Result<Self, String> {
-        Self::from_toml_with_models(text, blocks, &mut Vec::new())
+        Self::from_toml_with_visuals(text, blocks, &mut ItemVisuals::default())
     }
 
     /// Like [`ItemRegistry::from_toml`], but also reports each item's
-    /// `[item.model]` in a vector indexed by [`ItemId`].
+    /// `[item.model]` and `display_name` in [`ItemVisuals`], indexed by
+    /// [`ItemId`].
     ///
-    /// Model assignment is visual-only and is kept off [`Item`] on purpose, for
-    /// the same reason as `content::ItemIcon`: `Item` feeds `content_hash`,
-    /// which gates multiplayer joins, and two players whose swords are drawn
-    /// differently have no reason to be refused a shared world.
-    pub fn from_toml_with_models(
+    /// Both are presentation and are kept off [`Item`] on purpose, for the same
+    /// reason as `content::ItemIcon`: `Item` feeds `content_hash`, which gates
+    /// multiplayer joins, and two players whose swords are drawn — or
+    /// labelled — differently have no reason to be refused a shared world.
+    pub fn from_toml_with_visuals(
         text: &str,
         blocks: &BlockRegistry,
-        models: &mut Vec<Option<ModelSpec>>,
+        visuals: &mut ItemVisuals,
     ) -> Result<Self, String> {
         let file: ItemFile = toml::from_str(text).map_err(|e| e.to_string())?;
 
+        let ItemVisuals {
+            models,
+            display_names,
+        } = visuals;
         models.clear();
+        display_names.clear();
         let mut items: Vec<Item> = Vec::new();
         let mut block_to_item = vec![None; blocks.len()];
         for (block_id, block) in blocks.iter() {
@@ -286,19 +324,28 @@ impl ItemRegistry {
                 continue;
             }
             let item_id = ItemId(items.len() as u16);
-            items.push(Item::block(block.name.clone(), block_id));
+            items.push(Item::block(block.id.clone(), block_id));
             block_to_item[block_id.0 as usize] = Some(item_id);
         }
 
         for def in file.item {
-            let place_block = def.place_block.as_ref().and_then(|name| {
-                let id = blocks.find(name);
+            // A malformed id fails the whole file: an id is the key recipes,
+            // drops, saves and `/give` all spell, so accepting one that cannot
+            // be typed as a single token would break those references silently.
+            if !is_valid_id(&def.id) {
+                return Err(format!(
+                    "item {:?}: an id must be lowercase letters, digits and underscores",
+                    def.id
+                ));
+            }
+            let place_block = def.place_block.as_ref().and_then(|block_id| {
+                let id = blocks.find(block_id);
                 if id.is_none() {
-                    log::warn!("item {:?}: unknown place_block {name:?}", def.name);
+                    log::warn!("item {:?}: unknown place_block {block_id:?}", def.id);
                 }
                 id
             });
-            let index = match items.iter().position(|i| i.name == def.name) {
+            let index = match items.iter().position(|i| i.id == def.id) {
                 // Override an auto-generated block item: only the fields the
                 // entry specifies change.
                 Some(idx) => {
@@ -324,7 +371,7 @@ impl ItemRegistry {
                     let single = def.tool.is_some() || def.armor.is_some();
                     let max_stack = def.max_stack.unwrap_or(if single { 1 } else { 64 });
                     items.push(Item {
-                        name: def.name,
+                        id: def.id,
                         max_stack,
                         place_block,
                         tool: def.tool,
@@ -338,8 +385,13 @@ impl ItemRegistry {
                 models.resize(items.len().max(models.len()), None);
                 models[index] = Some(model);
             }
+            if let Some(label) = def.display_name {
+                display_names.resize(items.len().max(display_names.len()), None);
+                display_names[index] = Some(label);
+            }
         }
         models.resize(items.len(), None);
+        display_names.resize(items.len(), None);
 
         let mut reg = Self {
             items,
@@ -376,11 +428,12 @@ impl ItemRegistry {
         self.block_to_item.get(block.0 as usize).copied().flatten()
     }
 
-    /// Look up an item by its exact name (as used by recipe files).
-    pub fn find(&self, name: &str) -> Option<ItemId> {
+    /// Look up an item by its exact id (as used by recipe files, saves and
+    /// `/give`).
+    pub fn find(&self, id: &str) -> Option<ItemId> {
         self.items
             .iter()
-            .position(|item| item.name == name)
+            .position(|item| item.id == id)
             .map(|i| ItemId(i as u16))
     }
 
@@ -454,21 +507,21 @@ mod tests {
             "grass",
             "sand",
             "water",
-            "oak log",
-            "oak leaves",
+            "oak_log",
+            "oak_leaves",
             "glass",
             "bedrock",
             "snow",
             "gravel",
             "clay",
-            "coal ore",
-            "iron ore",
-            "copper ore",
+            "coal_ore",
+            "iron_ore",
+            "copper_ore",
             "cobblestone",
-            "blue bells",
-            "red flower",
-            "red mushroom",
-            "brown mushroom",
+            "blue_bells",
+            "red_flower",
+            "red_mushroom",
+            "brown_mushroom",
             "cornflower",
         ];
         const STONE: &[BlockMaterial] = &[BlockMaterial::Stone];
@@ -485,27 +538,27 @@ mod tests {
             Option<f32>,
         );
         let tools: [ToolRow; 14] = [
-            ("wooden pickaxe", "pickaxe", 2.0, 60, STONE, None),
-            ("wooden axe", "axe", 2.0, 60, WOOD, Some(3.0)),
-            ("wooden shovel", "shovel", 2.0, 60, DIGGABLE, None),
+            ("wooden_pickaxe", "pickaxe", 2.0, 60, STONE, None),
+            ("wooden_axe", "axe", 2.0, 60, WOOD, Some(3.0)),
+            ("wooden_shovel", "shovel", 2.0, 60, DIGGABLE, None),
             ("shears", "shears", 5.0, 120, PLANT, None),
-            ("vine sword", "sword", 1.5, 200, PLANT, Some(4.0)),
-            ("wooden sword", "sword", 1.5, 60, PLANT, Some(4.0)),
-            ("stone pickaxe", "pickaxe", 4.0, 132, STONE, None),
-            ("stone axe", "axe", 4.0, 132, WOOD, Some(4.0)),
-            ("stone shovel", "shovel", 4.0, 132, DIGGABLE, None),
-            ("stone sword", "sword", 1.5, 132, PLANT, Some(5.0)),
-            ("iron pickaxe", "pickaxe", 6.0, 250, STONE, None),
-            ("iron axe", "axe", 6.0, 250, WOOD, Some(5.0)),
-            ("iron shovel", "shovel", 6.0, 250, DIGGABLE, None),
-            ("iron sword", "sword", 1.5, 250, PLANT, Some(6.0)),
+            ("vine_sword", "sword", 1.5, 200, PLANT, Some(4.0)),
+            ("wooden_sword", "sword", 1.5, 60, PLANT, Some(4.0)),
+            ("stone_pickaxe", "pickaxe", 4.0, 132, STONE, None),
+            ("stone_axe", "axe", 4.0, 132, WOOD, Some(4.0)),
+            ("stone_shovel", "shovel", 4.0, 132, DIGGABLE, None),
+            ("stone_sword", "sword", 1.5, 132, PLANT, Some(5.0)),
+            ("iron_pickaxe", "pickaxe", 6.0, 250, STONE, None),
+            ("iron_axe", "axe", 6.0, 250, WOOD, Some(5.0)),
+            ("iron_shovel", "shovel", 6.0, 250, DIGGABLE, None),
+            ("iron_sword", "sword", 1.5, 250, PLANT, Some(6.0)),
         ];
         // (name, hunger, saturation)
         let foods = [
             ("apple", 4.0, 2.4),
             ("bread", 5.0, 6.0),
-            ("raw beef", 3.0, 1.8),
-            ("raw mutton", 2.0, 1.2),
+            ("raw_beef", 3.0, 1.8),
+            ("raw_mutton", 2.0, 1.2),
         ];
         // (name, slot, defense, durability)
         let armors = [
@@ -528,7 +581,7 @@ mod tests {
 
         for (i, &name) in block_items.iter().enumerate() {
             let item = items.get(ItemId(i as u16));
-            assert_eq!(item.name, name, "item {i}: name");
+            assert_eq!(item.id, name, "item {i}: name");
             assert_eq!(item.max_stack, 64, "{name}: max_stack");
             assert_eq!(item.place_block, blocks.find(name), "{name}: place_block");
             assert!(item.tool.is_none() && item.food.is_none(), "{name}: plain");
@@ -546,7 +599,7 @@ mod tests {
         {
             let id = ItemId((block_items.len() + offset) as u16);
             let item = items.get(id);
-            assert_eq!(item.name, name, "tool: name");
+            assert_eq!(item.id, name, "tool: name");
             assert_eq!(item.max_stack, 1, "{name}: max_stack");
             let tool = item.tool.as_ref().expect("tool spec");
             assert_eq!(tool.kind, kind, "{name}: kind");
@@ -560,7 +613,7 @@ mod tests {
         for (offset, &(name, hunger, saturation)) in foods.iter().enumerate() {
             let id = ItemId((block_items.len() + tools.len() + offset) as u16);
             let item = items.get(id);
-            assert_eq!(item.name, name, "food: name");
+            assert_eq!(item.id, name, "food: name");
             assert_eq!(item.max_stack, 64, "{name}: max_stack");
             let food = item.food.expect("food value");
             assert_eq!(food.hunger, hunger, "{name}: hunger");
@@ -571,7 +624,7 @@ mod tests {
         for (offset, &(name, slot, defense, durability)) in armors.iter().enumerate() {
             let id = ItemId((block_items.len() + tools.len() + foods.len() + offset) as u16);
             let item = items.get(id);
-            assert_eq!(item.name, name, "armor: name");
+            assert_eq!(item.id, name, "armor: name");
             assert_eq!(item.max_stack, 1, "{name}: max_stack");
             let armor = item.armor.expect("armor spec");
             assert_eq!(armor.slot, slot, "{name}: slot");
@@ -591,7 +644,7 @@ mod tests {
                 (block_items.len() + tools.len() + foods.len() + armors.len() + offset) as u16,
             );
             let item = items.get(id);
-            assert_eq!(item.name, name, "plain: name");
+            assert_eq!(item.id, name, "plain: name");
             assert_eq!(item.max_stack, 64, "{name}: max_stack");
             assert!(
                 item.tool.is_none()
@@ -608,10 +661,10 @@ mod tests {
         let kit = items.starter_kit_survival();
         assert_eq!(kit.len(), 6, "starter kit size");
         for (slot, name) in [
-            "wooden pickaxe",
-            "wooden axe",
-            "wooden shovel",
-            "vine sword",
+            "wooden_pickaxe",
+            "wooden_axe",
+            "wooden_shovel",
+            "vine_sword",
         ]
         .iter()
         .enumerate()
@@ -631,18 +684,75 @@ mod tests {
         );
     }
 
+    /// A malformed id fails the whole file, like the block table: an id is the
+    /// key recipes, drops, saves and `/give` all spell, so one that cannot be
+    /// typed as a single token would break those references silently.
+    #[test]
+    fn a_malformed_item_id_rejects_the_whole_file() {
+        let blocks = BlockRegistry::with_builtins();
+        for bad in ["Wooden Pickaxe", "wooden pickaxe", "wooden-pickaxe", ""] {
+            let text = format!("[[item]]\nid = \"{bad}\"\n");
+            let err = ItemRegistry::from_toml(&text, &blocks)
+                .err()
+                .unwrap_or_else(|| panic!("{bad:?} should be rejected"));
+            assert!(err.contains("id"), "{bad:?}: unhelpful error {err:?}");
+        }
+    }
+
+    /// Every shipped id is well formed — the loader enforces it, but asserting
+    /// it here names the rule where the item set is snapshotted.
+    #[test]
+    fn every_builtin_item_id_is_well_formed() {
+        let blocks = BlockRegistry::with_builtins();
+        for (_, item) in ItemRegistry::from_blocks(&blocks).iter() {
+            assert!(is_valid_id(&item.id), "malformed item id {:?}", item.id);
+        }
+    }
+
+    /// A label is presentation, so like a model it rides out in `ItemVisuals`
+    /// and never reaches `Item`, which feeds `content_hash`.
+    #[test]
+    fn display_names_ride_out_of_band_and_stay_off_item() {
+        let blocks = BlockRegistry::with_builtins();
+        let mut visuals = ItemVisuals::default();
+        let items = ItemRegistry::from_toml_with_visuals(
+            "[[item]]\nid = \"tnt\"\ndisplay_name = \"TNT\"\n\n[[item]]\nid = \"stick\"\n",
+            &blocks,
+            &mut visuals,
+        )
+        .expect("valid file");
+
+        assert_eq!(visuals.display_names.len(), items.len(), "one per item");
+        let tnt = items.find("tnt").expect("declared");
+        let stick = items.find("stick").expect("declared");
+        assert_eq!(
+            visuals.display_names[tnt.0 as usize].as_deref(),
+            Some("TNT"),
+            "authored"
+        );
+        assert_eq!(
+            visuals.display_names[stick.0 as usize], None,
+            "left for `content` to derive"
+        );
+        assert!(
+            !format!("{:?}", items.get(tnt)).contains("TNT"),
+            "display name must stay off Item"
+        );
+    }
+
     /// `[item.model]` is reported alongside the registry rather than stored on
     /// `Item`: it is visual-only and must not reach `content_hash`.
     #[test]
     fn item_models_are_reported_out_of_band() {
         let blocks = BlockRegistry::with_builtins();
-        let mut models = Vec::new();
-        let items = ItemRegistry::from_toml_with_models(BUILTIN_ITEMS, &blocks, &mut models)
+        let mut visuals = ItemVisuals::default();
+        let items = ItemRegistry::from_toml_with_visuals(BUILTIN_ITEMS, &blocks, &mut visuals)
             .expect("builtin items parse");
+        let models = &visuals.models;
 
         assert_eq!(models.len(), items.len(), "one entry per item");
 
-        let sword = items.find("vine sword").expect("vine sword");
+        let sword = items.find("vine_sword").expect("vine_sword");
         let spec = models[sword.0 as usize]
             .as_ref()
             .expect("vine sword declares a model");
@@ -657,13 +767,14 @@ mod tests {
         assert_eq!(spec.offset, [-0.5, 0.75, -0.5]);
 
         // Everything else is model-less, and nothing about the model leaks onto
-        // the item itself.
+        // the item itself. The item's *id* is legitimately "vine_sword", so what
+        // must be absent is the model file it points at.
         let apple = items.find("apple").expect("apple");
         assert!(models[apple.0 as usize].is_none());
+        let debug = format!("{:?}", items.get(sword));
         assert!(
-            format!("{:?}", items.get(sword))
-                .find("vine_sword")
-                .is_none()
+            !debug.contains("assets/models") && !debug.contains(".bbmodel"),
+            "the model path leaked onto Item: {debug}"
         );
     }
 
@@ -673,13 +784,14 @@ mod tests {
     #[test]
     fn tiered_tool_models_are_turned_broadside() {
         let blocks = BlockRegistry::with_builtins();
-        let mut models = Vec::new();
-        let items = ItemRegistry::from_toml_with_models(BUILTIN_ITEMS, &blocks, &mut models)
+        let mut visuals = ItemVisuals::default();
+        let items = ItemRegistry::from_toml_with_visuals(BUILTIN_ITEMS, &blocks, &mut visuals)
             .expect("builtin items parse");
+        let models = &visuals.models;
 
         for tier in ["wooden", "stone", "iron"] {
             for shape in ["pickaxe", "axe", "shovel", "sword"] {
-                let name = format!("{tier} {shape}");
+                let name = format!("{tier}_{shape}");
                 let id = items.find(&name).unwrap_or_else(|| panic!("{name} exists"));
                 let spec = models[id.0 as usize]
                     .as_ref()
@@ -710,7 +822,7 @@ mod tests {
         for shape in ["pickaxe", "axe", "shovel"] {
             let tiers: Vec<_> = ["wooden", "stone", "iron"]
                 .iter()
-                .map(|tier| spec(&format!("{tier} {shape}")))
+                .map(|tier| spec(&format!("{tier}_{shape}")))
                 .collect();
             for pair in tiers.windows(2) {
                 let (lo, hi) = (&pair[0], &pair[1]);
@@ -726,7 +838,7 @@ mod tests {
 
         let swords: Vec<_> = ["wooden", "stone", "iron"]
             .iter()
-            .map(|tier| spec(&format!("{tier} sword")))
+            .map(|tier| spec(&format!("{tier}_sword")))
             .collect();
         for pair in swords.windows(2) {
             let (lo, hi) = (&pair[0], &pair[1]);
@@ -745,12 +857,12 @@ mod tests {
 
         for tier in ["wooden", "stone", "iron"] {
             for shape in ["pickaxe", "shovel"] {
-                let name = format!("{tier} {shape}");
+                let name = format!("{tier}_{shape}");
                 let id = items.find(&name).expect("tool exists");
                 assert_eq!(items.tool(id).unwrap().damage, None, "{name}: no damage");
             }
             for shape in ["sword", "axe"] {
-                let name = format!("{tier} {shape}");
+                let name = format!("{tier}_{shape}");
                 let id = items.find(&name).expect("tool exists");
                 assert!(
                     items.tool(id).unwrap().damage.is_some(),

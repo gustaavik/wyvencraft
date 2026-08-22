@@ -283,7 +283,7 @@ mod tests {
         let items = ItemRegistry::from_blocks(&blocks);
         let mut inv = Inventory::new();
         let leftover = inv.add(
-            ItemStack::with_durability(items.find("wooden pickaxe").unwrap(), 12),
+            ItemStack::with_durability(items.find("wooden_pickaxe").unwrap(), 12),
             &items,
         );
         assert_eq!(leftover, 0);
@@ -363,7 +363,7 @@ mod tests {
 
         let helmet = items.find("helmet").unwrap();
         let boots = items.find("boots").unwrap();
-        let pickaxe = items.find("wooden pickaxe").unwrap();
+        let pickaxe = items.find("wooden_pickaxe").unwrap();
         let head = Inventory::armor_slot_index(ArmorSlot::Helmet);
 
         assert!(inv.can_equip(head, helmet, &items));

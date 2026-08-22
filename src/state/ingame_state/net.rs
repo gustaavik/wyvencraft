@@ -609,7 +609,7 @@ pub(super) fn record_remote(
     };
     // A client that never reported an inventory keeps its previous record's.
     let (slots, selected) = match remote_inventories.get(&pid) {
-        Some((slots, selected)) => (wire_slots_to_names(slots, items), *selected),
+        Some((slots, selected)) => (wire_slots_to_ids(slots, items), *selected),
         None => match records.0.get(&identity) {
             Some(prev) => (prev.slots.clone(), prev.selected_slot),
             // Never reported an inventory and no history: don't record at all,
@@ -647,17 +647,17 @@ fn armor_from_slots(slots: &[Option<NetItemStack>]) -> [Option<u16>; ARMOR_SIZE]
     })
 }
 
-/// Serialize the recipe book back to item names for the `Welcome` message.
+/// Serialize the recipe book back to item ids for the `Welcome` message.
 pub(super) fn recipes_to_wire(book: &RecipeBook, items: &ItemRegistry) -> Vec<RecipeData> {
     book.recipes()
         .iter()
         .map(|recipe| RecipeData {
-            output: items.get(recipe.output).name.clone(),
+            output: items.get(recipe.output).id.clone(),
             count: recipe.count as u32,
             ingredients: recipe
                 .ingredients
                 .iter()
-                .map(|&(item, n)| (items.get(item).name.clone(), n))
+                .map(|&(item, n)| (items.get(item).id.clone(), n))
                 .collect(),
         })
         .collect()
@@ -679,9 +679,9 @@ fn inventory_to_wire(inventory: &Inventory) -> (Vec<Option<NetItemStack>>, u32) 
     (slots, inventory.selected_index() as u32)
 }
 
-/// Convert wire inventory slots to the name-based on-disk form. Ids out of this
-/// build's registry range (mismatched peer) become empty slots.
-fn wire_slots_to_names(
+/// Convert wire inventory slots to the id-based on-disk form. Numeric ids out
+/// of this build's registry range (mismatched peer) become empty slots.
+fn wire_slots_to_ids(
     slots: &[Option<NetItemStack>],
     items: &ItemRegistry,
 ) -> Vec<Option<ItemStackData>> {
@@ -690,7 +690,7 @@ fn wire_slots_to_names(
         .map(|slot| {
             slot.and_then(|s| {
                 ((s.item as usize) < items.len()).then(|| ItemStackData {
-                    name: items.get(ItemId(s.item)).name.clone(),
+                    id: items.get(ItemId(s.item)).id.clone(),
                     count: s.count,
                     durability: s.durability,
                 })
@@ -714,7 +714,7 @@ fn record_to_restore(record: &PlayerData, items: &ItemRegistry) -> PlayerRestore
             .iter()
             .map(|slot| {
                 slot.as_ref().and_then(|s| {
-                    items.find(&s.name).map(|id| NetItemStack {
+                    items.find(&s.id).map(|id| NetItemStack {
                         item: id.0,
                         count: s.count,
                         durability: s.durability,
@@ -782,14 +782,14 @@ mod tests {
     fn a_local_swing_takes_its_damage_from_the_held_item() {
         let (mut state, _handle) = host_session();
 
-        hold(&mut state, "iron sword");
-        assert_eq!(state.melee_damage(), 6.0, "iron sword");
-        hold(&mut state, "wooden sword");
-        assert_eq!(state.melee_damage(), 4.0, "wooden sword");
-        hold(&mut state, "iron axe");
-        assert_eq!(state.melee_damage(), 5.0, "iron axe");
+        hold(&mut state, "iron_sword");
+        assert_eq!(state.melee_damage(), 6.0, "iron_sword");
+        hold(&mut state, "wooden_sword");
+        assert_eq!(state.melee_damage(), 4.0, "wooden_sword");
+        hold(&mut state, "iron_axe");
+        assert_eq!(state.melee_damage(), 5.0, "iron_axe");
 
-        hold(&mut state, "iron pickaxe");
+        hold(&mut state, "iron_pickaxe");
         assert_eq!(
             state.melee_damage(),
             mobs::PLAYER_ATTACK_DAMAGE,
@@ -824,7 +824,7 @@ mod tests {
             "nothing reported yet, so a fist"
         );
 
-        let sword = state.content.items.find("iron sword").expect("iron sword");
+        let sword = state.content.items.find("iron_sword").expect("iron_sword");
         let mut slots = vec![None; 3];
         slots[2] = Some(NetItemStack {
             item: sword.0,
@@ -902,7 +902,7 @@ mod tests {
         // This world remembers them from a previous session.
         let mut slots = vec![None; crate::inventory::TOTAL_SLOTS];
         slots[3] = Some(ItemStackData {
-            name: "bread".to_string(),
+            id: "bread".to_string(),
             count: 5,
             durability: None,
         });

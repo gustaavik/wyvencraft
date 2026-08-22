@@ -20,7 +20,7 @@ mod give;
 mod help;
 mod tp;
 
-pub use context::{CommandContext, Position};
+pub use context::{CommandContext, ItemName, Position};
 pub use fake::FakeContext;
 pub use give::GiveCommand;
 pub use help::HelpCommand;
@@ -210,10 +210,10 @@ mod tests {
 
     #[test]
     fn a_near_miss_gets_a_suggestion() {
-        let items = ["bread", "raw beef", "wooden pickaxe"];
+        let items = ["bread", "raw_beef", "wooden_pickaxe"];
         assert_eq!(suggest("brea", items), Some("bread"));
         assert_eq!(suggest("BREAD", items), Some("bread"));
-        assert_eq!(suggest("beef", items), Some("raw beef"));
+        assert_eq!(suggest("beef", items), Some("raw_beef"));
         assert_eq!(suggest("zzz", items), None);
         assert_eq!(suggest("", items), None);
     }
