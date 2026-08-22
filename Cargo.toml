@@ -47,6 +47,9 @@ renet_netcode = "2.0"
 # builds with no credential at all.
 wcauth-ticket = { git = "https://github.com/gustaavik/wcauthserver.git", branch = "main" }
 uuid = { version = "1", features = ["v4", "serde"] }
+# Locates the OS application-data directory, so saves outlive an install
+# directory that a launcher replaces on every update.
+dirs = "6"
 # Blocking HTTP. Deliberately not `reqwest`: the game has no async runtime, and
 # pulling tokio in for four requests would be absurd.
 ureq = { version = "3", features = ["json"] }
@@ -100,6 +103,7 @@ renet_netcode.workspace = true
 wcauth-ticket.workspace = true
 uuid.workspace = true
 ureq.workspace = true
+dirs.workspace = true
 rayon.workspace = true
 crossbeam-channel.workspace = true
 parking_lot.workspace = true

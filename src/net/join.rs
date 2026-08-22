@@ -3,7 +3,7 @@
 //! Two small declarations that turn the generic transport in [`wyven_net`] into
 //! this game's multiplayer.
 
-use wyven_auth::{AccountIdentity, KeyCache, TicketVerifier, keys};
+use wyven_auth::{AccountIdentity, KeyCache, TicketVerifier};
 use wyven_net::{HostConfig, JoinVerifier, Protocol, UserData};
 
 use crate::net::protocol::{ClientMessage, ServerMessage};
@@ -43,13 +43,18 @@ pub struct TicketJoin {
 
 impl TicketJoin {
     /// Load the cached keys. Call once, at bind.
+    ///
+    /// The path comes from the game rather than from `KeyCache`'s default: where
+    /// Wyvencraft keeps its data is a fact about Wyvencraft, and `wyven-auth` is
+    /// an engine crate that must not learn it.
     pub fn from_cache() -> Self {
-        let cached = KeyCache::new().load();
+        let path = crate::paths::keys_path();
+        let cached = KeyCache::at(&path).load();
         if cached.is_empty() {
             log::warn!(
                 "no {} — this host cannot verify players and will refuse every join. \
-                 Sign in once to fetch the auth keys.",
-                keys::KEYS_FILE
+                 Sign in through the launcher once to fetch the auth keys.",
+                path.display()
             );
             return Self { verifier: None };
         }

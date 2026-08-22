@@ -68,53 +68,55 @@ The 16-character username ceiling in the wire format is *why* the auth server en
 
 ## 2. Signing in
 
-`LoginState` is the first screen. It owns an `Arc<dyn AuthClient>` and runs every request on
-a one-shot worker thread, polling a channel each frame — the UI never blocks on HTTP.
+**The game has no login screen.** Signing in is the launcher's job; the game is handed a
+session through the `[account]` table of `profile.toml` and restores it at boot.
+
+`boot::start::boot_account` runs for every boot plan, before the first screen exists, and
+blocks on the main thread — there is no UI yet to keep responsive, and every later screen
+wants to know whether multiplayer is available.
 
 ```mermaid
 sequenceDiagram
-    participant U as Player
-    participant L as LoginState
-    participant W as worker thread
+    participant B as boot_account
     participant S as wcauthserver
     participant P as profile.toml
     participant K as authkeys.toml
 
-    Note over L: construction
-    L->>P: stored_account()
-    alt a profile exists
-        P-->>L: AccountProfile { refresh_token, … }
-        L->>W: spawn refresh(refresh_token)
-        W->>S: POST /api/v1/auth/refresh
-    else no profile
-        Note over L: show the form
-        U->>L: username + password, submit
-        L->>W: spawn login(u, p)
-        W->>S: POST /api/v1/auth/login
+    B->>P: stored_account()
+    alt a session exists
+        P-->>B: AccountProfile { refresh_token, … }
+        B->>S: POST /api/v1/auth/refresh
+    else no session, but WYVEN_USERNAME + WYVEN_PASSWORD
+        B->>S: POST /api/v1/auth/login
+    else neither
+        Note over B: AccountState::set_offline()
     end
 
     alt success
-        S-->>W: SessionView (rotated pair)
-        W-->>L: Outcome::Session
-        L->>P: store_account(account_id, username, refresh_token)
-        L->>L: AccountState::sign_in
-        L->>W: spawn public_keys()  (detached, best-effort)
-        W->>S: GET /api/v1/keys
-        W->>K: KeyCache::store
-        L-->>U: Replace(MainMenuState)
+        S-->>B: SessionView (rotated pair)
+        B->>P: store_account(…)  %% before anything else uses the new pair
+        B->>B: AccountState::sign_in
+        B->>S: GET /api/v1/keys
+        B->>K: KeyCache::at(paths::keys_path()).store
     else refused
-        S-->>W: {"status":"error","code":…}
-        W-->>L: Outcome::Failed(Refused)
-        Note over L: restoring? → store_account(None)<br/>"Your session expired — please sign in."
+        S-->>B: {"status":"error","code":"session_invalid"}
+        Note over B: store_account(None) — the token is dead<br/>set_offline()
     else unreachable
-        W-->>L: Outcome::Failed(Unreachable)
-        Note over L: keep the stored token<br/>offer "Play offline"
+        Note over B: keep the stored token<br/>set_offline()
     end
 ```
 
-The asymmetry in the last two branches is deliberate and worth not undoing: a **refused**
-restore clears the stored token, because it is dead; an **unreachable** server keeps it,
-because a network blip must not sign you out.
+Two orderings in there are load-bearing:
+
+- **The write to `profile.toml` precedes everything else.** Refresh rotation is destructive
+  and single-use: the token just presented is already dead server-side. A crash between
+  receiving the new pair and persisting it signs the player out everywhere.
+- **The asymmetry in the last two branches.** A **refused** restore clears the stored token,
+  because it is dead; an **unreachable** server keeps it, because a network blip must not
+  sign you out.
+
+`WYVEN_USERNAME` / `WYVEN_PASSWORD` remain as the developer path, so the game can be launched
+headlessly with no launcher. They are not how a player signs in.
 
 `AuthError` has exactly three variants and the distinction is load-bearing
 (`crates/wyven-auth/src/client.rs:27`):
@@ -125,9 +127,9 @@ Unreachable(String)                        // could not reach it   -> is_offline
 Malformed(String)                          // it said something unexpected
 ```
 
-`is_offline()` is the single branch the UI consults to decide whether to *offer* offline
-play. Offline is never a standing "skip login" button — it appears only after an actual
-`Unreachable`, and it does not unlock multiplayer.
+`is_offline()` is the branch that decides whether a failed restore keeps the stored token or
+discards it. Offline play is never a door someone chooses — it is where the game lands when no
+session could be restored, and it does not unlock multiplayer.
 
 ### The port
 
@@ -266,7 +268,8 @@ identical: a transport drop, then the 12-second timeout in `ConnectingState`.
 
 ## 4. Key distribution
 
-`authkeys.toml`, CWD-relative and gitignored, written atomically (temp + rename):
+`authkeys.toml`, in the data directory (`src/paths.rs`) and gitignored, written atomically
+(temp + rename):
 
 ```toml
 [[keys]]
@@ -278,24 +281,27 @@ The base64 is exactly what `GET /api/v1/keys` returns — the raw 32-byte Ed2551
 SPKI, not PEM. The endpoint returns **every** key including retired ones, ordered by
 creation, so tickets signed just before a rotation still verify.
 
+`KeyCache` takes its path from the caller — `KeyCache::at(paths::keys_path())`. The engine
+crate never learns where Wyvencraft keeps its data; the game resolves it and passes it in.
+
 `KeyCache::load` is fail-soft **toward refusal** (`crates/wyven-auth/src/keys.rs:17`):
 a missing file, unparseable TOML, or entries that are all unusable each yield an empty key
 set, and an empty key set refuses every join. Individual bad entries are skipped with a
 warning rather than discarding the rest, so one malformed line during a rotation cannot lock
 out the working key. `store` **replaces** rather than appends.
 
-**Exactly two places write it**, and neither is a background task:
-
-| Site                                            | When                                                 | Blocking?                                                         |
-| ----------------------------------------------- | ---------------------------------------------------- | ----------------------------------------------------------------- |
-| `src/state/login_state.rs:166` (`refresh_keys`) | after every successful sign-in, register, or restore | no — detached thread, failures logged only                        |
-| `src/boot/start.rs:65` (`boot_account`)         | after a `WYVEN_USERNAME` dev-boot login              | yes — synchronous, so a `WYVEN_HOST=1` boot can verify its guests |
+**Exactly one place in the game writes it**: `boot::start::adopt_session`, after any
+successful restore or dev-boot login, synchronously — so a `WYVEN_HOST=1` boot can verify its
+guests. A launcher is expected to write it too, from `GET /api/v1/keys` after signing in,
+which is what covers the case below.
 
 Three consequences follow, and all three surprise people:
 
-- **There is no periodic refresh.** Keys are fetched when you sign in, and at no other time.
-- **A host that has never signed in has no keys and refuses everyone.** This is the intended
-  failure direction, but the only signal is a `log::warn!` at bind plus one per refusal.
+- **There is no periodic refresh.** Keys are fetched when a session is established, and at no
+  other time.
+- **A host whose session has never been established has no keys and refuses everyone.** This
+  is the intended failure direction, but the only signal is a `log::warn!` at bind plus one
+  per refusal.
   `Host::can_verify()` exists but nothing in `src/` currently surfaces it in the UI.
 - **`TicketJoin::from_cache()` snapshots at bind.** Editing `authkeys.toml` while a host is
   running has no effect until it rebinds.
@@ -304,7 +310,7 @@ Three consequences follow, and all three surprise people:
 
 ## 5. `profile.toml`
 
-CWD-relative, gitignored, written atomically:
+In the data directory (`src/paths.rs`), gitignored, written atomically:
 
 ```toml
 client_id = "1787242050468846896"

@@ -36,7 +36,7 @@ flowchart LR
     end
 
     subgraph CP["Client process"]
-        CL["LoginState · ConnectingState<br/>AccountState"]
+        CL["boot::start · ConnectingState<br/>AccountState"]
         PT["profile.toml<br/>(refresh token)"]
     end
 
