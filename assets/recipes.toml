@@ -2,12 +2,12 @@
 #
 # Every [[recipe]] entry defines one shapeless recipe:
 #
-#   output      - name of the crafted item (must match an in-game item name)
+#   output      - id of the crafted item (must match an in-game item id)
 #   count       - how many the craft produces (optional, default 1)
-#   ingredients - table of item name -> count, consumed from the inventory
+#   ingredients - table of item id -> count, consumed from the inventory
 #
-# Item names containing spaces must be quoted when used as ingredient keys,
-# e.g.  ingredients = { "coal ore" = 2, "oak log" = 1 }
+# Item ids are single lowercase tokens, so they need no quoting as keys,
+# e.g.  ingredients = { coal_ore = 2, oak_log = 1 }
 #
 # Recipes naming an unknown item are skipped with a warning in the log; if the
 # whole file fails to parse, the game falls back to the recipes compiled into
@@ -20,7 +20,7 @@
 [[recipe]]
 output = "stick"
 count = 4
-ingredients = { "oak log" = 1 }
+ingredients = { oak_log = 1 }
 
 # Tools. The shape fixes the sticks and the head count; the tier only changes
 # which material the head is beaten from — wood, stone, or (as with the armor
@@ -32,57 +32,57 @@ ingredients = { "oak log" = 1 }
 #   sword    2 material + 1 stick
 
 [[recipe]]
-output = "wooden pickaxe"
-ingredients = { "oak log" = 3, stick = 2 }
+output = "wooden_pickaxe"
+ingredients = { oak_log = 3, stick = 2 }
 
 [[recipe]]
-output = "wooden axe"
-ingredients = { "oak log" = 3, stick = 2 }
+output = "wooden_axe"
+ingredients = { oak_log = 3, stick = 2 }
 
 [[recipe]]
-output = "wooden shovel"
-ingredients = { "oak log" = 1, stick = 2 }
+output = "wooden_shovel"
+ingredients = { oak_log = 1, stick = 2 }
 
 [[recipe]]
-output = "wooden sword"
-ingredients = { "oak log" = 2, stick = 1 }
+output = "wooden_sword"
+ingredients = { oak_log = 2, stick = 1 }
 
 [[recipe]]
-output = "stone pickaxe"
+output = "stone_pickaxe"
 ingredients = { cobblestone = 3, stick = 2 }
 
 [[recipe]]
-output = "stone axe"
+output = "stone_axe"
 ingredients = { cobblestone = 3, stick = 2 }
 
 [[recipe]]
-output = "stone shovel"
+output = "stone_shovel"
 ingredients = { cobblestone = 1, stick = 2 }
 
 [[recipe]]
-output = "stone sword"
+output = "stone_sword"
 ingredients = { cobblestone = 2, stick = 1 }
 
 [[recipe]]
-output = "iron pickaxe"
-ingredients = { "iron ore" = 3, stick = 2 }
+output = "iron_pickaxe"
+ingredients = { iron_ore = 3, stick = 2 }
 
 [[recipe]]
-output = "iron axe"
-ingredients = { "iron ore" = 3, stick = 2 }
+output = "iron_axe"
+ingredients = { iron_ore = 3, stick = 2 }
 
 [[recipe]]
-output = "iron shovel"
-ingredients = { "iron ore" = 1, stick = 2 }
+output = "iron_shovel"
+ingredients = { iron_ore = 1, stick = 2 }
 
 [[recipe]]
-output = "iron sword"
-ingredients = { "iron ore" = 2, stick = 1 }
+output = "iron_sword"
+ingredients = { iron_ore = 2, stick = 1 }
 
 # Shears: the only way to harvest leaf blocks.
 [[recipe]]
 output = "shears"
-ingredients = { cobblestone = 2, "oak log" = 1 }
+ingredients = { cobblestone = 2, oak_log = 1 }
 
 # Stand-in for smelting until furnaces exist.
 [[recipe]]
@@ -99,28 +99,62 @@ ingredients = { apple = 2 }
 output = "stone"
 ingredients = { gravel = 4 }
 
-# Armor. The plate pieces are beaten straight from ore — another stand-in for
-# smelting. Glove and cape are woven from leaves until a proper cloth exists.
+# Smelting stand-ins. Coal is the fuel in every one of them, so it reads as a
+# furnace even though the craft is shapeless.
 [[recipe]]
-output = "helmet"
-ingredients = { "iron ore" = 5 }
+output = "copper_ingot"
+ingredients = { copper_ore = 1, coal = 1 }
 
 [[recipe]]
-output = "chestplate"
-ingredients = { "iron ore" = 8 }
+output = "cooked_beef"
+ingredients = { raw_beef = 1, coal = 1 }
 
 [[recipe]]
-output = "leggings"
-ingredients = { "iron ore" = 7 }
+output = "cooked_mutton"
+ingredients = { mutton = 1, coal = 1 }
 
 [[recipe]]
-output = "boots"
-ingredients = { "iron ore" = 4 }
+output = "cooked_chicken"
+ingredients = { raw_chicken = 1, coal = 1 }
+
+[[recipe]]
+output = "cooked_porkchop"
+ingredients = { raw_porkchop = 1, coal = 1 }
+
+# Knap a shard off a handful of gravel. Drops have no chance roll, so this is
+# where flint comes from rather than off the block itself.
+[[recipe]]
+output = "flint"
+ingredients = { gravel = 3 }
+
+# Fletching.
+[[recipe]]
+output = "arrow"
+count = 4
+ingredients = { flint = 1, stick = 1, feather = 1 }
+
+# Armor. The plate pieces are the copper tier, beaten from ingots. Glove and
+# cape are woven from leaves until a proper cloth exists.
+[[recipe]]
+output = "copper_helmet"
+ingredients = { copper_ingot = 5 }
+
+[[recipe]]
+output = "copper_chestplate"
+ingredients = { copper_ingot = 8 }
+
+[[recipe]]
+output = "copper_leggings"
+ingredients = { copper_ingot = 7 }
+
+[[recipe]]
+output = "copper_boots"
+ingredients = { copper_ingot = 4 }
 
 [[recipe]]
 output = "glove"
-ingredients = { "oak leaves" = 4 }
+ingredients = { oak_leaves = 4 }
 
 [[recipe]]
 output = "cape"
-ingredients = { "oak leaves" = 6 }
+ingredients = { oak_leaves = 6 }

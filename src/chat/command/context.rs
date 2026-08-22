@@ -31,6 +31,20 @@ use crate::net::ChatKind;
 /// A world position as commands see it: `[x, y, z]`.
 pub type Position = [f32; 3];
 
+/// One item as commands see it: the id you type, and the label to echo back.
+///
+/// Both halves are needed at once. Resolution has to happen against ids — that
+/// is what the player types and what the registry matches — but a reply reading
+/// "gave 5 × wooden_pickaxe" would leak the machine key into the chat log, so
+/// the confirmation quotes the display name instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemName {
+    /// The stable key: lowercase, no spaces (see [`crate::core::ident`]).
+    pub id: String,
+    /// What the player reads.
+    pub display: String,
+}
+
 /// The session a command runs against, from the command's point of view.
 pub trait CommandContext {
     // --- Everyone ---------------------------------------------------------------
@@ -43,17 +57,17 @@ pub trait CommandContext {
 
     // --- Items ------------------------------------------------------------------
 
-    /// Every item name this build knows, for resolution and near-miss
-    /// suggestions. Item names are the stable identity across builds — numeric
-    /// ids are insertion-order indices — so commands address items by name.
-    fn item_names(&self) -> Vec<String>;
+    /// Every item this build knows, for resolution and near-miss suggestions.
+    /// String ids are the stable identity across builds — numeric ids are
+    /// insertion-order indices — so commands address items by id.
+    fn item_names(&self) -> Vec<ItemName>;
 
-    /// Put `count` of the item called `name` into the runner's inventory,
+    /// Put `count` of the item with this id into the runner's inventory,
     /// splitting it into stacks and dropping any overflow at their feet.
     ///
-    /// `name` must be one of [`item_names`](CommandContext::item_names); an
-    /// unknown name is a caller bug and fails soft with a logged warning.
-    fn give_item(&mut self, name: &str, count: u32);
+    /// `id` must be one of [`item_names`](CommandContext::item_names); an
+    /// unknown id is a caller bug and fails soft with a logged warning.
+    fn give_item(&mut self, id: &str, count: u32);
 
     // --- Position ---------------------------------------------------------------
 

@@ -35,6 +35,18 @@ group = [2, 4]
 cap = 10
 
 [[spawn]]
+entity = "pig"
+weight = 10
+group = [1, 3]
+cap = 10
+
+[[spawn]]
+entity = "chicken"
+weight = 8
+group = [2, 4]
+cap = 8
+
+[[spawn]]
 entity = "zombie"
 weight = 12
 group = [1, 2]

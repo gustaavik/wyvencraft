@@ -1,16 +1,24 @@
 # Item definitions.
 #
 # A placeable item is auto-generated for every visible, non-fluid-flow block
-# (same name as the block, stacks to 64, places itself). Entries here either
-# OVERRIDE an auto-generated block item by name, or define new items.
+# (same id as the block, stacks to 64, places itself). Entries here either
+# OVERRIDE an auto-generated block item by id, or define new items.
 #
-# NAMES ARE THE SAVE FORMAT: player inventories and crafting recipes identify
-# items by the exact `name` string.
+# IDS ARE THE SAVE FORMAT: player inventories, crafting recipes, mob drops and
+# `/give` identify items by the exact `id` string.
 #
 # Fields:
-#   name        unique display/save name
+#   id          unique key: lowercase letters, digits and underscores only, so
+#               it stays typeable as a single token (`/give wooden_pickaxe 5`).
+#               Anything else rejects the whole file and the game falls back to
+#               its builtin copy.
+#   display_name  what the player reads, in the inventory tooltip and above the
+#               hotbar. Optional: the default title-cases the id, so
+#               `wooden_pickaxe` already reads as "Wooden Pickaxe". Spell it out
+#               only where that rule gets it wrong. A block item with no
+#               `display_name` of its own inherits the block's.
 #   max_stack   defaults to 64, or 1 for tools
-#   place_block name of the block this item places (block items get theirs
+#   place_block id of the block this item places (block items get theirs
 #               automatically)
 #   [item.tool] makes the item a tool:
 #       kind        free-form tool kind; blocks whose drops say
@@ -61,7 +69,7 @@
 # no vertical offset correction.
 
 [[item]]
-name = "wooden pickaxe"
+id = "wooden_pickaxe"
 
 [item.tool]
 kind = "pickaxe"
@@ -76,7 +84,7 @@ offset = [-0.5, 0.0, -0.5]
 rotation = [0.0, 90.0, 0.0]
 
 [[item]]
-name = "wooden axe"
+id = "wooden_axe"
 
 [item.tool]
 kind = "axe"
@@ -92,7 +100,7 @@ offset = [-0.5, 0.0, -0.5]
 rotation = [0.0, 90.0, 0.0]
 
 [[item]]
-name = "wooden shovel"
+id = "wooden_shovel"
 
 [item.tool]
 kind = "shovel"
@@ -107,7 +115,7 @@ offset = [-0.5, 0.0, -0.5]
 rotation = [0.0, 90.0, 0.0]
 
 [[item]]
-name = "shears"
+id = "shears"
 
 [item.tool]
 kind = "shears"
@@ -116,7 +124,7 @@ durability = 120
 harvests = ["plant"]
 
 [[item]]
-name = "vine sword"
+id = "vine_sword"
 
 [item.tool]
 kind = "sword"
@@ -133,7 +141,7 @@ scale = 0.35
 offset = [-0.5, 0.75, -0.5]
 
 [[item]]
-name = "wooden sword"
+id = "wooden_sword"
 
 [item.tool]
 kind = "sword"
@@ -149,7 +157,7 @@ offset = [-0.5, 0.0, -0.5]
 rotation = [0.0, 90.0, 0.0]
 
 [[item]]
-name = "stone pickaxe"
+id = "stone_pickaxe"
 
 [item.tool]
 kind = "pickaxe"
@@ -164,7 +172,7 @@ offset = [-0.5, 0.0, -0.5]
 rotation = [0.0, 90.0, 0.0]
 
 [[item]]
-name = "stone axe"
+id = "stone_axe"
 
 [item.tool]
 kind = "axe"
@@ -180,7 +188,7 @@ offset = [-0.5, 0.0, -0.5]
 rotation = [0.0, 90.0, 0.0]
 
 [[item]]
-name = "stone shovel"
+id = "stone_shovel"
 
 [item.tool]
 kind = "shovel"
@@ -195,7 +203,7 @@ offset = [-0.5, 0.0, -0.5]
 rotation = [0.0, 90.0, 0.0]
 
 [[item]]
-name = "stone sword"
+id = "stone_sword"
 
 [item.tool]
 kind = "sword"
@@ -211,7 +219,7 @@ offset = [-0.5, 0.0, -0.5]
 rotation = [0.0, 90.0, 0.0]
 
 [[item]]
-name = "iron pickaxe"
+id = "iron_pickaxe"
 
 [item.tool]
 kind = "pickaxe"
@@ -226,7 +234,7 @@ offset = [-0.5, 0.0, -0.5]
 rotation = [0.0, 90.0, 0.0]
 
 [[item]]
-name = "iron axe"
+id = "iron_axe"
 
 [item.tool]
 kind = "axe"
@@ -242,7 +250,7 @@ offset = [-0.5, 0.0, -0.5]
 rotation = [0.0, 90.0, 0.0]
 
 [[item]]
-name = "iron shovel"
+id = "iron_shovel"
 
 [item.tool]
 kind = "shovel"
@@ -257,7 +265,7 @@ offset = [-0.5, 0.0, -0.5]
 rotation = [0.0, 90.0, 0.0]
 
 [[item]]
-name = "iron sword"
+id = "iron_sword"
 
 [item.tool]
 kind = "sword"
@@ -273,41 +281,115 @@ offset = [-0.5, 0.0, -0.5]
 rotation = [0.0, 90.0, 0.0]
 
 [[item]]
-name = "apple"
+id = "apple"
 
 [item.food]
 hunger = 4.0
 saturation = 2.4
 
 [[item]]
-name = "bread"
+id = "bread"
 
 [item.food]
 hunger = 5.0
 saturation = 6.0
 
-# Mob drops (see the mob `drops` lists in entities.toml).
+# Mob drops (see the mob `drops` lists in entities.toml). Raw meat is thin
+# food; cooking roughly doubles it.
 
 [[item]]
-name = "raw beef"
+id = "raw_beef"
 
 [item.food]
 hunger = 3.0
 saturation = 1.8
 
 [[item]]
-name = "raw mutton"
+id = "mutton"
 
 [item.food]
 hunger = 2.0
 saturation = 1.2
 
+[[item]]
+id = "raw_chicken"
+
+[item.food]
+hunger = 2.0
+saturation = 1.2
+
+[[item]]
+id = "cooked_beef"
+
+[item.food]
+hunger = 8.0
+saturation = 12.8
+
+[[item]]
+id = "cooked_mutton"
+
+[item.food]
+hunger = 6.0
+saturation = 9.6
+
+[[item]]
+id = "cooked_chicken"
+
+[item.food]
+hunger = 6.0
+saturation = 7.2
+
+[[item]]
+id = "raw_porkchop"
+
+[item.food]
+hunger = 3.0
+saturation = 1.8
+
+[[item]]
+id = "cooked_porkchop"
+
+[item.food]
+hunger = 8.0
+saturation = 12.8
+
+# Mob and block materials. Plain stackables: no components, so their icons are
+# whatever `assets/textures/<id>.png` holds.
+
+[[item]]
+id = "leather"
+
+[[item]]
+id = "feather"
+
+[[item]]
+id = "string"
+
+[[item]]
+id = "arrow"
+
+[[item]]
+id = "coal"
+
+[[item]]
+id = "clay_ball"
+
+[[item]]
+id = "flint"
+
+[[item]]
+id = "copper_ingot"
+
 # Armor. Worn pieces live in the six equipment slots; their `defense` sums into
 # the damage reduction applied by `Player::damage`, and every hit wears each worn
 # piece by one point. A piece only fits the slot it names.
+#
+# The four plate pieces are the copper tier and are named for it, so a second
+# tier can be added beside them rather than replacing them. `glove` and `cape`
+# are tierless and keep their bare ids.
 
 [[item]]
-name = "helmet"
+id = "copper_helmet"
 
 [item.armor]
 slot = "helmet"
@@ -315,7 +397,7 @@ defense = 2.0
 durability = 120
 
 [[item]]
-name = "chestplate"
+id = "copper_chestplate"
 
 [item.armor]
 slot = "chestplate"
@@ -323,7 +405,7 @@ defense = 6.0
 durability = 240
 
 [[item]]
-name = "leggings"
+id = "copper_leggings"
 
 [item.armor]
 slot = "leggings"
@@ -331,7 +413,7 @@ defense = 5.0
 durability = 200
 
 [[item]]
-name = "boots"
+id = "copper_boots"
 
 [item.armor]
 slot = "boots"
@@ -339,7 +421,7 @@ defense = 2.0
 durability = 120
 
 [[item]]
-name = "glove"
+id = "glove"
 
 [item.armor]
 slot = "glove"
@@ -347,7 +429,7 @@ defense = 1.0
 durability = 80
 
 [[item]]
-name = "cape"
+id = "cape"
 
 [item.armor]
 slot = "cape"
@@ -355,11 +437,10 @@ defense = 1.0
 durability = 80
 
 # Crafting intermediate: the handle every tool is built around. No components,
-# so it is a plain stackable and its icon comes from the painter in
-# `render::tiles::paint_named`.
+# so it is a plain stackable drawing its icon from `assets/textures/stick.png`.
 
 [[item]]
-name = "stick"
+id = "stick"
 
 # Ground cover. These four override the items auto-generated for the matching
 # [block.model] blocks, adding nothing but the model — which is enough to give
@@ -370,7 +451,7 @@ name = "stick"
 # repeated here.
 
 [[item]]
-name = "blue bells"
+id = "blue_bells"
 
 [item.model]
 path = "assets/models/plant1.bbmodel"
@@ -378,7 +459,7 @@ scale = 0.4
 offset = [-0.5, 0.0, -0.5]
 
 [[item]]
-name = "red flower"
+id = "red_flower"
 
 [item.model]
 path = "assets/models/plant2.bbmodel"
@@ -386,7 +467,7 @@ scale = 0.4
 offset = [-0.5, 0.0, -0.5]
 
 [[item]]
-name = "red mushroom"
+id = "red_mushroom"
 
 [item.model]
 path = "assets/models/mushroom1.bbmodel"
@@ -394,7 +475,7 @@ scale = 0.5
 offset = [-0.5, 0.0, -0.5]
 
 [[item]]
-name = "brown mushroom"
+id = "brown_mushroom"
 
 [item.model]
 path = "assets/models/mushroom2.bbmodel"
@@ -403,10 +484,10 @@ offset = [-0.5, 0.0, -0.5]
 
 [starter_kit]
 survival = [
-    { item = "wooden pickaxe" },
-    { item = "wooden axe" },
-    { item = "wooden shovel" },
-    { item = "vine sword" },
+    { item = "wooden_pickaxe" },
+    { item = "wooden_axe" },
+    { item = "wooden_shovel" },
+    { item = "vine_sword" },
     { item = "apple", count = 5 },
     { item = "bread", count = 3 },
 ]

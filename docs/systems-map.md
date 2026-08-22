@@ -42,7 +42,7 @@ though the dependency points the other way.
 
 | Trait                            | Declared                                                              | Implemented                                                | Dispatch                                        |
 | -------------------------------- | --------------------------------------------------------------------- | ---------------------------------------------------------- | ----------------------------------------------- |
-| `TileSource` (+ `ReservedTiles`) | `crates/wyven-render/src/tile_registry.rs:54`                         | `src/art/mod.rs:29` (`WyvencraftArt`)                      | `Box<dyn>`, load-time only                      |
+| `TileSource` (+ `ReservedTiles`) | `crates/wyven-render/src/tile_registry.rs:54`                         | `src/art/mod.rs:32` (`WyvencraftArt`)                      | `Box<dyn>`, load-time only                      |
 | `BlockCatalog`                   | `crates/wyven-voxel/src/catalog.rs:28`                                | `src/content/catalog.rs:28` (`BlockAppearance`)            | **`&impl`, monomorphised** — per-voxel hot path |
 | `BlockProperties`                | `crates/wyven-voxel/src/catalog.rs:88`                                | `src/world/block.rs:181` (`BlockRegistry`)                 | `Arc<dyn>` — crosses threads                    |
 | `WorldGenerator`                 | `crates/wyven-voxel/src/generate.rs:9`                                | `src/world/generation/generator.rs:110` (`NoiseGenerator`) | `Arc<dyn>` — cloned into workers                |

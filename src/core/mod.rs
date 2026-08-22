@@ -9,9 +9,12 @@
 //!   `instant_break`, `can_fly`), not a primitive.
 //! - [`DayCycle`] — a 20-minute day and an `is_night` that gates mob spawning
 //!   are likewise Wyvencraft's numbers, not the engine's.
+//! - [`ident`] — how content is named: what makes a legal block/item id, and
+//!   the display name derived from one.
 
 pub mod day_cycle;
 pub mod gamemode;
+pub mod ident;
 
 pub use day_cycle::{Atmosphere, DayCycle};
 pub use gamemode::GameMode;

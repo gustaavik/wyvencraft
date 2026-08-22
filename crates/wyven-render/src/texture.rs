@@ -1,9 +1,9 @@
 //! Sampled textures and the block-atlas layout.
 //!
 //! The atlas pixels are assembled at startup by the tile registry
-//! ([`super::tile_registry::TileRegistry::atlas_rgba`]) from PNGs and the
-//! procedural pixel art in [`super::tiles`]. This module owns the atlas layout
-//! (`tile index -> UV`) and the GPU upload.
+//! ([`super::tile_registry::TileRegistry::atlas_rgba`]), which gets its art from
+//! whatever [`TileSource`](super::tile_registry::TileSource) the game supplies.
+//! This module owns the atlas layout (`tile index -> UV`) and the GPU upload.
 //!
 //! [`Texture`] is deliberately *not* atlas-shaped: the block atlas is one
 //! instance of it, and a model loaded from a file brings its own. Each carries
@@ -33,7 +33,7 @@ use super::pipeline::voxel;
 /// Atlas is a square grid of `ATLAS_COLUMNS x ATLAS_COLUMNS` tiles.
 pub const ATLAS_COLUMNS: u32 = 16;
 /// Pixels per tile edge.
-pub const TILE_SIZE: u32 = 16;
+pub const TILE_SIZE: u32 = 32;
 /// Full atlas edge length in pixels.
 pub const ATLAS_SIZE: u32 = ATLAS_COLUMNS * TILE_SIZE;
 

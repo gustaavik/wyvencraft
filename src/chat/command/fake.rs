@@ -6,7 +6,8 @@
 //! command can be exercised end to end without a world, a registry, a socket or
 //! a GPU: what `/give bread 12` *means* is testable in three lines.
 
-use super::{CommandContext, Position};
+use super::{CommandContext, ItemName, Position};
+use crate::core::ident::title_case;
 use crate::net::ChatKind;
 
 /// A context that answers from fixed data and records everything done to it.
@@ -15,7 +16,7 @@ pub struct FakeContext {
     /// What [`CommandContext::is_op`] reports.
     pub is_op: bool,
     /// What [`CommandContext::item_names`] returns.
-    pub items: Vec<String>,
+    pub items: Vec<ItemName>,
     /// Where the runner stands.
     pub position: Position,
     /// The other players in the session.
@@ -29,10 +30,18 @@ pub struct FakeContext {
 }
 
 impl FakeContext {
+    /// Build from bare ids, deriving each label the way `content` does — so a
+    /// test says `["wooden_pickaxe"]` and still gets "Wooden Pickaxe" back.
     pub fn new<'a>(is_op: bool, items: impl IntoIterator<Item = &'a str>) -> Self {
         Self {
             is_op,
-            items: items.into_iter().map(str::to_string).collect(),
+            items: items
+                .into_iter()
+                .map(|id| ItemName {
+                    id: id.to_string(),
+                    display: title_case(id),
+                })
+                .collect(),
             ..Self::default()
         }
     }
@@ -76,12 +85,12 @@ impl CommandContext for FakeContext {
         self.replies.push((kind, text));
     }
 
-    fn item_names(&self) -> Vec<String> {
+    fn item_names(&self) -> Vec<ItemName> {
         self.items.clone()
     }
 
-    fn give_item(&mut self, name: &str, count: u32) {
-        self.given.push((name.to_string(), count));
+    fn give_item(&mut self, id: &str, count: u32) {
+        self.given.push((id.to_string(), count));
     }
 
     fn position(&self) -> Position {
@@ -110,7 +119,13 @@ mod tests {
         ctx.give_item("bread", 3);
 
         assert!(ctx.is_op());
-        assert_eq!(ctx.item_names(), ["bread"]);
+        assert_eq!(
+            ctx.item_names(),
+            [ItemName {
+                id: "bread".into(),
+                display: "Bread".into()
+            }]
+        );
         assert_eq!(ctx.given, [("bread".to_string(), 3)]);
         assert_eq!(ctx.said(ChatKind::System), "hello");
         assert_eq!(ctx.said(ChatKind::Error), "nope");

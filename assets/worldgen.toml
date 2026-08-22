@@ -29,19 +29,19 @@ clay = { block = "clay", below = -0.35 }
 # so reordering or inserting entries relocates ores in existing worlds.
 # `threshold` is on the ore noise field — higher = rarer.
 [[ore]]
-block = "iron ore"
+block = "iron_ore"
 min_y = 8
 max_y = 72
 threshold = 0.60
 
 [[ore]]
-block = "copper ore"
+block = "copper_ore"
 min_y = 8
 max_y = 80
 threshold = 0.58
 
 [[ore]]
-block = "coal ore"
+block = "coal_ore"
 min_y = 16
 max_y = 108
 threshold = 0.55
@@ -51,15 +51,15 @@ threshold = 0.55
 [[tree]]
 name = "oak"
 shape = "oak"
-trunk = "oak log"
-leaves = "oak leaves"
+trunk = "oak_log"
+leaves = "oak_leaves"
 trunk_height = [4, 6]
 
 [[tree]]
 name = "spruce"
 shape = "spruce"
-trunk = "oak log"
-leaves = "oak leaves"
+trunk = "oak_log"
+leaves = "oak_leaves"
 trunk_height = [6, 8]
 
 # Half-buried boulders on dry land.
@@ -90,7 +90,7 @@ surface = "grass"
 subsurface = "dirt"
 tree = "oak"
 tree_chance_per_mille = 550
-plants = ["blue bells", "red flower", "cornflower", "red mushroom", "brown mushroom"]
+plants = ["blue_bells", "red_flower", "cornflower", "red_mushroom", "brown_mushroom"]
 plant_chance_per_mille = 90
 tint = [124, 189, 107]
 foliage_tint = [93, 165, 74]
@@ -102,7 +102,7 @@ subsurface = "dirt"
 tree = "spruce"
 tree_chance_per_mille = 400
 # Only fungi survive the cold, and sparsely.
-plants = ["red mushroom", "brown mushroom"]
+plants = ["red_mushroom", "brown_mushroom"]
 plant_chance_per_mille = 15
 # Washed-out and blue-shifted, for grass poking through the snow line.
 tint = [128, 180, 151]

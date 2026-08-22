@@ -23,7 +23,9 @@
 use glam::Vec3;
 
 use super::InGameState;
-use crate::chat::{self, ChatKind, ChatState, CommandContext, Invocation, Permission, Position};
+use crate::chat::{
+    self, ChatKind, ChatState, CommandContext, Invocation, ItemName, Permission, Position,
+};
 use crate::entity::DroppedItem;
 use crate::inventory::{ItemId, ItemRegistry, ItemStack};
 use crate::net::{Channel, ClientMessage, NetItemStack, NetVec3, PlayerId, ServerMessage};
@@ -323,17 +325,20 @@ impl CommandContext for SessionContext<'_> {
         self.state.reply(self.actor, kind, text);
     }
 
-    fn item_names(&self) -> Vec<String> {
+    fn item_names(&self) -> Vec<ItemName> {
         self.state
             .content
             .items
             .iter()
-            .map(|(_, item)| item.name.clone())
+            .map(|(id, item)| ItemName {
+                id: item.id.clone(),
+                display: self.state.content.item_display_name(id).to_string(),
+            })
             .collect()
     }
 
-    fn give_item(&mut self, name: &str, count: u32) {
-        self.state.give_item(self.actor, name, count);
+    fn give_item(&mut self, id: &str, count: u32) {
+        self.state.give_item(self.actor, id, count);
     }
 
     fn position(&self) -> Position {
@@ -489,8 +494,8 @@ mod tests {
     #[test]
     fn a_multi_word_item_can_be_given() {
         let mut state = InGameState::new(GameContent::builtin(), 5, GameMode::Creative);
-        state.submit_chat("/give raw beef 3".to_string());
-        assert_eq!(count_of(&state, "raw beef"), 3);
+        state.submit_chat("/give cooked beef 3".to_string());
+        assert_eq!(count_of(&state, "cooked_beef"), 3);
     }
 
     /// A tool has durability, so five of them are five stacks of one — not one
@@ -500,7 +505,7 @@ mod tests {
         let mut state = InGameState::new(GameContent::builtin(), 5, GameMode::Creative);
         state.submit_chat("/give wooden pickaxe 3".to_string());
 
-        let id = state.content.items.find("wooden pickaxe").unwrap();
+        let id = state.content.items.find("wooden_pickaxe").unwrap();
         let full = state.content.items.max_durability(id).unwrap();
         let picks: Vec<_> = state
             .inventory

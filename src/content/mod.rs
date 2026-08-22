@@ -15,9 +15,11 @@
 use std::sync::Arc;
 
 use crate::core::Direction;
+use crate::core::ident::title_case;
 use crate::entity::kind::VisualSpec;
 use crate::entity::{EntityRegistry, SpawnConfig};
-use crate::inventory::ItemRegistry;
+use crate::inventory::item::ItemVisuals;
+use crate::inventory::{ItemId, ItemRegistry};
 use crate::world::block::{
     BUILTIN_BLOCKS, BlockJsonSpec, BlockModelSpec, BlockRegistry, BlockVisuals, FluidVisual,
 };
@@ -28,7 +30,7 @@ use wyven_voxel::model_hitbox;
 use wyven_voxel::{BlockModel, FaceTextures};
 
 use wyven_assets::decode_png;
-use wyven_model::{ModelId, ModelRegistry, ModelSpec, blockjson};
+use wyven_model::{ModelId, ModelRegistry, blockjson};
 use wyven_render::TileRegistry;
 use wyven_render::block_textures::{self, AnimatedLayers, BlockTextureSet, Strip};
 
@@ -62,6 +64,17 @@ pub enum ItemIcon {
 /// What a block with no resolvable art draws with: the missing-texture marker
 /// on every face, which is tile 0 by construction.
 pub(crate) const MISSING_FACES: FaceTextures = FaceTextures::uniform(0);
+
+/// How a loose stack is shaped where it lies in the world.
+///
+/// A block item is a miniature of the block, each face its own texture. Anything
+/// else has only a flat icon, and wrapping that around a cube reads as six
+/// apples rather than one — so it is drawn as the icon itself, one texel thick.
+#[derive(Debug, Clone, Copy)]
+pub enum ItemShape {
+    Cube(FaceTextures),
+    Sprite(u32),
+}
 
 /// A loaded model plus the placement its data file asked for. Resolving the
 /// path to a [`ModelId`] once at load keeps the per-frame path a plain index.
@@ -107,10 +120,30 @@ pub struct GameContent {
     /// `BlockId` — see [`GameContent::face_textures`], which is how everything
     /// outside the chunk mesh should read them.
     pub block_face_tiles: Vec<Option<FaceTextures>>,
+    /// The cube faces the arrow projectile is drawn with, resolved once from
+    /// the `arrow` item. A projectile in flight is not an inventory stack, so
+    /// nothing would otherwise look this up — and looking it up by id every
+    /// frame would be the only string search in the render path.
+    ///
+    /// Still a cube, unlike a *dropped* arrow: an arrow in flight is oriented by
+    /// its own yaw, so a flat sprite would turn edge-on to the way it is going.
+    /// It wants a model, not a sprite.
+    pub arrow_faces: FaceTextures,
     /// The animation strip each fluid block draws from, indexed by `BlockId`
     /// and covering the auto-registered flowing blocks too. Kept off `Block`
     /// for the same reason as [`BlockModel`].
     pub fluid_textures: Vec<Option<FluidTexture>>,
+    /// What the player reads for each block, indexed by `BlockId`: the
+    /// `display_name` it authored, or its id title-cased. Read it through
+    /// [`GameContent::block_display_name`].
+    ///
+    /// Off `Block`, like every other presentation field — a peer whose grass is
+    /// merely *labelled* differently should still be able to join.
+    pub block_display_names: Vec<String>,
+    /// What the player reads for each item, indexed by `ItemId`. Read it
+    /// through [`GameContent::item_display_name`]; this is the string the
+    /// inventory tooltip, the hotbar label and `/give`'s reply all show.
+    pub item_display_names: Vec<String>,
     /// Fingerprint of every gameplay-affecting definition. Exchanged in the
     /// multiplayer `Welcome`: raw block/item ids cross the wire, so a session
     /// between peers with divergent content would silently corrupt worlds —
@@ -118,6 +151,9 @@ pub struct GameContent {
     /// (visual-only divergence is harmless).
     pub hash: u64,
 }
+
+/// The item a fired arrow borrows its art from.
+const ARROW_ITEM: &str = "arrow";
 
 const BLOCKS_PATH: &str = "assets/blocks.toml";
 const ITEMS_PATH: &str = "assets/items.toml";
@@ -168,22 +204,31 @@ impl GameContent {
             models: block_model_specs,
             json: block_json_paths,
             fluids: fluid_visuals,
+            display_names: block_labels,
         } = block_ctx.visuals;
-        // Item models ride out on the `ctx` channel rather than on `Item`
-        // itself: they are visual-only and must stay out of `content_hash`.
-        let mut item_model_specs: Vec<Option<ModelSpec>> = Vec::new();
+        // Item models and labels ride out on the `ctx` channel rather than on
+        // `Item` itself: both are presentation and must stay out of
+        // `content_hash`.
+        let mut item_visuals = ItemVisuals::default();
         let items = Arc::new(load_or_builtin(
             source,
             ITEMS_PATH,
             "items",
-            &mut item_model_specs,
-            |text, specs| ItemRegistry::from_toml_with_models(text, &blocks, specs),
-            |specs| {
-                specs.clear();
+            &mut item_visuals,
+            |text, visuals| ItemRegistry::from_toml_with_visuals(text, &blocks, visuals),
+            |visuals| {
+                *visuals = ItemVisuals::default();
                 ItemRegistry::from_blocks(&blocks)
             },
             |reg| format!("{} items", reg.len()),
         ));
+        let ItemVisuals {
+            models: mut item_model_specs,
+            display_names: item_labels,
+        } = item_visuals;
+        let block_display_names = resolve_block_display_names(&blocks, block_labels);
+        let item_display_names =
+            resolve_item_display_names(&items, item_labels, &block_display_names);
         let entities = Arc::new(load_or_builtin(
             source,
             ENTITIES_PATH,
@@ -325,6 +370,13 @@ impl GameContent {
 
         let item_icons =
             build_item_icons(&mut tiles, &blocks, &items, &item_models, &block_face_tiles);
+        let arrow_faces = items
+            .find(ARROW_ITEM)
+            .and_then(|id| match item_icons.get(id.0 as usize) {
+                Some(&ItemIcon::Flat(tile)) => Some(FaceTextures::uniform(tile)),
+                _ => None,
+            })
+            .unwrap_or(MISSING_FACES);
         let hash = content_hash(&blocks, &items, &entities, &worldgen, &spawning);
         Arc::new(Self {
             tiles,
@@ -340,7 +392,10 @@ impl GameContent {
             block_models,
             baked_models,
             block_face_tiles,
+            arrow_faces,
             fluid_textures,
+            block_display_names,
+            item_display_names,
             hash,
         })
     }
@@ -372,6 +427,101 @@ impl GameContent {
             .flatten()
             .unwrap_or(MISSING_FACES)
     }
+
+    /// What shape a loose `item` takes where it lies in the world.
+    ///
+    /// An item with a `[item.model]` is drawn as that model instead and never
+    /// reaches here; anything else with no art at all gets the missing marker,
+    /// which is the same thing its inventory icon shows.
+    pub fn item_shape(&self, item: ItemId) -> ItemShape {
+        // Read the decision off the icon rather than re-deriving it from
+        // `place_block`: the two must agree, and a fluid is the case that proves
+        // it — water places a block but its icon is the flat still frame, so
+        // asking `place_block` would give a dropped bucket-of-nothing a cube the
+        // inventory never shows.
+        match self.item_icons.get(item.0 as usize) {
+            Some(&ItemIcon::Flat(tile)) => ItemShape::Sprite(tile),
+            Some(&ItemIcon::Cube { .. }) => ItemShape::Cube(
+                self.items
+                    .get(item)
+                    .place_block
+                    .map_or(MISSING_FACES, |block| self.face_textures(block)),
+            ),
+            // A model-backed item is drawn as its model and never reaches here.
+            _ => ItemShape::Cube(MISSING_FACES),
+        }
+    }
+
+    /// What the player reads for `block`. Falls back to the id, which is always
+    /// something rather than an empty label.
+    pub fn block_display_name(&self, block: crate::core::BlockId) -> &str {
+        self.block_display_names
+            .get(block.0 as usize)
+            .map(String::as_str)
+            .unwrap_or_else(|| &self.blocks.get(block).id)
+    }
+
+    /// What the player reads for `item` — the inventory tooltip, the label
+    /// above the hotbar, and the name `/give` echoes back.
+    pub fn item_display_name(&self, item: ItemId) -> &str {
+        self.item_display_names
+            .get(item.0 as usize)
+            .map(String::as_str)
+            .unwrap_or_else(|| &self.items.get(item).id)
+    }
+}
+
+/// Resolve every block's label: the one it authored, or its id title-cased.
+fn resolve_block_display_names(
+    blocks: &BlockRegistry,
+    authored: Vec<Option<String>>,
+) -> Vec<String> {
+    blocks
+        .iter()
+        .map(|(id, block)| {
+            authored
+                .get(id.0 as usize)
+                .cloned()
+                .flatten()
+                .unwrap_or_else(|| title_case(&block.id))
+        })
+        .collect()
+}
+
+/// Resolve every item's label, in precedence order: the one the `[[item]]`
+/// entry authored, else — for a block item — the *block's* resolved label, so
+/// a block and the item that places it can never disagree, else the id
+/// title-cased.
+fn resolve_item_display_names(
+    items: &ItemRegistry,
+    authored: Vec<Option<String>>,
+    block_names: &[String],
+) -> Vec<String> {
+    // The reverse of `block_to_item`: the block each item places, if any.
+    // Built once rather than rescanned per item.
+    let mut from_block: Vec<Option<usize>> = vec![None; items.len()];
+    for block in 0..block_names.len() {
+        if let Some(item) = items.item_for_block(crate::core::BlockId(block as u16))
+            && let Some(slot) = from_block.get_mut(item.0 as usize)
+        {
+            *slot = Some(block);
+        }
+    }
+
+    items
+        .iter()
+        .map(|(id, item)| {
+            if let Some(label) = authored.get(id.0 as usize).cloned().flatten() {
+                return label;
+            }
+            if let Some(block) = from_block[id.0 as usize]
+                && let Some(label) = block_names.get(block)
+            {
+                return label.clone();
+            }
+            title_case(&item.id)
+        })
+        .collect()
 }
 
 /// Column of the strip each of the two states reads. Documented in
@@ -553,7 +703,7 @@ fn build_item_icons(
             });
             match derived {
                 Some(tile) => ItemIcon::Flat(tile),
-                None => ItemIcon::Flat(tiles.resolve(&item.name).tile),
+                None => ItemIcon::Flat(tiles.resolve(&item.id).tile),
             }
         })
         .collect()
@@ -666,7 +816,7 @@ mod tests {
             }
         }
 
-        let sword = content.items.find("vine sword").expect("vine sword item");
+        let sword = content.items.find("vine_sword").expect("vine sword item");
         let model = content.item_models[sword.0 as usize].expect("vine sword has a model");
         assert_eq!(model.scale, 0.35);
         let loaded = content
@@ -699,31 +849,31 @@ mod tests {
             let loaded = content
                 .models
                 .get(model.id)
-                .unwrap_or_else(|| panic!("{}: model id is not in the registry", block.name));
+                .unwrap_or_else(|| panic!("{}: model id is not in the registry", block.id));
             assert!(
                 loaded.triangle_count() > 0,
                 "{}: model has no geometry",
-                block.name
+                block.id
             );
-            assert!(model.scale > 0.0, "{}: non-positive scale", block.name);
+            assert!(model.scale > 0.0, "{}: non-positive scale", block.id);
 
             let item = content
                 .items
-                .find(&block.name)
-                .unwrap_or_else(|| panic!("{}: no placeable item", block.name));
+                .find(&block.id)
+                .unwrap_or_else(|| panic!("{}: no placeable item", block.id));
             let item_model = content.item_models[item.0 as usize]
-                .unwrap_or_else(|| panic!("{}: item declares no model", block.name));
+                .unwrap_or_else(|| panic!("{}: item declares no model", block.id));
             assert_eq!(
                 item_model.id, model.id,
                 "{}: block and item parsed the file twice",
-                block.name
+                block.id
             );
-            declared.push(block.name.clone());
+            declared.push(block.id.clone());
         }
 
         assert_eq!(
             declared,
-            ["blue bells", "red flower", "red mushroom", "brown mushroom"],
+            ["blue_bells", "red_flower", "red_mushroom", "brown_mushroom"],
             "shipped model-backed blocks"
         );
     }
@@ -738,10 +888,10 @@ mod tests {
         // a re-export that changes a plant's size should show up here rather
         // than as a crosshair that quietly stops feeling right.
         let expected = [
-            ("blue bells", 0.83, 0.99),
-            ("red flower", 0.49, 0.63),
-            ("red mushroom", 0.41, 0.56),
-            ("brown mushroom", 0.83, 0.63),
+            ("blue_bells", 0.83, 0.99),
+            ("red_flower", 0.49, 0.63),
+            ("red_mushroom", 0.41, 0.56),
+            ("brown_mushroom", 0.83, 0.63),
         ];
         for (name, width, height) in expected {
             let id = content.blocks.find(name).expect("shipped block");
@@ -878,7 +1028,7 @@ mod tests {
                 content
                     .blocks
                     .get(crate::core::BlockId(id as u16))
-                    .name
+                    .id
                     .as_str()
             })
             .collect();
@@ -889,12 +1039,12 @@ mod tests {
                 "dirt",
                 "grass",
                 "sand",
-                "oak log",
-                "oak leaves",
+                "oak_log",
+                "oak_leaves",
                 "gravel",
-                "coal ore",
-                "iron ore",
-                "copper ore",
+                "coal_ore",
+                "iron_ore",
+                "copper_ore",
                 "cobblestone",
                 "cornflower",
             ],
@@ -904,14 +1054,14 @@ mod tests {
         // Solid terrain cubes must fill their cell so neighbours can cull
         // against them. The other two legitimately do not: leaves are a cutout,
         // and a cornflower is two crossed planes.
-        let see_through = ["oak leaves", "cornflower"];
+        let see_through = ["oak_leaves", "cornflower"];
 
         for (id, baked) in content.baked_models.iter().enumerate() {
             let Some(baked) = baked else { continue };
             let name = content
                 .blocks
                 .get(crate::core::BlockId(id as u16))
-                .name
+                .id
                 .as_str();
             assert!(!baked.quads.is_empty(), "{name}: no geometry");
             let expected = !see_through.contains(&name);
@@ -992,20 +1142,20 @@ mod tests {
             let loaded = content
                 .models
                 .get(model.id)
-                .unwrap_or_else(|| panic!("{}: model id is not in the registry", item.name));
+                .unwrap_or_else(|| panic!("{}: model id is not in the registry", item.id));
             assert!(
                 loaded.triangle_count() > 0,
                 "{}: model has no geometry",
-                item.name
+                item.id
             );
-            assert!(model.scale > 0.0, "{}: non-positive scale", item.name);
+            assert!(model.scale > 0.0, "{}: non-positive scale", item.id);
             // An item with a model always icons as that model.
             assert!(
                 matches!(content.item_icons[index], ItemIcon::Model(drawn) if drawn == model.id),
                 "{}: does not icon as its model",
-                item.name
+                item.id
             );
-            declared.push(item.name.clone());
+            declared.push(item.id.clone());
         }
 
         // The twelve tiered tools, the vine sword, and the four ground-cover
@@ -1022,6 +1172,43 @@ mod tests {
         let repointed = base.replace("assets/models/vine_sword", "assets/models/elsewhere");
         assert_ne!(base, repointed, "fixture substituted nothing");
         repointed
+    }
+
+    /// A dropped block is a miniature of itself; a dropped apple is its icon.
+    /// Wrapping a flat icon around a cube is what this split exists to stop.
+    #[test]
+    fn only_block_items_are_shaped_as_cubes() {
+        let content = GameContent::builtin();
+        let shape = |id: &str| {
+            let item = content.items.find(id).unwrap_or_else(|| panic!("no {id}"));
+            content.item_shape(item)
+        };
+        assert!(matches!(shape("dirt"), ItemShape::Cube(_)), "dirt");
+        assert!(matches!(shape("apple"), ItemShape::Sprite(_)), "apple");
+        assert!(matches!(shape("coal"), ItemShape::Sprite(_)), "coal");
+        // Water is a fluid: its icon is derived from the still frame, so it is
+        // flat art like any other icon rather than six faces of a cube.
+        assert!(matches!(shape("water"), ItemShape::Sprite(_)), "water");
+    }
+
+    /// The shipped apple art has transparent corners, so its extruded silhouette
+    /// must come out smaller than a full card. This is what proves the alpha
+    /// tracing reads real art and not just the synthetic fixtures in the mesher.
+    #[test]
+    fn a_real_icon_traces_less_than_a_full_card() {
+        let content = GameContent::builtin();
+        let apple = content.items.find("apple").expect("no apple");
+        let ItemShape::Sprite(tile) = content.item_shape(apple) else {
+            panic!("apple should be a sprite");
+        };
+        let art = content.tiles.art(tile).expect("apple art");
+        let full = wyven_voxel::ItemSprite::new(tile, None).rim_len();
+        let traced = wyven_voxel::ItemSprite::new(tile, Some(art)).rim_len();
+        assert!(traced > 0, "apple traced no silhouette at all");
+        assert!(
+            traced < full,
+            "apple traced a full card ({traced} of {full})"
+        );
     }
 
     /// A model is visual-only: swapping one must not change the fingerprint that
@@ -1045,6 +1232,84 @@ mod tests {
         assert_eq!(base.hash, repointed.hash);
     }
 
+    /// A label is presentation for exactly the same reason a model is: two peers
+    /// running a translated items file must still be able to share a world.
+    #[test]
+    fn display_names_do_not_feed_the_content_hash() {
+        let base_text = crate::inventory::item::BUILTIN_ITEMS;
+        // Give every declared item a label it did not have before.
+        let relabelled = base_text.replace("\n[[item]]\n", "\n[[item]]\ndisplay_name = \"Ding\"\n");
+        assert_ne!(base_text, relabelled, "fixture substituted nothing");
+
+        let base = GameContent::from_source(&MapSource::new().with(ITEMS_PATH, base_text));
+        let renamed = GameContent::from_source(&MapSource::new().with(ITEMS_PATH, relabelled));
+
+        assert!(
+            renamed.item_display_names.iter().any(|n| n == "Ding"),
+            "the fixture's labels did not take effect"
+        );
+        assert_eq!(base.items.len(), renamed.items.len(), "same items");
+        assert_eq!(base.hash, renamed.hash);
+    }
+
+    /// The three ways an item gets its label, in precedence order.
+    #[test]
+    fn item_display_names_resolve_by_authored_then_block_then_id() {
+        let content = GameContent::load();
+
+        // Derived from the id: nothing in the shipped data spells this one out.
+        let pickaxe = content.items.find("wooden_pickaxe").expect("shipped item");
+        assert_eq!(content.item_display_name(pickaxe), "Wooden Pickaxe");
+
+        // A block item takes the block's label, so the two can never disagree.
+        let log_block = content.blocks.find("oak_log").expect("shipped block");
+        let log_item = content
+            .items
+            .item_for_block(log_block)
+            .expect("oak_log is placeable");
+        assert_eq!(content.block_display_name(log_block), "Oak Log");
+        assert_eq!(content.item_display_name(log_item), "Oak Log");
+
+        // Every item has *some* label, and none of them leak the underscored id.
+        assert_eq!(content.item_display_names.len(), content.items.len());
+        for (id, item) in content.items.iter() {
+            let label = content.item_display_name(id);
+            assert!(!label.is_empty(), "{}: empty label", item.id);
+            assert!(
+                !label.contains('_'),
+                "{}: label kept an underscore",
+                item.id
+            );
+        }
+    }
+
+    /// An authored `display_name` wins over the derived one, and a block item
+    /// with no label of its own inherits the block's authored label.
+    #[test]
+    fn an_authored_display_name_overrides_the_derived_one() {
+        let blocks = format!(
+            "{BUILTIN_BLOCKS}\n\
+             [[block]]\n\
+             id = \"tnt\"\n\
+             display_name = \"TNT\"\n\
+             render = \"opaque\"\n\
+             solid = true\n\
+             hardness = 1.0\n\
+             material = \"stone\"\n\
+             textures = \"stone\"\n"
+        );
+        let content = GameContent::from_source(&MapSource::new().with(BLOCKS_PATH, blocks));
+
+        let block = content.blocks.find("tnt").expect("fixture block");
+        let item = content.items.find("tnt").expect("its placeable item");
+        assert_eq!(content.block_display_name(block), "TNT");
+        assert_eq!(
+            content.item_display_name(item),
+            "TNT",
+            "the block item inherits the block's label rather than deriving \"Tnt\""
+        );
+    }
+
     /// A model path that does not resolve degrades that one item's appearance
     /// and nothing else — the world still boots.
     #[test]
@@ -1052,7 +1317,7 @@ mod tests {
         let content = GameContent::from_source(
             &MapSource::new().with(ITEMS_PATH, items_with_repointed_models()),
         );
-        let sword = content.items.find("vine sword").expect("item still exists");
+        let sword = content.items.find("vine_sword").expect("item still exists");
         assert!(content.item_models[sword.0 as usize].is_none());
         assert!(!content.items.is_empty());
         assert!(content.models.is_empty(), "nothing resolved");
@@ -1081,7 +1346,7 @@ mod tests {
         let blocks = format!(
             "{BUILTIN_BLOCKS}\n\
              [[block]]\n\
-             name = \"testonium\"\n\
+             id = \"testonium\"\n\
              render = \"opaque\"\n\
              solid = true\n\
              hardness = 1.0\n\

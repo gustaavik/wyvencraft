@@ -264,7 +264,7 @@ mod tests {
     #[test]
     fn welcome_carries_game_mode_and_recipes() {
         let recipe = RecipeData {
-            output: "wooden pickaxe".to_string(),
+            output: "wooden_pickaxe".to_string(),
             count: 1,
             ingredients: vec![("wood".to_string(), 3)],
         };
@@ -451,10 +451,10 @@ mod tests {
     #[test]
     fn chat_messages_roundtrip() {
         let said = decode::<ClientMessage>(&encode(&ClientMessage::Chat(
-            "/give raw beef 3".to_string(),
+            "/give raw raw_beef 3".to_string(),
         )))
         .unwrap();
-        assert!(matches!(said, ClientMessage::Chat(text) if text == "/give raw beef 3"));
+        assert!(matches!(said, ClientMessage::Chat(text) if text == "/give raw raw_beef 3"));
 
         let relayed = ServerMessage::Chat {
             from: Some(PlayerId(4)),

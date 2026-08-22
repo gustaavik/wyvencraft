@@ -15,7 +15,7 @@ use crate::chat::{ChatState, OpsList};
 use crate::content::GameContent;
 use crate::core::{BlockPos, CHUNK_HEIGHT, ChunkPos, DayCycle, GameMode};
 use crate::entity::Player;
-use crate::inventory::{Inventory, RecipeBook};
+use crate::inventory::{HeldLabel, Inventory, RecipeBook};
 use crate::net::{Client, Host, NetVec3, PlayerId, PlayerRestore, RecipeData};
 use crate::save::{FileWorldRepository, SavedGame};
 use crate::state::session::{ClientSession, HostSession, Session, SingleplayerSession};
@@ -242,6 +242,7 @@ impl InGameState {
             world,
             player: Player::new(spawn, mode, content.entities.player()),
             inventory,
+            held_label: HeldLabel::default(),
             recipes,
             show_debug: false,
             view: SceneCache::new(),

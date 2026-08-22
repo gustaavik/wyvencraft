@@ -311,7 +311,7 @@ mod tests {
         assert_eq!(cfg.limits.min_player_distance, 16.0);
         assert_eq!(cfg.limits.max_player_distance, 48.0);
         assert_eq!(cfg.limits.despawn_distance, 96.0);
-        assert_eq!(cfg.entries.len(), 4);
+        assert_eq!(cfg.entries.len(), 6);
 
         let cow = cfg.entry("cow").expect("cow entry");
         assert_eq!((cow.weight, cow.group, cow.cap), (10, (1, 3), 10));
@@ -399,7 +399,7 @@ mod tests {
             let plan = one_pass(&mut spawner, &cfg, false, |_| 0, 0);
             assert!(
                 plan.iter()
-                    .all(|r| r.entity == "cow" || r.entity == "sheep"),
+                    .all(|r| matches!(r.entity.as_str(), "cow" | "sheep" | "pig" | "chicken")),
                 "day plan contained a hostile: {plan:?}"
             );
         }

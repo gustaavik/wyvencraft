@@ -62,7 +62,7 @@ fn water_corner_heights(
 }
 
 /// Per-face shading so faces read as 3D even before real lighting/AO.
-fn face_shade(dir: Direction) -> f32 {
+pub(super) fn face_shade(dir: Direction) -> f32 {
     match dir {
         Direction::PosY => 1.0,
         Direction::NegY => 0.68,
@@ -452,9 +452,13 @@ pub fn mesh_block_overlay(box_: Aabb, tile: u32) -> CpuMesh {
     mesh
 }
 
-/// Append a small textured cube (a dropped item) to `mesh`: edge length `size`,
+/// Append a small textured cube (a dropped block) to `mesh`: edge length `size`,
 /// centred on `center`, spun `yaw` radians around Y. Faces are shaded and
 /// textured like regular blocks so drops read as miniatures of their block.
+///
+/// Only *block* items belong here. An item with nothing but a flat icon is a
+/// [`push_item_sprite`](super::sprite::push_item_sprite) instead — six faces of
+/// the same picture reads as six apples rather than one.
 pub fn push_item_cube(
     mesh: &mut CpuMesh,
     center: Vec3,
@@ -462,26 +466,20 @@ pub fn push_item_cube(
     yaw: f32,
     textures: &FaceTextures,
 ) {
-    let (sin, cos) = yaw.sin_cos();
-    let rotate = |v: [f32; 3]| [v[0] * cos + v[2] * sin, v[1], -v[0] * sin + v[2] * cos];
-
     for dir in Direction::ALL {
         let (corners, uvs) = face_geometry(dir);
-        let normal = rotate(dir.normal().to_array());
+        let normal = rotate_y(Vec3::from(dir.normal().to_array()), yaw).to_array();
         let ao = face_shade(dir);
         let tile = textures.tile(dir);
         let quad = std::array::from_fn(|i| {
-            let local = rotate([
-                (corners[i][0] - 0.5) * size,
-                (corners[i][1] - 0.5) * size,
-                (corners[i][2] - 0.5) * size,
-            ]);
+            let local = rotate_y(
+                Vec3::from(std::array::from_fn::<f32, 3, _>(|a| {
+                    (corners[i][a] - 0.5) * size
+                })),
+                yaw,
+            );
             ChunkVertex {
-                position: [
-                    center.x + local[0],
-                    center.y + local[1],
-                    center.z + local[2],
-                ],
+                position: (center + local).to_array(),
                 normal,
                 uv: atlas_uv(tile, uvs[i]),
                 ao,

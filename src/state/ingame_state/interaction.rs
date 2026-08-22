@@ -5,13 +5,11 @@
 use glam::Vec3;
 
 use super::{BreakState, InGameState};
-use crate::art::tiles;
 use crate::core::{Aabb, BlockId, BlockPos};
 use crate::entity::DroppedItem;
-use crate::inventory::{ItemId, ItemRegistry, ItemStack};
+use crate::inventory::{ItemId, ItemStack};
 use crate::world::Target;
 use crate::world::block::Drops;
-use wyven_voxel::FaceTextures;
 
 impl InGameState {
     /// What the crosshair would hit at `pos`: the whole cell for an ordinary
@@ -114,8 +112,8 @@ impl InGameState {
                     .and_then(|id| self.content.items.tool(id));
                 (held.is_some_and(|tool| tool.kind == *kind)).then(self_item)?
             }
-            Drops::Item { name, count } => {
-                let id = self.content.items.find(name)?;
+            Drops::Item { id: drop, count } => {
+                let id = self.content.items.find(drop)?;
                 Some(ItemStack::new(
                     id,
                     (*count).clamp(1, self.content.items.max_stack(id)),
@@ -253,29 +251,5 @@ impl InGameState {
             self.broadcast_local_edit(target, block);
             self.view.trigger_swing();
         }
-    }
-}
-
-/// Atlas tiles for a dropped item's cube: the block's own faces for block
-/// items; simple stand-in tiles for tools and food (no dedicated item art yet).
-///
-/// `block_faces` is `content::GameContent::block_face_tiles` — the tiles derived
-/// from a Blockbench-authored block's own 256-pixel textures, which is what a
-/// dropped stack of one is drawn with. Anything not authored that way falls back
-/// to the tiles `blocks.toml` named.
-pub(super) fn drop_textures(
-    item: ItemId,
-    items: &ItemRegistry,
-    block_faces: &[Option<FaceTextures>],
-) -> FaceTextures {
-    let def = items.get(item);
-    match def.place_block {
-        Some(block) => block_faces
-            .get(block.0 as usize)
-            .copied()
-            .flatten()
-            .unwrap_or(crate::content::MISSING_FACES),
-        None if def.tool.is_some() => FaceTextures::uniform(tiles::WOOD_BARK),
-        None => FaceTextures::uniform(tiles::LEAVES),
     }
 }

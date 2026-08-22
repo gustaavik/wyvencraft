@@ -87,9 +87,11 @@ impl DroppedItem {
         )
     }
 
-    /// Rendered/collision cube edge length.
-    pub fn size(&self) -> f32 {
-        self.physics.width
+    /// Edge length the drop is *drawn* at — its collision box scaled by the
+    /// visual's `scale`. Bigger than [`DroppedItem::aabb`] on purpose: see
+    /// [`ItemCubeParams::scale`].
+    pub fn render_size(&self) -> f32 {
+        self.physics.width * self.visual.scale
     }
 
     /// Distance beyond a player's box within which they collect this drop.
@@ -141,12 +143,15 @@ impl DroppedItem {
         self.age * self.visual.spin_rate
     }
 
-    /// Cube centre to render at: the physics position plus a gentle bob.
+    /// Centre to render at: the physics position, lifted so the drawn box rests
+    /// on the same ground its collision box does however much larger it is, plus
+    /// a gentle bob.
     pub fn render_center(&self) -> Vec3 {
+        let lift = (self.render_size() - self.physics.height) * 0.5;
         self.position
             + Vec3::new(
                 0.0,
-                (self.age * self.visual.bob_rate).sin() * self.visual.bob_amplitude,
+                lift + (self.age * self.visual.bob_rate).sin() * self.visual.bob_amplitude,
                 0.0,
             )
     }
@@ -173,7 +178,7 @@ mod tests {
         for _ in 0..600 {
             item.update(dt, solid);
         }
-        let bottom = item.position.y - item.size() * 0.5;
+        let bottom = item.aabb().min.y;
         assert!(
             (65.0..65.05).contains(&bottom),
             "drop should rest on the ground; bottom at {bottom}"
@@ -181,6 +186,33 @@ mod tests {
         assert!(item.velocity.length() < 0.05, "drop should come to rest");
         assert!(item.can_pickup(), "pickup delay should have elapsed");
         assert!(!item.expired());
+    }
+
+    /// Drops are drawn larger than they collide, but still sit *on* the ground:
+    /// the extra size goes upward, not into the floor.
+    #[test]
+    fn a_scaled_drop_is_drawn_bigger_but_still_rests_on_the_ground() {
+        let kinds = EntityRegistry::builtin();
+        let solid = |p: BlockPos| p.y < 65;
+        let mut item =
+            DroppedItem::block_drop(stack(), BlockPos::new(0, 65, 0), 1.0, kinds.dropped_item());
+        let dt = 1.0 / 60.0;
+        for _ in 0..600 {
+            item.update(dt, solid);
+        }
+        let collision = item.aabb();
+        assert!(
+            item.render_size() > collision.max.x - collision.min.x,
+            "the drawn box should be larger than the collision box"
+        );
+        // Bob is the only thing that should ever put the drawn bottom off the
+        // floor, and it is small; without the lift it would be half a drop deep.
+        let drawn_bottom = item.render_center().y - item.render_size() * 0.5;
+        assert!(
+            (drawn_bottom - collision.min.y).abs() < 0.05,
+            "drawn bottom {drawn_bottom} left the ground at {}",
+            collision.min.y
+        );
     }
 
     #[test]

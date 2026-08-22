@@ -8,6 +8,14 @@ use crate::inventory::{HOTBAR_SIZE, Inventory, ItemRegistry};
 use crate::state::UiTextures;
 use crate::ui::icon::draw_item_icon;
 
+/// How far the vitals row floats above the bottom edge, and how tall it is.
+/// The held-item label clears both, so the three rows stack rather than overlap.
+const VITALS_Y: f32 = -70.0;
+const VITALS_HEIGHT: f32 = 22.0;
+/// Where the held-item label sits with and without a vitals row beneath it.
+const LABEL_Y_ABOVE_VITALS: f32 = VITALS_Y - VITALS_HEIGHT - 4.0;
+const LABEL_Y_ABOVE_HOTBAR: f32 = VITALS_Y;
+
 /// Draw a simple crosshair at the screen centre.
 pub fn draw_crosshair(ctx: &Context) {
     let screen = ctx.screen_rect();
@@ -96,6 +104,52 @@ pub fn draw_hotbar(
         });
 }
 
+/// Name the item the player is holding, centred above the hotbar and fading
+/// out — the timing is [`HeldLabel`](crate::inventory::HeldLabel)'s, this only
+/// paints the result at the opacity it reports.
+///
+/// `above_vitals` must match whether [`draw_vitals`] is being drawn this frame,
+/// or the label lands on top of the hearts.
+pub fn draw_held_label(ctx: &Context, name: &str, alpha: f32, above_vitals: bool) {
+    if alpha <= 0.0 || name.is_empty() {
+        return;
+    }
+    let y = if above_vitals {
+        LABEL_Y_ABOVE_VITALS
+    } else {
+        LABEL_Y_ABOVE_HOTBAR
+    };
+    let fade = |c: Color32| {
+        Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (alpha * c.a() as f32) as u8)
+    };
+    egui::Area::new(egui::Id::new("hotbar_label"))
+        .anchor(Align2::CENTER_BOTTOM, egui::vec2(0.0, y))
+        .interactable(false)
+        .show(ctx, |ui| {
+            let font = egui::FontId::proportional(17.0);
+            // Measure first: the label is centred on the screen, not on a box
+            // whose width we had to guess.
+            let galley =
+                ui.painter()
+                    .layout_no_wrap(name.to_string(), font.clone(), fade(Color32::WHITE));
+            let size = galley.size();
+            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+            let painter = ui.painter();
+            // A shadow rather than a panel: the name has to stay readable over
+            // bright terrain without boxing in the middle of the screen.
+            painter.galley(
+                rect.min + egui::vec2(1.0, 1.0),
+                painter.layout_no_wrap(
+                    name.to_string(),
+                    font,
+                    fade(Color32::from_black_alpha(200)),
+                ),
+                Color32::PLACEHOLDER,
+            );
+            painter.galley(rect.min, galley, Color32::PLACEHOLDER);
+        });
+}
+
 /// Green→red colour for a tool's remaining-durability ratio.
 fn durability_color(ratio: f32) -> Color32 {
     let r = ((1.0 - ratio) * 255.0) as u8;
@@ -161,7 +215,7 @@ pub fn draw_vitals(ctx: &Context, health: f32, max_health: f32, hunger: f32, max
     let hearts = (max_health / 2.0).round() as usize;
     let shanks = (max_hunger / 2.0).round() as usize;
     egui::Area::new(egui::Id::new("vitals"))
-        .anchor(Align2::CENTER_BOTTOM, egui::vec2(0.0, -70.0))
+        .anchor(Align2::CENTER_BOTTOM, egui::vec2(0.0, VITALS_Y))
         .show(ctx, |ui| {
             let width = 240.0;
             let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 22.0), egui::Sense::hover());
@@ -218,4 +272,89 @@ pub fn draw_debug(ctx: &Context, lines: &[String]) {
                 );
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Run one headless egui frame and report how many shapes it emitted.
+    /// Enough to tell "painted the label" from "painted nothing" without a GPU.
+    fn shapes_from(draw: impl Fn(&Context)) -> usize {
+        let ctx = Context::default();
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 720.0),
+            )),
+            ..Default::default()
+        };
+        // Two frames: an anchored `Area` is placed from the size it had last
+        // frame, so the first pass is the one that measures it.
+        let _ = ctx.run(input(), |ctx| draw(ctx));
+        let output = ctx.run(input(), |ctx| draw(ctx));
+        output
+            .shapes
+            .iter()
+            .filter(|s| !matches!(s.shape, egui::Shape::Noop))
+            .count()
+    }
+
+    #[test]
+    fn a_visible_held_label_paints_something() {
+        let painted = shapes_from(|ctx| draw_held_label(ctx, "Wooden Pickaxe", 1.0, true));
+        assert!(painted > 0, "nothing was painted");
+    }
+
+    /// The fade must actually stop drawing, not just draw at alpha 0 — an
+    /// invisible label still costs a layer and can still catch a hover.
+    #[test]
+    fn a_faded_out_label_paints_nothing() {
+        assert_eq!(
+            shapes_from(|ctx| draw_held_label(ctx, "Bread", 0.0, true)),
+            0
+        );
+        assert_eq!(shapes_from(|ctx| draw_held_label(ctx, "", 1.0, true)), 0);
+    }
+
+    /// With a vitals row beneath it the label has to clear the hearts; without
+    /// one it drops into the space they would have taken. Compared as painted
+    /// rectangles rather than as constants, so the check still means something
+    /// after someone re-tunes the offsets.
+    #[test]
+    fn the_label_clears_the_vitals_row() {
+        let bounds = |above_vitals: bool| {
+            let ctx = Context::default();
+            let input = || egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 720.0),
+                )),
+                ..Default::default()
+            };
+            let run = |ctx: &Context| {
+                draw_held_label(ctx, "Wooden Pickaxe", 1.0, above_vitals);
+                draw_vitals(ctx, 20.0, 20.0, 20.0, 20.0);
+            };
+            let _ = ctx.run(input(), run);
+            let _ = ctx.run(input(), run);
+            (
+                ctx.memory(|m| m.area_rect(egui::Id::new("hotbar_label"))),
+                ctx.memory(|m| m.area_rect(egui::Id::new("vitals"))),
+            )
+        };
+
+        let (label, vitals) = bounds(true);
+        let (label, vitals) = (label.expect("label area"), vitals.expect("vitals area"));
+        assert!(
+            label.bottom() <= vitals.top(),
+            "label {label:?} overlaps the hearts {vitals:?}"
+        );
+
+        let lower = bounds(false).0.expect("label area");
+        assert!(
+            lower.top() > label.top(),
+            "with no vitals the label should sit lower, got {lower:?} vs {label:?}"
+        );
+    }
 }

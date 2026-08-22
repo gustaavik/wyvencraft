@@ -1,6 +1,6 @@
 //! `/give <item> [count]` — put items in the runner's inventory.
 
-use super::{ChatCommand, CommandContext, Permission, refuse, suggest};
+use super::{ChatCommand, CommandContext, ItemName, Permission, refuse, suggest};
 use crate::net::ChatKind;
 
 /// Largest count `/give` accepts. Big enough to fill an inventory several times
@@ -31,16 +31,17 @@ impl ChatCommand for GiveCommand {
         };
 
         // Resolve against the session's registry rather than trusting the typed
-        // spelling: matching case-insensitively means `/give Bread` works, and
-        // the canonical name is what the confirmation should echo back.
-        let names = ctx.item_names();
-        let Some(canonical) = names.iter().find(|name| name.eq_ignore_ascii_case(&item)) else {
-            return refuse(ctx, unknown_item_message(&item, &names));
+        // spelling: matching case-insensitively means `/give Bread` works.
+        let items = ctx.item_names();
+        let Some(found) = items.iter().find(|i| i.id.eq_ignore_ascii_case(&item)) else {
+            return refuse(ctx, unknown_item_message(&item, &items));
         };
 
-        let message = format!("gave {count} × {canonical}");
-        let canonical = canonical.clone();
-        ctx.give_item(&canonical, count);
+        // Confirm with the display name, not the id: the chat log is for the
+        // player, and "gave 5 × Wooden Pickaxe" is what they asked for.
+        let message = format!("gave {count} × {}", found.display);
+        let id = found.id.clone();
+        ctx.give_item(&id, count);
         ctx.reply(ChatKind::System, message);
     }
 }
@@ -53,11 +54,11 @@ struct Args {
 
 /// Parse `<item> [count]`.
 ///
-/// Item names contain spaces (`raw beef`, `wooden pickaxe`), so the name cannot
-/// simply be the first token. Instead the *last* token is taken as the count
-/// when it looks like a number and something is left to name; everything before
-/// it is the item. `_` also stands in for a space, so `/give raw_beef 5` works
-/// for anyone who expects one-argument-per-token syntax.
+/// An id is a single token (`cooked_beef`), so `/give cooked_beef 5` is the ordinary
+/// form. Spaces are still folded to underscores, because "Cooked Beef" is how the
+/// item reads in the inventory and typing what you see should work. That is why
+/// the *last* token is what becomes the count — and only when it looks like a
+/// number and something is left over to name.
 fn parse_args(rest: &str) -> Result<Args, String> {
     let mut tokens: Vec<&str> = rest.split_whitespace().collect();
     if tokens.is_empty() {
@@ -77,7 +78,7 @@ fn parse_args(rest: &str) -> Result<Args, String> {
         }
     }
 
-    let item = tokens.join(" ").replace('_', " ");
+    let item = tokens.join("_");
     if item.is_empty() {
         return Err(format!("usage: {USAGE}"));
     }
@@ -85,8 +86,10 @@ fn parse_args(rest: &str) -> Result<Args, String> {
 }
 
 /// "unknown item 'brad' — did you mean 'bread'?", when there is a near miss.
-fn unknown_item_message(typed: &str, names: &[String]) -> String {
-    match suggest(typed, names.iter().map(String::as_str)) {
+///
+/// Suggests an *id*, because an id is what the player has to type next.
+fn unknown_item_message(typed: &str, items: &[ItemName]) -> String {
+    match suggest(typed, items.iter().map(|i| i.id.as_str())) {
         Some(near) => format!("unknown item '{typed}' — did you mean '{near}'?"),
         None => format!("unknown item '{typed}'"),
     }
@@ -98,7 +101,7 @@ mod tests {
     use super::*;
 
     fn run(line: &str) -> FakeContext {
-        let mut ctx = FakeContext::new(true, ["bread", "raw beef", "wooden pickaxe"]);
+        let mut ctx = FakeContext::new(true, ["bread", "cooked_beef", "wooden_pickaxe"]);
         GiveCommand.run(line, &mut ctx);
         ctx
     }
@@ -113,32 +116,47 @@ mod tests {
         assert_eq!(run("bread 12").given, [("bread".to_string(), 12)]);
     }
 
-    /// Item names really do contain spaces ("raw beef", "wooden pickaxe"), so
-    /// the name cannot be the first token — it is everything before the count.
+    /// An id is one token, so `/give cooked_beef 3` is the plain form.
     #[test]
-    fn a_multi_word_item_name_survives_parsing() {
-        assert_eq!(run("raw beef 3").given, [("raw beef".to_string(), 3)]);
+    fn an_id_is_a_single_token() {
+        assert_eq!(run("cooked_beef 3").given, [("cooked_beef".to_string(), 3)]);
         assert_eq!(
-            run("wooden pickaxe").given,
-            [("wooden pickaxe".to_string(), 1)]
+            run("wooden_pickaxe").given,
+            [("wooden_pickaxe".to_string(), 1)]
         );
     }
 
+    /// Typing the label you see in the inventory works too: spaces fold to
+    /// underscores, so the name cannot be the first token — it is everything
+    /// before the count.
     #[test]
-    fn underscores_stand_in_for_spaces() {
-        assert_eq!(run("raw_beef 3").given, [("raw beef".to_string(), 3)]);
+    fn spaces_fold_to_underscores_so_the_displayed_name_also_works() {
+        assert_eq!(run("cooked beef 3").given, [("cooked_beef".to_string(), 3)]);
     }
 
-    /// The registry holds the canonical spelling, so a differently-cased request
-    /// still resolves — and the confirmation echoes the canonical name back.
+    /// The registry holds the canonical id, so a differently-cased request still
+    /// resolves — and the confirmation echoes the *display name*, not the id.
     #[test]
-    fn item_names_are_matched_case_insensitively() {
-        let ctx = run("RAW BEEF 2");
-        assert_eq!(ctx.given, [("raw beef".to_string(), 2)]);
-        assert!(ctx.said(ChatKind::System).contains("raw beef"));
+    fn ids_are_matched_case_insensitively() {
+        let ctx = run("COOKED BEEF 2");
+        assert_eq!(ctx.given, [("cooked_beef".to_string(), 2)]);
+        assert!(
+            ctx.said(ChatKind::System).contains("Cooked Beef"),
+            "got {:?}",
+            ctx.replies
+        );
     }
 
-    /// An item whose name *is* a number must still be nameable, which is why a
+    /// The chat log is for the player: the reply must quote the label, never
+    /// the underscored key it was resolved through.
+    #[test]
+    fn the_confirmation_quotes_the_display_name_not_the_id() {
+        let said = run("wooden_pickaxe 2").said(ChatKind::System);
+        assert!(said.contains("Wooden Pickaxe"), "got {said:?}");
+        assert!(!said.contains("wooden_pickaxe"), "leaked the id: {said:?}");
+    }
+
+    /// An item whose id *is* a number must still be nameable, which is why a
     /// lone token is never treated as the count.
     #[test]
     fn a_lone_token_is_always_the_item_name() {

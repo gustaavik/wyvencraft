@@ -283,7 +283,7 @@ mod tests {
         let items = ItemRegistry::from_blocks(&blocks);
         let mut inv = Inventory::new();
         let leftover = inv.add(
-            ItemStack::with_durability(items.find("wooden pickaxe").unwrap(), 12),
+            ItemStack::with_durability(items.find("wooden_pickaxe").unwrap(), 12),
             &items,
         );
         assert_eq!(leftover, 0);
@@ -338,7 +338,7 @@ mod tests {
         }
 
         // A helmet on the player's head is invisible to crafting.
-        let helmet = items.find("helmet").unwrap();
+        let helmet = items.find("copper_helmet").unwrap();
         inv.set_slot(
             Inventory::armor_slot_index(ArmorSlot::Helmet),
             Some(ItemStack::single(helmet)),
@@ -361,9 +361,9 @@ mod tests {
         let items = ItemRegistry::from_blocks(&blocks);
         let inv = Inventory::new();
 
-        let helmet = items.find("helmet").unwrap();
-        let boots = items.find("boots").unwrap();
-        let pickaxe = items.find("wooden pickaxe").unwrap();
+        let helmet = items.find("copper_helmet").unwrap();
+        let boots = items.find("copper_boots").unwrap();
+        let pickaxe = items.find("wooden_pickaxe").unwrap();
         let head = Inventory::armor_slot_index(ArmorSlot::Helmet);
 
         assert!(inv.can_equip(head, helmet, &items));
@@ -382,8 +382,13 @@ mod tests {
         let mut inv = Inventory::new();
         assert_eq!(inv.total_defense(&items), 0.0, "bare player has no defense");
 
+        // Find each piece by the slot it declares rather than by id, so a
+        // renamed or re-tiered set of armor doesn't break the test.
         for slot in ArmorSlot::ALL {
-            let id = items.find(slot.label().to_lowercase().as_str()).unwrap();
+            let (id, _) = items
+                .iter()
+                .find(|(_, item)| item.armor.is_some_and(|a| a.slot == slot))
+                .unwrap_or_else(|| panic!("no item fits the {} slot", slot.label()));
             inv.set_slot(
                 Inventory::armor_slot_index(slot),
                 Some(items.full_stack(id)),

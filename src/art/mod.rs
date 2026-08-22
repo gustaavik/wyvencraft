@@ -1,4 +1,4 @@
-//! Wyvencraft's own pixel art, and how the renderer gets at it.
+//! Wyvencraft's art, and how the renderer gets at it.
 //!
 //! None of this is engine work. `grass_block_side`, a zombie's face and the
 //! eight stages of a block breaking are this game's assets; they lived inside
@@ -7,36 +7,40 @@
 //! the answer — which is why a second game built on these crates would not
 //! inherit a pickaxe sprite.
 //!
-//! - [`tiles`] — procedural 16×16 art for blocks, plus ASCII-sprite item icons.
+//! Every tile is a PNG under `assets/textures/`; nothing here paints. What the
+//! modules below hold is the *layout* — which sheet lands on which atlas tiles,
+//! and how a body part's box unwraps onto it:
+//!
+//! - [`cracks`] — the eight break-overlay stages and their reserved band.
 //! - [`skin`] — the 64×64 Minecraft-format player skin sheet and its part rects.
 //! - [`armor`] — worn-armor sheets, sharing the skin's unwrap.
 //! - [`mobskin`] — per-mob sheets, humanoid and quadruped.
 
 pub mod armor;
+pub mod cracks;
 pub mod mobskin;
 pub mod skin;
-pub mod tiles;
 
 use wyven_render::{ReservedTiles, TileRegistry, TileRgba, TileSource, decode_tile};
 
-/// Where Wyvencraft looks for a named tile: a PNG under `assets/textures/`
-/// first, then the procedural painter of the same name.
+/// Where Wyvencraft looks for a named tile: `assets/textures/<name>.png`.
 ///
-/// The PNG wins so any painted tile can be overridden by dropping a file in
-/// beside it, which is how art gets replaced without touching Rust.
+/// A name with no file resolves to the magenta missing-texture marker and one
+/// warning in the log, which is exactly what art that has not been drawn yet
+/// should look like.
 pub struct WyvencraftArt;
 
 impl TileSource for WyvencraftArt {
     fn tile(&self, name: &str) -> Option<TileRgba> {
-        load_png(name).or_else(|| tiles::paint_named(name))
+        load_png(name)
     }
 }
 
 /// Decode `assets/textures/<name>.png`, or `None` if it is absent or unusable.
 ///
-/// A malformed or wrong-sized PNG warns and falls through to the procedural
-/// painter rather than failing the load — a bad override should look wrong, not
-/// stop the game booting.
+/// A malformed or wrong-sized PNG warns and resolves to the missing marker
+/// rather than failing the load — bad art should look wrong, not stop the game
+/// booting.
 fn load_png(name: &str) -> Option<TileRgba> {
     let path = format!("assets/textures/{name}.png");
     let bytes = std::fs::read(&path).ok()?;
@@ -56,9 +60,6 @@ fn load_png(name: &str) -> Option<TileRgba> {
 /// must pin: the break-crack overlay, the player skin, the armor sheets and the
 /// mob sheets. Everything else is allocated on demand by name.
 fn reserved() -> ReservedTiles {
-    let cracks = (tiles::CRACK_0..tiles::CRACK_0 + tiles::CRACK_STAGES)
-        .filter_map(|tile| tiles::paint(tile).map(|art| (tile, art)));
-
     let sheet = skin::load_default();
     let armor = armor::ALL.iter().flat_map(|&kind| armor::atlas_tiles(kind));
     let mobs = mobskin::ALL
@@ -66,7 +67,7 @@ fn reserved() -> ReservedTiles {
         .flat_map(|&kind| mobskin::atlas_tiles(kind));
 
     ReservedTiles::new()
-        .extend(cracks)
+        .extend(cracks::atlas_tiles())
         .extend(skin::atlas_tiles(&sheet))
         .extend(armor)
         .extend(mobs)
@@ -88,7 +89,7 @@ mod tests {
     #[test]
     fn content_tiles_never_land_on_reserved_art() {
         let mut reg = tile_registry();
-        for name in ["stone", "dirt", "leaves", "glass"] {
+        for name in ["apple", "stick", "coal", "flint"] {
             let t = reg.resolve(name).tile;
             assert_ne!(t, 0, "{name} got the missing marker");
             assert!(
@@ -98,7 +99,7 @@ mod tests {
             assert!(!armor::is_armor_tile(t), "{name} landed in the armor band");
             assert!(!mobskin::is_mob_tile(t), "{name} landed in a mob sheet");
             assert!(
-                !(tiles::CRACK_0..tiles::CRACK_0 + tiles::CRACK_STAGES).contains(&t),
+                !(cracks::CRACK_0..cracks::CRACK_0 + cracks::CRACK_STAGES).contains(&t),
                 "{name} landed on the crack overlay"
             );
         }
@@ -107,10 +108,10 @@ mod tests {
     #[test]
     fn content_tiles_allocate_and_stay_stable() {
         let mut reg = tile_registry();
-        let stone = reg.resolve("stone");
-        assert_ne!(stone, TileEntry::MISSING);
-        assert_eq!(reg.resolve("stone"), stone);
-        assert_ne!(reg.resolve("dirt").tile, stone.tile);
+        let apple = reg.resolve("apple");
+        assert_ne!(apple, TileEntry::MISSING);
+        assert_eq!(reg.resolve("apple"), apple);
+        assert_ne!(reg.resolve("stick").tile, apple.tile);
     }
 
     #[test]

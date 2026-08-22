@@ -22,7 +22,11 @@ use wyven_model::{ModelId, ModelRegistry};
 use wyven_render::CpuMesh;
 
 /// Zombie shamble: both arms held straight out (≈ 80° forward of hanging).
-const ARMS_FORWARD_ANGLE: f32 = -1.4;
+///
+/// Positive is *forward* — the arm pivots at the shoulder, so a positive angle
+/// carries the fist toward the model's front (-Z). See `rot_x` in
+/// [`crate::entity::model`], which every arm pose is written against.
+const ARMS_FORWARD_ANGLE: f32 = 1.4;
 /// Damage a bare-fisted player melee swing lands. A held tool overrides it with
 /// its `[item.tool] damage` component; this is the floor everything falls back
 /// to (see `InGameState::melee_damage`).
@@ -650,4 +654,34 @@ fn ground_at(world: &crate::world::World, x: f32, z: f32, top: i32) -> Option<f3
     let open_sky = (y + 2..crate::core::CHUNK_HEIGHT)
         .all(|yy| !world.is_solid(BlockPos::new(column.x, yy, column.z)));
     open_sky.then_some(y as f32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entity::Pose;
+
+    /// The shamble has to reach *at* you. The sign is easy to get backwards and
+    /// nothing else would catch it — a zombie with its arms behind it still
+    /// walks, chases and hits exactly the same.
+    #[test]
+    fn the_shamble_holds_the_arms_out_in_front() {
+        let model = HumanoidModel::player();
+        let rest = model.hand_anchor(Vec3::ZERO, 0.0, &Pose::default());
+        let shamble = model.hand_anchor(
+            Vec3::ZERO,
+            0.0,
+            &Pose {
+                right_arm: ARMS_FORWARD_ANGLE,
+                ..Default::default()
+            },
+        );
+        assert!(
+            shamble.position.z < rest.position.z - 0.2,
+            "the model faces -Z, so the fists must end up ahead of the shoulders: \
+             rest {}, shamble {}",
+            rest.position.z,
+            shamble.position.z
+        );
+    }
 }

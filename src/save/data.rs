@@ -1,10 +1,10 @@
 //! Serialized forms of the game state, decoupled from the live types.
 //!
-//! Blocks and items are referenced by *name* through a palette / per-slot
-//! strings: numeric `BlockId`/`ItemId` are registry-insertion-order indices, so
-//! raw ids on disk would silently corrupt a world whenever a block or item is
-//! added in the middle of a registry. Unknown names on load are skipped with a
-//! warning (the same fail-soft policy as the recipe wire sync).
+//! Blocks and items are referenced by their string *id* through a palette /
+//! per-slot strings: numeric `BlockId`/`ItemId` are registry-insertion-order
+//! indices, so raw numbers on disk would silently corrupt a world whenever a
+//! block or item is added in the middle of a registry. Unknown ids on load are
+//! skipped with a warning (the same fail-soft policy as the recipe wire sync).
 
 use std::collections::HashMap;
 
@@ -17,7 +17,7 @@ use crate::inventory::{Inventory, ItemRegistry, ItemStack, TOTAL_SLOTS};
 use crate::world::{BlockRegistry, World};
 
 /// The world's block-edit overlay: everything that diverges from the terrain
-/// the seed regenerates. `edits` index into the block-name `palette`.
+/// the seed regenerates. `edits` index into the block-id `palette`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorldData {
     pub palette: Vec<String>,
@@ -25,7 +25,7 @@ pub struct WorldData {
 }
 
 impl WorldData {
-    /// Snapshot a world's edit overlay, building the name palette on the fly.
+    /// Snapshot a world's edit overlay, building the id palette on the fly.
     pub fn from_world(world: &World, registry: &BlockRegistry) -> Self {
         let mut palette: Vec<String> = Vec::new();
         let mut index_of: HashMap<BlockId, u16> = HashMap::new();
@@ -34,7 +34,7 @@ impl WorldData {
             .into_iter()
             .map(|(pos, block)| {
                 let index = *index_of.entry(block).or_insert_with(|| {
-                    palette.push(registry.get(block).name.to_string());
+                    palette.push(registry.get(block).id.to_string());
                     (palette.len() - 1) as u16
                 });
                 (pos, index)
@@ -44,7 +44,7 @@ impl WorldData {
     }
 
     /// Map the palette back onto this build's registry. Edits naming blocks the
-    /// build doesn't know are dropped with one warning per name.
+    /// build doesn't know are dropped with one warning per id.
     pub fn resolve(&self, blocks: &BlockRegistry) -> Vec<(BlockPos, BlockId)> {
         let ids: Vec<Option<BlockId>> = self
             .palette
@@ -69,10 +69,10 @@ impl WorldData {
     }
 }
 
-/// One inventory slot on disk (item referenced by name).
+/// One inventory slot on disk (item referenced by id).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ItemStackData {
-    pub name: String,
+    pub id: String,
     pub count: u8,
     pub durability: Option<u16>,
 }
@@ -95,7 +95,7 @@ pub struct PlayerData {
 }
 
 impl PlayerData {
-    /// Snapshot the local player and inventory (item ids → names).
+    /// Snapshot the local player and inventory (numeric ids → string ids).
     pub fn capture(player: &Player, inventory: &Inventory, items: &ItemRegistry) -> Self {
         Self {
             position: player.position.to_array(),
@@ -111,7 +111,7 @@ impl PlayerData {
                 .iter()
                 .map(|slot| {
                     slot.map(|stack| ItemStackData {
-                        name: items.get(stack.item).name.clone(),
+                        id: items.get(stack.item).id.clone(),
                         count: stack.count,
                         durability: stack.durability,
                     })
@@ -121,7 +121,7 @@ impl PlayerData {
     }
 
     /// Restore onto a freshly built player/inventory. Overwrites *all* slots
-    /// (clearing the starter kit); unknown item names become empty slots.
+    /// (clearing the starter kit); unknown item ids become empty slots.
     ///
     /// A save written before armor existed carries only the 36 storage slots;
     /// the missing armor entries read back as `None`, so old worlds load with an
@@ -137,9 +137,9 @@ impl PlayerData {
         for index in 0..TOTAL_SLOTS {
             let stack = self.slots.get(index).and_then(|slot| {
                 slot.as_ref().and_then(|data| {
-                    let id = items.find(&data.name);
+                    let id = items.find(&data.id);
                     if id.is_none() {
-                        log::warn!("save references unknown item '{}'; dropping it", data.name);
+                        log::warn!("save references unknown item '{}'; dropping it", data.id);
                     }
                     id.map(|item| ItemStack {
                         item,
@@ -224,7 +224,7 @@ mod tests {
         }
 
         let data = WorldData::from_world(&world, &registry);
-        assert_eq!(data.palette.len(), 2, "palette dedups block names");
+        assert_eq!(data.palette.len(), 2, "palette dedups block ids");
 
         // Round-trip through bincode like the .dat files do.
         let bytes = bincode::serde::encode_to_vec(&data, bincode::config::standard()).unwrap();
@@ -279,7 +279,7 @@ mod tests {
         inventory.set_slot(
             0,
             Some(ItemStack::with_durability(
-                items.find("wooden pickaxe").unwrap(),
+                items.find("wooden_pickaxe").unwrap(),
                 33,
             )),
         );
@@ -289,7 +289,7 @@ mod tests {
         let mut data = PlayerData::capture(&player, &inventory, &items);
         // A record from another build may name an item we don't have.
         data.slots[1] = Some(ItemStackData {
-            name: "netherite doohickey".into(),
+            id: "netherite_doohickey".into(),
             count: 1,
             durability: None,
         });
@@ -307,7 +307,7 @@ mod tests {
         assert_eq!(
             restored_inventory.slot(0),
             Some(ItemStack::with_durability(
-                items.find("wooden pickaxe").unwrap(),
+                items.find("wooden_pickaxe").unwrap(),
                 33
             ))
         );

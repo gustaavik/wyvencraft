@@ -10,7 +10,7 @@
 
 use glam::Vec3;
 
-use crate::art::tiles;
+use crate::art::cracks;
 use crate::content::{BlockAppearance, FluidTexture, GameContent};
 use crate::core::{Aabb, BlockId, BlockPos, ChunkPos, LocalPos};
 use crate::world::block::{BlockRegistry, blocks};
@@ -313,7 +313,7 @@ fn adjacent_water_levels_connect_at_shared_corners() {
 fn a_model_block_meshes_into_its_own_bucket_and_emits_no_cube_faces() {
     let content = GameContent::load();
     let catalog = content.appearance();
-    let plant = content.blocks.find("blue bells").expect("shipped block");
+    let plant = content.blocks.find("blue_bells").expect("shipped block");
     let (placement, _) = catalog
         .placed_model(plant)
         .expect("blue bells declares a model");
@@ -455,7 +455,7 @@ fn only_tinted_faces_take_the_biome_colour() {
 fn stacked_leaves_cull_the_face_they_share() {
     let content = GameContent::load();
     let catalog = content.appearance();
-    let leaves = content.blocks.find("oak leaves").expect("shipped block");
+    let leaves = content.blocks.find("oak_leaves").expect("shipped block");
     let baked = catalog.baked(leaves).expect("modelled");
     assert_eq!(
         baked.occludes, [false; 6],
@@ -561,13 +561,7 @@ fn item_cube_is_centred_and_compact() {
     let mut mesh = CpuMesh::new();
     let center = Vec3::new(1.0, 70.0, -2.0);
     let size = 0.25;
-    push_item_cube(
-        &mut mesh,
-        center,
-        size,
-        0.7,
-        &FaceTextures::uniform(tiles::STONE),
-    );
+    push_item_cube(&mut mesh, center, size, 0.7, &FaceTextures::uniform(1));
     assert_eq!(mesh.vertices.len(), 24); // 6 faces × 4 vertices
     assert_eq!(mesh.indices.len(), 36);
     // Every vertex stays within the cube's rotated bounding radius.
@@ -582,7 +576,7 @@ fn item_cube_is_centred_and_compact() {
 #[test]
 fn block_overlay_covers_all_faces_and_wraps_the_block() {
     let cell = Aabb::block(Vec3::new(2.0, 5.0, -3.0));
-    let mesh = mesh_block_overlay(cell, tiles::CRACK_0);
+    let mesh = mesh_block_overlay(cell, cracks::CRACK_0);
     assert_eq!(mesh.vertices.len(), 24); // 6 faces × 4 vertices
     assert_eq!(mesh.indices.len(), 36);
     for v in &mesh.vertices {
@@ -591,8 +585,8 @@ fn block_overlay_covers_all_faces_and_wraps_the_block() {
         assert!(v.position[1] > 4.9 && v.position[1] < 6.1);
         assert!(v.position[2] > -3.1 && v.position[2] < -1.9);
         // And its UVs stay inside the crack tile.
-        let uv0 = atlas_uv(tiles::CRACK_0, [0.0, 0.0]);
-        let uv1 = atlas_uv(tiles::CRACK_0, [1.0, 1.0]);
+        let uv0 = atlas_uv(cracks::CRACK_0, [0.0, 0.0]);
+        let uv1 = atlas_uv(cracks::CRACK_0, [1.0, 1.0]);
         assert!(v.uv[0] >= uv0[0] && v.uv[0] <= uv1[0]);
         assert!(v.uv[1] >= uv0[1] && v.uv[1] <= uv1[1]);
     }
@@ -602,7 +596,7 @@ fn block_overlay_covers_all_faces_and_wraps_the_block() {
 #[test]
 fn block_overlay_follows_a_smaller_hitbox() {
     let box_ = Aabb::new(Vec3::new(2.3, 5.0, -2.7), Vec3::new(2.7, 5.5, -2.3));
-    let mesh = mesh_block_overlay(box_, tiles::CRACK_0);
+    let mesh = mesh_block_overlay(box_, cracks::CRACK_0);
     for v in &mesh.vertices {
         assert!(v.position[0] > 2.29 && v.position[0] < 2.71);
         assert!(v.position[1] > 4.99 && v.position[1] < 5.51);
