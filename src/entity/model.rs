@@ -712,6 +712,30 @@ mod tests {
         assert!((r - Vec3::Z).length() < 1e-6, "got {r:?}");
     }
 
+    /// The shoulder is the arm's pivot, so a *positive* angle carries the fist
+    /// toward the model's front (-Z). Every arm pose is written against this
+    /// sign — the walk swing, the one-shot mining swing, the zombie shamble —
+    /// so it is worth pinning where the sign is actually applied.
+    #[test]
+    fn a_positive_arm_angle_puts_the_fist_in_front() {
+        let model = HumanoidModel::player();
+        let rest = model.hand_anchor(Vec3::ZERO, 0.0, &Pose::default());
+        let raised = model.hand_anchor(
+            Vec3::ZERO,
+            0.0,
+            &Pose {
+                right_arm: 1.4,
+                ..Default::default()
+            },
+        );
+        assert!(
+            raised.position.z < rest.position.z - 0.2,
+            "a positive angle should reach forward (-Z): rest {}, raised {}",
+            rest.position.z,
+            raised.position.z
+        );
+    }
+
     #[test]
     fn right_limbs_sit_on_the_characters_right() {
         // Facing -Z with +Y up, the character's right side is +X.
