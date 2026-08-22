@@ -260,6 +260,30 @@ pub struct QuadrupedVisual {
     pub body: [f32; 3],
     pub head: [f32; 3],
     pub leg: [f32; 3],
+    /// Where each part's unwrap starts on the sheet — Minecraft's `texOffs`,
+    /// which is what mob art is drawn against. The extents above give the rest:
+    /// a part's six face rects follow from its offset and its size.
+    ///
+    /// The defaults are the layout Minecraft's own quadrupeds share; the cow is
+    /// the odd one out and names its own `body_uv`.
+    #[serde(default = "head_uv")]
+    pub head_uv: [u32; 2],
+    #[serde(default = "body_uv")]
+    pub body_uv: [u32; 2],
+    #[serde(default = "leg_uv")]
+    pub leg_uv: [u32; 2],
+}
+
+fn head_uv() -> [u32; 2] {
+    [0, 0]
+}
+
+fn body_uv() -> [u32; 2] {
+    [28, 8]
+}
+
+fn leg_uv() -> [u32; 2] {
+    [0, 16]
 }
 
 /// How the entity is drawn.
@@ -383,7 +407,7 @@ mod tests {
     #[test]
     fn builtin_entities_golden() {
         let reg = EntityRegistry::builtin();
-        assert_eq!(reg.len(), 8);
+        assert_eq!(reg.len(), 9);
 
         let player = reg.player();
         assert_eq!(player.physics.gravity, 28.0);
@@ -451,7 +475,8 @@ mod tests {
                 assert_eq!(v.skin, "cow");
                 assert_eq!(v.body, [12.0, 10.0, 18.0]);
                 assert_eq!(v.head, [8.0, 8.0, 6.0]);
-                assert_eq!(v.leg, [4.0, 11.0, 4.0]);
+                assert_eq!(v.leg, [4.0, 12.0, 4.0]);
+                assert_eq!(v.body_uv, [18, 4], "the cow's own body unwrap");
             }
             other => panic!("cow should be a quadruped, got {other:?}"),
         }
@@ -463,6 +488,22 @@ mod tests {
         assert_eq!(mob.drops[0].item, "mutton");
         assert_eq!((mob.drops[0].min, mob.drops[0].max), (1, 2));
         assert!(matches!(&sheep.visual, VisualSpec::Quadruped(v) if v.skin == "sheep"));
+
+        // Box sizes and unwrap offsets are what make a real mob sheet land on
+        // the right faces, so they are pinned together with the tuning.
+        let pig = reg.find("pig").expect("pig kind");
+        match &pig.visual {
+            VisualSpec::Quadruped(v) => {
+                assert_eq!(v.skin, "pig");
+                assert_eq!(
+                    (v.body, v.head, v.leg),
+                    ([10.0, 8.0, 16.0], [8.0; 3], [4.0, 6.0, 4.0])
+                );
+                // The pig takes every default offset; the cow overrides its body.
+                assert_eq!((v.head_uv, v.body_uv, v.leg_uv), ([0, 0], [28, 8], [0, 16]));
+            }
+            other => panic!("pig should be a quadruped, got {other:?}"),
+        }
 
         // The hostiles: a melee humanoid and a ranged one.
         let zombie = reg.find("zombie").expect("zombie kind");

@@ -220,8 +220,8 @@ pub fn atlas_tiles(skin: &SkinRgba) -> impl Iterator<Item = (u32, TileRgba)> + '
 /// Minecraft treats the base layer); overlay regions keep their alpha for the
 /// separate inflated overlay shell the model draws.
 pub fn load_default() -> Box<SkinRgba> {
-    let mut skin = match std::fs::read(SKIN_PATH) {
-        Ok(bytes) => match decode(&bytes) {
+    match std::fs::read(SKIN_PATH) {
+        Ok(bytes) => match decode_humanoid(&bytes) {
             Ok(skin) => {
                 log::info!("player skin: using {SKIN_PATH}");
                 skin
@@ -232,31 +232,33 @@ pub fn load_default() -> Box<SkinRgba> {
             }
         },
         Err(_) => embedded(),
-    };
-    force_base_opaque(&mut skin);
-    skin
+    }
 }
 
 fn embedded() -> Box<SkinRgba> {
-    decode(EMBEDDED_SKIN).expect("embedded default skin decodes")
+    decode_humanoid(EMBEDDED_SKIN).expect("embedded default skin decodes")
 }
 
-/// Decode a 64×64 skin/armor PNG. The size is the only extra constraint on top
-/// of [`wyven_render::texture::decode_png`]: the part rects below index into a sheet of
-/// exactly this shape.
+/// Decode a skin/armor/mob PNG into a 64×64 sheet.
+///
+/// Two shapes are accepted, because that is what mob art comes in: the modern
+/// 64×64 sheet, and the pre-1.8 64×32 half-sheet, which is padded out with
+/// transparency. A half-height sheet has no separate left limbs and no overlay
+/// layer — see [`mirror_legacy_limbs`], which the humanoid loader applies so the
+/// model never has to know which it got.
 pub fn decode(bytes: &[u8]) -> Result<Box<SkinRgba>, String> {
     let image = wyven_render::texture::decode_png(bytes)?;
-    if image.size != [SKIN_SIZE; 2] {
+    let [width, height] = image.size;
+    if width != SKIN_SIZE || (height != SKIN_SIZE && height != SKIN_SIZE / 2) {
         return Err(format!(
-            "must be {SKIN_SIZE}x{SKIN_SIZE}, got {}x{}",
-            image.width(),
-            image.height()
+            "must be {SKIN_SIZE}x{SKIN_SIZE} or {SKIN_SIZE}x{}, got {width}x{height}",
+            SKIN_SIZE / 2
         ));
     }
     let mut skin = Box::new([[[0u8; 4]; SKIN_SIZE as usize]; SKIN_SIZE as usize]);
-    for (y, row) in skin.iter_mut().enumerate() {
+    for (y, row) in skin.iter_mut().enumerate().take(height as usize) {
         for (x, px) in row.iter_mut().enumerate() {
-            let i = (y * SKIN_SIZE as usize + x) * 4;
+            let i = (y * width as usize + x) * 4;
             *px = [
                 image.pixels[i],
                 image.pixels[i + 1],
@@ -266,6 +268,57 @@ pub fn decode(bytes: &[u8]) -> Result<Box<SkinRgba>, String> {
         }
     }
     Ok(skin)
+}
+
+/// Whether `sheet` uses the pre-1.8 layout: everything in the top half, with no
+/// separate left arm or leg and no overlay.
+///
+/// Detected rather than declared, because a 64×32 skin padded out to 64×64 is
+/// indistinguishable from one that was authored that way — and both need the
+/// same fixing up.
+pub fn is_legacy(sheet: &SkinRgba) -> bool {
+    sheet[SKIN_SIZE as usize / 2..]
+        .iter()
+        .all(|row| row.iter().all(|px| px[3] == 0))
+}
+
+/// Fill a legacy sheet's empty left arm and leg from its right ones, mirrored.
+///
+/// Pre-1.8 skins drew both sides from one unwrap; read with the modern part
+/// rects those slots are empty, which [`force_base_opaque`] would then turn into
+/// solid black limbs. Mirroring is what the old renderer did implicitly, so this
+/// reproduces the intended look rather than inventing one.
+fn mirror_legacy_limbs(sheet: &mut SkinRgba) {
+    for (right, left) in [(RIGHT_ARM, LEFT_ARM), (RIGHT_LEG, LEFT_LEG)] {
+        for dir in Direction::ALL {
+            // Mirroring in X swaps the two side faces and flips every face's
+            // horizontal run; the rest of the unwrap maps straight across.
+            let source = match dir {
+                Direction::PosX => Direction::NegX,
+                Direction::NegX => Direction::PosX,
+                other => other,
+            };
+            let [sx, sy, w, h] = right.face_rect(source);
+            let [dx, dy, dw, dh] = left.face_rect(dir);
+            debug_assert_eq!([w, h], [dw, dh], "mirrored faces must match in size");
+            for y in 0..h {
+                for x in 0..w {
+                    let px = sheet[(sy + y) as usize][(sx + w - 1 - x) as usize];
+                    sheet[(dy + y) as usize][(dx + x) as usize] = px;
+                }
+            }
+        }
+    }
+}
+
+/// [`decode`], then whatever fixing up the sheet's own layout calls for.
+pub fn decode_humanoid(bytes: &[u8]) -> Result<Box<SkinRgba>, String> {
+    let mut sheet = decode(bytes)?;
+    if is_legacy(&sheet) {
+        mirror_legacy_limbs(&mut sheet);
+    }
+    force_base_opaque(&mut sheet);
+    Ok(sheet)
 }
 
 /// Force the base layer's face rects fully opaque, so the inner body never
@@ -296,6 +349,55 @@ mod tests {
         assert_eq!(BODY.face_rect(Direction::PosZ), [32, 20, 8, 12]); // back
         assert_eq!(RIGHT_ARM.face_rect(Direction::PosY), [44, 16, 4, 4]);
         assert_eq!(LEFT_LEG.face_rect(Direction::NegX), [24, 52, 4, 12]);
+    }
+
+    /// A pre-1.8 sheet has nothing in its lower half, so the modern left-limb
+    /// rects read as empty — which `force_base_opaque` would then turn into
+    /// solid black limbs. They must come from the right ones instead.
+    #[test]
+    fn a_legacy_sheet_gets_its_left_limbs_from_its_right_ones() {
+        let mut sheet = Box::new([[[0u8; 4]; SKIN_SIZE as usize]; SKIN_SIZE as usize]);
+        // Paint the right arm's unwrap with a per-column marker, top half only.
+        let [ax, ay, aw, ah] = RIGHT_ARM.face_rect(Direction::PosX);
+        for y in ay..ay + ah {
+            for x in ax..ax + aw {
+                sheet[y as usize][x as usize] = [x as u8, 0, 0, 255];
+            }
+        }
+        assert!(is_legacy(&sheet), "nothing below the halfway line");
+
+        mirror_legacy_limbs(&mut sheet);
+
+        // The right arm's outward face lands on the left arm's *inward* one —
+        // that is what mirroring means — and reversed along its run.
+        let [bx, by, bw, _] = LEFT_ARM.face_rect(Direction::NegX);
+        for i in 0..bw {
+            let got = sheet[by as usize][(bx + i) as usize];
+            assert_eq!(got, [(ax + aw - 1 - i) as u8, 0, 0, 255], "column {i}");
+        }
+        assert!(!is_legacy(&sheet), "the lower half is now populated");
+    }
+
+    /// The half-height sheets mob art ships as are padded, not rejected.
+    #[test]
+    fn a_half_height_sheet_is_accepted() {
+        let mut png = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut png, SKIN_SIZE, SKIN_SIZE / 2);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            enc.write_header()
+                .unwrap()
+                .write_image_data(&vec![255u8; (SKIN_SIZE * SKIN_SIZE / 2 * 4) as usize])
+                .unwrap();
+        }
+        let sheet = decode(&png).expect("a 64x32 sheet is valid mob art");
+        assert_eq!(sheet[0][0][3], 255, "the drawn half survives");
+        assert_eq!(
+            sheet[SKIN_SIZE as usize - 1][0][3],
+            0,
+            "the rest is padding"
+        );
     }
 
     #[test]

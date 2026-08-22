@@ -1,29 +1,23 @@
 //! Mob skin sheets blitted into the block atlas.
 //!
 //! Each mob skin is a 64×64 sheet like the player skin and the armor sheets
-//! ([`super::skin`], [`super::armor`]). Humanoid mobs (zombie, skeleton) use
-//! the standard Minecraft unwrap so [`crate::entity::HumanoidModel`] renders
-//! them by only switching the sheet's atlas origin; quadrupeds (cow, sheep,
-//! chicken) use this module's own unwrap ([`Q_HEAD`]/[`Q_BODY`]/[`Q_LEG`])
-//! sized for a four-legged body. Sheets are read from
-//! `assets/textures/mob_<name>.png`; a mob with no file gets a magenta sheet,
-//! so unmade art is visible rather than invisible. They occupy the band below
-//! the armor sheets, clear of the dynamically allocated content tiles.
+//! ([`super::skin`], [`super::armor`]); a 64×32 half-sheet is padded out to one.
+//! Humanoid mobs (zombie, skeleton) use the standard Minecraft unwrap so
+//! [`crate::entity::HumanoidModel`] renders them by only switching the sheet's
+//! atlas origin. Quadrupeds (cow, sheep, pig, chicken) carry their unwrap as
+//! data — `head_uv`/`body_uv`/`leg_uv` in `assets/entities.toml` — because no
+//! two of them share one: a cow, a pig and a sheep all sit at different offsets.
+//! Sheets are read from `assets/textures/entity/<name>/<name>.png`; a mob with
+//! no file gets a magenta sheet, so unmade art is visible rather than invisible.
+//! They occupy the band below the armor sheets, clear of the dynamically
+//! allocated content tiles.
 //!
 //! Entity kinds reference skins by name (`[entity.visual] skin = "cow"`);
 //! [`origin_for`] is the lookup the state layer uses when building meshes.
 
 use super::armor;
-use super::skin::{self, SkinPart};
+use super::skin;
 use wyven_render::TileRgba;
-
-/// The quadruped unwrap. A cow-sized body (12×10×18 px) unfolds 60 px wide,
-/// so it gets its own row instead of reusing the humanoid layout. All four
-/// legs share one unwrap. Data-driven part sizes that differ from these
-/// canonical boxes simply stretch the sampled rects — fine for flat fills.
-pub const Q_HEAD: SkinPart = SkinPart::new([0, 0], [8, 8, 6]);
-pub const Q_LEG: SkinPart = SkinPart::new([28, 0], [4, 11, 4]);
-pub const Q_BODY: SkinPart = SkinPart::new([0, 20], [12, 10, 18]);
 
 /// The shipped mob skins.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,14 +26,16 @@ pub enum MobSkin {
     Skeleton,
     Cow,
     Sheep,
+    Pig,
     Chicken,
 }
 
-pub const ALL: [MobSkin; 5] = [
+pub const ALL: [MobSkin; 6] = [
     MobSkin::Zombie,
     MobSkin::Skeleton,
     MobSkin::Cow,
     MobSkin::Sheep,
+    MobSkin::Pig,
     MobSkin::Chicken,
 ];
 
@@ -50,6 +46,13 @@ impl MobSkin {
         skin::sheet_origin(armor::next_row(), index)
     }
 
+    /// Whether this mob wears the player unwrap, and so needs a legacy sheet's
+    /// missing left limbs filled in. Quadrupeds have their own unwrap and no
+    /// such notion.
+    fn is_humanoid(self) -> bool {
+        matches!(self, MobSkin::Zombie | MobSkin::Skeleton)
+    }
+
     /// The name entity kinds reference (and the PNG file stem).
     fn name(self) -> &'static str {
         match self {
@@ -57,6 +60,7 @@ impl MobSkin {
             MobSkin::Skeleton => "skeleton",
             MobSkin::Cow => "cow",
             MobSkin::Sheep => "sheep",
+            MobSkin::Pig => "pig",
             MobSkin::Chicken => "chicken",
         }
     }
@@ -81,10 +85,20 @@ pub fn is_mob_tile(tile: u32) -> bool {
 }
 
 /// Load a skin's sheet: the PNG if present and valid, else a magenta sheet.
+///
+/// Mob art lives one directory per mob (`entity/cow/cow.png`) so a mob that
+/// grows a second sheet — a sheep's wool, a variant's recolour — has somewhere
+/// obvious to put it.
 fn load(kind: MobSkin) -> Box<skin::SkinRgba> {
-    let path = format!("assets/textures/mob_{}.png", kind.name());
+    let name = kind.name();
+    let path = format!("assets/textures/entity/{name}/{name}.png");
+    let decode = if kind.is_humanoid() {
+        skin::decode_humanoid
+    } else {
+        skin::decode
+    };
     match std::fs::read(&path) {
-        Ok(bytes) => match skin::decode(&bytes) {
+        Ok(bytes) => match decode(&bytes) {
             Ok(sheet) => {
                 log::info!("mob skin {}: using {path}", kind.name());
                 sheet
@@ -112,17 +126,6 @@ mod tests {
             assert_eq!(origin_for(kind.name()), Some(kind.origin()));
         }
         assert_eq!(origin_for("dragon"), None);
-    }
-
-    #[test]
-    fn quadruped_unwrap_fits_the_sheet() {
-        for part in [Q_HEAD, Q_BODY, Q_LEG] {
-            for dir in crate::core::Direction::ALL {
-                let [x, y, w, h] = part.face_rect(dir);
-                assert!(x + w <= skin::SKIN_SIZE, "{part:?} {dir:?} overflows x");
-                assert!(y + h <= skin::SKIN_SIZE, "{part:?} {dir:?} overflows y");
-            }
-        }
     }
 
     #[test]

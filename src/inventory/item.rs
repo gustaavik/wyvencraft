@@ -563,6 +563,7 @@ mod tests {
             ("cooked_beef", 8.0, 12.8),
             ("cooked_mutton", 6.0, 9.6),
             ("cooked_chicken", 6.0, 7.2),
+            ("raw_porkchop", 3.0, 1.8),
             ("cooked_porkchop", 8.0, 12.8),
         ];
         // Plain stackables declared between the foods and the armor: mob and

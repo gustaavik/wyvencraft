@@ -267,7 +267,8 @@ those systems are testable without a Vulkan device.
 | Live player preview     | offscreen pass `wyven_render::Renderer::draw_model` + `PreviewFrame`; mesh/camera in `state::ingame_state::{update_preview_mesh,preview_frame}`; image + egui `TextureId` in `state::shared` (the runner draws it *before* the world pass, which is the ordering `wyven_app` owns) |
 | Block drop rules        | `drops = ...` on the block in `assets/blocks.toml` (`"self"`, `"none"`, `{ requires_tool }`, `{ item, count }`) |
 | Entity tuning / new kind | `assets/entities.toml` (physics/movement/vitals/item/mob components); a new *behavior* = one new component in `entity::kind` + its code hook |
-| Add / tune a mob        | `assets/entities.toml` (`[entity.mob]`: health, speeds, `behavior`, `knockback_resistance`, `[entity.mob.ranged]`, `drops`; `[entity.visual]` humanoid `skin=`/`arms_forward` or quadruped) + a `[[spawn]]` entry in `assets/spawning.toml`; sheet layout in `art::mobskin` (art: `assets/textures/mob_<name>.png`, 64×64) |
+| Add / tune a mob        | `assets/entities.toml` (`[entity.mob]`: health, speeds, `behavior`, `knockback_resistance`, `[entity.mob.ranged]`, `drops`; `[entity.visual]` humanoid `skin=`/`arms_forward` or quadruped) + a `[[spawn]]` entry in `assets/spawning.toml` + a variant in `art::mobskin::MobSkin`. Art is `assets/textures/entity/<name>/<name>.png`, 64×64 or 64×32 |
+| A mob's skin unwrap     | Humanoids use the player unwrap in `art::skin` and need nothing declared. Quadrupeds carry theirs as data — `head_uv`/`body_uv`/`leg_uv` in `[entity.visual]`, Minecraft's `texOffs` — because a cow, a pig and a sheep all sit at different offsets. `body`/`head`/`leg` px sizes are the box as it **stands**; the body's unwrap is drawn upright and `QuadrupedModel::build_mesh` tips it a quarter turn, which is why its `SkinPart` swaps height and depth |
 | Mob AI behavior         | `entity::brain` (pure state machine: Idle/Wander/Chase/Flee, perception → intent); body/physics in `entity::mob`; state-layer tick/perception/combat in `state::ingame_state::mobs`. Disposition is the `entity::kind::Behavior` enum (`passive`/`hostile`/`inert`) — a new disposition is a variant plus its arm in `MobBrain::think`, never a new boolean |
 | A static prop / statue  | an `[[entity]]` with `[entity.mob] behavior = "inert"` and no `spawning.toml` entry. `knockback_resistance` is the separate axis: `1.0` bolts it down, `0.0` lets a hit send it flying |
 | Mob spawning rules      | `assets/spawning.toml` (caps, ring distances, weights, groups, night rules — strict: unknown entity rejects the file); planner in `entity::spawning` (pure, seeded); world sampling in `state::ingame_state::mobs::update_spawning` |
@@ -399,8 +400,8 @@ those systems are testable without a Vulkan device.
 ## Verifying a change
 
 1. `cargo build --workspace` / `cargo clippy --workspace --all-targets` clean.
-2. `cargo test --workspace` green (527 tests: 54 auth, 8 core, 54 model,
-   46 render, 19 voxel, 346 game).
+2. `cargo test --workspace` green (530 tests: 54 auth, 8 core, 54 model,
+   46 render, 19 voxel, 349 game).
 3. Run it: `WYVEN_BOOT_INGAME=1 cargo run` (or host/join for net changes) and
    confirm no panic over several seconds. In a sandbox, launch in the background and
    poll the log rather than blocking on a foreground `sleep` — `timeout` is not

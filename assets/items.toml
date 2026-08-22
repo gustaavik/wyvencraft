@@ -339,9 +339,12 @@ id = "cooked_chicken"
 hunger = 6.0
 saturation = 7.2
 
-# No pig walks the world yet and no raw porkchop art was drawn, so this one has
-# neither a drop nor a recipe — `/give cooked_porkchop` is the only way to it
-# until both exist.
+[[item]]
+id = "raw_porkchop"
+
+[item.food]
+hunger = 3.0
+saturation = 1.8
 
 [[item]]
 id = "cooked_porkchop"

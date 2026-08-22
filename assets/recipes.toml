@@ -117,6 +117,10 @@ ingredients = { mutton = 1, coal = 1 }
 output = "cooked_chicken"
 ingredients = { raw_chicken = 1, coal = 1 }
 
+[[recipe]]
+output = "cooked_porkchop"
+ingredients = { raw_porkchop = 1, coal = 1 }
+
 # Knap a shard off a handful of gravel. Drops have no chance roll, so this is
 # where flint comes from rather than off the block itself.
 [[recipe]]

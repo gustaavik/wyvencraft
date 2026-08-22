@@ -207,6 +207,7 @@ impl HumanoidModel {
                 position,
                 yaw,
                 pivot,
+                0.0,
                 rot,
                 local_yaw,
             );
@@ -224,6 +225,7 @@ impl HumanoidModel {
                 position,
                 yaw,
                 pivot,
+                0.0,
                 rot,
                 local_yaw,
             );
@@ -287,6 +289,7 @@ impl HumanoidModel {
                 pivot,
                 0.0,
                 0.0,
+                0.0,
             );
             return;
         }
@@ -298,7 +301,7 @@ impl HumanoidModel {
                 size: part.size + Vec3::splat(2.0 * inflate),
             };
             push_box(
-                mesh, shell, skin_part, origin, position, yaw, pivot, rot, local_yaw,
+                mesh, shell, skin_part, origin, position, yaw, pivot, 0.0, rot, local_yaw,
             );
         }
     }
@@ -377,6 +380,11 @@ pub struct QuadrupedModel {
     pub head: ModelBox,
     /// Front-left, front-right, hind-left, hind-right.
     pub legs: [ModelBox; 4],
+    /// Where each part reads from the sheet. The body's is the *unrotated* box
+    /// it was drawn as — see [`QuadrupedModel::build_mesh`].
+    body_part: SkinPart,
+    head_part: SkinPart,
+    leg_part: SkinPart,
 }
 
 impl QuadrupedModel {
@@ -408,10 +416,20 @@ impl QuadrupedModel {
             center: Vec3::new(x, lh * 0.5, z),
             size: Vec3::new(lw, lh, ld),
         };
+        // Mob art unwraps a quadruped's body as an *upright* box that the model
+        // then tips onto its side, so its unwrap is `[width, depth, height]`
+        // where the standing parts are plain `[width, height, depth]`.
+        let px16 = |v: f32| v.round() as u32;
         Self {
             body,
             head,
             legs: [leg(-lx, -lz), leg(lx, -lz), leg(-lx, lz), leg(lx, lz)],
+            body_part: SkinPart::new(
+                v.body_uv,
+                [px16(v.body[0]), px16(v.body[2]), px16(v.body[1])],
+            ),
+            head_part: SkinPart::new(v.head_uv, v.head.map(px16)),
+            leg_part: SkinPart::new(v.leg_uv, v.leg.map(px16)),
         }
     }
 
@@ -427,26 +445,51 @@ impl QuadrupedModel {
         pose: &Pose,
         sheet_origin: [u32; 2],
     ) -> CpuMesh {
-        use crate::art::mobskin::{Q_BODY, Q_HEAD, Q_LEG};
-
         let mut mesh = CpuMesh::new();
         let swings = [pose.left_arm, pose.right_arm, pose.left_leg, pose.right_leg];
+        // The body is drawn as the upright box its unwrap was authored on, then
+        // tipped a quarter turn onto its side — the same trick the art assumes,
+        // and the reason its `SkinPart` swaps height and depth. Tipping the
+        // geometry rather than the UVs is what keeps every face rect plain.
+        let upright = ModelBox {
+            center: self.body.center,
+            size: Vec3::new(self.body.size.x, self.body.size.z, self.body.size.y),
+        };
+        // (box, unwrap, pivot, tilt, animation, local yaw)
+        let leg = |i: usize| {
+            (
+                self.legs[i],
+                self.leg_part,
+                top_pivot(self.legs[i]),
+                0.0,
+                swings[i],
+                0.0,
+            )
+        };
         let parts = [
-            (self.body, Q_BODY, self.body.center, 0.0, 0.0),
+            (
+                upright,
+                self.body_part,
+                self.body.center,
+                -std::f32::consts::FRAC_PI_2,
+                0.0,
+                0.0,
+            ),
             (
                 self.head,
-                Q_HEAD,
+                self.head_part,
                 // The neck: where the head meets the body's front face.
                 self.head.center + Vec3::new(0.0, 0.0, self.head.size.z * 0.5),
+                0.0,
                 pose.head_pitch,
                 pose.head_yaw,
             ),
-            (self.legs[0], Q_LEG, top_pivot(self.legs[0]), swings[0], 0.0),
-            (self.legs[1], Q_LEG, top_pivot(self.legs[1]), swings[1], 0.0),
-            (self.legs[2], Q_LEG, top_pivot(self.legs[2]), swings[2], 0.0),
-            (self.legs[3], Q_LEG, top_pivot(self.legs[3]), swings[3], 0.0),
+            leg(0),
+            leg(1),
+            leg(2),
+            leg(3),
         ];
-        for (part, skin_part, pivot, rot, local_yaw) in parts {
+        for (part, skin_part, pivot, tilt, rot, local_yaw) in parts {
             push_box(
                 &mut mesh,
                 part,
@@ -455,6 +498,7 @@ impl QuadrupedModel {
                 position,
                 yaw,
                 pivot,
+                tilt,
                 rot,
                 local_yaw,
             );
@@ -524,12 +568,22 @@ fn rot_x(p: Vec3, a: f32) -> Vec3 {
     Vec3::new(p.x, p.y * c - p.z * s, p.y * s + p.z * c)
 }
 
-fn face_shade(dir: Direction) -> f32 {
-    match dir {
-        Direction::PosY => 1.0,
-        Direction::NegY => 0.68,
-        Direction::PosX | Direction::NegX => 0.86,
-        Direction::PosZ | Direction::NegZ => 0.80,
+/// Baked face shade: how much a face is dimmed for the direction it points,
+/// picked by whichever axis its normal points most nearly along.
+///
+/// Taking the *turned* normal rather than the face's authored direction is what
+/// lets a part be tipped — a quadruped's body is drawn upright and laid on its
+/// side — and still be lit as the face it has become. Rotations smaller than 45°
+/// keep the same dominant axis, so a pitching head and swinging limbs are shaded
+/// exactly as a static model would be.
+fn shade_for(normal: Vec3) -> f32 {
+    let a = normal.abs();
+    if a.y >= a.x && a.y >= a.z {
+        if normal.y >= 0.0 { 1.0 } else { 0.68 }
+    } else if a.x >= a.z {
+        0.86
+    } else {
+        0.80
     }
 }
 
@@ -547,6 +601,7 @@ fn push_box(
     origin: Vec3,
     yaw: f32,
     pivot: Vec3,
+    tilt: f32,
     rot: f32,
     local_yaw: f32,
 ) {
@@ -559,11 +614,15 @@ fn push_box(
         let uv = face_local_uv(dir);
         // local_yaw and the global yaw are both about Y, so they compose for the
         // (translation-free) normal; positions rotate about their own centres.
-        let normal = rot_y(rot_x(dir.normal(), rot), local_yaw + yaw).to_array();
-        let ao = face_shade(dir);
+        // `tilt` is how the part is *built* — a quadruped's body is drawn
+        // upright and laid on its side — and `rot` is what the animation does to
+        // it this frame. Both turn the geometry; only the tilt is shaded for, or
+        // a leg swinging past 45° would pop between two shades mid-stride.
+        let normal = rot_y(rot_x(dir.normal(), tilt + rot), local_yaw + yaw).to_array();
+        let ao = shade_for(rot_x(dir.normal(), tilt));
         let rect = skin_part.face_rect(dir);
         let quad = std::array::from_fn(|i| {
-            let local = rot_y(rot_x(corners[i] - pivot, rot), local_yaw) + pivot;
+            let local = rot_y(rot_x(corners[i] - pivot, tilt + rot), local_yaw) + pivot;
             let world = rot_y(local, yaw) + origin;
             ChunkVertex {
                 position: world.to_array(),
@@ -750,7 +809,10 @@ mod tests {
             skin: "cow".into(),
             body: [12.0, 10.0, 18.0],
             head: [8.0, 8.0, 6.0],
-            leg: [4.0, 11.0, 4.0],
+            leg: [4.0, 12.0, 4.0],
+            head_uv: [0, 0],
+            body_uv: [18, 4],
+            leg_uv: [0, 16],
         };
         let model = QuadrupedModel::new(&visual);
         let mesh = model.build_mesh(Vec3::ZERO, 0.0, &Pose::default(), [0, 12]);
@@ -763,7 +825,7 @@ mod tests {
             .fold(f32::MAX, |lo, v| lo.min(v.position[1]));
         assert!(min_y.abs() < 1e-6, "legs stand on the origin: {min_y}");
         let px = 1.0 / 16.0;
-        let leg_top = 11.0 * px;
+        let leg_top = 12.0 * px;
         let body_bottom = model.body.center.y - model.body.size.y * 0.5;
         assert!(body_bottom < leg_top, "body overlaps the legs");
         // Head is forward of the body (model faces -Z).
@@ -776,13 +838,81 @@ mod tests {
         assert!(front.iter().any(|l| l.center.x < 0.0) && front.iter().any(|l| l.center.x > 0.0));
     }
 
+    /// The body's unwrap is drawn as an upright box and the model tips it over,
+    /// so which drawn face ends up as the animal's *back* is a property of that
+    /// turn. Pinned against the cow's own art: the sheet rect at (50, 14) is the
+    /// brown spine, (28, 14) the pale belly with the udder. Getting the turn
+    /// backwards renders a cow inside out, and nothing else would catch it.
+    #[test]
+    fn a_quadrupeds_back_comes_from_the_upright_boxs_back_face() {
+        let visual = QuadrupedVisual {
+            skin: "cow".into(),
+            body: [12.0, 10.0, 18.0],
+            head: [8.0, 8.0, 6.0],
+            leg: [4.0, 12.0, 4.0],
+            head_uv: [0, 0],
+            body_uv: [18, 4],
+            leg_uv: [0, 16],
+        };
+        let origin = [0, 12];
+        let mesh =
+            QuadrupedModel::new(&visual).build_mesh(Vec3::ZERO, 0.0, &Pose::default(), origin);
+
+        // Which sheet rect does the face pointing `n` sample?
+        let sheet_x = |uv: [f32; 2]| {
+            uv[0] * wyven_render::texture::ATLAS_SIZE as f32
+                - (origin[0] * wyven_render::texture::TILE_SIZE) as f32
+        };
+        let face_span = |ny: f32| {
+            // The body is the first box pushed: six faces, four vertices each.
+            let quad = mesh.vertices[..24]
+                .chunks(4)
+                .find(|q| (q[0].normal[1] - ny).abs() < 1e-5)
+                .unwrap_or_else(|| panic!("no body face with normal y = {ny}"));
+            let xs: Vec<f32> = quad.iter().map(|v| sheet_x(v.uv)).collect();
+            (
+                xs.iter().cloned().fold(f32::MAX, f32::min),
+                xs.iter().cloned().fold(f32::MIN, f32::max),
+            )
+        };
+
+        let (top_lo, top_hi) = face_span(1.0);
+        assert!(
+            (top_lo - 50.0).abs() < 0.5 && (top_hi - 62.0).abs() < 0.5,
+            "the back should read the sheet at x 50..62, got {top_lo}..{top_hi}"
+        );
+        let (belly_lo, belly_hi) = face_span(-1.0);
+        assert!(
+            (belly_lo - 28.0).abs() < 0.5 && (belly_hi - 40.0).abs() < 0.5,
+            "the belly should read the sheet at x 28..40, got {belly_lo}..{belly_hi}"
+        );
+    }
+
+    /// A tipped face must be lit as the face it has become: the cow's back is a
+    /// top, not a flank, even though it was drawn as the box's back.
+    #[test]
+    fn a_tipped_face_is_shaded_as_where_it_points() {
+        assert_eq!(shade_for(Vec3::Y), 1.0);
+        assert_eq!(shade_for(rot_x(Vec3::Z, -std::f32::consts::FRAC_PI_2)), 1.0);
+        assert_eq!(
+            shade_for(rot_x(Vec3::NEG_Z, -std::f32::consts::FRAC_PI_2)),
+            0.68
+        );
+        // Animation never reaches here — a swinging limb keeps its authored
+        // shade however far it swings.
+        assert_eq!(shade_for(Vec3::NEG_Y), 0.68);
+    }
+
     #[test]
     fn quadruped_legs_swing_about_their_hips() {
         let visual = QuadrupedVisual {
             skin: "sheep".into(),
-            body: [12.0, 10.0, 16.0],
-            head: [7.0, 7.0, 6.0],
-            leg: [4.0, 10.0, 4.0],
+            body: [8.0, 6.0, 16.0],
+            head: [6.0, 6.0, 8.0],
+            leg: [4.0, 12.0, 4.0],
+            head_uv: [0, 0],
+            body_uv: [28, 8],
+            leg_uv: [0, 16],
         };
         let model = QuadrupedModel::new(&visual);
         let rest = model.build_mesh(Vec3::ZERO, 0.0, &Pose::default(), [4, 12]);
