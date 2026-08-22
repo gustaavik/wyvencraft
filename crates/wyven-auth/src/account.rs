@@ -24,8 +24,8 @@ pub enum AccountStatus {
     /// Playing without an account.
     ///
     /// Singleplayer works; multiplayer does not, because a host has no way to
-    /// know who this is. See `state::login_state` for where a player chooses
-    /// this.
+    /// know who this is. Entered when no session could be restored — see the
+    /// game's `boot::start::boot_account`.
     Offline,
 }
 

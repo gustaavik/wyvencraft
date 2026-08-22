@@ -1,5 +1,8 @@
 /target
 .cargo/config.toml
+# Runtime state. These live in the OS application-data directory by default
+# (see src/paths.rs); they appear here only when WYVEN_DATA_DIR=. pins them
+# to the checkout, which is what `make run` does.
 # World saves + local player profile (generated at runtime)
 /saves
 /profile.toml

@@ -46,6 +46,7 @@
 //! entity    ← inventory     player, physics, mobs, brains, projectiles
 //! content   ← all of it     registries loaded from assets/*.toml
 //! chat      ← net           message log, commands, the ops list
+//! paths     ← (nothing)    where the data dir is; saves, profile, ops, keys
 //! save      ← world, entity world/player persistence under saves/
 //! ui        ← inventory     HUD and inventory egui views
 //! net       ← wyven-net     the wire protocol and the join gate
@@ -87,6 +88,7 @@ pub mod core;
 pub mod entity;
 pub mod inventory;
 pub mod net;
+pub mod paths;
 pub mod save;
 pub mod state;
 pub mod ui;

@@ -7,7 +7,7 @@
 //!
 //! Blocking, not async. The game has no runtime and one thread that must not
 //! stall, so calls happen from a worker thread and the UI polls the result —
-//! see `state::login_state`.
+//! see the game's `boot::start::boot_account`.
 
 use std::collections::HashMap;
 use std::sync::Mutex;

@@ -37,9 +37,9 @@ pub use repository::{
 
 /// On-disk format version, stamped into `level.toml` and every `.dat` header.
 pub const SAVE_VERSION: u32 = 1;
-/// Directory holding all world saves, relative to the working directory
-/// (matching the `assets/` convention).
-pub const SAVES_DIR: &str = "saves";
+/// Directory holding all world saves. A leaf name under
+/// [`crate::paths::data_dir`], not a path — see that module for where it sits.
+pub use crate::paths::SAVES_DIR;
 
 const LEVEL_FILE: &str = "level.toml";
 const WORLD_FILE: &str = "world.dat";
@@ -47,7 +47,7 @@ const PLAYER_FILE: &str = "player.dat";
 const PLAYERS_FILE: &str = "players.dat";
 const MOBS_FILE: &str = "mobs.dat";
 /// Local player profile (stable multiplayer identity), next to `saves/`.
-const PROFILE_FILE: &str = "profile.toml";
+use crate::paths::PROFILE_FILE;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SaveError {
@@ -258,9 +258,12 @@ impl WorldSave {
     }
 }
 
-/// The saves root, relative to the working directory (like `assets/`).
+/// The saves root: `<data dir>/saves`.
+///
+/// Deliberately not next to `assets/`. The install directory is replaced
+/// wholesale by a launcher applying an update, and a world must survive that.
 pub fn saves_root() -> PathBuf {
-    PathBuf::from(SAVES_DIR)
+    crate::paths::saves_root()
 }
 
 /// Scan the saves root for worlds. Unreadable/corrupt entries are skipped with
@@ -378,7 +381,7 @@ pub struct AccountProfile {
 
 /// The account this client last signed in as, if any.
 pub fn stored_account() -> Option<AccountProfile> {
-    let text = fs::read_to_string(PROFILE_FILE).ok()?;
+    let text = fs::read_to_string(crate::paths::profile_path()).ok()?;
     toml::from_str::<ProfileToml>(&text).ok()?.account
 }
 
@@ -388,7 +391,7 @@ pub fn stored_account() -> Option<AccountProfile> {
 /// the offline fallback identity, and regenerating it would orphan any
 /// singleplayer save made before signing in.
 pub fn store_account(account: Option<AccountProfile>) -> Result<(), String> {
-    let path = PathBuf::from(PROFILE_FILE);
+    let path = crate::paths::profile_path();
     let existing = fs::read_to_string(&path)
         .ok()
         .and_then(|text| toml::from_str::<ProfileToml>(&text).ok());
@@ -430,17 +433,24 @@ pub fn client_identity() -> u64 {
     {
         return id;
     }
-    let path = PathBuf::from(PROFILE_FILE);
-    if let Ok(text) = fs::read_to_string(&path)
-        && let Ok(profile) = toml::from_str::<ProfileToml>(&text)
+    let path = crate::paths::profile_path();
+    let existing = fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| toml::from_str::<ProfileToml>(&text).ok());
+    if let Some(profile) = &existing
         && let Ok(id) = profile.client_id.trim().parse::<u64>()
     {
         return id;
     }
+
     let id = (random_seed() ^ (u64::from(std::process::id())).rotate_left(32)).max(1);
     let profile = ProfileToml {
         client_id: id.to_string(),
-        account: None,
+        // Carried over rather than dropped. This branch runs whenever the id is
+        // missing or unreadable — including on a file a launcher wrote — and
+        // discarding the account here would sign the player out for the sake of
+        // regenerating a number they never see.
+        account: existing.and_then(|profile| profile.account),
     };
     match toml::to_string_pretty(&profile) {
         Ok(text) => {
@@ -659,5 +669,50 @@ mod tests {
         assert!(list_worlds(&root).is_empty());
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Regenerating the client id must not sign the player out.
+    ///
+    /// A launcher writes `profile.toml` to hand the game a session, and it may
+    /// not put a usable `client_id` in it. That sends `client_identity` down
+    /// its minting branch, which used to rewrite the file with no `[account]`
+    /// table at all — destroying the session it was handed.
+    #[test]
+    fn regenerating_the_client_id_keeps_the_stored_account() {
+        let dir = temp_root("client-id-preserves-account");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("profile.toml");
+
+        // What a launcher might write: an account, and no usable id.
+        std::fs::write(
+            &path,
+            "client_id = \"\"\n\n[account]\n\
+             account_id = \"67757374-6176-0000-0000-000000000000\"\n\
+             username = \"gustav\"\n\
+             refresh_token = \"rt\"\n",
+        )
+        .unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let before: ProfileToml = toml::from_str(&text).unwrap();
+        assert!(before.client_id.trim().parse::<u64>().is_err());
+        let account = before.account.expect("the fixture has an account");
+
+        // Mirrors the minting branch of `client_identity`, which cannot be
+        // called directly here: it resolves its path through the process-wide
+        // data dir.
+        let regenerated = ProfileToml {
+            client_id: "1787389778214353360".to_owned(),
+            account: Some(account),
+        };
+        std::fs::write(&path, toml::to_string_pretty(&regenerated).unwrap()).unwrap();
+
+        let after: ProfileToml = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(after.client_id.trim().parse::<u64>().is_ok());
+        let kept = after.account.expect("the account must survive");
+        assert_eq!(kept.username, "gustav");
+        assert_eq!(kept.refresh_token, "rt");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

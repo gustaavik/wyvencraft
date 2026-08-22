@@ -77,20 +77,25 @@ impl GameState<Wyvencraft> for MainMenuState {
                 }
 
                 ui.add_space(20.0);
-                let link = if signed_in_as.is_some() {
-                    "Sign out"
-                } else {
-                    "Sign in"
-                };
-                if ui.link(link).clicked() {
-                    account.sign_out();
-                    // The stored refresh token goes with it, or the login screen
-                    // would silently sign the player straight back in.
-                    if let Err(err) = crate::save::store_account(None) {
-                        log::warn!("could not clear the stored account: {err}");
+                // Signing *in* is not offered: there is no login screen to send
+                // anyone to. The launcher owns that, and hands the session over
+                // through `profile.toml`. Signing out stays, because forgetting
+                // a session on a shared machine has to be possible from here.
+                if signed_in_as.is_some() {
+                    if ui.link("Sign out").clicked() {
+                        account.sign_out();
+                        // The stored refresh token goes with it, or the next
+                        // launch would silently restore the session.
+                        if let Err(err) = crate::save::store_account(None) {
+                            log::warn!("could not clear the stored account: {err}");
+                        }
                     }
-                    transition =
-                        Transition::Replace(Box::new(super::LoginState::new(account.clone())));
+                } else {
+                    ui.label(
+                        egui::RichText::new("Sign in from the Wyvencraft launcher")
+                            .weak()
+                            .small(),
+                    );
                 }
             });
         });

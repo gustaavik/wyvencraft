@@ -131,9 +131,10 @@ Because `Push` runs `on_exit` on the covered screen, **pausing autosaves**.
 `shutdown` — from a window close or `Transition::Quit` — pops every screen running `on_exit`,
 which is the other save trigger.
 
-Screen chain: `LoginState` → `MainMenuState` → `SingleplayerMenuState` /
+Screen chain: `MainMenuState` → `SingleplayerMenuState` /
 `MultiplayerMenuState` → `LoadingState` / `ConnectingState` → `InGameState` →
-`PauseMenuState`.
+`PauseMenuState`. There is no login screen: `boot::start::boot_account` settles
+the account before the first screen is built.
 
 ---
 

@@ -7,15 +7,13 @@
 use std::sync::Arc;
 
 use wyven_app::Screen;
-use wyven_auth::AccountState;
+use wyven_auth::{AccountState, AuthClient, AuthSession, KeyCache};
 
 use crate::content::GameContent;
 use crate::core::GameMode;
 use crate::net::Host;
-use crate::save::{self, SaveError, SavedGame, WorldSave};
-use crate::state::{
-    ConnectingState, InGameState, LoadingState, LoginState, MainMenuState, Wyvencraft,
-};
+use crate::save::{self, AccountProfile, SaveError, SavedGame, WorldSave};
+use crate::state::{ConnectingState, InGameState, LoadingState, MainMenuState, Wyvencraft};
 
 use super::{BootPlan, WorldChoice};
 
@@ -35,45 +33,102 @@ fn open_boot_world(world: &WorldChoice, mode: GameMode) -> Option<Result<SavedGa
     )
 }
 
-/// Set up the account for a dev-boot plan, which skips the login screen.
+/// Establish who is playing, before the first screen is built.
 ///
-/// `WYVEN_BOOT_INGAME`, `WYVEN_HOST` and `WYVEN_JOIN` exist so the game can be
-/// launched headlessly with no clicking, and that has to keep working. So a boot
-/// plan never shows the login screen: it signs in with `WYVEN_USERNAME` if the
-/// auth server can be reached, and otherwise runs offline.
+/// The game has no login screen: signing in is the launcher's job, and it hands
+/// the result over by writing the `[account]` table of `profile.toml`. So this
+/// has three paths, tried in order:
 ///
-/// This is a *developer* path, not a way around the login gate — an offline
-/// client still cannot join anyone, because it has no ticket to present.
+/// 1. **A stored session** — the normal case. Refresh it and carry on.
+/// 2. **`WYVEN_USERNAME` / `WYVEN_PASSWORD`** — the developer path, so the game
+///    can be launched headlessly with no launcher and no clicking.
+/// 3. **Neither** — run offline. Singleplayer works; multiplayer does not,
+///    because an offline client has no ticket to present.
+///
+/// It never fails and never blocks the player out. An unreachable auth server
+/// means offline play, not a locked door.
 fn boot_account(account: &AccountState) {
-    let Ok(username) = std::env::var("WYVEN_USERNAME") else {
-        log::info!("no WYVEN_USERNAME; booting offline");
-        account.set_offline();
-        return;
-    };
-    let Ok(password) = std::env::var("WYVEN_PASSWORD") else {
-        log::info!("WYVEN_USERNAME set but no WYVEN_PASSWORD; booting offline");
+    let client = wyven_auth::HttpAuthClient::from_env();
+
+    if let Some(stored) = save::stored_account() {
+        match client.refresh(&stored.refresh_token) {
+            Ok(session) => {
+                log::info!("restored session for {}", session.identity);
+                adopt_session(account, &client, session);
+                return;
+            }
+            // The server *refused* it: consumed, revoked, or expired. The token
+            // is dead, so drop it — keeping it would mean retrying a doomed
+            // refresh on every launch.
+            Err(err) if !err.is_offline() => {
+                log::warn!("stored session rejected ({err}); signing out");
+                if let Err(err) = save::store_account(None) {
+                    log::warn!("could not clear the stored account: {err}");
+                }
+                account.set_offline();
+                return;
+            }
+            // Could not reach the server. The token is probably still good, so
+            // keep it and try again next launch.
+            Err(err) => {
+                log::warn!("could not reach the account server ({err}); playing offline");
+                account.set_offline();
+                return;
+            }
+        }
+    }
+
+    let (Ok(username), Ok(password)) = (
+        std::env::var("WYVEN_USERNAME"),
+        std::env::var("WYVEN_PASSWORD"),
+    ) else {
+        log::info!("no stored session and no WYVEN_USERNAME; playing offline");
         account.set_offline();
         return;
     };
 
-    let client = wyven_auth::HttpAuthClient::from_env();
-    match wyven_auth::AuthClient::login(&client, &username, &password) {
+    match client.login(&username, &password) {
         Ok(session) => {
-            log::info!("booted signed in as {}", session.identity);
-            // Cache the ticket keys too, so a `WYVEN_HOST=1` boot can verify the
-            // clients that join it.
-            if let Ok(keys) = wyven_auth::AuthClient::public_keys(&client)
-                && !keys.is_empty()
-                && let Err(err) = wyven_auth::KeyCache::new().store(&keys)
-            {
-                log::warn!("could not cache auth keys: {err}");
-            }
-            account.sign_in(session);
+            log::info!("signed in as {} from the environment", session.identity);
+            adopt_session(account, &client, session);
         }
         Err(err) => {
             log::warn!("boot sign-in failed ({err}); continuing offline");
             account.set_offline();
         }
+    }
+}
+
+/// Record a session: on disk first, then in memory, then cache the ticket keys.
+///
+/// The order is the refresh-token discipline, and it is not arbitrary. Rotation
+/// is destructive and single-use — the token that was just spent is already dead
+/// server-side. If the process died between receiving the new pair and writing
+/// it, the player would be signed out everywhere with nothing to show for it.
+/// So the write happens before anything else can go wrong.
+fn adopt_session(account: &AccountState, client: &impl AuthClient, session: AuthSession) {
+    if let Err(err) = save::store_account(Some(AccountProfile {
+        account_id: session.identity.account_id.to_string(),
+        username: session.identity.username.clone(),
+        refresh_token: session.refresh_token.clone(),
+    })) {
+        log::warn!("could not persist the session: {err}");
+    }
+
+    account.sign_in(session);
+
+    // Fetch the ticket keys while the server is known reachable. This client
+    // may host later, and a host with no keys turns everyone away — so the
+    // moment to cache them is now, not when someone tries to join.
+    match client.public_keys() {
+        Ok(keys) if !keys.is_empty() => {
+            match KeyCache::at(crate::paths::keys_path()).store(&keys) {
+                Ok(()) => log::info!("cached {} auth key(s) for hosting", keys.len()),
+                Err(err) => log::warn!("could not cache auth keys: {err}"),
+            }
+        }
+        Ok(_) => log::warn!("the auth server published no keys"),
+        Err(err) => log::warn!("could not fetch auth keys: {err}"),
     }
 }
 
@@ -83,14 +138,12 @@ pub fn initial_screen(
     content: &Arc<GameContent>,
     account: &AccountState,
 ) -> Box<dyn Screen<Wyvencraft>> {
-    // Only the menu path is gated. Every other plan is a dev-boot flag, which
-    // must stay usable without a window to click in.
-    if !matches!(plan, BootPlan::MainMenu) {
-        boot_account(account);
-    }
+    // Every plan, the menu included. There is no login screen to defer this
+    // to any more, so if the account is not established here it never is.
+    boot_account(account);
 
     match plan {
-        BootPlan::MainMenu => Box::new(LoginState::new(account.clone())),
+        BootPlan::MainMenu => Box::new(MainMenuState::new()),
         BootPlan::Singleplayer { world, mode } => match open_boot_world(&world, mode) {
             Some(Ok(game)) => Box::new(LoadingState::saved(game)),
             Some(Err(err)) => {

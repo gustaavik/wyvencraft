@@ -28,8 +28,16 @@ cargo test -p wyven-voxel # one engine crate, no GPU and no game content
 ```
 
 `cargo run` still works from the repo root: the root package *is* `wyvencraft`
-as well as the workspace root, so `assets/`, `saves/`, `profile.toml`,
-`ops.toml` and `authkeys.toml` stay CWD-relative exactly as before.
+as well as the workspace root, so `assets/` stays CWD-relative exactly as
+before.
+
+Runtime state — `saves/`, `profile.toml`, `ops.toml`, `authkeys.toml` — does
+not. It lives in the OS application-data directory (`~/Library/Application
+Support/Wyvencraft`, `%APPDATA%\Wyvencraft`, `~/.local/share/Wyvencraft`),
+resolved by `src/paths.rs`, so a launcher can replace the install directory on
+every update without taking anyone's worlds with it. `WYVEN_DATA_DIR` overrides
+it; `make run` sets `WYVEN_DATA_DIR=.` so the dev loop keeps its state in the
+checkout.
 
 Run with logging: `RUST_LOG=info,wyvencraft=debug cargo run`.
 
@@ -205,8 +213,8 @@ those systems are testable without a Vulkan device.
   is implemented once in Rust and dispatched on — never on block/item identity.
   Every file has an embedded `include_str!` fallback and degrades fail-soft
   with a logged warning (worldgen is strict: any bad name rejects the file).
-- **State pattern** — `wyven_app::Screen` + `ScreenStack` (login → menus →
-  loading → in-game → pause overlay). The runner only drives the stack; it never
+- **State pattern** — `wyven_app::Screen` + `ScreenStack` (menus → loading →
+  in-game → pause overlay; there is no login screen — see below). The runner only drives the stack; it never
   learns what a screen is. `wyven_app::Screen` is an alias for
   `Screen<Wyvencraft>` so nothing has to spell the parameter.
 - **Dependency inversion at every engine seam** — the six traits in the table
@@ -285,17 +293,18 @@ those systems are testable without a Vulkan device.
 | HUD / inventory UI      | `ui::hud`, `ui::inventory`                                                                 |
 | Item names on screen    | Read them through `GameContent::item_display_name` — never `Item::id`, which is the machine key. Slot tooltips come free from `ui::inventory::View::slot` (the one path the storage grid, hotbar row and armor column share); the fading label above the hotbar is `ui::hud::draw_held_label`, timed by the pure `inventory::HeldLabel` that `InGameState` ticks each frame |
 | Add a chat command      | **one new file in `src/chat/command/` + one entry in `COMMANDS`** — nothing else changes (the `ModelLoader::LOADERS` pattern). Implement `ChatCommand` (`name`/`usage`/`permission`/`run`); the command parses its own arguments and phrases its own messages. It reaches the world only through the `CommandContext` port, so it never sees a `PlayerId` and works identically for the local player and a remote client. Test it against `chat::FakeContext` with no world, socket or GPU. **Caveat:** a command needing a capability the port doesn't expose yet also grows `CommandContext` + its two impls — and if that capability must reach a *client*, a `ServerMessage` too (`GrantItems`, `Teleport`) |
-| Authorize a player      | `ops.toml` in the working directory (`ops = [{ id = "<account uuid>", name = "..." }]`), parsed by `chat::ops`. Keyed by the **account id from the verified join ticket**, never by anything a client asserts. The host/singleplayer player is always an op; only the authority loads the file |
+| Authorize a player      | `ops.toml` in the data directory (`ops = [{ id = "<account uuid>", name = "..." }]`), parsed by `chat::ops`. Keyed by the **account id from the verified join ticket**, never by anything a client asserts. The host/singleplayer player is always an op; only the authority loads the file |
 | Chat log / input bar    | `chat::{log,composer}` (pure state), drawn by `ui::chat::draw_chat`; keys `chat`/`chat_command` in `config::Keybinds` (T and /) |
 | Networking              | `wyven_net::{server,client}` + `net::protocol` transport; role behind `state::session::Session` (Singleplayer/Host/Client + `FakeSession`); message application in `state::ingame_state::net` |
-| Accounts / login        | `wyven_auth::{client,session,account,keys,username,verifier}`. `AuthClient` is a port (`HttpAuthClient` via ureq / `FakeAuthClient`); `LoginState` is the first screen; the session persists in `profile.toml`. `wyven_auth::username` hand-mirrors the server's name rule (`[A-Za-z0-9_]`, 3..=16, no leading `_`) so the form refuses locally what the server would refuse anyway — same duplication, and same obligation to keep both sides in step, as `AccountIdentity::netcode_id`. Server lives in the private repo [gustaavik/wcauthserver](https://github.com/gustaavik/wcauthserver) |
+| Accounts / login        | `wyven_auth::{client,session,account,keys,username,verifier}`. `AuthClient` is a port (`HttpAuthClient` via ureq / `FakeAuthClient`). **There is no login screen** — signing in belongs to the launcher, which writes the session into `profile.toml`; `boot::start::boot_account` restores and refreshes it before the first screen exists, and falls back to offline play. The main menu offers Sign out but not Sign in. `wyven_auth::username` hand-mirrors the server's name rule (`[A-Za-z0-9_]`, 3..=16, no leading `_`) so the form refuses locally what the server would refuse anyway — same duplication, and same obligation to keep both sides in step, as `AccountIdentity::netcode_id`. Server lives in the private repo [gustaavik/wcauthserver](https://github.com/gustaavik/wcauthserver) |
 | Who may join            | `net::TicketJoin` (the game's `JoinVerifier`) checks the Ed25519 ticket a client puts in netcode `user_data` **before** a `PlayerId` exists — a failure is disconnected with no `Welcome`. Keys come from `authkeys.toml` via `wyven_auth::KeyCache`; **no keys means no joins**, never "everyone joins". Ticket format is `wcauth-ticket`, shared verbatim with the server — literally the same crate, pulled from the wcauthserver repo as a git dependency |
 | Player nameplates       | `ui::nameplate` painted from `InGameState::draw_nameplates`; projection is `wyven_render::Camera::project`. egui composites after the world pass with no depth, so occlusion is an explicit `wyven_voxel::raycast` against `is_solid` |
 | Saving / world files    | `save` module (formats, `saves/<slug>/`) behind `save::WorldRepository` (File/Null/InMemory); triggers in `state::ingame_state::save_world` |
 | Pipelines / passes      | `wyven_render::pipeline`, `wyven_render::renderer`                                                     |
 | GPU meshes / camera     | `state::ingame_state::view` (`SceneCache`) — the only holder of `RenderContext`             |
-| Startup / dev env vars  | `boot::plan::BootPlan::from_env` (pure, tested); effects in `boot::start::initial_screen`. A dev-boot plan skips the login screen via `boot::start::boot_account`. The window/device/event-loop side is `wyven_app::run`, reached through the `Game` impl in `state::shared` |
-| Loading `assets/*.toml` | `wyven_assets::AssetSource` (Fs/Embedded/Map) + one `load_or_builtin` helper           |
+| Startup / dev env vars  | `boot::plan::BootPlan::from_env` (pure, tested); effects in `boot::start::initial_screen`, which runs `boot::start::boot_account` for **every** plan. The window/device/event-loop side is `wyven_app::run`, reached through the `Game` impl in `state::shared` |
+| Loading `assets/*.toml` | `wyven_assets::AssetSource` (Fs/Embedded/Map) + one `load_or_builtin` helper. CWD-relative: `assets/` belongs to the install, not the player |
+| Where runtime files go  | `src/paths.rs` — one memoised data root (`WYVEN_DATA_DIR`, else OS app-data, else CWD) with `saves_root`/`profile_path`/`ops_path`/`keys_path` off it. Engine crates never learn it: `wyven_auth::KeyCache::at` takes the path the game resolves |
 | Shaders                 | `crates/wyven-render/shaders/*.{vert,frag}`, declared in `wyven_render::shaders` (they moved out of `assets/` with the renderer — they are compiled into the binary, so nothing reads that path at runtime). `voxel.vert` is shared by both chunk pipelines, so a new vertex attribute means editing it plus `wyven_render::vertex` and every `ChunkVertex { .. }` site |
 
 ## Conventions & gotchas
@@ -349,8 +358,8 @@ those systems are testable without a Vulkan device.
   raw chat line (command or not) as `ClientMessage::Chat`; the host parses it,
   checks `ops.toml`, and answers with `ServerMessage::Chat` / `GrantItems`. There
   is deliberately no client-side execution path to skip, which is what makes the
-  ops list an actual permission rather than a suggestion. `ops.toml` is
-  CWD-relative and gitignored like `profile.toml`, keyed by the **account uuid
+  ops list an actual permission rather than a suggestion. `ops.toml` lives in
+  the data directory beside `profile.toml`, keyed by the **account uuid
   from a verified join ticket** (player ids are per-session and can't carry a
   permission). It used to be keyed by the client's own `profile.toml` id, which
   the client asserted for itself — so anyone who learned an op's number became
@@ -386,8 +395,9 @@ those systems are testable without a Vulkan device.
   are a separate registry and still use spaced `name`s.
 - **Saves are id-based, not index-based.** `saves/<slug>/` stores blocks/items by
   registry *id* (numeric ids are insertion-order indices and shift across code
-  changes). `saves/` and `profile.toml` are CWD-relative (like `assets/`) and
-  gitignored. Worlds regenerate terrain from the seed; only the edit overlay,
+  changes). `saves/` and `profile.toml` live in the data directory (see
+  `src/paths.rs`), *not* next to `assets/` — an update replaces the install
+  directory wholesale and must not take a world with it. Worlds regenerate terrain from the seed; only the edit overlay,
   players, mobs (`mobs.dat`, kind-by-name, fail-soft), and metadata are
   persisted — so terrain-generator changes alter existing worlds' unedited
   terrain (edits still replay at their coordinates). Dropped items and arrows

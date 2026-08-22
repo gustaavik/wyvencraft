@@ -1,8 +1,17 @@
+# The dev loop keeps its state in the repo, as it always has: WYVEN_DATA_DIR
+# pins `saves/`, `profile.toml`, `ops.toml` and `authkeys.toml` to the working
+# directory. Without it the game writes to the OS application-data directory,
+# which is right for a player and surprising for a checkout.
 run:
-	WYVEN_BOOT_INGAME=1 WYVEN_WORLD=test cargo run
+	WYVEN_DATA_DIR=. WYVEN_BOOT_INGAME=1 WYVEN_WORLD=test cargo run
 
 build:
 	WYVEN_AUTH_URL=http://llzdmervhd2eyewlrapa8jhi.100.94.237.98.sslip.io cargo build --release
 
 run-release:
+	WYVEN_DATA_DIR=. ./target/release/wyvencraft
+
+# What the launcher does: state in the application-data directory, assets from
+# the working directory. Use this to check the shipped layout by hand.
+run-release-packaged:
 	./target/release/wyvencraft

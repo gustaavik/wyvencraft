@@ -1,5 +1,9 @@
-//! Wyvencraft's screens: login → menus → loading → in-game, with the pause
-//! menu pushed as an overlay.
+//! Wyvencraft's screens: menus → loading → in-game, with the pause menu
+//! pushed as an overlay.
+//!
+//! There is no login screen. Signing in belongs to the launcher, which hands
+//! the session over through `profile.toml`; [`crate::boot::start`] restores it
+//! before the first screen is built.
 //!
 //! The stack itself is [`wyven_app`]; what is on it is here. Each screen
 //! implements [`wyven_app::Screen<Wyvencraft>`], which the aliases below make
@@ -9,7 +13,6 @@
 pub mod connecting_state;
 pub mod ingame_state;
 pub mod loading_state;
-pub mod login_state;
 pub mod menu_state;
 pub mod multiplayer_menu;
 pub mod pause_menu;
@@ -20,7 +23,6 @@ pub mod singleplayer_menu;
 pub use connecting_state::ConnectingState;
 pub use ingame_state::InGameState;
 pub use loading_state::LoadingState;
-pub use login_state::LoginState;
 pub use menu_state::MainMenuState;
 pub use multiplayer_menu::MultiplayerMenuState;
 pub use pause_menu::PauseMenuState;

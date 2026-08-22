@@ -20,8 +20,8 @@ use std::fs;
 use serde::Deserialize;
 use uuid::Uuid;
 
-/// Ops file, next to `profile.toml` and `saves/` in the working directory.
-pub const OPS_FILE: &str = "ops.toml";
+/// Ops file, next to `profile.toml` and `saves/` in the data directory.
+pub use crate::paths::OPS_FILE;
 
 /// The set of authorized accounts, with the names the file gave them.
 #[derive(Debug, Clone, Default)]
@@ -31,11 +31,11 @@ pub struct OpsList {
 }
 
 impl OpsList {
-    /// Read `ops.toml` from the working directory. Never fails: a missing file
+    /// Read `ops.toml` from the data directory. Never fails: a missing file
     /// is the normal case (nobody but the host is an op) and a broken one is
     /// logged and treated the same way.
     pub fn load() -> Self {
-        let text = match fs::read_to_string(OPS_FILE) {
+        let text = match fs::read_to_string(crate::paths::ops_path()) {
             Ok(text) => text,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 log::debug!("no {OPS_FILE}; only the host may run commands");
