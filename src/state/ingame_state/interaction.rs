@@ -177,6 +177,12 @@ impl InGameState {
             self.breaking = None;
             return;
         }
+        // Mining is a run of blows, so the arm swings for as long as the button
+        // is down rather than once when it went down. Keeping the swing alive
+        // (rather than triggering it) is what lets each arc finish before the
+        // next begins; the blow that finally breaks the block is covered by the
+        // same loop, so it needs no trigger of its own.
+        self.view.keep_swinging();
         // Effective tool: the held item, if it's a tool.
         let tool = self
             .inventory
@@ -191,7 +197,6 @@ impl InGameState {
         };
         let progress = prior + dt / seconds.max(1.0e-3);
         if progress >= 1.0 {
-            self.view.trigger_swing();
             if self.break_block_at(hit.block) {
                 self.inventory.damage_selected_tool();
             }

@@ -11,6 +11,8 @@ use glam::{EulerRot, Mat3, Mat4, Vec3};
 
 use wyven_core::math::yaw_matrix;
 use wyven_render::mesh::CpuMesh;
+
+use super::display::ItemTransform;
 use wyven_render::vertex::{ChunkVertex, NO_TINT};
 
 /// Triangle geometry in model space: Y-up, right-handed, one block = 1.0, UVs
@@ -132,12 +134,39 @@ pub fn placement(
     rotation: Vec3,
     offset: Vec3,
 ) -> Mat4 {
-    Mat4::from_translation(origin)
-        * yaw_matrix(yaw)
-        * Mat4::from_rotation_x(pitch)
-        * Mat4::from_scale(Vec3::splat(scale))
-        * Mat4::from_euler(EulerRot::YXZ, rotation.y, rotation.x, rotation.z)
-        * Mat4::from_translation(offset)
+    anchor(origin, yaw, pitch) * local_transform(None, scale, rotation, offset)
+}
+
+/// The world half of a [`placement`]: where the thing carrying the model is,
+/// and how it is turned. Split out so a caller that has its own model-space
+/// transform — a `display` entry, a viewmodel's camera-relative pose — can
+/// compose against the same anchor every other model uses.
+pub fn anchor(origin: Vec3, yaw: f32, pitch: f32) -> Mat4 {
+    Mat4::from_translation(origin) * yaw_matrix(yaw) * Mat4::from_rotation_x(pitch)
+}
+
+/// The model half of a [`placement`]: where the model sits within the space of
+/// whatever carries it.
+///
+/// This is the one place that decides between an authored `display` entry and
+/// the data file's own `scale`/`rotation`/`offset`. A model that declares a
+/// placement for the context being drawn wins outright — its author measured it
+/// against that context, where the `ModelSpec` numbers are one compromise
+/// stretched across the hand, the ground and the inventory slot at once.
+pub fn local_transform(
+    display: Option<ItemTransform>,
+    scale: f32,
+    rotation: Vec3,
+    offset: Vec3,
+) -> Mat4 {
+    match display {
+        Some(transform) => transform.matrix(),
+        None => {
+            Mat4::from_scale(Vec3::splat(scale))
+                * Mat4::from_euler(EulerRot::YXZ, rotation.y, rotation.x, rotation.z)
+                * Mat4::from_translation(offset)
+        }
+    }
 }
 
 /// Directional shading for an arbitrary normal, generalising the per-face
@@ -158,6 +187,8 @@ pub(super) fn shade(normal: Vec3) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use super::super::display::ItemTransform;
+
     use super::*;
     use std::f32::consts::FRAC_PI_2;
 
@@ -309,5 +340,39 @@ mod tests {
         let mut oob = tri();
         oob.indices = vec![0, 1, 99];
         assert!(oob.validate().is_err(), "index out of range");
+    }
+
+    /// The split must be exact, or every model in the game shifts.
+    #[test]
+    fn the_anchor_and_the_local_transform_rebuild_the_placement() {
+        let origin = Vec3::new(3.0, 1.5, -2.0);
+        let (yaw, pitch) = (0.7, -0.3);
+        let rotation = Vec3::new(0.2, 1.1, -0.4);
+        let offset = Vec3::new(-0.5, 0.25, -0.5);
+        let split = anchor(origin, yaw, pitch) * local_transform(None, 0.45, rotation, offset);
+        let whole = placement(origin, yaw, pitch, 0.45, rotation, offset);
+        assert!(
+            split.abs_diff_eq(whole, 1e-6),
+            "split {split} != placement {whole}"
+        );
+    }
+
+    /// An authored placement replaces the data file's numbers rather than
+    /// composing with them: the two centre a model differently (`display` in all
+    /// three axes, `offset` only in XZ), so combining them would mean nothing.
+    #[test]
+    fn an_authored_placement_ignores_the_spec() {
+        let display = ItemTransform {
+            translation: [0.0, 16.0, 0.0],
+            ..Default::default()
+        };
+        let with_spec = local_transform(Some(display), 0.45, Vec3::new(0.0, 1.5, 0.0), Vec3::X);
+        let without = local_transform(Some(display), 1.0, Vec3::ZERO, Vec3::ZERO);
+        assert!(with_spec.abs_diff_eq(without, 1e-6));
+        assert!(
+            with_spec
+                .transform_point3(Vec3::splat(0.5))
+                .abs_diff_eq(Vec3::Y, 1e-6)
+        );
     }
 }

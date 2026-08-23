@@ -826,6 +826,12 @@ mod tests {
     /// The tiered tools are flat in the XY plane, unlike `vine_sword`, so they
     /// all carry the quarter-turn that stands them broadside in the fist. A
     /// tool that silently lost it would render edge-on and near-invisible.
+    ///
+    /// The extension is deliberately not pinned: tools are migrating from
+    /// `.bbmodel` to the Java Block/Item `.json` export one at a time, and a
+    /// re-authored tool places itself from its own `display` block instead. The
+    /// spec rotation stays as the fallback for any context that block does not
+    /// name, which is why it is still asserted for every tier.
     #[test]
     fn tiered_tool_models_are_turned_broadside() {
         let blocks = BlockRegistry::with_builtins();
@@ -841,10 +847,12 @@ mod tests {
                 let spec = models[id.0 as usize]
                     .as_ref()
                     .unwrap_or_else(|| panic!("{name} declares a model"));
-                assert_eq!(
-                    spec.path,
-                    format!("assets/models/{tier}_{shape}.bbmodel"),
-                    "{name}: model path"
+                let stem = format!("assets/models/{tier}_{shape}.");
+                assert!(
+                    spec.path.starts_with(&stem)
+                        && (spec.path.ends_with(".bbmodel") || spec.path.ends_with(".json")),
+                    "{name}: model path {}",
+                    spec.path
                 );
                 assert_eq!(spec.rotation, [0.0, 90.0, 0.0], "{name}: rotation");
             }

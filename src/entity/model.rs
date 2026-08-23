@@ -3,12 +3,13 @@
 //!
 //! Dimensions follow the classic Minecraft proportions (in pixels / 16 = blocks).
 
-use glam::Vec3;
+use glam::{Mat4, Vec3};
 
 use crate::art::armor::ArmorKind;
 use crate::art::skin::{self, SkinPart};
 use crate::core::Direction;
 use crate::core::math::rotate_y as rot_y;
+use crate::core::math::yaw_matrix;
 use crate::entity::kind::QuadrupedVisual;
 use crate::inventory::{ARMOR_SIZE, ArmorSlot, ItemId, ItemRegistry};
 use wyven_render::mesh::CpuMesh;
@@ -605,6 +606,82 @@ fn push_box(
     rot: f32,
     local_yaw: f32,
 ) {
+    // The pivot-then-yaw chain the parts articulate through, written as one
+    // matrix so a caller with a transform of its own — a view model hanging off
+    // the camera rather than off a body — can use the same face emitter.
+    let transform = Mat4::from_translation(origin)
+        * yaw_matrix(yaw)
+        * Mat4::from_translation(pivot)
+        * yaw_matrix(local_yaw)
+        * Mat4::from_rotation_x(tilt + rot)
+        * Mat4::from_translation(-pivot);
+    // `tilt` is how the part is *built* — a quadruped's body is drawn upright
+    // and laid on its side — and `rot` is what the animation does to it this
+    // frame. Both turn the geometry; only the tilt is shaded for, or a leg
+    // swinging past 45° would pop between two shades mid-stride.
+    push_box_with(
+        mesh,
+        part,
+        skin_part,
+        sheet_origin,
+        BoxPlacement::new(transform).shaded_as(Mat4::from_rotation_x(tilt)),
+    );
+}
+
+/// Where one box goes, and which way it faces for lighting.
+///
+/// Three matrices rather than one because they answer different questions, and
+/// only for a view model do the answers differ:
+///
+/// - `transform` decides where a face ends up. Always model→world.
+/// - `normal_basis` orients the normal the shader dots against the sun. For
+///   world geometry that is the same transform; for geometry carried by the
+///   camera it must **not** be, or the hand would brighten and dim every time
+///   the player turned on the spot.
+/// - `shade_basis` orients the normal the *baked* face shade comes from. A
+///   quadruped's body is drawn upright and tipped a quarter turn, and must read
+///   as the face it has become rather than the face it was drawn as.
+#[derive(Debug, Clone, Copy)]
+pub struct BoxPlacement {
+    pub transform: Mat4,
+    pub normal_basis: Mat4,
+    pub shade_basis: Mat4,
+}
+
+impl BoxPlacement {
+    /// Position, light and shade all taken from one model→world transform —
+    /// what every piece of world geometry wants.
+    pub fn new(transform: Mat4) -> Self {
+        Self {
+            transform,
+            normal_basis: transform,
+            shade_basis: transform,
+        }
+    }
+
+    /// Take the baked face shade from `basis` instead of the transform.
+    pub fn shaded_as(mut self, basis: Mat4) -> Self {
+        self.shade_basis = basis;
+        self
+    }
+
+    /// Take the lighting normal from `basis` instead of the transform, for
+    /// geometry that moves with the camera rather than with the world.
+    pub fn lit_as(mut self, basis: Mat4) -> Self {
+        self.normal_basis = basis;
+        self
+    }
+}
+
+/// Emit the 6 faces of one model box into `mesh` under an arbitrary
+/// [`BoxPlacement`], sampling the 64×64 sheet at atlas `sheet_origin`.
+pub fn push_box_with(
+    mesh: &mut CpuMesh,
+    part: ModelBox,
+    skin_part: SkinPart,
+    sheet_origin: [u32; 2],
+    placement: BoxPlacement,
+) {
     let half = part.size * 0.5;
     let lo = part.center - half;
     let hi = part.center + half;
@@ -612,20 +689,15 @@ fn push_box(
     for dir in Direction::ALL {
         let corners = box_face_corners(dir, lo, hi);
         let uv = face_local_uv(dir);
-        // local_yaw and the global yaw are both about Y, so they compose for the
-        // (translation-free) normal; positions rotate about their own centres.
-        // `tilt` is how the part is *built* — a quadruped's body is drawn
-        // upright and laid on its side — and `rot` is what the animation does to
-        // it this frame. Both turn the geometry; only the tilt is shaded for, or
-        // a leg swinging past 45° would pop between two shades mid-stride.
-        let normal = rot_y(rot_x(dir.normal(), tilt + rot), local_yaw + yaw).to_array();
-        let ao = shade_for(rot_x(dir.normal(), tilt));
+        let normal = placement
+            .normal_basis
+            .transform_vector3(dir.normal())
+            .to_array();
+        let ao = shade_for(placement.shade_basis.transform_vector3(dir.normal()));
         let rect = skin_part.face_rect(dir);
         let quad = std::array::from_fn(|i| {
-            let local = rot_y(rot_x(corners[i] - pivot, tilt + rot), local_yaw) + pivot;
-            let world = rot_y(local, yaw) + origin;
             ChunkVertex {
-                position: world.to_array(),
+                position: placement.transform.transform_point3(corners[i]).to_array(),
                 normal,
                 uv: skin::sheet_uv(sheet_origin, rect, uv[i]),
                 ao,

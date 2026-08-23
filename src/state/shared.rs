@@ -15,7 +15,7 @@ use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
 use vulkano::memory::allocator::AllocationCreateInfo;
 use vulkano::sync::GpuFuture;
 use wyven_app::{Boot, Game, RendererTextures, Screen, WindowConfig};
-use wyven_model::ModelRegistry;
+use wyven_model::{DisplayContext, ModelRegistry};
 use wyven_render::{GpuMesh, RenderContext, Renderer, Texture, TexturedMesh, icons};
 
 use crate::boot::{BootPlan, SystemEnv};
@@ -208,12 +208,20 @@ fn build_icon_sheet(
     let view = ImageView::new_default(image).expect("icon sheet view");
 
     // Bake each model into the unit box the icon camera frames, and upload it
-    // alongside its own texture. A model that fails either step is skipped: its
-    // cell stays empty rather than taking the whole sheet down with it.
-    let uploaded: Vec<(GpuMesh, Texture)> = (0..count)
-        .filter_map(|i| {
+    // alongside its own texture. A model that fails either step leaves its cell
+    // empty rather than taking the whole sheet down with it — and keeps its
+    // place in the slice, because the cell index *is* the `ModelId` that
+    // `ItemIcon::Model` looks the icon up by.
+    let uploaded: Vec<Option<(GpuMesh, Texture)>> = (0..count)
+        .map(|i| {
             let model = models.get(wyven_model::ModelId(i))?;
-            let mesh = model.mesh.bake(icons::frame(model.bounds));
+            // A model that says where it belongs in an inventory slot is posed
+            // by its author; everything else is fitted to the cell automatically.
+            let frame = match model.placement_for(DisplayContext::Gui) {
+                Some(gui) => icons::frame_authored(gui.matrix()),
+                None => icons::frame(model.bounds),
+            };
+            let mesh = model.mesh.bake(frame);
             let gpu = GpuMesh::upload(&ctx.memory_allocator, &mesh)
                 .ok()
                 .flatten()?;
@@ -223,9 +231,13 @@ fn build_icon_sheet(
             Some((gpu, texture))
         })
         .collect();
-    let batch: Vec<TexturedMesh<'_>> = uploaded
+    let batch: Vec<Option<TexturedMesh<'_>>> = uploaded
         .iter()
-        .map(|(mesh, texture)| TexturedMesh { mesh, texture })
+        .map(|entry| {
+            entry
+                .as_ref()
+                .map(|(mesh, texture)| TexturedMesh { mesh, texture })
+        })
         .collect();
 
     let future = renderer.draw_icons(
@@ -238,6 +250,9 @@ fn build_icon_sheet(
         .expect("flush icon sheet")
         .wait(None)
         .expect("wait icon sheet");
-    log::info!("rendered {} item model icon(s)", batch.len());
+    log::info!(
+        "rendered {} item model icon(s)",
+        batch.iter().flatten().count()
+    );
     view
 }

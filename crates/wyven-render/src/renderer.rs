@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use glam::{Mat4, Vec3};
 use vulkano::command_buffer::{
-    AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer,
-    RenderingAttachmentInfo, RenderingInfo,
+    AutoCommandBufferBuilder, ClearAttachment, ClearRect, CommandBufferUsage,
+    PrimaryAutoCommandBuffer, RenderingAttachmentInfo, RenderingInfo,
 };
 use vulkano::descriptor_set::DescriptorSet;
 use vulkano::format::{ClearValue, Format};
@@ -98,6 +98,38 @@ pub struct SceneFrame<'a> {
     pub textured: Vec<TexturedMesh<'a>>,
     /// Debug lines drawn on top of the world (block selection outline).
     pub lines: Option<&'a GpuLines>,
+    /// Geometry drawn in front of the finished world under its own camera — a
+    /// first-person view model. `None` when there is nothing in front.
+    ///
+    /// Deliberately not called "hand": what the renderer knows is that this
+    /// geometry is nearer than the world and framed by a camera of its own, not
+    /// that a game somewhere has arms.
+    pub foreground: Option<ForegroundFrame<'a>>,
+}
+
+/// Geometry drawn after the world, with the depth buffer cleared first, so
+/// nothing already drawn can cut into it.
+///
+/// The depth clear is what makes this different from another entry in
+/// `opaque` — a view model sits a few centimetres from the eye, closer than the
+/// near plane of anything it would otherwise be tested against, so a wall the
+/// camera is pressed against would slice straight through it. Clearing costs one
+/// command inside the render pass already in progress; a second render pass
+/// instance would cost a store and reload of the whole colour attachment.
+pub struct ForegroundFrame<'a> {
+    /// Its own camera: a view model is framed independently of the world's
+    /// field of view, so a wide-FOV setting does not distort it.
+    pub view_proj: Mat4,
+    /// Geometry sampling the shared atlas — a player's own skin.
+    pub atlas: Vec<&'a GpuMesh>,
+    /// Geometry bringing its own texture — a held model.
+    pub textured: Vec<TexturedMesh<'a>>,
+}
+
+impl ForegroundFrame<'_> {
+    fn is_empty(&self) -> bool {
+        self.atlas.is_empty() && self.textured.is_empty()
+    }
 }
 
 /// Everything the renderer needs to draw the player-model preview into the
@@ -477,6 +509,36 @@ impl Renderer {
             if let Some(lines) = scene.lines {
                 self.record_lines(&mut builder, scene.view_proj, lines);
             }
+            // Last, and only after the depth of everything else is thrown away:
+            // the view model is nearer than the world by construction, and must
+            // not be clipped by geometry the camera is standing inside.
+            if let Some(foreground) = scene.foreground.as_ref().filter(|f| !f.is_empty()) {
+                builder
+                    .clear_attachments(
+                        [ClearAttachment::Depth(1.0)].into_iter().collect(),
+                        [ClearRect {
+                            offset: [0, 0],
+                            extent: size,
+                            array_layers: 0..1,
+                        }]
+                        .into_iter()
+                        .collect(),
+                    )
+                    .expect("clear foreground depth");
+                let pass = Pass {
+                    pipeline: &voxel_pipeline,
+                    view_proj: foreground.view_proj,
+                    light: &scene.light,
+                    time: scene.time,
+                };
+                self.record_meshes(
+                    &mut builder,
+                    pass,
+                    self.atlas.set.clone(),
+                    &foreground.atlas,
+                );
+                self.record_textured(&mut builder, pass, &foreground.textured);
+            }
         }
 
         builder.end_rendering().expect("end rendering");
@@ -491,6 +553,11 @@ impl Renderer {
     /// Fill an icon sheet: render `icons[i]` into cell `i` of `target`, all in
     /// one pass, and return a future that completes when the sheet is ready.
     ///
+    /// A `None` leaves its cell empty **without moving the ones after it**. The
+    /// index is the identity of the icon, not merely its order — callers look a
+    /// cell up by the same index they built the slice with — so a model that
+    /// failed to load has to hold its place rather than be squeezed out.
+    ///
     /// Every cell shares the orthographic camera and light from
     /// [`super::icons`] — the meshes arrive already framed into the unit box it
     /// covers — so a cell change is only a viewport change. Cleared fully
@@ -501,7 +568,7 @@ impl Renderer {
         &mut self,
         before: Box<dyn GpuFuture>,
         target: Arc<ImageView>,
-        icons: &[TexturedMesh<'_>],
+        icons: &[Option<TexturedMesh<'_>>],
     ) -> Box<dyn GpuFuture> {
         let extent = target.image().extent();
         let depth = self.ensure_depth([extent[0], extent[1]]);
@@ -534,6 +601,9 @@ impl Renderer {
         let pipeline = self.voxel_pipeline.clone();
         let view_proj = icons::view_projection();
         for (index, icon) in icons.iter().enumerate() {
+            let Some(icon) = icon else {
+                continue;
+            };
             let [x, y, w, h] = icons::cell_rect(index as u32);
             builder
                 .set_viewport(

@@ -30,7 +30,8 @@ use wyven_voxel::model_hitbox;
 use wyven_voxel::{BlockModel, FaceTextures};
 
 use wyven_assets::decode_png;
-use wyven_model::{ModelId, ModelRegistry, blockjson};
+use wyven_model::mesh as model_mesh;
+use wyven_model::{DisplayContext, ModelId, ModelRegistry, blockjson};
 use wyven_render::TileRegistry;
 use wyven_render::block_textures::{self, AnimatedLayers, BlockTextureSet, Strip};
 
@@ -85,6 +86,24 @@ pub struct ItemModel {
     /// Model-space rotation in radians (`ModelSpec` authors it in degrees).
     pub rotation: glam::Vec3,
     pub offset: glam::Vec3,
+}
+
+impl ItemModel {
+    /// Where this item sits within the space of whatever carries it, for the
+    /// context it is being drawn in.
+    ///
+    /// The model file's own `display` entry wins when it has one, because its
+    /// author measured it against that context; otherwise the `[item.model]`
+    /// numbers place it, exactly as they did before `display` existed. One
+    /// function, so the fallback can never be spelled two different ways at two
+    /// call sites — a `.bbmodel`, which declares nothing, must keep being placed
+    /// by precisely the matrix that has always placed it.
+    pub fn local(&self, models: &ModelRegistry, context: DisplayContext) -> glam::Mat4 {
+        let display = models
+            .get(self.id)
+            .and_then(|model| model.placement_for(context));
+        model_mesh::local_transform(display, self.scale, self.rotation, self.offset)
+    }
 }
 
 /// All loaded content registries, shared across the app.

@@ -25,6 +25,7 @@ use crate::art::cracks;
 use crate::content::BlockAppearance;
 use crate::content::{ItemModel, ItemShape};
 use crate::core::{Aabb, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, ChunkPos, DayCycle};
+use crate::entity::viewmodel::{self, HandPose};
 use crate::entity::{
     AnimationState, Arrow, DroppedItem, HandAnchor, HumanoidModel, Mob, Perspective, Player,
 };
@@ -35,10 +36,10 @@ use crate::world::meshing::{
     ItemSprite, mesh_block_overlay, mesh_chunk, push_item_cube, push_item_sprite,
 };
 use wyven_model::mesh as model_mesh;
-use wyven_model::{ModelId, ModelRegistry};
+use wyven_model::{DisplayContext, ModelId, ModelRegistry};
 use wyven_render::{
-    Camera, CpuMesh, GpuLines, GpuMesh, LightParams, PreviewFrame, RenderContext, SceneFrame,
-    SkyParams, Texture, TexturedMesh, TileRegistry, debug,
+    Camera, CpuMesh, ForegroundFrame, GpuLines, GpuMesh, LightParams, PreviewFrame, RenderContext,
+    SceneFrame, SkyParams, Texture, TexturedMesh, TileRegistry, debug,
 };
 use wyven_voxel::FaceTextures;
 
@@ -121,6 +122,10 @@ pub(super) struct SceneCache {
     mob_meshes: Vec<(GpuMesh, Option<ModelId>)>,
     /// The item model in the local player's hand, drawn in third person.
     held_mesh: Option<(GpuMesh, ModelId)>,
+    /// The view model: the player's own arm, and the item in it. Built only in
+    /// first person, where `player_mesh` and `held_mesh` are not.
+    hand_mesh: Option<GpuMesh>,
+    hand_held_mesh: Option<(GpuMesh, ModelId)>,
     /// The same model in the inventory preview, posed for the preview camera.
     preview_held_mesh: Option<(GpuMesh, ModelId)>,
     /// Model geometry for dropped stacks, one mesh per distinct model.
@@ -175,6 +180,8 @@ impl SceneCache {
             remote_anims: HashMap::new(),
             mob_meshes: Vec::new(),
             held_mesh: None,
+            hand_mesh: None,
+            hand_held_mesh: None,
             preview_held_mesh: None,
             drops_model_meshes: Vec::new(),
             model_textures: Vec::new(),
@@ -326,7 +333,13 @@ impl SceneCache {
         self.player_anim.trigger_swing();
     }
 
-    /// Rebuild the player model mesh in third person; drop it in first person.
+    /// Keep the main-hand swing looping while a held action continues.
+    pub fn keep_swinging(&mut self) {
+        self.player_anim.keep_swinging();
+    }
+
+    /// Rebuild the player model mesh in third person, or the view model in
+    /// first — never both, since in first person the body is the camera.
     pub fn update_player_mesh(
         &mut self,
         ctx: &Arc<RenderContext>,
@@ -338,8 +351,11 @@ impl SceneCache {
         if player.perspective.is_first_person() {
             self.player_mesh = None;
             self.held_mesh = None;
+            self.update_hand_meshes(ctx, player, inventory, content);
             return;
         }
+        self.hand_mesh = None;
+        self.hand_held_mesh = None;
         let pose = self.player_anim.pose(player.pitch);
         let armor = inventory.equipped_armor();
         let mesh =
@@ -362,15 +378,42 @@ impl SceneCache {
         anchor: HandAnchor,
     ) -> Option<(GpuMesh, ModelId)> {
         let held = content.held(inventory)?;
-        let transform = model_mesh::placement(
-            anchor.position,
-            anchor.yaw,
-            anchor.pitch,
-            held.scale,
-            held.rotation,
-            held.offset,
-        );
+        let local = held.local(content.models, DisplayContext::ThirdPersonRightHand);
+        let transform = model_mesh::anchor(anchor.position, anchor.yaw, anchor.pitch) * local;
         self.bake_model(ctx, content.models, held.id, transform)
+    }
+
+    /// Rebuild the first-person view model: the player's own arm, and whatever
+    /// it holds.
+    ///
+    /// The arm always draws; the item only when it has a model of its own, the
+    /// same rule third person follows. Both hang off one [`HandPose::frame`], so
+    /// the item cannot drift out of the fist.
+    fn update_hand_meshes(
+        &mut self,
+        ctx: &Arc<RenderContext>,
+        player: &Player,
+        inventory: &Inventory,
+        content: ModelContent<'_>,
+    ) {
+        let pose = HandPose {
+            eye: player.interpolated_eye_position(self.render_alpha),
+            yaw: player.yaw,
+            pitch: player.pitch,
+            swing: self.player_anim.swing_progress(),
+            walk_phase: self.player_anim.walk_phase(),
+            walk_amount: self.player_anim.walk_amount(),
+        };
+        let frame = pose.frame();
+
+        let arm = viewmodel::arm_mesh(&self.player_model, frame);
+        self.hand_mesh = GpuMesh::upload(&ctx.memory_allocator, &arm).ok().flatten();
+
+        self.hand_held_mesh = content.held(inventory).and_then(|held| {
+            let local = held.local(content.models, DisplayContext::FirstPersonRightHand);
+            let transform = viewmodel::item_anchor(frame) * local;
+            self.bake_model(ctx, content.models, held.id, transform)
+        });
     }
 
     /// Rebuild the inventory-preview player mesh: the model at the origin,
@@ -586,14 +629,8 @@ impl SceneCache {
             if let Some(model) = content.of(item.stack.item)
                 && let Some(loaded) = content.models.get(model.id)
             {
-                let transform = model_mesh::placement(
-                    item.render_center(),
-                    item.spin_yaw(),
-                    0.0,
-                    model.scale,
-                    model.rotation,
-                    model.offset,
-                );
+                let transform = model_mesh::anchor(item.render_center(), item.spin_yaw(), 0.0)
+                    * model.local(content.models, DisplayContext::Ground);
                 let mesh = loaded.mesh.bake(transform);
                 let entry = by_model.entry(model.id).or_default();
                 entry.push_indexed(mesh.vertices, mesh.indices);
@@ -848,7 +885,32 @@ impl SceneCache {
             array_transparent,
             textured,
             lines: self.outline_mesh.as_ref(),
+            foreground: self.foreground_frame(player, aspect),
         }
+    }
+
+    /// The view model, framed by its own camera.
+    ///
+    /// Its own, because the field of view a player picks for the world should
+    /// not distort their own hand — and because the renderer clears depth before
+    /// drawing it, so it needs no relationship to the world's near plane.
+    fn foreground_frame(&self, player: &Player, aspect: f32) -> Option<ForegroundFrame<'_>> {
+        let arm = self.hand_mesh.as_ref()?;
+        let mut camera = Camera::new(viewmodel::HAND_FOV_DEGREES, aspect);
+        // The hand is baked in world space against the same eye the world pass
+        // uses, so the foreground camera has to sit exactly there too — only its
+        // field of view differs.
+        camera.position = player.interpolated_eye_position(self.render_alpha);
+        camera.forward = player.look_direction();
+        Some(ForegroundFrame {
+            view_proj: camera.view_projection(),
+            atlas: vec![arm],
+            textured: self
+                .hand_held_mesh
+                .iter()
+                .filter_map(|(mesh, id)| self.textured_mesh(mesh, *id))
+                .collect(),
+        })
     }
 
     /// The offscreen player-model preview, when the inventory is open.

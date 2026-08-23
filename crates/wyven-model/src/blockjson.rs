@@ -12,10 +12,14 @@
 //!   the texture.
 //!
 //! It also names **several** textures per model (grass block: top, side, side
-//! overlay, bottom), where [`super::Model`] carries exactly one. So this is
-//! deliberately *not* a [`super::ModelLoader`]: it produces a different shape,
-//! and `.json` is far too generic an extension to claim in a registry that
-//! dispatches on extension alone with no content sniffing.
+//! overlay, bottom), where [`super::Model`] carries exactly one, and a
+//! `display` block saying where the model sits in each context it is drawn in.
+//! So this is not itself a [`super::ModelLoader`]: it produces a different
+//! shape, and the chunk mesher wants the `cullface`/`tintindex` a `Model` has
+//! nowhere to put. [`super::javamodel`] is the adapter that turns what comes
+//! out of here into a `Model` for the *item* path, by packing the textures into
+//! one image; that is what claims `.json` in the registry, and blocks still
+//! come through here directly.
 //!
 //! Everything about how a UV rect maps onto a box corner is shared verbatim
 //! with [`super::bbmodel`], whose conventions are pinned by a test asserting it
@@ -38,6 +42,7 @@ use wyven_core::Direction;
 use super::bbmodel::{
     FACES, FaceDir, PIXELS_PER_BLOCK, Resolution, Transform, face_corners, face_uvs,
 };
+use super::display::DisplayTransforms;
 use super::resolve_sibling;
 
 /// Minecraft's UV space is always `0..16`, whatever the texture's pixel size —
@@ -89,6 +94,9 @@ pub struct BlockJsonModel {
     /// Where each texture came from, `assets/`-relative. Used to key the layer
     /// registry so two blocks naming the same PNG share one array layer.
     pub texture_paths: Vec<String>,
+    /// The model's `display` block, empty when it declares none. A block in a
+    /// chunk has nowhere to put this; an item drawn from the same file does.
+    pub display: DisplayTransforms,
 }
 
 impl BlockJsonModel {
@@ -140,6 +148,7 @@ pub fn load(bytes: &[u8], dir: &str, source: &dyn ContentSource) -> Result<Block
         quads,
         textures: textures.images,
         texture_paths: textures.paths,
+        display: doc.display,
     })
 }
 
@@ -155,6 +164,11 @@ struct Document {
     textures: HashMap<String, String>,
     #[serde(default)]
     elements: Vec<Element>,
+    /// Where the model sits in each context it can be drawn in. Meaningless to
+    /// a block in a chunk, which is why this rides through untouched for the
+    /// item loader to pick up.
+    #[serde(default)]
+    display: DisplayTransforms,
 }
 
 #[derive(Deserialize)]

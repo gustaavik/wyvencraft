@@ -6,22 +6,27 @@
 //! shape authored in Blockbench (or anything that exports glTF) can be used as
 //! an entity's body or an item's model without touching Rust.
 //!
-//! Two formats are supported, both JSON:
+//! Three formats are supported, all JSON:
 //! - `.gltf` — the interchange format every DCC tool exports. Blockbench's
 //!   export is self-contained (buffer and texture as inline `data:` URIs).
 //! - `.bbmodel` — Blockbench's native file, cuboids with per-face UV rects.
+//! - `.json` — Blockbench's *Java Block/Item* export, the format blocks are
+//!   authored in, read here by [`javamodel`] for the *item* path.
 //!
-//! Adding a third means writing one [`ModelLoader`] and listing it in
+//! Adding a fourth means writing one [`ModelLoader`] and listing it in
 //! [`ModelRegistry::LOADERS`]; nothing else in the module changes, and nothing
 //! outside it can tell which loader produced a given [`Model`].
 //!
-//! [`blockjson`] sits deliberately outside that arrangement. It reads
-//! Blockbench's *Java Block/Item* export — the format all blocks are authored
-//! in — which names several textures per model and carries `cullface` and
-//! `tintindex`, none of which fit a [`Model`]'s single [`Rgba8`]. It is called
-//! directly rather than through the registry, both because of that shape and
-//! because `.json` is far too generic an extension to claim in a registry that
-//! dispatches on extension alone.
+//! [`blockjson`] is the parser behind that third entry, and stays outside the
+//! registry itself: it names several textures per model and carries `cullface`
+//! and `tintindex`, which the chunk mesher needs and a [`Model`]'s single
+//! [`Rgba8`] has nowhere to put. Blocks call it directly; [`javamodel`] is the
+//! adapter that flattens what it produces into a [`Model`], and is what claims
+//! `.json` in the registry.
+//!
+//! It also reads the one thing a `.gltf` and a `.bbmodel` cannot express: the
+//! [`display`] block, which places a model separately for the hand, the ground
+//! and the inventory slot instead of making one placement serve all three.
 //!
 //! Boundaries: this layer is pure. It reads through the [`ContentSource`] port,
 //! never touches the filesystem or the GPU directly, and produces model-space
@@ -31,7 +36,9 @@
 pub mod bbmodel;
 pub mod blockjson;
 pub mod datauri;
+pub mod display;
 pub mod gltf;
+pub mod javamodel;
 pub mod mesh;
 
 use std::collections::HashMap;
@@ -41,10 +48,12 @@ use glam::Vec3;
 use wyven_assets::AssetSource as ContentSource;
 use wyven_assets::Rgba8;
 
+pub use display::{DisplayContext, DisplayTransforms, ItemTransform};
 pub use mesh::ModelMesh;
 
 use bbmodel::BbmodelLoader;
 use gltf::GltfLoader;
+use javamodel::JavaModelLoader;
 
 /// Index of a loaded model in a [`ModelRegistry`]. Cheap to copy and to store
 /// on per-entity data, which matters because entity visuals are cloned per mob.
@@ -98,6 +107,10 @@ pub struct Model {
     pub texture: Rgba8,
     /// Model-space bounds, handy for sanity checks and for centring a model.
     pub bounds: (Vec3, Vec3),
+    /// Where the file asks to be placed in each context it can be drawn in.
+    /// Empty for every format that cannot express it — which is `.gltf` and
+    /// `.bbmodel`, i.e. everything authored before [`display`] existed.
+    pub display: DisplayTransforms,
 }
 
 impl Model {
@@ -107,7 +120,21 @@ impl Model {
             mesh,
             texture,
             bounds,
+            display: DisplayTransforms::default(),
         })
+    }
+
+    /// Attach the placements the file declared. Only [`javamodel`] has any.
+    pub(crate) fn with_display(mut self, display: DisplayTransforms) -> Self {
+        self.display = display;
+        self
+    }
+
+    /// The placement this model's file asks for in `context`, or `None` when it
+    /// declares none — in which case the caller's own data file decides, which
+    /// is what [`mesh::local_transform`] is for.
+    pub fn placement_for(&self, context: DisplayContext) -> Option<ItemTransform> {
+        self.display.get(context)
     }
 
     pub fn triangle_count(&self) -> usize {
@@ -145,7 +172,8 @@ pub struct ModelRegistry {
 
 impl ModelRegistry {
     /// The registered loaders. Adding a format means adding an entry here.
-    const LOADERS: &'static [&'static dyn ModelLoader] = &[&GltfLoader, &BbmodelLoader];
+    const LOADERS: &'static [&'static dyn ModelLoader] =
+        &[&GltfLoader, &BbmodelLoader, &JavaModelLoader];
 
     pub fn new() -> Self {
         Self::default()
@@ -286,6 +314,7 @@ mod tests {
 
     const GLTF: &str = "assets/models/vine_sword.gltf";
     const BBMODEL: &str = "assets/models/vine_sword.bbmodel";
+    const JAVA: &str = "assets/models/wooden_sword.json";
 
     /// Measured from the two exports of `vine_sword`, which describe the same
     /// object: 21 cubes, 6 faces each, 4 unwelded vertices per face.
@@ -341,6 +370,48 @@ mod tests {
         assert_eq!(model.vertex_count(), EXPECTED_VERTS);
         assert_eq!(model.triangle_count(), EXPECTED_TRIS);
         assert_eq!(model.texture.size, [32, 32]);
+    }
+
+    /// The Java Block/Item export is the only format that can say where a model
+    /// belongs in each context, and the shipped sword says it for all of them.
+    #[test]
+    fn loads_the_java_export_with_its_display_block() {
+        let model = load(JAVA);
+        assert_eq!(model.texture.size, [32, 32]);
+        assert!(!model.display.is_empty());
+
+        let first = model
+            .placement_for(DisplayContext::FirstPersonRightHand)
+            .expect("firstperson_righthand");
+        assert_eq!(first.translation, [0.0, 1.0, 1.0]);
+        assert!((first.scale[0] - 0.79883).abs() < 1e-6);
+        assert!((first.rotation[0] - -99.9).abs() < 1e-4);
+
+        for context in [
+            DisplayContext::ThirdPersonRightHand,
+            DisplayContext::Gui,
+            DisplayContext::Ground,
+            DisplayContext::Fixed,
+        ] {
+            assert!(
+                model.placement_for(context).is_some(),
+                "{context:?} should be declared"
+            );
+        }
+        // `"head": {"scale": [0, 0, 0]}` is how the file says "not here".
+        assert_eq!(model.placement_for(DisplayContext::Head), None);
+    }
+
+    /// The fallback contract every model authored before `display` relies on: a
+    /// `.bbmodel` declares nothing, so its `[item.model]` spec keeps placing it.
+    #[test]
+    fn a_bbmodel_declares_no_placement_of_its_own() {
+        let model = load(BBMODEL);
+        assert!(model.display.is_empty());
+        assert_eq!(
+            model.placement_for(DisplayContext::ThirdPersonRightHand),
+            None
+        );
     }
 
     #[test]

@@ -150,8 +150,11 @@ durability = 60
 harvests = ["plant"]
 damage = 4.0
 
+# Authored as a Java Block/Item model, so its `display` block places it in the
+# hand, on the ground and in the inventory slot separately. The scale/offset/
+# rotation below still apply to any context that block does not name.
 [item.model]
-path = "assets/models/wooden_sword.bbmodel"
+path = "assets/models/wooden_sword.json"
 scale = 0.45
 offset = [-0.5, 0.0, -0.5]
 rotation = [0.0, 90.0, 0.0]

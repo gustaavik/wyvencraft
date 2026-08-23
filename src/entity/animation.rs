@@ -63,9 +63,46 @@ impl AnimationState {
         self.swing_timer = (self.swing_timer - dt).max(0.0);
     }
 
-    /// Start a one-shot arm swing (e.g. breaking or placing a block).
+    /// Start a one-shot arm swing (e.g. placing a block, or a single click).
     pub fn trigger_swing(&mut self) {
         self.swing_timer = SWING_DURATION;
+    }
+
+    /// Keep a swing running: start one if none is in flight, and leave one
+    /// already under way alone.
+    ///
+    /// This is what a *held* action wants. Mining is a sequence of blows rather
+    /// than one long reach, so the arm should loop for as long as the button is
+    /// down — but calling [`Self::trigger_swing`] every frame would reset the
+    /// timer every frame and freeze the arm at the start of its arc instead.
+    pub fn keep_swinging(&mut self) {
+        if self.swing_timer <= 0.0 {
+            self.trigger_swing();
+        }
+    }
+
+    /// Progress through the one-shot swing: `0` as it starts, rising to `1` as
+    /// it ends, and `0` whenever there is no swing running.
+    ///
+    /// The third-person arm reads the swing through [`Pose::right_arm`], which
+    /// is an angle. A first-person view model needs the raw phase instead,
+    /// because the hand traces a different curve than the shoulder does.
+    pub fn swing_progress(&self) -> f32 {
+        if self.swing_timer <= 0.0 {
+            0.0
+        } else {
+            1.0 - self.swing_timer / SWING_DURATION
+        }
+    }
+
+    /// Walk-cycle phase, for animation that rides the gait without being a limb.
+    pub fn walk_phase(&self) -> f32 {
+        self.walk_phase
+    }
+
+    /// Smoothed idle↔walk blend in `[0,1]`, the amplitude of that gait.
+    pub fn walk_amount(&self) -> f32 {
+        self.walk_amount
     }
 
     /// Sample the current articulation into a [`Pose`]. `head_pitch` orients the head.
@@ -173,5 +210,55 @@ mod tests {
     fn head_pitch_passes_through() {
         let anim = AnimationState::new();
         assert_eq!(anim.pose(0.42).head_pitch, 0.42);
+    }
+
+    /// Holding the dig button must land repeated blows, each running its whole
+    /// arc — where re-triggering every frame would pin the arm at the start of
+    /// one arc forever.
+    ///
+    /// A swing ends exactly where it began (both curves are zero at the end of
+    /// their arc, which `viewmodel::a_finished_swing_returns_the_hand` pins), so
+    /// the single frame between one blow and the next is at the rest pose and
+    /// invisible. What matters is that the next blow starts.
+    #[test]
+    fn a_held_swing_lands_repeated_blows() {
+        let mut anim = AnimationState::new();
+        let (frames, dt) = (12, SWING_DURATION / 3.0);
+        let mut blows = 0;
+        let mut deepest: f32 = 0.0;
+        for _ in 0..frames {
+            if anim.swing_progress() == 0.0 {
+                blows += 1;
+            }
+            anim.keep_swinging();
+            anim.advance(0.0, dt);
+            deepest = deepest.max(anim.swing_progress());
+        }
+        // Three frames to a swing, so twelve frames of holding is four blows.
+        assert_eq!(
+            blows, 4,
+            "held mining swung {blows} time(s) in {frames} frames"
+        );
+        assert!(deepest > 0.5, "no swing got past the start of its arc");
+    }
+
+    /// ...and once the button is released, the swing finishes and stops.
+    #[test]
+    fn a_held_swing_ends_when_the_button_does() {
+        let mut anim = AnimationState::new();
+        anim.keep_swinging();
+        anim.advance(0.0, SWING_DURATION);
+        assert_eq!(anim.swing_progress(), 0.0);
+    }
+
+    /// Keeping a swing alive must not restart one already under way.
+    #[test]
+    fn keeping_a_swing_alive_does_not_restart_it() {
+        let mut anim = AnimationState::new();
+        anim.trigger_swing();
+        anim.advance(0.0, SWING_DURATION / 2.0);
+        let midway = anim.swing_progress();
+        anim.keep_swinging();
+        assert_eq!(anim.swing_progress(), midway);
     }
 }
