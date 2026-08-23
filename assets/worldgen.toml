@@ -10,9 +10,9 @@
 # placing the wrong block would corrupt worlds.
 
 [terrain]
-bedrock = "bedrock"   # placed at y = 0
-stone = "stone"       # base solid, upgraded to ores below
-water = "water"       # fills air up to sea_level
+bedrock = "bedrock" # placed at y = 0
+stone = "stone"     # base solid, upgraded to ores below
+water = "water"     # fills air up to sea_level
 sea_level = 62
 
 # Ocean-floor covering: `shallow` within 2 blocks of sea level, then noise
@@ -80,7 +80,7 @@ chance_per_mille = 300
 # `tint`, `foliage_tint` and `water_tint` are the colours multiplied into the
 # faces marked `tintindex` — 0 takes `tint` (the grass top and side overlay), 1
 # takes `foliage_tint` (leaves), 2 takes `water_tint` (the fluid animation in
-# assets/textures/water_flow.png). Those textures are deliberately greyscale so
+# assets/textures/blocks/water_flow.png). Those textures are deliberately greyscale so
 # one set of art serves every climate. Omit `tint` for white, which multiplies to
 # no change at all; omit `foliage_tint` and it follows `tint`. `water_tint` is
 # the exception — omitting it takes a default blue, because nothing else in the
@@ -90,7 +90,13 @@ surface = "grass"
 subsurface = "dirt"
 tree = "oak"
 tree_chance_per_mille = 550
-plants = ["blue_bells", "red_flower", "cornflower", "red_mushroom", "brown_mushroom"]
+plants = [
+    "blue_bells",
+    "red_flower",
+    "cornflower",
+    "red_mushroom",
+    "brown_mushroom",
+]
 plant_chance_per_mille = 90
 tint = [124, 189, 107]
 foliage_tint = [93, 165, 74]

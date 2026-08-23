@@ -199,9 +199,9 @@ mod tests {
 
     fn bake(json: &str) -> (BakedBlockModel, BlockTextureSet) {
         let source = MapSource::new()
-            .with_bytes("assets/textures/solid.png", png(255))
-            .with_bytes("assets/textures/cutout.png", png(0));
-        let model = wyven_model::blockjson::load(json.as_bytes(), "assets/blocks", &source)
+            .with_bytes("assets/textures/blocks/solid.png", png(255))
+            .with_bytes("assets/textures/blocks/cutout.png", png(0));
+        let model = wyven_model::blockjson::load(json.as_bytes(), "assets/models/blocks", &source)
             .expect("model loads");
         let mut textures = BlockTextureSet::new();
         let baked = BakedBlockModel::bake(&model, &mut textures, false);
@@ -211,7 +211,7 @@ mod tests {
     fn full_cube(texture: &str) -> String {
         format!(
             r##"{{
-            "textures": {{ "0": "../textures/{texture}" }},
+            "textures": {{ "0": "../../textures/blocks/{texture}" }},
             "elements": [{{
                 "from": [0,0,0], "to": [16,16,16],
                 "faces": {{
@@ -249,7 +249,7 @@ mod tests {
     #[test]
     fn a_partial_cube_occludes_nothing() {
         let json = r##"{
-            "textures": { "0": "../textures/solid" },
+            "textures": { "0": "../../textures/blocks/solid" },
             "elements": [{
                 "from": [6,6,6], "to": [10,10,10],
                 "faces": {
@@ -292,7 +292,7 @@ mod tests {
     #[test]
     fn face_layers_is_empty_where_nothing_covers_the_cell_face() {
         let json = r##"{
-            "textures": { "0": "../textures/solid" },
+            "textures": { "0": "../../textures/blocks/solid" },
             "elements": [{
                 "from": [0,0,0], "to": [16,16,16],
                 "faces": { "up": {"uv": [0,0,16,16], "texture": "#0"} }

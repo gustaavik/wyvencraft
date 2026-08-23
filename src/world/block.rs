@@ -275,7 +275,7 @@ struct BlockDef {
     drops: Option<DropsDef>,
     fluid: Option<FluidDef>,
     model: Option<ModelSpec>,
-    /// `block_model = "blocks/dirt_block.json"` — a Blockbench *Java
+    /// `block_model = "assets/models/blocks/dirt.json"` — a Blockbench *Java
     /// Block/Item* export, the way all blocks are authored going forward. Unlike
     /// `[block.model]` it needs no placement: the model is already in cell
     /// coordinates, carries several textures, and declares its own cull faces.

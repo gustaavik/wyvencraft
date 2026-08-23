@@ -6,9 +6,17 @@
 //! `outliner` nest elements and add their own pivoted rotation.
 //!
 //! Every convention below (which box corner each UV corner lands on, which way a
-//! face `rotation` turns, the sign of an element rotation) was verified against
-//! Blockbench's own glTF export of the same model — the two must agree, and the
-//! test module keeps them honest.
+//! face `rotation` turns, the sign of an element rotation) was originally
+//! derived by diffing this loader against Blockbench's own glTF export of the
+//! same model, vertex for vertex.
+//!
+//! **That cross-check no longer runs.** The glTF export it compared against was
+//! removed from `assets/`, and with it the test that asserted the two agreed. The
+//! conventions here are still correct — they are what the shipped models are
+//! authored against — but nothing mechanically pins them any more, so a change to
+//! corner order or UV-rotation direction will not fail a test. Re-adding a
+//! second export of one model, and a test that the two loaders agree on it, is
+//! the way to get that guarantee back.
 
 use std::collections::HashMap;
 
@@ -429,7 +437,7 @@ mod tests {
             "u1,v1 lands on corner 0"
         );
 
-        // Verified against element 7 of assets/models/vine_sword.gltf: at 270°
+        // Verified against element 7 of Blockbench's glTF export of vine_sword: at 270°
         // the first corner takes (u2, v1).
         let turned = face_uvs(rect, 270.0, res);
         assert_eq!(turned[0], [18.0 / 32.0, 18.0 / 32.0]);

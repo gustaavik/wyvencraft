@@ -1,6 +1,6 @@
 //! Wyvencraft's art, and how the renderer gets at it.
 //!
-//! None of this is engine work. `grass_block_side`, a zombie's face and the
+//! None of this is engine work. `blocks/grass_side`, a zombie's face and the
 //! eight stages of a block breaking are this game's assets; they lived inside
 //! `render` only because that is where the atlas is assembled. The renderer now
 //! asks for art through [`wyven_render::TileSource`], and [`WyvencraftArt`] is
@@ -24,6 +24,10 @@ pub mod skin;
 use wyven_render::{ReservedTiles, TileRegistry, TileRgba, TileSource, decode_tile};
 
 /// Where Wyvencraft looks for a named tile: `assets/textures/<name>.png`.
+///
+/// The name carries its own subdirectory — `blocks/glass`, `items/apple` — so
+/// one lookup serves every kind of art without this having to guess which
+/// folder a bare name belonged to.
 ///
 /// A name with no file resolves to the magenta missing-texture marker and one
 /// warning in the log, which is exactly what art that has not been drawn yet
@@ -107,7 +111,7 @@ mod tests {
     #[test]
     fn content_tiles_never_land_on_reserved_art() {
         let mut reg = tile_registry();
-        for name in ["apple", "stick", "coal", "flint"] {
+        for name in ["items/apple", "items/stick", "items/coal", "items/flint"] {
             assert_unreserved(reg.resolve(name).tile, name);
         }
     }
@@ -139,10 +143,10 @@ mod tests {
     #[test]
     fn content_tiles_allocate_and_stay_stable() {
         let mut reg = tile_registry();
-        let apple = reg.resolve("apple");
+        let apple = reg.resolve("items/apple");
         assert_ne!(apple, TileEntry::MISSING);
-        assert_eq!(reg.resolve("apple"), apple);
-        assert_ne!(reg.resolve("stick").tile, apple.tile);
+        assert_eq!(reg.resolve("items/apple"), apple);
+        assert_ne!(reg.resolve("items/stick").tile, apple.tile);
     }
 
     #[test]

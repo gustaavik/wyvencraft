@@ -133,8 +133,7 @@ output = "arrow"
 count = 4
 ingredients = { flint = 1, stick = 1, feather = 1 }
 
-# Armor. The plate pieces are the copper tier, beaten from ingots. Glove and
-# cape are woven from leaves until a proper cloth exists.
+# Armor. The plate pieces are the copper tier, beaten from ingots.
 [[recipe]]
 output = "copper_helmet"
 ingredients = { copper_ingot = 5 }
@@ -150,11 +149,3 @@ ingredients = { copper_ingot = 7 }
 [[recipe]]
 output = "copper_boots"
 ingredients = { copper_ingot = 4 }
-
-[[recipe]]
-output = "glove"
-ingredients = { oak_leaves = 4 }
-
-[[recipe]]
-output = "cape"
-ingredients = { oak_leaves = 6 }

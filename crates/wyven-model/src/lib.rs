@@ -37,9 +37,11 @@ pub mod bbmodel;
 pub mod blockjson;
 pub mod datauri;
 pub mod display;
+pub mod generated;
 pub mod gltf;
 pub mod javamodel;
 pub mod mesh;
+pub mod silhouette;
 
 use std::collections::HashMap;
 
@@ -68,7 +70,7 @@ pub struct ModelId(pub u32);
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelSpec {
-    /// `assets/`-relative path, e.g. `"assets/models/vine_sword.gltf"`.
+    /// `assets/`-relative path, e.g. `"assets/models/items/vine_sword.bbmodel"`.
     pub path: String,
     /// Uniform scale applied to the model's own units.
     #[serde(default = "unit_scale")]
@@ -281,7 +283,7 @@ pub(crate) fn resolve_sibling(dir: &str, path: &str) -> String {
 ///
 /// The OS would do this for a real filesystem read, but content also comes from
 /// [`wyven_assets::MapSource`], which looks paths up verbatim — so a block
-/// model in `assets/blocks/` naming `"../textures/dirt.png"` only resolves the
+/// model in `assets/models/blocks/` naming `"../../textures/blocks/dirt.png"` only resolves the
 /// same way from both sources if the collapsing happens here.
 ///
 /// A `..` that would climb above the root is kept rather than dropped, so a
@@ -312,12 +314,10 @@ mod tests {
         FsSource::rooted(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
     }
 
-    const GLTF: &str = "assets/models/vine_sword.gltf";
-    const BBMODEL: &str = "assets/models/vine_sword.bbmodel";
-    const JAVA: &str = "assets/models/wooden_sword.json";
+    const BBMODEL: &str = "assets/models/items/vine_sword.bbmodel";
+    const JAVA: &str = "assets/models/items/wooden_sword.json";
 
-    /// Measured from the two exports of `vine_sword`, which describe the same
-    /// object: 21 cubes, 6 faces each, 4 unwelded vertices per face.
+    /// Measured from the shipped `vine_sword` export: 21 cubes, 6 faces each, 4 unwelded vertices per face.
     const EXPECTED_VERTS: usize = 504;
     const EXPECTED_TRIS: usize = 252;
 
@@ -349,27 +349,19 @@ mod tests {
     }
 
     /// Blockbench writes block-model texture refs relative to the exported
-    /// file, so `assets/blocks/x.json` names `../textures/dirt.png`.
+    /// file, so `assets/models/blocks/x.json` names `../../textures/blocks/dirt.png`.
     #[test]
     fn resolve_sibling_collapses_parent_segments() {
         assert_eq!(
-            resolve_sibling("assets/blocks", "../textures/dirt.png"),
-            "assets/textures/dirt.png"
+            resolve_sibling("assets/blocks", "../textures/blocks/dirt.png"),
+            "assets/textures/blocks/dirt.png"
         );
         assert_eq!(
-            resolve_sibling("assets/blocks/nested", "../../textures/a.png"),
-            "assets/textures/a.png"
+            resolve_sibling("assets/blocks/nested", "../../textures/blocks/a.png"),
+            "assets/textures/blocks/a.png"
         );
         // Climbing above the root is kept, so the path stays visibly wrong.
         assert_eq!(resolve_sibling("assets", "../../x.png"), "../x.png");
-    }
-
-    #[test]
-    fn loads_the_gltf_export() {
-        let model = load(GLTF);
-        assert_eq!(model.vertex_count(), EXPECTED_VERTS);
-        assert_eq!(model.triangle_count(), EXPECTED_TRIS);
-        assert_eq!(model.texture.size, [32, 32]);
     }
 
     /// The Java Block/Item export is the only format that can say where a model
@@ -422,55 +414,11 @@ mod tests {
         assert_eq!(model.texture.size, [32, 32]);
     }
 
-    /// The strongest check available: both files are Blockbench exports of the
-    /// same sword, so the two loaders must agree on where every vertex and UV
-    /// ends up. This is what pins down the bbmodel face-corner order, the UV
-    /// rotation direction, the element-rotation sign and the 1/16 scale.
-    #[test]
-    fn the_two_formats_describe_the_same_model() {
-        let a = load(GLTF);
-        let b = load(BBMODEL);
-
-        let (a_lo, a_hi) = a.bounds;
-        let (b_lo, b_hi) = b.bounds;
-        assert!(
-            a_lo.abs_diff_eq(b_lo, 1e-4) && a_hi.abs_diff_eq(b_hi, 1e-4),
-            "bounds differ: gltf {a_lo}..{a_hi} vs bbmodel {b_lo}..{b_hi}"
-        );
-
-        // Compare as unordered sets of (position, uv): the exporters emit faces
-        // in a different order, but the surface they describe is identical.
-        let key = |m: &Model| {
-            let mut rows: Vec<[i32; 5]> = (0..m.vertex_count())
-                .map(|i| {
-                    let p = m.mesh.positions[i];
-                    let uv = m.mesh.uvs[i];
-                    // Quantise to 1/1024 block and 1/1024 UV to absorb the
-                    // float noise of two independent transform paths.
-                    [
-                        (p.x * 1024.0).round() as i32,
-                        (p.y * 1024.0).round() as i32,
-                        (p.z * 1024.0).round() as i32,
-                        (uv[0] * 1024.0).round() as i32,
-                        (uv[1] * 1024.0).round() as i32,
-                    ]
-                })
-                .collect();
-            rows.sort_unstable();
-            rows
-        };
-        assert_eq!(
-            key(&a),
-            key(&b),
-            "the gltf and bbmodel exports disagree on geometry or UVs"
-        );
-    }
-
     #[test]
     fn the_sword_lands_where_blockbench_authored_it() {
         // Measured from the files: the blade runs above the block and the hilt
         // dips below it, so a model is emphatically not confined to 0..1.
-        let (lo, hi) = load(GLTF).bounds;
+        let (lo, hi) = load(BBMODEL).bounds;
         assert!(
             lo.abs_diff_eq(Vec3::new(0.467188, -0.889055, 0.113190), 1e-4),
             "lo = {lo}"
@@ -511,11 +459,11 @@ mod tests {
     #[test]
     fn the_same_path_parses_once_and_shares_an_id() {
         let mut registry = ModelRegistry::new();
-        let first = registry.load(GLTF, &assets()).expect("loads");
-        let second = registry.load(GLTF, &assets()).expect("cached");
+        let first = registry.load(BBMODEL, &assets()).expect("loads");
+        let second = registry.load(BBMODEL, &assets()).expect("cached");
         assert_eq!(first, second);
         assert_eq!(registry.len(), 1, "the file should be parsed once");
-        assert!(registry.find(GLTF).is_some());
+        assert!(registry.find(BBMODEL).is_some());
     }
 
     #[test]

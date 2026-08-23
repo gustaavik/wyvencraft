@@ -1,0 +1,172 @@
+{
+	"meta": {
+		"format_version": "5.0",
+		"model_format": "java_block",
+		"box_uv": false
+	},
+	"name": "copper_ore",
+	"parent": "",
+	"java_block_version": "1.21.11",
+	"ambientocclusion": true,
+	"front_gui_light": false,
+	"visible_box": [
+		1,
+		1,
+		0
+	],
+	"variable_placeholders": "",
+	"multi_file_ruleset": "",
+	"variable_placeholder_buttons": [],
+	"unhandled_root_fields": {},
+	"resolution": {
+		"width": 16,
+		"height": 16
+	},
+	"elements": [
+		{
+			"name": "block",
+			"box_uv": false,
+			"render_order": "behind",
+			"rescale": false,
+			"locked": false,
+			"shade": true,
+			"light_emission": 0,
+			"export": true,
+			"scope": 0,
+			"allow_mirror_modeling": true,
+			"from": [
+				0,
+				0,
+				0
+			],
+			"to": [
+				16,
+				16,
+				16
+			],
+			"autouv": 0,
+			"color": 6,
+			"origin": [
+				8,
+				8,
+				8
+			],
+			"faces": {
+				"north": {
+					"uv": [
+						0,
+						0,
+						16,
+						16
+					],
+					"texture": 0,
+					"cullface": "north"
+				},
+				"east": {
+					"uv": [
+						0,
+						0,
+						16,
+						16
+					],
+					"texture": 0,
+					"cullface": "east"
+				},
+				"south": {
+					"uv": [
+						0,
+						0,
+						16,
+						16
+					],
+					"texture": 0,
+					"cullface": "south"
+				},
+				"west": {
+					"uv": [
+						0,
+						0,
+						16,
+						16
+					],
+					"texture": 0,
+					"cullface": "west"
+				},
+				"up": {
+					"uv": [
+						0,
+						0,
+						16,
+						16
+					],
+					"texture": 0,
+					"cullface": "up"
+				},
+				"down": {
+					"uv": [
+						0,
+						0,
+						16,
+						16
+					],
+					"texture": 0,
+					"cullface": "down"
+				}
+			},
+			"type": "cube",
+			"uuid": "608ee601-e156-5e5c-5a87-6041897757bd"
+		}
+	],
+	"groups": [],
+	"outliner": [
+		"608ee601-e156-5e5c-5a87-6041897757bd"
+	],
+	"textures": [
+		{
+			"name": "copper_ore.png",
+			"path": "copper_ore.png",
+			"folder": "",
+			"namespace": "",
+			"id": "2",
+			"group": "",
+			"scope": 0,
+			"width": 16,
+			"height": 16,
+			"uv_width": 16,
+			"uv_height": 16,
+			"particle": true,
+			"use_as_default": false,
+			"layers_enabled": false,
+			"sync_to_project": "",
+			"file_format": "png",
+			"render_mode": "default",
+			"render_sides": "auto",
+			"wrap_mode": "limited",
+			"pbr_channel": "color",
+			"fps": 7,
+			"frame_time": 1,
+			"frame_order_type": "loop",
+			"frame_order": "",
+			"frame_interpolate": false,
+			"visible": true,
+			"internal": true,
+			"saved": true,
+			"uuid": "5bd66bc1-2dae-f1ff-8f83-0730aefd0b17",
+			"source": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAADIElEQVQ4ETWT204bVxSGvz2z52QP+MAYTABDioMEiZCq9CD1ASK1l73oA1S96Vv0DXLRu95G6kP0rjetIrWkSRUIwSRgG5sYbGPGh/Ec7G6mypaWtLS111rfXutf4unTZ/MoiojjmOl0ShjeWagsIopiPh7HcSgmA8TyfXUlcBwb0zSQw+EwDQ6CCZqmpe9Pfthk49hHHBySjyppwru7oyuH3dNTqmcJ8cJGWkR+DLIsk44laH3rYZ5E3G/UcWaCXFjjtVll+5cz2IvY++MIfynHSPhoRgXZaDQxzPn/pKFg6dcm1fEcw9apb69hHRyRuf6bvlNF1HT6CyXaRsh+t8vzSEMWCnmmcYdktUim3YMrGxY/MGoPeHTVpBeE3A5HOEUbLRY0yBP1BQeqqOu6aEXRpvb9PuMHDvaDIgsLWbrxFnVzBz+M0+Dbyj0mk4C5Aj3/cRf59TqblSp5PUb/6vMnPz0+eEkvnpOZJlBRWAMrbWjH8AhLBUbjfPrNnuqBM3Xwetd01i2sxhRtbM15Mb7Hzqv3TAIftz2mMDzBMEzW5xcpVVIaEWcTsgeC/PmZKjbDPWnTWcmgmZeX5LSIY3eXzVqH2V8vENdXigBOnjzEfnfOJ81L3DhHJuMQHkr8dkBZUTtnb5CB7fNIV03B4a27Q2TFFAo5BqJL7lVEI8mS9ypKKwlra2u0Wi1oTYjmgkLzDLkVCNpbGc6/q7J0PKH8/EYpMkSPbIz5Ep4Ed6HPpOTQfddLv2bbM055iOe0kK3yY97vx3h/1lgRkg3zmqNRVlF45HIFfv9GUjnWWT28pmB2ubqMsFaqWJZFouWRvu+z+tsU4SaU+nWGtyPk2pf4/oj25IIvflbo+pjmRZ3+Z59ys1div/aGl4aGoW8iNzbWubm5IQgC3soqhe0cSkr0+wNcJ88HqXZkeMG0ssziP/9SnM14XVok2wW97CGbTSVlw0AIldGQDJXqpJSpb9uWSmVRD3cggEF5HWfiI3WX0bJDEiVIz/NIEuWooLsVHo9HSnEzZfOU4m5JpNSVQhdVcwNu1cTKXpmiGuld4f8Ad9xrZrnMU9sAAAAASUVORK5CYII="
+		}
+	],
+	"display": {
+		"thirdperson_righthand": {
+			"rotation": [
+				32,
+				32,
+				32
+			],
+			"scale": [
+				0.25,
+				0.25,
+				0.25
+			]
+		}
+	}
+}

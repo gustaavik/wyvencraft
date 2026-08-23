@@ -1,0 +1,45 @@
+{
+	"format_version": "1.21.6",
+	"credit": "Made with Blockbench",
+	"textures": {
+		"0": "../../textures/blocks/mushroom1",
+		"particle": "../../textures/blocks/mushroom1"
+	},
+	"elements": [
+		{
+			"from": [4.75, 7, 4.75],
+			"to": [11.25, 9, 11.25],
+			"rotation": {"angle": 0, "axis": "y", "origin": [7, 0, 7]},
+			"faces": {
+				"north": {"uv": [7, 0, 14, 2], "texture": "#0"},
+				"east": {"uv": [7, 2, 14, 4], "texture": "#0"},
+				"south": {"uv": [7, 4, 14, 6], "texture": "#0"},
+				"west": {"uv": [7, 6, 14, 8], "texture": "#0"},
+				"up": {"uv": [7, 7, 0, 0], "texture": "#0"},
+				"down": {"uv": [7, 7, 0, 14], "texture": "#0"}
+			}
+		},
+		{
+			"from": [7, 0, 7],
+			"to": [9, 7, 9],
+			"rotation": {"angle": 0, "axis": "y", "origin": [7, 0, 7]},
+			"faces": {
+				"north": {"uv": [7, 8, 9, 15], "texture": "#0"},
+				"east": {"uv": [9, 8, 11, 15], "texture": "#0"},
+				"south": {"uv": [11, 8, 13, 15], "texture": "#0"},
+				"west": {"uv": [13, 8, 15, 15], "texture": "#0"},
+				"up": {"uv": [2, 16, 0, 14], "texture": "#0"},
+				"down": {"uv": [16, 0, 14, 2], "texture": "#0"}
+			}
+		}
+	],
+	"groups": [
+		{
+			"name": "group",
+			"origin": [7, 0, 7],
+			"scope": 0,
+			"color": 0,
+			"children": [0, 1]
+		}
+	]
+}

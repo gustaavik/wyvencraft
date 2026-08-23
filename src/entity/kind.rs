@@ -547,7 +547,7 @@ mod tests {
         assert_eq!(mob.knockback_resistance, 1.0, "and cannot be shoved");
         match &prop.visual {
             VisualSpec::Model(spec) => {
-                assert_eq!(spec.path, "assets/models/vine_sword.bbmodel");
+                assert_eq!(spec.path, "assets/models/items/vine_sword.bbmodel");
                 assert_eq!(spec.scale, 1.0, "defaulted");
                 assert_eq!(spec.offset, [-0.5, 0.889, -0.5]);
             }
