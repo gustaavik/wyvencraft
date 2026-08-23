@@ -72,6 +72,18 @@ fn load(stage: u32) -> Option<TileRgba> {
 mod tests {
     use super::*;
 
+    /// The overlay art has to actually be on disk. Every other test here
+    /// tolerates its absence — which is exactly how the whole effect once went
+    /// missing in silence, with one startup warning as the only sign.
+    #[test]
+    fn every_stage_has_art() {
+        assert_eq!(
+            atlas_tiles().count() as u32,
+            CRACK_STAGES,
+            "assets/textures/crack_<0..{CRACK_STAGES}>.png must all be present"
+        );
+    }
+
     /// Every progress fraction lands inside the reserved band — or, with no
     /// crack art on disk, draws nothing at all rather than a magenta block.
     #[test]
