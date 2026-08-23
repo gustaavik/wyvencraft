@@ -91,7 +91,10 @@ mod tests {
             !skin::atlas_tile_indices().any(|s| s == tile),
             "{who} hit the skin"
         );
-        assert!(!armor::is_armor_tile(tile), "{who} landed in the armor band");
+        assert!(
+            !armor::is_armor_tile(tile),
+            "{who} landed in the armor band"
+        );
         assert!(!mobskin::is_mob_tile(tile), "{who} landed in a mob sheet");
         assert!(
             !(cracks::CRACK_0..cracks::CRACK_0 + cracks::CRACK_STAGES).contains(&tile),
