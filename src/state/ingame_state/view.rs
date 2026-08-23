@@ -51,14 +51,21 @@ struct RemoteAnim {
     last_pos: Vec3,
 }
 
-/// Everything the view needs to draw geometry loaded from model files: the
-/// parsed models, and which one each item uses. The two always travel together,
-/// so they are passed as one borrow rather than threaded separately through
-/// every mesh builder.
+/// Everything the view needs to draw an item: the parsed models and which one
+/// each item uses, plus — for the items that have no model at all — the atlas
+/// and the shape they fall back to. These always travel together, so they are
+/// passed as one borrow rather than threaded separately through every mesh
+/// builder.
 #[derive(Clone, Copy)]
 pub(super) struct ModelContent<'a> {
     pub models: &'a ModelRegistry,
     pub item_models: &'a [Option<ItemModel>],
+    /// The shared atlas, for the cube and sprite fallbacks.
+    pub tiles: &'a TileRegistry,
+    /// What an item with no model is drawn as, and whether it belongs in the
+    /// blended pass. A closure because the answer needs the block registry,
+    /// which the view deliberately cannot reach.
+    pub shape: &'a dyn Fn(ItemId) -> (ItemShape, bool),
 }
 
 impl ModelContent<'_> {
@@ -128,6 +135,18 @@ pub(super) struct SceneCache {
     hand_held_mesh: Option<(GpuMesh, ModelId)>,
     /// The same model in the inventory preview, posed for the preview camera.
     preview_held_mesh: Option<(GpuMesh, ModelId)>,
+
+    /// The held item when it has **no model file** — a block cube or a flat
+    /// sprite, sampling the shared atlas rather than a texture of its own.
+    ///
+    /// Three fields rather than one because the three views reach the renderer
+    /// by three different routes: the foreground's atlas list, the world's
+    /// opaque/transparent lists (hence the `bool`), and the preview pass. Each
+    /// is `Some` only when its `*_mesh` counterpart above is `None` — a model
+    /// always wins, and the two can never draw at once.
+    hand_held_atlas: Option<GpuMesh>,
+    held_atlas: Option<(GpuMesh, bool)>,
+    preview_held_atlas: Option<GpuMesh>,
     /// Model geometry for dropped stacks, one mesh per distinct model.
     drops_model_meshes: Vec<(GpuMesh, ModelId)>,
     /// GPU textures for loaded models, indexed by [`ModelId`] and uploaded on
@@ -183,6 +202,9 @@ impl SceneCache {
             hand_mesh: None,
             hand_held_mesh: None,
             preview_held_mesh: None,
+            hand_held_atlas: None,
+            held_atlas: None,
+            preview_held_atlas: None,
             drops_model_meshes: Vec::new(),
             model_textures: Vec::new(),
             break_mesh: None,
@@ -351,11 +373,13 @@ impl SceneCache {
         if player.perspective.is_first_person() {
             self.player_mesh = None;
             self.held_mesh = None;
+            self.held_atlas = None;
             self.update_hand_meshes(ctx, player, inventory, content);
             return;
         }
         self.hand_mesh = None;
         self.hand_held_mesh = None;
+        self.hand_held_atlas = None;
         let pose = self.player_anim.pose(player.pitch);
         let armor = inventory.equipped_armor();
         let mesh =
@@ -367,6 +391,69 @@ impl SceneCache {
             .player_model
             .hand_anchor(player.position, player.yaw, &pose);
         self.held_mesh = self.bake_held(ctx, content, inventory, anchor);
+        self.held_atlas = self.bake_held_atlas(ctx, content, inventory, anchor);
+    }
+
+    /// Build the held item for something with **no model file**: the same cube
+    /// or sprite a dropped stack of it would be, placed by `transform`.
+    ///
+    /// This is what keeps a block from being invisible in the hand. The geometry
+    /// is built in `0..1` model space — the space a Blockbench export occupies —
+    /// so the caller's placement matrix positions it by exactly the path an
+    /// authored model takes.
+    ///
+    /// `normal_basis` is passed separately because the two hands want different
+    /// answers: in third person the item really is out in the world and should
+    /// light like the body carrying it, while in first person the transform
+    /// carries the camera's own rotation and lighting taken from it would pulse
+    /// as the player turns. See [`CpuMesh::transformed`].
+    fn shaped_item_mesh(
+        &mut self,
+        ctx: &Arc<RenderContext>,
+        shape: ItemShape,
+        tiles: &TileRegistry,
+        transform: glam::Mat4,
+        normal_basis: glam::Mat4,
+    ) -> Option<GpuMesh> {
+        let mut mesh = CpuMesh::new();
+        match shape {
+            ItemShape::Cube(faces) => {
+                push_item_cube(&mut mesh, Vec3::splat(0.5), 1.0, 0.0, &faces);
+            }
+            ItemShape::Sprite(tile) => {
+                let sprite = self
+                    .item_sprites
+                    .entry(tile)
+                    .or_insert_with(|| ItemSprite::new(tile, tiles.art(tile)));
+                push_item_sprite(&mut mesh, sprite, Vec3::splat(0.5), 1.0, 0.0);
+            }
+        }
+        let placed = mesh.transformed(transform, normal_basis);
+        GpuMesh::upload(&ctx.memory_allocator, &placed)
+            .ok()
+            .flatten()
+    }
+
+    /// The third-person/preview counterpart of [`SceneCache::bake_held`], for an
+    /// item with no model. Returns the mesh and whether it belongs in the
+    /// blended pass, so a held glass block reads like the block it places.
+    fn bake_held_atlas(
+        &mut self,
+        ctx: &Arc<RenderContext>,
+        content: ModelContent<'_>,
+        inventory: &Inventory,
+        anchor: HandAnchor,
+    ) -> Option<(GpuMesh, bool)> {
+        // A model always wins; this is only the fallback for items without one.
+        if content.held(inventory).is_some() {
+            return None;
+        }
+        let item = inventory.selected_stack()?.item;
+        let (shape, is_transparent) = (content.shape)(item);
+        let local = held_placement(shape, DisplayContext::ThirdPersonRightHand).matrix();
+        let transform = model_mesh::anchor(anchor.position, anchor.yaw, anchor.pitch) * local;
+        let mesh = self.shaped_item_mesh(ctx, shape, content.tiles, transform, transform)?;
+        Some((mesh, is_transparent))
     }
 
     /// Bake the model of the item in `anchor`'s hand, if it has one.
@@ -409,11 +496,28 @@ impl SceneCache {
         let arm = viewmodel::arm_mesh(&self.player_model, frame);
         self.hand_mesh = GpuMesh::upload(&ctx.memory_allocator, &arm).ok().flatten();
 
-        self.hand_held_mesh = content.held(inventory).and_then(|held| {
+        let held = content.held(inventory);
+        self.hand_held_mesh = held.and_then(|held| {
             let local = held.local(content.models, DisplayContext::FirstPersonRightHand);
             let transform = viewmodel::item_anchor(frame) * local;
             self.bake_model(ctx, content.models, held.id, transform)
         });
+
+        // No model file: draw the cube or sprite the ground would draw, rather
+        // than an empty fist. Keyed off `held` rather than off the mesh above,
+        // so a model that merely failed to upload does not fall back to the
+        // magenta placeholder `item_shape` returns for model-backed items.
+        self.hand_held_atlas = match (held, inventory.selected_stack()) {
+            (None, Some(stack)) => {
+                let (shape, _) = (content.shape)(stack.item);
+                let local = held_placement(shape, DisplayContext::FirstPersonRightHand).matrix();
+                let transform = viewmodel::item_anchor(frame) * local;
+                // Lit by the placement alone: `transform` carries the camera's
+                // rotation, and using it would make the block pulse as you spin.
+                self.shaped_item_mesh(ctx, shape, content.tiles, transform, local)
+            }
+            _ => None,
+        };
     }
 
     /// Rebuild the inventory-preview player mesh: the model at the origin,
@@ -432,6 +536,7 @@ impl SceneCache {
         if !inventory_open {
             self.preview_mesh = None;
             self.preview_held_mesh = None;
+            self.preview_held_atlas = None;
             return;
         }
         // The preview head tracks the cursor (yaw + pitch), independent of the
@@ -453,6 +558,11 @@ impl SceneCache {
             .player_model
             .hand_anchor(Vec3::ZERO, self.preview.yaw, &pose);
         self.preview_held_mesh = self.bake_held(ctx, content, inventory, anchor);
+        // The preview is lit by its own neutral lamp, so the transparency split
+        // the world pass needs is meaningless here — take just the mesh.
+        self.preview_held_atlas = self
+            .bake_held_atlas(ctx, content, inventory, anchor)
+            .map(|(mesh, _)| mesh);
     }
 
     /// Rebuild GPU meshes for remote players, advancing each one's animation
@@ -614,10 +724,9 @@ impl SceneCache {
         &mut self,
         ctx: &Arc<RenderContext>,
         drops: &[DroppedItem],
-        shape: impl Fn(ItemId) -> (ItemShape, bool),
-        tiles: &TileRegistry,
         content: ModelContent<'_>,
     ) {
+        let (shape, tiles) = (content.shape, content.tiles);
         let mut opaque = CpuMesh::new();
         let mut transparent = CpuMesh::new();
         // Drops whose item declares a model are drawn as that model instead of
@@ -827,6 +936,16 @@ impl SceneCache {
             opaque.push(mesh);
         }
 
+        // A held item with no model of its own, split by pass for the same
+        // reason drops are: a glass block in the fist must blend like glass.
+        if let Some((mesh, is_transparent)) = &self.held_atlas {
+            if *is_transparent {
+                transparent.push(mesh);
+            } else {
+                opaque.push(mesh);
+            }
+        }
+
         // Dropped items, split by pass like the blocks they represent.
         if let Some(mesh) = &self.drops_mesh {
             opaque.push(mesh);
@@ -904,7 +1023,9 @@ impl SceneCache {
         camera.forward = player.look_direction();
         Some(ForegroundFrame {
             view_proj: camera.view_projection(),
-            atlas: vec![arm],
+            atlas: std::iter::once(arm)
+                .chain(self.hand_held_atlas.as_ref())
+                .collect(),
             textured: self
                 .hand_held_mesh
                 .iter()
@@ -936,7 +1057,26 @@ impl SceneCache {
                 .preview_held_mesh
                 .as_ref()
                 .and_then(|(mesh, id)| self.textured_mesh(mesh, *id)),
+            held_atlas: self.preview_held_atlas.as_ref(),
         })
+    }
+}
+
+/// Which display table places a held item that has no model file of its own.
+///
+/// A cube takes Minecraft's `block/block` numbers; a flat sprite is precisely
+/// the geometry `item/generated` describes, so it takes that model's standard
+/// placement — the same one every extruded 2D item already uses, which is why
+/// an apple in the fist and a lump of coal in the fist agree.
+fn held_placement(
+    shape: ItemShape,
+    context: DisplayContext,
+) -> wyven_model::display::ItemTransform {
+    match shape {
+        ItemShape::Cube(_) => viewmodel::block_placement(context),
+        ItemShape::Sprite(_) => wyven_model::generated::default_display()
+            .get(context)
+            .unwrap_or_default(),
     }
 }
 
@@ -996,23 +1136,22 @@ impl super::InGameState {
         let loaded = self.content.clone();
         let (items, blocks) = (&loaded.items, &loaded.blocks);
         let models = &loaded.models;
+        // What shape an item is, and which pass it belongs in. Shared by the
+        // drops and by every hand that has to fall back to a cube or a sprite.
+        let shape = |item| {
+            let is_transparent = items
+                .get(item)
+                .place_block
+                .is_some_and(|b| blocks.get(b).is_transparent());
+            (loaded.item_shape(item), is_transparent)
+        };
         let content = ModelContent {
             models,
             item_models: &loaded.item_models,
+            tiles: &loaded.tiles,
+            shape: &shape,
         };
-        self.view.update_drops_mesh(
-            ctx,
-            &self.drops,
-            |item| {
-                let is_transparent = items
-                    .get(item)
-                    .place_block
-                    .is_some_and(|b| blocks.get(b).is_transparent());
-                (loaded.item_shape(item), is_transparent)
-            },
-            &loaded.tiles,
-            content,
-        );
+        self.view.update_drops_mesh(ctx, &self.drops, content);
         self.view
             .update_mob_meshes(ctx, &self.mobs.live, &mut self.mobs.remote, models, dt);
         self.view

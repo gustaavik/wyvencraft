@@ -24,6 +24,7 @@ use glam::{Mat4, Vec3};
 
 use crate::art::skin::{self, SkinPart};
 use crate::entity::model::{BoxPlacement, HumanoidModel, ModelBox, push_box_with};
+use wyven_model::display::{DisplayContext, ItemTransform};
 use wyven_model::mesh as model_mesh;
 use wyven_render::mesh::CpuMesh;
 
@@ -138,6 +139,40 @@ fn fist(arm: ModelBox) -> Vec3 {
 /// hand space, with the model's own placement applied on top by the caller.
 pub fn item_anchor(frame: Mat4) -> Mat4 {
     frame
+}
+
+/// Where a held **cube** sits — Minecraft's `block/block` display table.
+///
+/// An item with a model file carries its own `display` block and places itself.
+/// A block item has no model file at all: its item is synthesised from the block
+/// (`Item::block`), so nothing anywhere says how big a held cube should be or
+/// which way it should face. These are the numbers vanilla uses, and they are
+/// read for the two hand contexts only — `Gui` and `Ground` stay owned by the
+/// icon sheet and `DroppedItem::render_size`, which already look right.
+///
+/// The cube this places is built in `0..1` model space, the same space a
+/// Blockbench export occupies, so [`ItemTransform::matrix`] positions it by
+/// exactly the path an authored model takes — including its `-0.5` recentring.
+pub fn block_placement(context: DisplayContext) -> ItemTransform {
+    match context {
+        // Turned a corner toward the camera so three faces are visible, rather
+        // than one flat square filling the fist.
+        DisplayContext::FirstPersonRightHand => ItemTransform {
+            rotation: [0.0, 45.0, 0.0],
+            translation: [0.0, 0.0, 0.0],
+            scale: [0.40; 3],
+        },
+        // Smaller and lifted, because in third person it hangs off a fist that
+        // is itself already out at the end of an arm.
+        DisplayContext::ThirdPersonRightHand => ItemTransform {
+            rotation: [0.0, 0.0, 0.0],
+            translation: [0.0, 2.5, 0.0],
+            scale: [0.375; 3],
+        },
+        // Nothing else asks: the icon sheet and the ground both have their own
+        // sizing already. The identity keeps this total rather than panicking.
+        _ => ItemTransform::default(),
+    }
 }
 
 /// Build the player's right arm — the base box plus its sleeve overlay — in
@@ -255,6 +290,56 @@ mod tests {
                 "swing {swing}: fist {arm_fist} vs item {held}"
             );
         }
+    }
+
+    /// A held cube built through the model-less fallback must land in front of
+    /// the eye, for every direction the player might face. A block that renders
+    /// behind the camera is invisible in exactly the way this fallback exists to
+    /// fix, and no screenshot would tell you which of the two it was.
+    #[test]
+    fn a_held_cube_sits_in_front_of_the_eye() {
+        for &(yaw, pitch) in &[(0.0, 0.0), (1.7, 0.0), (-2.4, 0.6), (3.0, -0.9), (5.5, 0.2)] {
+            let pose = pose(yaw, pitch);
+            let (sy, cy) = yaw.sin_cos();
+            let (sp, cp) = pitch.sin_cos();
+            let look = Vec3::new(cp * sy, sp, -cp * cy).normalize();
+
+            for vertex in &held_cube(pose.frame()).vertices {
+                let offset = Vec3::from(vertex.position) - pose.eye;
+                assert!(
+                    offset.dot(look) > 0.0,
+                    "cube vertex behind the eye at yaw {yaw} pitch {pitch}: {offset}"
+                );
+            }
+        }
+    }
+
+    /// The same invariant the arm has, for the same reason: a held block rides
+    /// the camera, so spinning on the spot must not change how it is lit. Taking
+    /// the normals from the full placement — which contains the camera's yaw —
+    /// is the mistake this guards.
+    #[test]
+    fn turning_does_not_change_a_held_cubes_lighting() {
+        let a = held_cube(pose(0.0, 0.0).frame());
+        let b = held_cube(pose(2.9, 0.4).frame());
+        for (x, y) in a.vertices.iter().zip(&b.vertices) {
+            assert_eq!(x.normal, y.normal);
+            assert_eq!(x.ao, y.ao);
+        }
+    }
+
+    /// A held cube placed the way `SceneCache::shaped_item_mesh` places one.
+    fn held_cube(frame: Mat4) -> CpuMesh {
+        let local = block_placement(DisplayContext::FirstPersonRightHand).matrix();
+        let mut cube = CpuMesh::new();
+        crate::world::meshing::push_item_cube(
+            &mut cube,
+            Vec3::splat(0.5),
+            1.0,
+            0.0,
+            &wyven_voxel::FaceTextures::uniform(1),
+        );
+        cube.transformed(item_anchor(frame) * local, local)
     }
 
     /// The hand rides the camera, so turning must not change its shading.

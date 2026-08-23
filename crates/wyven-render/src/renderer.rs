@@ -141,6 +141,9 @@ pub struct PreviewFrame<'a> {
     pub model: &'a GpuMesh,
     /// The item model in the previewed player's hand, if they hold one.
     pub held: Option<TexturedMesh<'a>>,
+    /// A held item with no model of its own — a block cube or a flat sprite,
+    /// sampling the shared atlas like the player model beside it.
+    pub held_atlas: Option<&'a GpuMesh>,
 }
 
 /// The state every world draw shares: which pipeline, and the camera and light
@@ -695,6 +698,12 @@ impl Renderer {
         };
         self.record_meshes(&mut builder, pass, self.atlas.set.clone(), &[preview.model]);
         self.record_textured(&mut builder, pass, preview.held.as_slice());
+        self.record_meshes(
+            &mut builder,
+            pass,
+            self.atlas.set.clone(),
+            &preview.held_atlas.into_iter().collect::<Vec<_>>(),
+        );
 
         builder.end_rendering().expect("end preview rendering");
         let command_buffer = builder.build().expect("build preview cb");
