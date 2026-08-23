@@ -82,7 +82,22 @@ pub fn tile_registry() -> TileRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wyven_render::TileEntry;
+    use wyven_render::{TileEntry, texture::TILE_SIZE};
+
+    /// Assert `tile` belongs to no reserved band, naming the one it hit.
+    fn assert_unreserved(tile: u32, who: &str) {
+        assert_ne!(tile, 0, "{who} got the missing marker");
+        assert!(
+            !skin::atlas_tile_indices().any(|s| s == tile),
+            "{who} hit the skin"
+        );
+        assert!(!armor::is_armor_tile(tile), "{who} landed in the armor band");
+        assert!(!mobskin::is_mob_tile(tile), "{who} landed in a mob sheet");
+        assert!(
+            !(cracks::CRACK_0..cracks::CRACK_0 + cracks::CRACK_STAGES).contains(&tile),
+            "{who} landed on the crack overlay"
+        );
+    }
 
     /// The reserved bands exist so art addressed by constant keeps its index.
     /// Content allocated by name must never be handed one of those slots.
@@ -90,18 +105,31 @@ mod tests {
     fn content_tiles_never_land_on_reserved_art() {
         let mut reg = tile_registry();
         for name in ["apple", "stick", "coal", "flint"] {
-            let t = reg.resolve(name).tile;
-            assert_ne!(t, 0, "{name} got the missing marker");
-            assert!(
-                !skin::atlas_tile_indices().any(|s| s == t),
-                "{name} hit the skin"
-            );
-            assert!(!armor::is_armor_tile(t), "{name} landed in the armor band");
-            assert!(!mobskin::is_mob_tile(t), "{name} landed in a mob sheet");
-            assert!(
-                !(cracks::CRACK_0..cracks::CRACK_0 + cracks::CRACK_STAGES).contains(&t),
-                "{name} landed on the crack overlay"
-            );
+            assert_unreserved(reg.resolve(name).tile, name);
+        }
+    }
+
+    /// The same invariant, but for *every* slot the registry ever hands out
+    /// rather than the handful of names a game happens to resolve first.
+    ///
+    /// Those first names land at tiles 1-4, far below any reserved band, so
+    /// the test above cannot see a band that was never claimed in the first
+    /// place. That is precisely how the crack overlay's slots went missing:
+    /// with no art on disk `cracks::atlas_tiles` yielded nothing, tiles 48-55
+    /// were never marked used, and content quietly moved in.
+    #[test]
+    fn allocation_never_reaches_a_reserved_band() {
+        let mut reg = tile_registry();
+        let art: TileRgba = [[[255; 4]; TILE_SIZE as usize]; TILE_SIZE as usize];
+        // Ask for far more tiles than any band starts at, so allocation is
+        // forced to walk past all of them.
+        for i in 0..(mobskin::ALL.len() as u32 + 1) * 64 {
+            let name = format!("filler_{i}");
+            let entry = reg.insert(&name, art);
+            if entry == TileEntry::MISSING {
+                break; // atlas exhausted; every slot before it was checked
+            }
+            assert_unreserved(entry.tile, &name);
         }
     }
 
