@@ -1,5 +1,5 @@
 //! Compiled shader modules. `vulkano_shaders::shader!` compiles the GLSL in
-//! `assets/shaders/` to SPIR-V at build time and generates typed push-constant
+//! `shaders/` to SPIR-V at build time and generates typed push-constant
 //! structs (e.g. [`voxel_vs::PushConstants`]).
 
 pub mod voxel_vs {

@@ -821,7 +821,17 @@ mod tests {
     #[test]
     fn armor_adds_one_box_per_covered_part() {
         let blocks = crate::world::block::BlockRegistry::with_builtins();
-        let items = crate::inventory::ItemRegistry::from_blocks(&blocks);
+        // The cape slot renders but ships with no item to fill it, so this
+        // declares one rather than losing the standalone-box case entirely.
+        let items = crate::inventory::ItemRegistry::from_toml(
+            &format!(
+                "{}\n\n[[item]]\nid = \"cape\"\n\n\
+                 [item.armor]\nslot = \"cape\"\ndefense = 1.0\ndurability = 80\n",
+                crate::inventory::item::BUILTIN_ITEMS
+            ),
+            &blocks,
+        )
+        .expect("builtin items plus a cape");
         let model = HumanoidModel::player();
         let bare = model
             .build_mesh(Vec3::ZERO, 0.0, &Pose::default())

@@ -10,7 +10,7 @@ use vulkano::pipeline::graphics::vertex_input::Vertex;
 /// vertex attribute and no extra descriptor.
 ///
 /// The array fragment shader mirrors these three constants — keep them in step
-/// with `assets/shaders/voxel_array.frag`.
+/// with `shaders/voxel_array.frag`.
 pub const ANIM_FRAMES_SHIFT: u32 = 8;
 /// Frames per second, in the byte above the frame count.
 pub const ANIM_FPS_SHIFT: u32 = 16;

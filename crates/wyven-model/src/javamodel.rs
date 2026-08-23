@@ -198,7 +198,7 @@ mod tests {
     /// Blockbench item export is made of.
     const MODEL: &str = r##"{
         "texture_size": [16, 16],
-        "textures": {"0": "../textures/a"},
+        "textures": {"0": "../../textures/items/a"},
         "elements": [
             {"from": [0, 0, 0], "to": [16, 16, 16],
              "faces": {
@@ -221,9 +221,9 @@ mod tests {
 
     fn load(json: &str) -> Result<Model, String> {
         let source = MapSource::new()
-            .with_bytes("assets/models/t.json", json.as_bytes().to_vec())
-            .with_bytes("assets/textures/a.png", png(16, [9, 9, 9, 255]));
-        JavaModelLoader.load(json.as_bytes(), "assets/models", &source)
+            .with_bytes("assets/models/items/t.json", json.as_bytes().to_vec())
+            .with_bytes("assets/textures/items/a.png", png(16, [9, 9, 9, 255]));
+        JavaModelLoader.load(json.as_bytes(), "assets/models/items", &source)
     }
 
     #[test]
@@ -252,6 +252,47 @@ mod tests {
         assert!(model.placement_for(DisplayContext::Gui).is_some());
         // Undeclared contexts stay absent, so the caller falls back to its spec.
         assert!(model.placement_for(DisplayContext::Ground).is_none());
+    }
+
+    /// The whole point of `item/generated`: a stub with no geometry of its own
+    /// still loads as a real model, extruded from its sprite's alpha.
+    #[test]
+    fn a_generated_stub_extrudes_its_sprite() {
+        let json = r##"{
+            "parent": "item/generated",
+            "textures": { "layer0": "../../textures/items/a" }
+        }"##;
+        let model = load(json).expect("a generated stub loads");
+        // Two flat faces plus a rim right around a fully opaque 16x16 sprite:
+        // (2 + 4 * 16) quads, two triangles each.
+        assert_eq!(model.triangle_count(), (2 + 4 * 16) * 2);
+        // It places itself, so an `[item.model]` spec need not.
+        assert!(
+            model.placement_for(DisplayContext::Gui).is_some(),
+            "a generated model carries Minecraft's standard display block"
+        );
+    }
+
+    /// A stub naming no sprite has nothing to take a shape from, and must say so
+    /// rather than loading as an invisible item.
+    #[test]
+    fn a_generated_stub_without_layer0_is_rejected() {
+        let json = r##"{ "parent": "item/generated", "textures": {} }"##;
+        match load(json) {
+            Err(err) => assert!(err.contains("layer0"), "{err}"),
+            Ok(_) => panic!("a stub naming no sprite must be refused"),
+        }
+    }
+
+    /// An unknown parent is still refused — `item/generated` is a special case,
+    /// not the start of general model inheritance.
+    #[test]
+    fn an_unknown_parent_still_has_no_geometry_to_inherit() {
+        let json = r##"{
+            "parent": "block/cube_all",
+            "textures": { "0": "../../textures/items/a" }
+        }"##;
+        assert!(load(json).is_err());
     }
 
     #[test]

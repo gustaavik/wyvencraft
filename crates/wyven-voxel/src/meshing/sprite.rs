@@ -10,11 +10,17 @@
 //! The rim is what makes this more than a billboard, and finding it means
 //! walking the art's alpha. That is why [`ItemSprite`] is derived once per atlas
 //! tile and kept, rather than re-derived for every drop on every frame.
+//!
+//! The walk itself is [`wyven_model::silhouette`], shared with the loader that
+//! extrudes an `item/generated` model. An item with a model and one without must
+//! trace the same outline from the same art, so there is one implementation of
+//! it and one alpha cutoff.
 
 use glam::Vec3;
 
 use wyven_core::Direction;
 use wyven_core::math::rotate_y;
+use wyven_model::silhouette;
 use wyven_render::mesh::CpuMesh;
 use wyven_render::texture::{TILE_SIZE, atlas_uv};
 use wyven_render::tile_registry::TileRgba;
@@ -22,21 +28,13 @@ use wyven_render::vertex::{ChunkVertex, NO_TINT};
 
 use super::culled::face_shade;
 
-/// Alpha at or above which a texel counts as part of the shape. The same cutoff
-/// `voxel.frag` discards below, so the extruded rim traces exactly the silhouette
-/// that ends up drawn.
-const ALPHA_CUTOFF: u8 = 26; // 0.1 * 255, rounded up
-
-/// One exposed texel edge: where in the icon, and which way it faces.
-type RimEdge = (u16, u16, Direction);
-
 /// The extruded silhouette of one flat item icon.
 pub struct ItemSprite {
     tile: u32,
     /// Every texel edge with nothing beside it, as `(x, y, outward direction)`
     /// with `y = 0` at the top of the icon. Only the four in-plane directions
     /// appear; the two flat faces are implicit.
-    rim: Vec<RimEdge>,
+    rim: Vec<silhouette::Edge>,
 }
 
 impl ItemSprite {
@@ -46,30 +44,10 @@ impl ItemSprite {
     /// missing icon still reads as a card rather than vanishing.
     pub fn new(tile: u32, art: Option<&TileRgba>) -> Self {
         let n = TILE_SIZE as usize;
-        let solid = |x: usize, y: usize| match art {
-            Some(art) => art[y][x][3] >= ALPHA_CUTOFF,
+        let rim = silhouette::trace(n, n, |x, y| match art {
+            Some(art) => art[y][x][3] >= silhouette::ALPHA_CUTOFF,
             None => true,
-        };
-        let mut rim = Vec::new();
-        for y in 0..n {
-            for x in 0..n {
-                if !solid(x, y) {
-                    continue;
-                }
-                // `y` counts down the image, so the *previous* row is up.
-                let exposed = [
-                    (Direction::NegX, x == 0 || !solid(x - 1, y)),
-                    (Direction::PosX, x + 1 == n || !solid(x + 1, y)),
-                    (Direction::PosY, y == 0 || !solid(x, y - 1)),
-                    (Direction::NegY, y + 1 == n || !solid(x, y + 1)),
-                ];
-                for (dir, is_exposed) in exposed {
-                    if is_exposed {
-                        rim.push((x as u16, y as u16, dir));
-                    }
-                }
-            }
-        }
+        });
         Self { tile, rim }
     }
 

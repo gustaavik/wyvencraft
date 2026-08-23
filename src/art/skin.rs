@@ -9,7 +9,7 @@
 //! as a slightly inflated second shell (its transparent pixels are alpha-tested
 //! away in the shader) for a 3D layered look.
 //!
-//! `assets/textures/defaultskin.png` overrides the embedded copy; an invalid
+//! `assets/textures/entity/defaultskin.png` overrides the embedded copy; an invalid
 //! or missing file degrades fail-soft with a logged warning.
 
 use crate::core::Direction;
@@ -29,8 +29,8 @@ pub const SKIN_ROW: u32 = 0;
 /// The player skin's atlas origin as an `[col, row]` tile pair.
 pub const SKIN_ORIGIN: [u32; 2] = [SKIN_COL, SKIN_ROW];
 
-const SKIN_PATH: &str = "assets/textures/defaultskin.png";
-const EMBEDDED_SKIN: &[u8] = include_bytes!("../../assets/textures/defaultskin.png");
+const SKIN_PATH: &str = "assets/textures/entity/defaultskin.png";
+const EMBEDDED_SKIN: &[u8] = include_bytes!("../../assets/textures/entity/defaultskin.png");
 
 /// The whole skin sheet as RGBA pixels, indexed `[y][x]` with y = 0 at the top.
 pub type SkinRgba = [[[u8; 4]; SKIN_SIZE as usize]; SKIN_SIZE as usize];

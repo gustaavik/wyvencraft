@@ -29,7 +29,7 @@ pub fn atlas_tiles() -> impl Iterator<Item = (u32, TileRgba)> {
         .collect();
     if art.len() as u32 != CRACK_STAGES {
         log::warn!(
-            "block-break overlay: {} of {CRACK_STAGES} assets/textures/crack_<n>.png present; \
+            "block-break overlay: {} of {CRACK_STAGES} assets/textures/misc/crack_<n>.png present; \
              no crack overlay will be drawn",
             art.len()
         );
@@ -54,10 +54,10 @@ pub fn tile(progress: f32) -> Option<u32> {
     Some(CRACK_0 + stage.min(CRACK_STAGES - 1))
 }
 
-/// Decode `assets/textures/crack_<stage>.png`, or `None` if it is absent or
+/// Decode `assets/textures/misc/crack_<stage>.png`, or `None` if it is absent or
 /// unusable.
 fn load(stage: u32) -> Option<TileRgba> {
-    let path = format!("assets/textures/crack_{stage}.png");
+    let path = format!("assets/textures/misc/crack_{stage}.png");
     let bytes = std::fs::read(&path).ok()?;
     match decode_tile(&bytes) {
         Ok(art) => Some(art),
@@ -80,7 +80,7 @@ mod tests {
         assert_eq!(
             atlas_tiles().count() as u32,
             CRACK_STAGES,
-            "assets/textures/crack_<0..{CRACK_STAGES}>.png must all be present"
+            "assets/textures/misc/crack_<0..{CRACK_STAGES}>.png must all be present"
         );
     }
 

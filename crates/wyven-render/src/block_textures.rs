@@ -652,8 +652,8 @@ mod tests {
     fn the_same_path_shares_one_layer() {
         let mut set = BlockTextureSet::new();
         let art = block_texture([1, 2, 3, 255]);
-        let first = set.resolve("assets/textures/a.png", &art);
-        let second = set.resolve("assets/textures/a.png", &art);
+        let first = set.resolve("assets/textures/blocks/a.png", &art);
+        let second = set.resolve("assets/textures/blocks/a.png", &art);
         assert_eq!(first, second);
         assert_eq!(set.len(), 2, "one marker plus one texture");
     }
@@ -661,8 +661,14 @@ mod tests {
     #[test]
     fn different_paths_get_different_layers() {
         let mut set = BlockTextureSet::new();
-        let a = set.resolve("assets/textures/a.png", &block_texture([1, 1, 1, 255]));
-        let b = set.resolve("assets/textures/b.png", &block_texture([2, 2, 2, 255]));
+        let a = set.resolve(
+            "assets/textures/blocks/a.png",
+            &block_texture([1, 1, 1, 255]),
+        );
+        let b = set.resolve(
+            "assets/textures/blocks/b.png",
+            &block_texture([2, 2, 2, 255]),
+        );
         assert_ne!(a, b);
         assert!(a != 0 && b != 0, "content must not land on the marker");
     }
@@ -674,7 +680,7 @@ mod tests {
     fn a_smaller_texture_is_scaled_up_to_the_array_extent() {
         let mut set = BlockTextureSet::new();
         let art = image(16, |x, y| [x as u8, y as u8, 0, 255]);
-        let layer = set.resolve("assets/textures/small.png", &art);
+        let layer = set.resolve("assets/textures/blocks/small.png", &art);
         assert_ne!(layer, 0, "it should take a real layer");
 
         let stored = set.layer(layer).expect("layer");

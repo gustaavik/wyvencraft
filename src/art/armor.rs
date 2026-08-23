@@ -3,7 +3,7 @@
 //! Each of the six armor pieces has its own 64×64 sheet, laid out with the same
 //! Minecraft unwrap as the player skin ([`super::skin`]) so the entity model can
 //! address it with the same `SkinPart` rects — only the sheet's atlas origin
-//! differs. Sheets are read from `assets/textures/armor_<piece>.png`; a piece
+//! differs. Sheets are read from `assets/textures/equipment/armor_<piece>.png`; a piece
 //! with no file gets a magenta sheet, so unmade art is visible rather than
 //! invisible. They live in a band below the crack overlay, clear of the
 //! dynamically-allocated block tiles and the skin block.
@@ -57,7 +57,7 @@ impl ArmorKind {
         skin::sheet_origin(BAND_ROW, index)
     }
 
-    /// File-name stem for the PNG (`assets/textures/armor_<name>.png`).
+    /// File-name stem for the PNG (`assets/textures/equipment/armor_<name>.png`).
     fn name(self) -> &'static str {
         match self {
             ArmorKind::Helmet => "helmet",
@@ -85,7 +85,7 @@ pub fn is_armor_tile(tile: u32) -> bool {
 
 /// Load a piece's sheet: the PNG if present and valid, else a magenta sheet.
 fn load(kind: ArmorKind) -> Box<skin::SkinRgba> {
-    let path = format!("assets/textures/armor_{}.png", kind.name());
+    let path = format!("assets/textures/equipment/armor_{}.png", kind.name());
     match std::fs::read(&path) {
         Ok(bytes) => match skin::decode(&bytes) {
             Ok(sheet) => {
