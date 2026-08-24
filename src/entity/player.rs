@@ -38,6 +38,20 @@ impl Perspective {
     pub fn is_first_person(self) -> bool {
         matches!(self, Perspective::First)
     }
+
+    /// Where the camera sits relative to the eye and which way it looks, given
+    /// the player's look direction: the unit offset *toward* the camera, then
+    /// the forward vector. `None` in first person — there the camera is the eye.
+    ///
+    /// The one place that knows this, so the camera's placement and the collision
+    /// trace that decides how far along the offset it may go cannot drift apart.
+    pub fn camera_placement(self, look: Vec3) -> Option<(Vec3, Vec3)> {
+        match self {
+            Perspective::First => None,
+            Perspective::ThirdBack => Some((-look, look)),
+            Perspective::ThirdFront => Some((look, -look)),
+        }
+    }
 }
 
 /// Desired movement for one simulation tick, in player-local terms.

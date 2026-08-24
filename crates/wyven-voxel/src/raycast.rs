@@ -28,6 +28,9 @@ pub struct RaycastHit {
     /// The face of `block` that the ray entered through (points toward the ray
     /// origin). Adding this offset to `block` gives the placement position.
     pub face: Direction,
+    /// Distance along `dir` at which the ray entered the target. `0.0` when the
+    /// origin already sits inside it, since it crossed nothing to get there.
+    pub distance: f32,
 }
 
 impl RaycastHit {
@@ -102,14 +105,25 @@ pub fn raycast(
     while traveled <= max_distance {
         match target(block) {
             // A full cell is settled by the crossing the DDA already made.
-            Some(Target::Cell) => return Some(RaycastHit { block, face }),
+            Some(Target::Cell) => {
+                return Some(RaycastHit {
+                    block,
+                    face,
+                    // The DDA stopped at this cell's own boundary, so the
+                    // crossing it already made *is* the entry distance.
+                    distance: traveled,
+                });
+            }
             Some(Target::Box(aabb)) => {
-                if let Some((_, entered)) = aabb.ray_enter(origin, dir, max_distance) {
+                if let Some((t, entered)) = aabb.ray_enter(origin, dir, max_distance) {
                     return Some(RaycastHit {
                         block,
                         // Starting inside the box crosses no face; keep the one
                         // the ray used to enter the cell.
                         face: entered.unwrap_or(face),
+                        // The box sits somewhere inside the cell, so its own
+                        // entry is further along than the cell's.
+                        distance: t,
                     });
                 }
                 // Missed the box — keep marching past it.
@@ -160,6 +174,28 @@ mod tests {
         move |p| (p == pos).then_some(Target::Cell)
     }
 
+    /// The distance is what lets a caller stop *short* of what it hit — the
+    /// third-person camera pulls itself in by it. Without it the only way back
+    /// to a length is to re-derive the entry plane from `block` and `face`.
+    #[test]
+    fn a_hit_reports_how_far_the_ray_travelled() {
+        let target = BlockPos::new(4, 0, 0);
+        let hit = raycast(Vec3::new(0.5, 0.5, 0.5), Vec3::X, 8.0, only(target)).expect("hit");
+        assert!(
+            (hit.distance - 3.5).abs() < 1.0e-5,
+            "entered the cell at x = 4 from x = 0.5, so 3.5; got {}",
+            hit.distance
+        );
+    }
+
+    /// A ray that starts inside its target crossed nothing to get there.
+    #[test]
+    fn a_hit_in_the_origins_own_cell_is_at_zero_distance() {
+        let here = BlockPos::new(0, 0, 0);
+        let hit = raycast(Vec3::new(0.5, 0.5, 0.5), Vec3::X, 8.0, only(here)).expect("hit");
+        assert_eq!(hit.distance, 0.0);
+    }
+
     #[test]
     fn a_full_cell_is_hit_on_the_face_the_ray_crossed() {
         let target = BlockPos::new(4, 0, 0);
@@ -202,6 +238,11 @@ mod tests {
         let into = raycast(Vec3::new(0.0, 0.15, 0.0), Vec3::X, 10.0, boxes).expect("hit");
         assert_eq!(into.block, plant);
         assert_eq!(into.face, Direction::NegX, "entered the box's -X face");
+        assert!(
+            (into.distance - 2.4).abs() < 1.0e-5,
+            "the box's own front face at 2.4, not the cell boundary at 2.0; got {}",
+            into.distance
+        );
     }
 
     /// A box hit reports the face of the *box*, which is what a placed block
