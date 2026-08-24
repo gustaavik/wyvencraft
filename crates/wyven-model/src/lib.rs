@@ -6,22 +6,27 @@
 //! shape authored in Blockbench (or anything that exports glTF) can be used as
 //! an entity's body or an item's model without touching Rust.
 //!
-//! Two formats are supported, both JSON:
+//! Three formats are supported, all JSON:
 //! - `.gltf` — the interchange format every DCC tool exports. Blockbench's
 //!   export is self-contained (buffer and texture as inline `data:` URIs).
 //! - `.bbmodel` — Blockbench's native file, cuboids with per-face UV rects.
+//! - `.json` — Blockbench's *Java Block/Item* export, the format blocks are
+//!   authored in, read here by [`javamodel`] for the *item* path.
 //!
-//! Adding a third means writing one [`ModelLoader`] and listing it in
+//! Adding a fourth means writing one [`ModelLoader`] and listing it in
 //! [`ModelRegistry::LOADERS`]; nothing else in the module changes, and nothing
 //! outside it can tell which loader produced a given [`Model`].
 //!
-//! [`blockjson`] sits deliberately outside that arrangement. It reads
-//! Blockbench's *Java Block/Item* export — the format all blocks are authored
-//! in — which names several textures per model and carries `cullface` and
-//! `tintindex`, none of which fit a [`Model`]'s single [`Rgba8`]. It is called
-//! directly rather than through the registry, both because of that shape and
-//! because `.json` is far too generic an extension to claim in a registry that
-//! dispatches on extension alone.
+//! [`blockjson`] is the parser behind that third entry, and stays outside the
+//! registry itself: it names several textures per model and carries `cullface`
+//! and `tintindex`, which the chunk mesher needs and a [`Model`]'s single
+//! [`Rgba8`] has nowhere to put. Blocks call it directly; [`javamodel`] is the
+//! adapter that flattens what it produces into a [`Model`], and is what claims
+//! `.json` in the registry.
+//!
+//! It also reads the one thing a `.gltf` and a `.bbmodel` cannot express: the
+//! [`display`] block, which places a model separately for the hand, the ground
+//! and the inventory slot instead of making one placement serve all three.
 //!
 //! Boundaries: this layer is pure. It reads through the [`ContentSource`] port,
 //! never touches the filesystem or the GPU directly, and produces model-space
@@ -31,8 +36,12 @@
 pub mod bbmodel;
 pub mod blockjson;
 pub mod datauri;
+pub mod display;
+pub mod generated;
 pub mod gltf;
+pub mod javamodel;
 pub mod mesh;
+pub mod silhouette;
 
 use std::collections::HashMap;
 
@@ -41,10 +50,12 @@ use glam::Vec3;
 use wyven_assets::AssetSource as ContentSource;
 use wyven_assets::Rgba8;
 
+pub use display::{DisplayContext, DisplayTransforms, ItemTransform};
 pub use mesh::ModelMesh;
 
 use bbmodel::BbmodelLoader;
 use gltf::GltfLoader;
+use javamodel::JavaModelLoader;
 
 /// Index of a loaded model in a [`ModelRegistry`]. Cheap to copy and to store
 /// on per-entity data, which matters because entity visuals are cloned per mob.
@@ -59,7 +70,7 @@ pub struct ModelId(pub u32);
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelSpec {
-    /// `assets/`-relative path, e.g. `"assets/models/vine_sword.gltf"`.
+    /// `assets/`-relative path, e.g. `"assets/models/items/vine_sword.bbmodel"`.
     pub path: String,
     /// Uniform scale applied to the model's own units.
     #[serde(default = "unit_scale")]
@@ -98,6 +109,10 @@ pub struct Model {
     pub texture: Rgba8,
     /// Model-space bounds, handy for sanity checks and for centring a model.
     pub bounds: (Vec3, Vec3),
+    /// Where the file asks to be placed in each context it can be drawn in.
+    /// Empty for every format that cannot express it — which is `.gltf` and
+    /// `.bbmodel`, i.e. everything authored before [`display`] existed.
+    pub display: DisplayTransforms,
 }
 
 impl Model {
@@ -107,7 +122,21 @@ impl Model {
             mesh,
             texture,
             bounds,
+            display: DisplayTransforms::default(),
         })
+    }
+
+    /// Attach the placements the file declared. Only [`javamodel`] has any.
+    pub(crate) fn with_display(mut self, display: DisplayTransforms) -> Self {
+        self.display = display;
+        self
+    }
+
+    /// The placement this model's file asks for in `context`, or `None` when it
+    /// declares none — in which case the caller's own data file decides, which
+    /// is what [`mesh::local_transform`] is for.
+    pub fn placement_for(&self, context: DisplayContext) -> Option<ItemTransform> {
+        self.display.get(context)
     }
 
     pub fn triangle_count(&self) -> usize {
@@ -145,7 +174,8 @@ pub struct ModelRegistry {
 
 impl ModelRegistry {
     /// The registered loaders. Adding a format means adding an entry here.
-    const LOADERS: &'static [&'static dyn ModelLoader] = &[&GltfLoader, &BbmodelLoader];
+    const LOADERS: &'static [&'static dyn ModelLoader] =
+        &[&GltfLoader, &BbmodelLoader, &JavaModelLoader];
 
     pub fn new() -> Self {
         Self::default()
@@ -253,7 +283,7 @@ pub(crate) fn resolve_sibling(dir: &str, path: &str) -> String {
 ///
 /// The OS would do this for a real filesystem read, but content also comes from
 /// [`wyven_assets::MapSource`], which looks paths up verbatim — so a block
-/// model in `assets/blocks/` naming `"../textures/dirt.png"` only resolves the
+/// model in `assets/models/blocks/` naming `"../../textures/blocks/dirt.png"` only resolves the
 /// same way from both sources if the collapsing happens here.
 ///
 /// A `..` that would climb above the root is kept rather than dropped, so a
@@ -284,11 +314,10 @@ mod tests {
         FsSource::rooted(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
     }
 
-    const GLTF: &str = "assets/models/vine_sword.gltf";
-    const BBMODEL: &str = "assets/models/vine_sword.bbmodel";
+    const BBMODEL: &str = "assets/models/items/vine_sword.bbmodel";
+    const JAVA: &str = "assets/models/items/wooden_sword.json";
 
-    /// Measured from the two exports of `vine_sword`, which describe the same
-    /// object: 21 cubes, 6 faces each, 4 unwelded vertices per face.
+    /// Measured from the shipped `vine_sword` export: 21 cubes, 6 faces each, 4 unwelded vertices per face.
     const EXPECTED_VERTS: usize = 504;
     const EXPECTED_TRIS: usize = 252;
 
@@ -320,27 +349,61 @@ mod tests {
     }
 
     /// Blockbench writes block-model texture refs relative to the exported
-    /// file, so `assets/blocks/x.json` names `../textures/dirt.png`.
+    /// file, so `assets/models/blocks/x.json` names `../../textures/blocks/dirt.png`.
     #[test]
     fn resolve_sibling_collapses_parent_segments() {
         assert_eq!(
-            resolve_sibling("assets/blocks", "../textures/dirt.png"),
-            "assets/textures/dirt.png"
+            resolve_sibling("assets/blocks", "../textures/blocks/dirt.png"),
+            "assets/textures/blocks/dirt.png"
         );
         assert_eq!(
-            resolve_sibling("assets/blocks/nested", "../../textures/a.png"),
-            "assets/textures/a.png"
+            resolve_sibling("assets/blocks/nested", "../../textures/blocks/a.png"),
+            "assets/textures/blocks/a.png"
         );
         // Climbing above the root is kept, so the path stays visibly wrong.
         assert_eq!(resolve_sibling("assets", "../../x.png"), "../x.png");
     }
 
+    /// The Java Block/Item export is the only format that can say where a model
+    /// belongs in each context, and the shipped sword says it for all of them.
     #[test]
-    fn loads_the_gltf_export() {
-        let model = load(GLTF);
-        assert_eq!(model.vertex_count(), EXPECTED_VERTS);
-        assert_eq!(model.triangle_count(), EXPECTED_TRIS);
+    fn loads_the_java_export_with_its_display_block() {
+        let model = load(JAVA);
         assert_eq!(model.texture.size, [32, 32]);
+        assert!(!model.display.is_empty());
+
+        let first = model
+            .placement_for(DisplayContext::FirstPersonRightHand)
+            .expect("firstperson_righthand");
+        assert_eq!(first.translation, [0.0, 1.0, 1.0]);
+        assert!((first.scale[0] - 0.79883).abs() < 1e-6);
+        assert!((first.rotation[0] - -99.9).abs() < 1e-4);
+
+        for context in [
+            DisplayContext::ThirdPersonRightHand,
+            DisplayContext::Gui,
+            DisplayContext::Ground,
+            DisplayContext::Fixed,
+        ] {
+            assert!(
+                model.placement_for(context).is_some(),
+                "{context:?} should be declared"
+            );
+        }
+        // `"head": {"scale": [0, 0, 0]}` is how the file says "not here".
+        assert_eq!(model.placement_for(DisplayContext::Head), None);
+    }
+
+    /// The fallback contract every model authored before `display` relies on: a
+    /// `.bbmodel` declares nothing, so its `[item.model]` spec keeps placing it.
+    #[test]
+    fn a_bbmodel_declares_no_placement_of_its_own() {
+        let model = load(BBMODEL);
+        assert!(model.display.is_empty());
+        assert_eq!(
+            model.placement_for(DisplayContext::ThirdPersonRightHand),
+            None
+        );
     }
 
     #[test]
@@ -351,55 +414,11 @@ mod tests {
         assert_eq!(model.texture.size, [32, 32]);
     }
 
-    /// The strongest check available: both files are Blockbench exports of the
-    /// same sword, so the two loaders must agree on where every vertex and UV
-    /// ends up. This is what pins down the bbmodel face-corner order, the UV
-    /// rotation direction, the element-rotation sign and the 1/16 scale.
-    #[test]
-    fn the_two_formats_describe_the_same_model() {
-        let a = load(GLTF);
-        let b = load(BBMODEL);
-
-        let (a_lo, a_hi) = a.bounds;
-        let (b_lo, b_hi) = b.bounds;
-        assert!(
-            a_lo.abs_diff_eq(b_lo, 1e-4) && a_hi.abs_diff_eq(b_hi, 1e-4),
-            "bounds differ: gltf {a_lo}..{a_hi} vs bbmodel {b_lo}..{b_hi}"
-        );
-
-        // Compare as unordered sets of (position, uv): the exporters emit faces
-        // in a different order, but the surface they describe is identical.
-        let key = |m: &Model| {
-            let mut rows: Vec<[i32; 5]> = (0..m.vertex_count())
-                .map(|i| {
-                    let p = m.mesh.positions[i];
-                    let uv = m.mesh.uvs[i];
-                    // Quantise to 1/1024 block and 1/1024 UV to absorb the
-                    // float noise of two independent transform paths.
-                    [
-                        (p.x * 1024.0).round() as i32,
-                        (p.y * 1024.0).round() as i32,
-                        (p.z * 1024.0).round() as i32,
-                        (uv[0] * 1024.0).round() as i32,
-                        (uv[1] * 1024.0).round() as i32,
-                    ]
-                })
-                .collect();
-            rows.sort_unstable();
-            rows
-        };
-        assert_eq!(
-            key(&a),
-            key(&b),
-            "the gltf and bbmodel exports disagree on geometry or UVs"
-        );
-    }
-
     #[test]
     fn the_sword_lands_where_blockbench_authored_it() {
         // Measured from the files: the blade runs above the block and the hilt
         // dips below it, so a model is emphatically not confined to 0..1.
-        let (lo, hi) = load(GLTF).bounds;
+        let (lo, hi) = load(BBMODEL).bounds;
         assert!(
             lo.abs_diff_eq(Vec3::new(0.467188, -0.889055, 0.113190), 1e-4),
             "lo = {lo}"
@@ -440,11 +459,11 @@ mod tests {
     #[test]
     fn the_same_path_parses_once_and_shares_an_id() {
         let mut registry = ModelRegistry::new();
-        let first = registry.load(GLTF, &assets()).expect("loads");
-        let second = registry.load(GLTF, &assets()).expect("cached");
+        let first = registry.load(BBMODEL, &assets()).expect("loads");
+        let second = registry.load(BBMODEL, &assets()).expect("cached");
         assert_eq!(first, second);
         assert_eq!(registry.len(), 1, "the file should be parsed once");
-        assert!(registry.find(GLTF).is_some());
+        assert!(registry.find(BBMODEL).is_some());
     }
 
     #[test]

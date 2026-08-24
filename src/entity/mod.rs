@@ -12,6 +12,7 @@ pub mod physics;
 pub mod player;
 pub mod projectile;
 pub mod spawning;
+pub mod viewmodel;
 
 pub use animation::AnimationState;
 pub use brain::{Perception, PlayerSighting};
@@ -22,3 +23,4 @@ pub use model::{HandAnchor, HumanoidModel, ModelBox, Pose, QuadrupedModel};
 pub use player::{MovementInput, Perspective, Player};
 pub use projectile::Arrow;
 pub use spawning::{SpawnConfig, SpawnRequest, Spawner};
+pub use viewmodel::HandPose;

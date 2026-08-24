@@ -36,7 +36,11 @@
 #       durability  hits taken before the piece breaks
 #   [item.model] draws the item as a 3D model instead of the default cube,
 #                both in the holder's hand and where it lies in the world:
-#       path        a .gltf or .bbmodel under assets/models/
+#       path        a .gltf, .bbmodel or Java Block/Item .json under
+#                   assets/models/items/. A flat 2D item instead names a
+#                   three-line `item/generated` stub, whose geometry is
+#                   extruded from its sprite's alpha and which places
+#                   itself, so scale/offset/rotation below are not needed.
 #       scale       uniform scale (default 1.0)
 #       offset      shift in the model's own space, applied before scale
 #                   (Blockbench authors on a 0..1 block, so [-0.5, y, -0.5]
@@ -78,7 +82,7 @@ durability = 60
 harvests = ["stone"]
 
 [item.model]
-path = "assets/models/wooden_pickaxe.bbmodel"
+path = "assets/models/items/wooden_pickaxe.bbmodel"
 scale = 0.55
 offset = [-0.5, 0.0, -0.5]
 rotation = [0.0, 90.0, 0.0]
@@ -94,7 +98,7 @@ harvests = ["wood"]
 damage = 3.0
 
 [item.model]
-path = "assets/models/wooden_axe.bbmodel"
+path = "assets/models/items/wooden_axe.bbmodel"
 scale = 0.55
 offset = [-0.5, 0.0, -0.5]
 rotation = [0.0, 90.0, 0.0]
@@ -109,7 +113,7 @@ durability = 60
 harvests = ["dirt", "sand"]
 
 [item.model]
-path = "assets/models/wooden_shovel.bbmodel"
+path = "assets/models/items/wooden_shovel.bbmodel"
 scale = 0.5
 offset = [-0.5, 0.0, -0.5]
 rotation = [0.0, 90.0, 0.0]
@@ -136,7 +140,7 @@ damage = 4.0
 # Drawn from a model file rather than as a textured cube. The offset drops the
 # grip (the model runs from y = -0.889 up to y = 1.471) onto the fist.
 [item.model]
-path = "assets/models/vine_sword.bbmodel"
+path = "assets/models/items/vine_sword.bbmodel"
 scale = 0.35
 offset = [-0.5, 0.75, -0.5]
 
@@ -150,8 +154,11 @@ durability = 60
 harvests = ["plant"]
 damage = 4.0
 
+# Authored as a Java Block/Item model, so its `display` block places it in the
+# hand, on the ground and in the inventory slot separately. The scale/offset/
+# rotation below still apply to any context that block does not name.
 [item.model]
-path = "assets/models/wooden_sword.bbmodel"
+path = "assets/models/items/wooden_sword.json"
 scale = 0.45
 offset = [-0.5, 0.0, -0.5]
 rotation = [0.0, 90.0, 0.0]
@@ -166,7 +173,7 @@ durability = 132
 harvests = ["stone"]
 
 [item.model]
-path = "assets/models/stone_pickaxe.bbmodel"
+path = "assets/models/items/stone_pickaxe.json"
 scale = 0.55
 offset = [-0.5, 0.0, -0.5]
 rotation = [0.0, 90.0, 0.0]
@@ -182,7 +189,7 @@ harvests = ["wood"]
 damage = 4.0
 
 [item.model]
-path = "assets/models/stone_axe.bbmodel"
+path = "assets/models/items/stone_axe.json"
 scale = 0.55
 offset = [-0.5, 0.0, -0.5]
 rotation = [0.0, 90.0, 0.0]
@@ -197,7 +204,7 @@ durability = 132
 harvests = ["dirt", "sand"]
 
 [item.model]
-path = "assets/models/stone_shovel.bbmodel"
+path = "assets/models/items/stone_shovel.json"
 scale = 0.5
 offset = [-0.5, 0.0, -0.5]
 rotation = [0.0, 90.0, 0.0]
@@ -213,7 +220,7 @@ harvests = ["plant"]
 damage = 5.0
 
 [item.model]
-path = "assets/models/stone_sword.bbmodel"
+path = "assets/models/items/stone_sword.json"
 scale = 0.45
 offset = [-0.5, 0.0, -0.5]
 rotation = [0.0, 90.0, 0.0]
@@ -228,7 +235,7 @@ durability = 250
 harvests = ["stone"]
 
 [item.model]
-path = "assets/models/iron_pickaxe.bbmodel"
+path = "assets/models/items/iron_pickaxe.json"
 scale = 0.55
 offset = [-0.5, 0.0, -0.5]
 rotation = [0.0, 90.0, 0.0]
@@ -244,7 +251,7 @@ harvests = ["wood"]
 damage = 5.0
 
 [item.model]
-path = "assets/models/iron_axe.bbmodel"
+path = "assets/models/items/iron_axe.json"
 scale = 0.55
 offset = [-0.5, 0.0, -0.5]
 rotation = [0.0, 90.0, 0.0]
@@ -259,7 +266,7 @@ durability = 250
 harvests = ["dirt", "sand"]
 
 [item.model]
-path = "assets/models/iron_shovel.bbmodel"
+path = "assets/models/items/iron_shovel.json"
 scale = 0.5
 offset = [-0.5, 0.0, -0.5]
 rotation = [0.0, 90.0, 0.0]
@@ -275,7 +282,7 @@ harvests = ["plant"]
 damage = 6.0
 
 [item.model]
-path = "assets/models/iron_sword.bbmodel"
+path = "assets/models/items/iron_sword.json"
 scale = 0.45
 offset = [-0.5, 0.0, -0.5]
 rotation = [0.0, 90.0, 0.0]
@@ -286,6 +293,9 @@ id = "apple"
 [item.food]
 hunger = 4.0
 saturation = 2.4
+
+[item.model]
+path = "assets/models/items/apple.json"
 
 [[item]]
 id = "bread"
@@ -304,12 +314,18 @@ id = "raw_beef"
 hunger = 3.0
 saturation = 1.8
 
+[item.model]
+path = "assets/models/items/raw_beef.json"
+
 [[item]]
 id = "mutton"
 
 [item.food]
 hunger = 2.0
 saturation = 1.2
+
+[item.model]
+path = "assets/models/items/mutton.json"
 
 [[item]]
 id = "raw_chicken"
@@ -318,12 +334,18 @@ id = "raw_chicken"
 hunger = 2.0
 saturation = 1.2
 
+[item.model]
+path = "assets/models/items/raw_chicken.json"
+
 [[item]]
 id = "cooked_beef"
 
 [item.food]
 hunger = 8.0
 saturation = 12.8
+
+[item.model]
+path = "assets/models/items/cooked_beef.json"
 
 [[item]]
 id = "cooked_mutton"
@@ -332,12 +354,18 @@ id = "cooked_mutton"
 hunger = 6.0
 saturation = 9.6
 
+[item.model]
+path = "assets/models/items/cooked_mutton.json"
+
 [[item]]
 id = "cooked_chicken"
 
 [item.food]
 hunger = 6.0
 saturation = 7.2
+
+[item.model]
+path = "assets/models/items/cooked_chicken.json"
 
 [[item]]
 id = "raw_porkchop"
@@ -356,26 +384,50 @@ saturation = 12.8
 # Mob and block materials. Plain stackables: no components, so their icons are
 # whatever `assets/textures/<id>.png` holds.
 
+[item.model]
+path = "assets/models/items/cooked_porkchop.json"
+
 [[item]]
 id = "leather"
+
+[item.model]
+path = "assets/models/items/leather.json"
 
 [[item]]
 id = "feather"
 
+[item.model]
+path = "assets/models/items/feather.json"
+
 [[item]]
 id = "string"
+
+[item.model]
+path = "assets/models/items/string.json"
 
 [[item]]
 id = "arrow"
 
+[item.model]
+path = "assets/models/items/arrow.json"
+
 [[item]]
 id = "coal"
+
+[item.model]
+path = "assets/models/items/coal.json"
 
 [[item]]
 id = "clay_ball"
 
+[item.model]
+path = "assets/models/items/clay_ball.json"
+
 [[item]]
 id = "flint"
+
+[item.model]
+path = "assets/models/items/flint.json"
 
 [[item]]
 id = "copper_ingot"
@@ -385,8 +437,12 @@ id = "copper_ingot"
 # piece by one point. A piece only fits the slot it names.
 #
 # The four plate pieces are the copper tier and are named for it, so a second
-# tier can be added beside them rather than replacing them. `glove` and `cape`
-# are tierless and keep their bare ids.
+# tier can be added beside them rather than replacing them. The `glove` and
+# `cape` slots exist and render, but no item fills them yet — declare one here
+# when the art is drawn.
+
+[item.model]
+path = "assets/models/items/copper_ingot.json"
 
 [[item]]
 id = "copper_helmet"
@@ -396,6 +452,9 @@ slot = "helmet"
 defense = 2.0
 durability = 120
 
+[item.model]
+path = "assets/models/items/copper_helmet.json"
+
 [[item]]
 id = "copper_chestplate"
 
@@ -403,6 +462,9 @@ id = "copper_chestplate"
 slot = "chestplate"
 defense = 6.0
 durability = 240
+
+[item.model]
+path = "assets/models/items/copper_chestplate.json"
 
 [[item]]
 id = "copper_leggings"
@@ -412,6 +474,9 @@ slot = "leggings"
 defense = 5.0
 durability = 200
 
+[item.model]
+path = "assets/models/items/copper_leggings.json"
+
 [[item]]
 id = "copper_boots"
 
@@ -420,24 +485,11 @@ slot = "boots"
 defense = 2.0
 durability = 120
 
-[[item]]
-id = "glove"
-
-[item.armor]
-slot = "glove"
-defense = 1.0
-durability = 80
-
-[[item]]
-id = "cape"
-
-[item.armor]
-slot = "cape"
-defense = 1.0
-durability = 80
-
 # Crafting intermediate: the handle every tool is built around. No components,
 # so it is a plain stackable drawing its icon from `assets/textures/stick.png`.
+
+[item.model]
+path = "assets/models/items/copper_boots.json"
 
 [[item]]
 id = "stick"
@@ -450,11 +502,14 @@ id = "stick"
 # `place_block` is inherited from the auto-generated item and must not be
 # repeated here.
 
+[item.model]
+path = "assets/models/items/stick.json"
+
 [[item]]
 id = "blue_bells"
 
 [item.model]
-path = "assets/models/plant1.bbmodel"
+path = "assets/models/blocks/plant1.bbmodel"
 scale = 0.4
 offset = [-0.5, 0.0, -0.5]
 
@@ -462,7 +517,7 @@ offset = [-0.5, 0.0, -0.5]
 id = "red_flower"
 
 [item.model]
-path = "assets/models/plant2.bbmodel"
+path = "assets/models/blocks/plant2.bbmodel"
 scale = 0.4
 offset = [-0.5, 0.0, -0.5]
 
@@ -470,7 +525,7 @@ offset = [-0.5, 0.0, -0.5]
 id = "red_mushroom"
 
 [item.model]
-path = "assets/models/mushroom1.bbmodel"
+path = "assets/models/blocks/mushroom1.bbmodel"
 scale = 0.5
 offset = [-0.5, 0.0, -0.5]
 
@@ -478,7 +533,7 @@ offset = [-0.5, 0.0, -0.5]
 id = "brown_mushroom"
 
 [item.model]
-path = "assets/models/mushroom2.bbmodel"
+path = "assets/models/blocks/mushroom2.bbmodel"
 scale = 0.45
 offset = [-0.5, 0.0, -0.5]
 

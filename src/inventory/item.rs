@@ -584,8 +584,6 @@ mod tests {
             ("copper_chestplate", ArmorSlot::Chestplate, 6.0, 240),
             ("copper_leggings", ArmorSlot::Leggings, 5.0, 200),
             ("copper_boots", ArmorSlot::Boots, 2.0, 120),
-            ("glove", ArmorSlot::Glove, 1.0, 80),
-            ("cape", ArmorSlot::Cape, 1.0, 80),
         ];
 
         // Plain stackables with no components at all, declared after the armor.
@@ -804,18 +802,21 @@ mod tests {
         // Not the exact extension: either export of this object is valid here,
         // and pinning one would make swapping formats a test failure.
         assert!(
-            spec.path.starts_with("assets/models/vine_sword."),
+            spec.path.starts_with("assets/models/items/vine_sword."),
             "unexpected model path {:?}",
             spec.path
         );
         assert_eq!(spec.scale, 0.35);
         assert_eq!(spec.offset, [-0.5, 0.75, -0.5]);
 
-        // Everything else is model-less, and nothing about the model leaks onto
-        // the item itself. The item's *id* is legitimately "vine_sword", so what
-        // must be absent is the model file it points at.
-        let apple = items.find("apple").expect("apple");
-        assert!(models[apple.0 as usize].is_none());
+        // An item with no art yet declares no model either — flat items get one
+        // extruded from their sprite, and `bread` has no sprite to extrude.
+        let bread = items.find("bread").expect("bread");
+        assert!(models[bread.0 as usize].is_none());
+
+        // Nothing about the model leaks onto the item itself. The item's *id* is
+        // legitimately "vine_sword", so what must be absent is the file it
+        // points at.
         let debug = format!("{:?}", items.get(sword));
         assert!(
             !debug.contains("assets/models") && !debug.contains(".bbmodel"),
@@ -826,6 +827,12 @@ mod tests {
     /// The tiered tools are flat in the XY plane, unlike `vine_sword`, so they
     /// all carry the quarter-turn that stands them broadside in the fist. A
     /// tool that silently lost it would render edge-on and near-invisible.
+    ///
+    /// The extension is deliberately not pinned: tools are migrating from
+    /// `.bbmodel` to the Java Block/Item `.json` export one at a time, and a
+    /// re-authored tool places itself from its own `display` block instead. The
+    /// spec rotation stays as the fallback for any context that block does not
+    /// name, which is why it is still asserted for every tier.
     #[test]
     fn tiered_tool_models_are_turned_broadside() {
         let blocks = BlockRegistry::with_builtins();
@@ -841,10 +848,12 @@ mod tests {
                 let spec = models[id.0 as usize]
                     .as_ref()
                     .unwrap_or_else(|| panic!("{name} declares a model"));
-                assert_eq!(
-                    spec.path,
-                    format!("assets/models/{tier}_{shape}.bbmodel"),
-                    "{name}: model path"
+                let stem = format!("assets/models/items/{tier}_{shape}.");
+                assert!(
+                    spec.path.starts_with(&stem)
+                        && (spec.path.ends_with(".bbmodel") || spec.path.ends_with(".json")),
+                    "{name}: model path {}",
+                    spec.path
                 );
                 assert_eq!(spec.rotation, [0.0, 90.0, 0.0], "{name}: rotation");
             }

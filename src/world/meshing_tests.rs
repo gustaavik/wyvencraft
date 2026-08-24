@@ -2,7 +2,7 @@
 //!
 //! `wyven_voxel` owns the mesher and tests it against a synthetic catalog — that
 //! is what proves it needs no game. These tests are the other half: they run it
-//! over `assets/blocks.toml`, the shipped `assets/blocks/*.json` and this game's
+//! over `assets/blocks.toml`, the shipped `assets/models/blocks/*.json` and this game's
 //! fluid definitions, which is where a bad `cullface`, a mis-columned water
 //! animation or an untinted leaf would actually show up.
 //!
@@ -343,7 +343,7 @@ fn a_model_block_meshes_into_its_own_bucket_and_emits_no_cube_faces() {
 /// 256-pixel array layers that no atlas UV could address.
 ///
 /// `load()` rather than `builtin()`: the embedded fallback carries the TOML
-/// but not `assets/blocks/*.json`, so nothing would have a model to bake.
+/// but not `assets/models/blocks/*.json`, so nothing would have a model to bake.
 #[test]
 fn a_blockbench_block_meshes_into_the_array_buffers() {
     let content = GameContent::load();

@@ -103,6 +103,21 @@ pub fn frame(bounds: (Vec3, Vec3)) -> Mat4 {
     Mat4::from_scale(Vec3::splat(scale)) * orient * Mat4::from_translation(-centre)
 }
 
+/// Frame a model that carries its own icon placement, instead of fitting it by
+/// bounds.
+///
+/// `local` maps model space into the unit cell the icon camera covers — it is
+/// the model file's own "how I look in an inventory slot" transform, which the
+/// author posed deliberately and which therefore wins over [`frame`]'s
+/// automatic three-quarter view. All this adds is [`FILL`], so an authored icon
+/// keeps the same margin from the slot border as a fitted one.
+///
+/// Unlike [`frame`], this cannot guarantee the model fits: an author who scales
+/// their model past the cell will see it clipped, which is the correct feedback.
+pub fn frame_authored(local: Mat4) -> Mat4 {
+    Mat4::from_scale(Vec3::splat(FILL)) * local
+}
+
 /// The orthographic camera every icon cell is rendered with. Looks down −Z at
 /// the unit box [`frame`] places geometry in, with the Y flip the rest of the
 /// renderer uses for Vulkan clip space.

@@ -25,14 +25,15 @@
 #   textures  one texture name for all faces, or
 #             { top = "...", bottom = "...", side = "..." }, or the fully
 #             explicit { neg_x, pos_x, neg_y, pos_y, neg_z, pos_z }. A name is
-#             the stem of a PNG in assets/textures/ — 32x32, or an exact
+#             a PNG under assets/textures/, named with its subdirectory but
+#             without its extension (`blocks/glass`) — 32x32, or an exact
 #             fraction of it. A name with no file draws magenta.
 #             Optional for a block whose geometry brings its own texture and
 #             never samples the atlas — a `block_model`, a [block.model] or a
 #             [block.fluid.texture].
 #   block_model  the block is authored in Blockbench and exported as a Java
-#             Block/Item .json under assets/blocks/, with its textures as
-#             separate 256x256 PNGs in assets/textures/. This is how blocks
+#             Block/Item .json under assets/models/blocks/, with its textures as
+#             separate 256x256 PNGs in assets/textures/blocks/. This is how blocks
 #             are made from now on; `textures` and [block.model] are the older
 #             paths, kept working while the remaining blocks are re-authored.
 #             The model is already in cell coordinates (a full cube is
@@ -62,7 +63,7 @@
 #             SINGLE blended sheet (its interior faces are culled), so depth
 #             adds no opacity and this number is the whole of it. Frames may be
 #             any square size that divides 256, like a `block_model` texture.
-#   [block.model] draws the block as a .gltf/.bbmodel from assets/models/
+#   [block.model] draws the block as a .gltf/.bbmodel from assets/models/blocks/
 #             instead of six atlas-textured cube faces — the same
 #             `path`/`scale`/`offset`/`rotation` spelling as [item.model] and
 #             [entity.visual] kind = "model". The model is baked into the
@@ -81,7 +82,7 @@ render = "opaque"
 solid = true
 hardness = 1.5
 material = "stone"
-block_model = "assets/blocks/stone_block.json"
+block_model = "assets/models/blocks/stone.json"
 drops = { item = "cobblestone" }
 
 [[block]]
@@ -90,7 +91,7 @@ render = "opaque"
 solid = true
 hardness = 0.5
 material = "dirt"
-block_model = "assets/blocks/dirt_block.json"
+block_model = "assets/models/blocks/dirt.json"
 
 [[block]]
 id = "grass"
@@ -98,7 +99,7 @@ render = "opaque"
 solid = true
 hardness = 0.6
 material = "dirt"
-block_model = "assets/blocks/grass_block.json"
+block_model = "assets/models/blocks/grass.json"
 
 [[block]]
 id = "sand"
@@ -106,7 +107,7 @@ render = "opaque"
 solid = true
 hardness = 0.5
 material = "sand"
-block_model = "assets/blocks/sand_block.json"
+block_model = "assets/models/blocks/sand.json"
 
 [[block]]
 id = "water"
@@ -122,7 +123,7 @@ flow_levels = 7
 # The art is greyscale so `tint` gives every biome its own water colour, and
 # its alpha is a placeholder `opacity` overrides — see the schema above.
 [block.fluid.texture]
-path = "assets/textures/water_flow.png"
+path = "assets/textures/blocks/water_flow.png"
 frames = 64
 fps = 8
 tint = 2
@@ -134,7 +135,7 @@ render = "opaque"
 solid = true
 hardness = 2.0
 material = "wood"
-block_model = "assets/blocks/oak_log_block.json"
+block_model = "assets/models/blocks/oak_log.json"
 
 [[block]]
 id = "oak_leaves"
@@ -142,7 +143,7 @@ render = "cutout"
 solid = true
 hardness = 0.2
 material = "plant"
-block_model = "assets/blocks/oak_leaves_block.json"
+block_model = "assets/models/blocks/oak_leaves.json"
 drops = { requires_tool = "shears" }
 
 [[block]]
@@ -151,7 +152,7 @@ render = "transparent"
 solid = true
 hardness = 0.3
 material = "glass"
-textures = "glass"
+textures = "blocks/glass"
 
 [[block]]
 id = "bedrock"
@@ -159,7 +160,7 @@ render = "opaque"
 solid = true
 hardness = inf
 material = "other"
-textures = "bedrock"
+textures = "blocks/bedrock"
 
 [[block]]
 id = "snow"
@@ -167,7 +168,7 @@ render = "opaque"
 solid = true
 hardness = 0.2
 material = "dirt"
-textures = "snow"
+textures = "blocks/snow"
 
 [[block]]
 id = "gravel"
@@ -175,7 +176,7 @@ render = "opaque"
 solid = true
 hardness = 0.6
 material = "dirt"
-block_model = "assets/blocks/gravel_block.json"
+block_model = "assets/models/blocks/gravel.json"
 
 [[block]]
 id = "clay"
@@ -183,7 +184,7 @@ render = "opaque"
 solid = true
 hardness = 0.6
 material = "dirt"
-textures = "clay"
+textures = "blocks/clay"
 drops = { item = "clay_ball", count = 4 }
 
 [[block]]
@@ -192,7 +193,7 @@ render = "opaque"
 solid = true
 hardness = 3.0
 material = "stone"
-block_model = "assets/blocks/coal_ore_block.json"
+block_model = "assets/models/blocks/coal_ore.json"
 drops = { item = "coal" }
 
 [[block]]
@@ -201,7 +202,7 @@ render = "opaque"
 solid = true
 hardness = 3.0
 material = "stone"
-block_model = "assets/blocks/iron_ore_block.json"
+block_model = "assets/models/blocks/iron_ore.json"
 
 [[block]]
 id = "copper_ore"
@@ -209,7 +210,7 @@ render = "opaque"
 solid = true
 hardness = 3.0
 material = "stone"
-block_model = "assets/blocks/copper_ore_block.json"
+block_model = "assets/models/blocks/copper_ore.json"
 
 [[block]]
 id = "cobblestone"
@@ -217,7 +218,7 @@ render = "opaque"
 solid = true
 hardness = 2.0
 material = "stone"
-block_model = "assets/blocks/cobblestone_block.json"
+block_model = "assets/models/blocks/cobblestone.json"
 
 # Ground cover: model-backed, walk-through decoration scattered on the surface
 # by worldgen (see the per-biome `plants` lists in worldgen.toml). No `textures`
@@ -233,7 +234,7 @@ material = "plant"
 random_yaw = true
 
 [block.model]
-path = "assets/models/plant1.bbmodel"
+path = "assets/models/blocks/plant1.bbmodel"
 offset = [-0.5, 0.0, -0.5]
 
 [[block]]
@@ -245,7 +246,7 @@ material = "plant"
 random_yaw = true
 
 [block.model]
-path = "assets/models/plant2.bbmodel"
+path = "assets/models/blocks/plant2.bbmodel"
 offset = [-0.5, 0.0, -0.5]
 
 [[block]]
@@ -257,7 +258,7 @@ material = "plant"
 random_yaw = true
 
 [block.model]
-path = "assets/models/mushroom1.bbmodel"
+path = "assets/models/blocks/mushroom1.bbmodel"
 offset = [-0.5, 0.0, -0.5]
 
 [[block]]
@@ -269,7 +270,7 @@ material = "plant"
 random_yaw = true
 
 [block.model]
-path = "assets/models/mushroom2.bbmodel"
+path = "assets/models/blocks/mushroom2.bbmodel"
 offset = [-0.5, 0.0, -0.5]
 
 # Authored in Blockbench as two crossed planes, so it needs no `[block.model]`
@@ -281,4 +282,4 @@ solid = false
 hardness = 0.0
 material = "plant"
 random_yaw = true
-block_model = "assets/blocks/cornflower_block.json"
+block_model = "assets/models/blocks/cornflower.json"

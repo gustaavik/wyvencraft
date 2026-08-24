@@ -3,6 +3,8 @@
 
 use std::sync::Arc;
 
+use glam::{Mat4, Vec3};
+
 use vulkano::Validated;
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
@@ -44,6 +46,40 @@ impl CpuMesh {
         let base = self.vertices.len() as u32;
         self.vertices.extend(vertices);
         self.indices.extend(indices.into_iter().map(|i| i + base));
+    }
+
+    /// This mesh moved by `transform`, with normals turned by `normal_basis`.
+    ///
+    /// Everything else — UVs, the baked face shade, flags, layer and tint —
+    /// rides through untouched, because none of it depends on where the geometry
+    /// ended up.
+    ///
+    /// `normal_basis` is separate from `transform` for the reason a view model
+    /// exists at all: geometry held in front of the camera is placed by a matrix
+    /// that *contains the camera's own rotation*, and normals taken from it would
+    /// swing relative to the sun as the player turns on the spot — the held item
+    /// would pulse bright and dim, which reads as a rendering fault rather than
+    /// as lighting. Passing just the placement's rotation pins the shading to the
+    /// object instead. Where the two genuinely are the same thing, pass the same
+    /// matrix twice.
+    pub fn transformed(&self, transform: Mat4, normal_basis: Mat4) -> CpuMesh {
+        let vertices = self
+            .vertices
+            .iter()
+            .map(|v| ChunkVertex {
+                position: transform
+                    .transform_point3(Vec3::from(v.position))
+                    .to_array(),
+                normal: normal_basis
+                    .transform_vector3(Vec3::from(v.normal))
+                    .to_array(),
+                ..*v
+            })
+            .collect();
+        CpuMesh {
+            vertices,
+            indices: self.indices.clone(),
+        }
     }
 }
 
@@ -136,5 +172,94 @@ impl GpuLines {
             vertex_buffer,
             vertex_count: vertices.len() as u32,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vertex(position: [f32; 3], normal: [f32; 3]) -> ChunkVertex {
+        ChunkVertex {
+            position,
+            normal,
+            uv: [0.25, 0.75],
+            ao: 0.6,
+            flags: 7,
+            layer: 3,
+            tint: [1, 2, 3, 4],
+        }
+    }
+
+    fn one_triangle() -> CpuMesh {
+        let mut mesh = CpuMesh::new();
+        mesh.push_indexed(
+            [
+                vertex([0.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
+                vertex([1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
+                vertex([0.0, 1.0, 0.0], [0.0, 0.0, 1.0]),
+            ],
+            [0, 1, 2],
+        );
+        mesh
+    }
+
+    #[test]
+    fn transforming_moves_positions_and_keeps_the_index_list() {
+        let mesh = one_triangle();
+        let moved = mesh.transformed(
+            Mat4::from_translation(Vec3::new(5.0, 0.0, -2.0)),
+            Mat4::IDENTITY,
+        );
+        assert_eq!(moved.indices, mesh.indices);
+        assert_eq!(moved.vertices[0].position, [5.0, 0.0, -2.0]);
+        assert_eq!(moved.vertices[1].position, [6.0, 0.0, -2.0]);
+    }
+
+    /// The whole reason `normal_basis` is a separate argument: a held item is
+    /// placed by a matrix carrying the camera's rotation, but must be lit as
+    /// though it were not, or it pulses as the player spins.
+    #[test]
+    fn normals_follow_the_basis_and_not_the_transform() {
+        let mesh = one_triangle();
+        let spun = mesh.transformed(
+            Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2),
+            Mat4::IDENTITY,
+        );
+        assert_eq!(
+            spun.vertices[0].normal,
+            [0.0, 0.0, 1.0],
+            "the identity basis must leave the normal alone"
+        );
+
+        let turned = mesh.transformed(
+            Mat4::IDENTITY,
+            Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2),
+        );
+        let n = Vec3::from(turned.vertices[0].normal);
+        assert!(
+            n.abs_diff_eq(Vec3::X, 1e-5),
+            "normal not turned by the basis: {n}"
+        );
+        assert_eq!(
+            turned.vertices[0].position,
+            [0.0, 0.0, 0.0],
+            "the identity transform must leave the position alone"
+        );
+    }
+
+    /// Everything that does not depend on where the geometry ended up rides
+    /// through untouched — a transformed mesh must still sample the same texel.
+    #[test]
+    fn everything_but_position_and_normal_survives() {
+        let mesh = one_triangle();
+        let out = mesh.transformed(Mat4::from_scale(Vec3::splat(3.0)), Mat4::IDENTITY);
+        for (before, after) in mesh.vertices.iter().zip(&out.vertices) {
+            assert_eq!(after.uv, before.uv);
+            assert_eq!(after.ao, before.ao);
+            assert_eq!(after.flags, before.flags);
+            assert_eq!(after.layer, before.layer);
+            assert_eq!(after.tint, before.tint);
+        }
     }
 }

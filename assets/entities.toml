@@ -39,7 +39,7 @@
 #                      kind = "item_cube" (spinning, bobbing drop; `scale`
 #                      draws it larger than its collision box),
 #                      or kind = "model" (geometry from a .gltf/.bbmodel file:
-#                      path = "assets/models/<name>.gltf", optional scale and
+#                      path = "assets/models/items/<name>.bbmodel", optional scale and
 #                      offset — the offset applies in the model's own space)
 
 [[entity]]
@@ -300,7 +300,7 @@ knockback_resistance = 1.0
 kind = "model"
 # Either export of this object works and renders identically — swap the
 # extension to .gltf to exercise the other loader.
-path = "assets/models/vine_sword.bbmodel"
+path = "assets/models/items/vine_sword.bbmodel"
 # Blockbench authors on a 0..1 block; re-centre it horizontally and lift the
 # hilt (which dips to y = -0.889) up to the entity's feet.
 offset = [-0.5, 0.889, -0.5]

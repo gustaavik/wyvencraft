@@ -30,7 +30,8 @@ use wyven_voxel::model_hitbox;
 use wyven_voxel::{BlockModel, FaceTextures};
 
 use wyven_assets::decode_png;
-use wyven_model::{ModelId, ModelRegistry, blockjson};
+use wyven_model::mesh as model_mesh;
+use wyven_model::{DisplayContext, ModelId, ModelRegistry, blockjson};
 use wyven_render::TileRegistry;
 use wyven_render::block_textures::{self, AnimatedLayers, BlockTextureSet, Strip};
 
@@ -85,6 +86,24 @@ pub struct ItemModel {
     /// Model-space rotation in radians (`ModelSpec` authors it in degrees).
     pub rotation: glam::Vec3,
     pub offset: glam::Vec3,
+}
+
+impl ItemModel {
+    /// Where this item sits within the space of whatever carries it, for the
+    /// context it is being drawn in.
+    ///
+    /// The model file's own `display` entry wins when it has one, because its
+    /// author measured it against that context; otherwise the `[item.model]`
+    /// numbers place it, exactly as they did before `display` existed. One
+    /// function, so the fallback can never be spelled two different ways at two
+    /// call sites — a `.bbmodel`, which declares nothing, must keep being placed
+    /// by precisely the matrix that has always placed it.
+    pub fn local(&self, models: &ModelRegistry, context: DisplayContext) -> glam::Mat4 {
+        let display = models
+            .get(self.id)
+            .and_then(|model| model.placement_for(context));
+        model_mesh::local_transform(display, self.scale, self.rotation, self.offset)
+    }
 }
 
 /// All loaded content registries, shared across the app.
@@ -370,13 +389,14 @@ impl GameContent {
 
         let item_icons =
             build_item_icons(&mut tiles, &blocks, &items, &item_models, &block_face_tiles);
-        let arrow_faces = items
-            .find(ARROW_ITEM)
-            .and_then(|id| match item_icons.get(id.0 as usize) {
-                Some(&ItemIcon::Flat(tile)) => Some(FaceTextures::uniform(tile)),
-                _ => None,
-            })
-            .unwrap_or(MISSING_FACES);
+        // An arrow in flight is a flat billboard sampling one atlas tile, so it
+        // reads the *art* by name rather than the item's icon. Those used to be
+        // the same thing; they stopped being when the arrow gained a generated
+        // model and its icon became an `ItemIcon::Model` with no tile at all.
+        let arrow_faces = match items.find(ARROW_ITEM) {
+            Some(_) => FaceTextures::uniform(tiles.resolve(&format!("items/{ARROW_ITEM}")).tile),
+            None => MISSING_FACES,
+        };
         let hash = content_hash(&blocks, &items, &entities, &worldgen, &spawning);
         Arc::new(Self {
             tiles,
@@ -703,7 +723,7 @@ fn build_item_icons(
             });
             match derived {
                 Some(tile) => ItemIcon::Flat(tile),
-                None => ItemIcon::Flat(tiles.resolve(&item.id).tile),
+                None => ItemIcon::Flat(tiles.resolve(&format!("items/{}", item.id)).tile),
             }
         })
         .collect()
@@ -1000,8 +1020,8 @@ mod tests {
     #[test]
     fn an_unreadable_fluid_strip_degrades_to_no_animation() {
         let blocks = BUILTIN_BLOCKS.replace(
-            "assets/textures/water_flow.png",
-            "assets/textures/no_such_fluid.png",
+            "assets/textures/blocks/water_flow.png",
+            "assets/textures/blocks/no_such_fluid.png",
         );
         let content = GameContent::from_source(&MapSource::new().with(BLOCKS_PATH, &blocks));
         let water = content.blocks.find("water").expect("declared");
@@ -1158,9 +1178,10 @@ mod tests {
             declared.push(item.id.clone());
         }
 
-        // The twelve tiered tools, the vine sword, and the four ground-cover
-        // blocks whose items are drawn as their own model.
-        assert_eq!(declared.len(), 17, "declared item models: {declared:?}");
+        // The twelve tiered tools, the vine sword, the four ground-cover blocks
+        // whose items are drawn as their own model, and the twenty-one flat
+        // items extruded from their sprites by `item/generated`.
+        assert_eq!(declared.len(), 38, "declared item models: {declared:?}");
     }
 
     /// The shipped items file with every model path pointed somewhere else.
@@ -1169,7 +1190,7 @@ mod tests {
     /// stop substituting anything the day the other is chosen.
     fn items_with_repointed_models() -> String {
         let base = crate::inventory::item::BUILTIN_ITEMS;
-        let repointed = base.replace("assets/models/vine_sword", "assets/models/elsewhere");
+        let repointed = base.replace("assets/models/items/vine_sword", "assets/models/elsewhere");
         assert_ne!(base, repointed, "fixture substituted nothing");
         repointed
     }

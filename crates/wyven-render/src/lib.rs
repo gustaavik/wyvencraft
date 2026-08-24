@@ -25,7 +25,9 @@ pub use block_textures::{BlockTextureArray, BlockTextureSet};
 pub use camera::Camera;
 pub use context::RenderContext;
 pub use mesh::{CpuMesh, GpuLines, GpuMesh};
-pub use renderer::{LightParams, PreviewFrame, Renderer, SceneFrame, SkyParams, TexturedMesh};
+pub use renderer::{
+    ForegroundFrame, LightParams, PreviewFrame, Renderer, SceneFrame, SkyParams, TexturedMesh,
+};
 pub use texture::{Rgba8, Texture};
 pub use tile_registry::{
     MISSING_TEXTURE, NoTiles, ReservedTiles, TileEntry, TileRegistry, TileRgba, TileSource,

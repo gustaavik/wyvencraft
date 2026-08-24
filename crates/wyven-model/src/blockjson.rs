@@ -12,14 +12,18 @@
 //!   the texture.
 //!
 //! It also names **several** textures per model (grass block: top, side, side
-//! overlay, bottom), where [`super::Model`] carries exactly one. So this is
-//! deliberately *not* a [`super::ModelLoader`]: it produces a different shape,
-//! and `.json` is far too generic an extension to claim in a registry that
-//! dispatches on extension alone with no content sniffing.
+//! overlay, bottom), where [`super::Model`] carries exactly one, and a
+//! `display` block saying where the model sits in each context it is drawn in.
+//! So this is not itself a [`super::ModelLoader`]: it produces a different
+//! shape, and the chunk mesher wants the `cullface`/`tintindex` a `Model` has
+//! nowhere to put. [`super::javamodel`] is the adapter that turns what comes
+//! out of here into a `Model` for the *item* path, by packing the textures into
+//! one image; that is what claims `.json` in the registry, and blocks still
+//! come through here directly.
 //!
 //! Everything about how a UV rect maps onto a box corner is shared verbatim
-//! with [`super::bbmodel`], whose conventions are pinned by a test asserting it
-//! agrees vertex-for-vertex with Blockbench's own glTF export.
+//! with [`super::bbmodel`], so the two formats cannot disagree about a face
+//! that was authored once and exported twice.
 //!
 //! Boundaries: pure. Geometry comes out in block-local `0..1` space with no
 //! notion of atlas layers, block ids or neighbours — turning that into
@@ -38,6 +42,7 @@ use wyven_core::Direction;
 use super::bbmodel::{
     FACES, FaceDir, PIXELS_PER_BLOCK, Resolution, Transform, face_corners, face_uvs,
 };
+use super::display::DisplayTransforms;
 use super::resolve_sibling;
 
 /// Minecraft's UV space is always `0..16`, whatever the texture's pixel size —
@@ -89,6 +94,9 @@ pub struct BlockJsonModel {
     /// Where each texture came from, `assets/`-relative. Used to key the layer
     /// registry so two blocks naming the same PNG share one array layer.
     pub texture_paths: Vec<String>,
+    /// The model's `display` block, empty when it declares none. A block in a
+    /// chunk has nowhere to put this; an item drawn from the same file does.
+    pub display: DisplayTransforms,
 }
 
 impl BlockJsonModel {
@@ -109,7 +117,11 @@ pub fn load(bytes: &[u8], dir: &str, source: &dyn ContentSource) -> Result<Block
     let doc: Document =
         serde_json::from_slice(bytes).map_err(|e| format!("invalid block model JSON: {e}"))?;
 
-    if !doc.parent.trim().is_empty() {
+    // `item/generated` is the one parent that carries no geometry to inherit —
+    // it says "my shape is my sprite", which is something we can honour without
+    // resolving a parent chain. Anything else still warns.
+    let generate = super::generated::claims(&doc.parent) && doc.elements.is_empty();
+    if !generate && !doc.parent.trim().is_empty() {
         log::warn!(
             "block model declares parent {:?}; model inheritance is not supported, \
              the model must be self-contained",
@@ -121,7 +133,26 @@ pub fn load(bytes: &[u8], dir: &str, source: &dyn ContentSource) -> Result<Block
     let mut quads = Vec::new();
     let mut planes: HashMap<[i32; 4], u32> = HashMap::new();
 
-    for element in &doc.elements {
+    // A generated model's texture has to be resolved *before* its elements
+    // exist, because the alpha is what decides where the geometry goes.
+    let synthesized;
+    let elements: &[Element] = if generate {
+        let layer = format!("#{}", super::generated::LAYER);
+        let index = textures
+            .resolve(&layer, &doc.textures, dir, source)?
+            .ok_or_else(|| {
+                format!(
+                    "generated model names no {:?} texture to take its shape from",
+                    super::generated::LAYER
+                )
+            })?;
+        synthesized = super::generated::elements(&textures.images[index])?;
+        &synthesized
+    } else {
+        &doc.elements
+    };
+
+    for element in elements {
         element.build(
             &doc.textures,
             dir,
@@ -136,10 +167,19 @@ pub fn load(bytes: &[u8], dir: &str, source: &dyn ContentSource) -> Result<Block
         return Err("block model has no geometry".into());
     }
 
+    // A generated stub that says nothing about placement takes Minecraft's
+    // standard one, which is the same for every flat sprite. One that does
+    // declare a `display` block keeps it.
+    let display = match generate && doc.display.is_empty() {
+        true => super::generated::default_display(),
+        false => doc.display,
+    };
+
     Ok(BlockJsonModel {
         quads,
         textures: textures.images,
         texture_paths: textures.paths,
+        display,
     })
 }
 
@@ -155,10 +195,15 @@ struct Document {
     textures: HashMap<String, String>,
     #[serde(default)]
     elements: Vec<Element>,
+    /// Where the model sits in each context it can be drawn in. Meaningless to
+    /// a block in a chunk, which is why this rides through untouched for the
+    /// item loader to pick up.
+    #[serde(default)]
+    display: DisplayTransforms,
 }
 
-#[derive(Deserialize)]
-struct Element {
+#[derive(Debug, Deserialize)]
+pub struct Element {
     #[serde(default)]
     from: [f32; 3],
     #[serde(default)]
@@ -177,7 +222,7 @@ fn yes() -> bool {
     true
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct ElementRotation {
     #[serde(default)]
     angle: f32,
@@ -206,8 +251,8 @@ impl ElementRotation {
     }
 }
 
-#[derive(Deserialize)]
-struct Face {
+#[derive(Debug, Deserialize)]
+pub struct Face {
     /// `[u1, v1, u2, v2]` in Minecraft's fixed `0..16` space. Optional: when
     /// absent it is derived from the element's own extents.
     uv: Option<[f32; 4]>,
@@ -224,6 +269,35 @@ struct Face {
 
 fn no_tint() -> i32 {
     -1
+}
+
+impl Element {
+    /// A box carrying exactly one textured face, built in code rather than
+    /// parsed. [`super::generated`] is the only caller: it derives geometry from
+    /// a sprite's alpha and hands it back through this door so the result still
+    /// goes through [`Element::build`], and cannot drift from an authored model.
+    pub(crate) fn synthetic(from: [f32; 3], to: [f32; 3], face: &str, spec: Face) -> Self {
+        Element {
+            from,
+            to,
+            rotation: None,
+            shade: true,
+            faces: HashMap::from([(face.to_string(), spec)]),
+        }
+    }
+}
+
+impl Face {
+    /// An untinted, unculled face naming the sole texture of a generated model.
+    pub(crate) fn synthetic(uv: [f32; 4]) -> Self {
+        Face {
+            uv: Some(uv),
+            texture: Some(format!("#{}", super::generated::LAYER)),
+            cullface: None,
+            tintindex: no_tint(),
+            rotation: 0.0,
+        }
+    }
 }
 
 // --- Geometry ---------------------------------------------------------------
@@ -415,12 +489,12 @@ impl TextureSet {
         // Blockbench writes the reference relative to the exported file when the
         // texture was linked from disk, and as a bare name when it was not.
         // Both mean the same thing here, so the relative form is a hint rather
-        // than a contract: fall back to the one directory textures actually
-        // live in before giving up.
+        // than a contract: fall back to this model's own texture directory
+        // before giving up.
         let (resolved, bytes) = match source.read_bytes(&path) {
             Ok(bytes) => (path.clone(), bytes),
             Err(first) => {
-                let fallback = texture_dir_path(&path);
+                let fallback = texture_dir_path(dir, &path);
                 match source.read_bytes(&fallback) {
                     Ok(bytes) => {
                         log::debug!("texture {path} not found; using {fallback}");
@@ -447,16 +521,34 @@ impl TextureSet {
     }
 }
 
-/// The same texture, looked for in `assets/textures/` instead.
-fn texture_dir_path(path: &str) -> String {
+/// The same texture, looked for in the model's own texture directory instead.
+///
+/// Art sits beside the models that name it, one tree mirroring the other:
+/// `assets/models/items/` is textured out of `assets/textures/items/`. So the
+/// fallback is the model's own directory with its `models` segment swapped for
+/// `textures` — which is how a bare `"dirt"` still finds its PNG without this
+/// crate having to know that Wyvencraft keeps blocks in one folder and items in
+/// another. A directory with no `models` segment has no mirror, and the
+/// reference is left to fail on its own terms.
+fn texture_dir_path(dir: &str, path: &str) -> String {
     let name = path.rsplit('/').next().unwrap_or(path);
-    format!("assets/textures/{name}")
+    let mirrored: Vec<&str> = dir
+        .split('/')
+        .map(|segment| {
+            if segment == "models" {
+                "textures"
+            } else {
+                segment
+            }
+        })
+        .collect();
+    format!("{}/{name}", mirrored.join("/"))
 }
 
 /// Follow a `"#key"` reference through the document's texture map to a file
 /// path, then make it `assets/`-relative.
 ///
-/// Blockbench writes `"../textures/dirt"` — relative to the exported file, and
+/// Blockbench writes `"../../textures/blocks/dirt"` — relative to the exported file, and
 /// without the extension.
 fn texture_path(
     reference: &str,
@@ -501,8 +593,8 @@ mod tests {
         FsSource::rooted(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
     }
 
-    const DIRT: &str = "assets/blocks/dirt_block.json";
-    const GRASS: &str = "assets/blocks/grass_block.json";
+    const DIRT: &str = "assets/models/blocks/dirt.json";
+    const GRASS: &str = "assets/models/blocks/grass.json";
 
     fn load_file(path: &str) -> BlockJsonModel {
         let source = assets();
@@ -530,17 +622,17 @@ mod tests {
 
     fn source_with(json: &str) -> MapSource {
         MapSource::new()
-            .with_bytes("assets/blocks/t.json", json.as_bytes().to_vec())
-            .with_bytes("assets/textures/a.png", tiny_png())
-            .with_bytes("assets/textures/b.png", tiny_png())
+            .with_bytes("assets/models/blocks/t.json", json.as_bytes().to_vec())
+            .with_bytes("assets/textures/blocks/a.png", tiny_png())
+            .with_bytes("assets/textures/blocks/b.png", tiny_png())
     }
 
     fn load_inline(json: &str) -> Result<BlockJsonModel, String> {
-        load(json.as_bytes(), "assets/blocks", &source_with(json))
+        load(json.as_bytes(), "assets/models/blocks", &source_with(json))
     }
 
     const FULL_CUBE: &str = r##"{
-        "textures": { "0": "../textures/a" },
+        "textures": { "0": "../../textures/blocks/a" },
         "elements": [{
             "from": [0, 0, 0], "to": [16, 16, 16],
             "faces": {
@@ -593,18 +685,18 @@ mod tests {
     #[test]
     fn texture_paths_resolve_relative_to_the_model_file() {
         let model = load_inline(FULL_CUBE).expect("loads");
-        assert_eq!(model.texture_paths, vec!["assets/textures/a.png"]);
+        assert_eq!(model.texture_paths, vec!["assets/textures/blocks/a.png"]);
     }
 
     #[test]
     fn a_texture_key_may_point_at_another_key() {
         let json = r##"{
-            "textures": { "all": "../textures/a", "0": "#all" },
+            "textures": { "all": "../../textures/blocks/a", "0": "#all" },
             "elements": [{ "from": [0,0,0], "to": [16,16,16],
                 "faces": { "up": {"uv": [0,0,16,16], "texture": "#0"} } }]
         }"##;
         let model = load_inline(json).expect("loads");
-        assert_eq!(model.texture_paths, vec!["assets/textures/a.png"]);
+        assert_eq!(model.texture_paths, vec!["assets/textures/blocks/a.png"]);
     }
 
     #[test]
@@ -624,7 +716,7 @@ mod tests {
     #[test]
     fn an_undefined_texture_key_drops_only_its_own_face() {
         let json = r##"{
-            "textures": { "0": "../textures/a" },
+            "textures": { "0": "../../textures/blocks/a" },
             "elements": [{ "from": [0,0,0], "to": [16,16,16],
                 "faces": {
                     "up":   {"uv": [0,0,16,16], "texture": "#0"},
@@ -639,7 +731,7 @@ mod tests {
     #[test]
     fn a_missing_texture_file_fails_the_model() {
         let json = r##"{
-            "textures": { "0": "../textures/gone" },
+            "textures": { "0": "../../textures/blocks/gone" },
             "elements": [{ "from": [0,0,0], "to": [16,16,16],
                 "faces": { "up": {"uv": [0,0,16,16], "texture": "#0"} } }]
         }"##;
@@ -653,7 +745,7 @@ mod tests {
     #[test]
     fn a_coplanar_face_is_nudged_clear_of_the_one_it_overlays() {
         let json = r##"{
-            "textures": { "0": "../textures/a", "1": "../textures/b" },
+            "textures": { "0": "../../textures/blocks/a", "1": "../../textures/blocks/b" },
             "elements": [
                 { "from": [0,0,0], "to": [16,16,16],
                   "faces": { "north": {"uv": [0,0,16,16], "texture": "#0"} } },
@@ -689,7 +781,7 @@ mod tests {
     #[test]
     fn an_element_rotation_turns_the_box_about_its_origin() {
         let json = r##"{
-            "textures": { "0": "../textures/a" },
+            "textures": { "0": "../../textures/blocks/a" },
             "elements": [{
                 "from": [0, 0, 8], "to": [16, 16, 8],
                 "rotation": {"angle": 45, "axis": "y", "origin": [8, 8, 8]},
@@ -708,7 +800,7 @@ mod tests {
     #[test]
     fn an_unknown_rotation_axis_is_reported() {
         let json = r##"{
-            "textures": { "0": "../textures/a" },
+            "textures": { "0": "../../textures/blocks/a" },
             "elements": [{ "from": [0,0,0], "to": [16,16,16],
                 "rotation": {"angle": 45, "axis": "w", "origin": [8,8,8]},
                 "faces": { "up": {"uv": [0,0,16,16], "texture": "#0"} } }]
@@ -720,7 +812,7 @@ mod tests {
     #[test]
     fn shade_false_flattens_the_face_lighting() {
         let json = r##"{
-            "textures": { "0": "../textures/a" },
+            "textures": { "0": "../../textures/blocks/a" },
             "elements": [{ "from": [0,0,0], "to": [16,16,16], "shade": false,
                 "faces": { "north": {"uv": [0,0,16,16], "texture": "#0"} } }]
         }"##;
@@ -731,7 +823,7 @@ mod tests {
     #[test]
     fn tintindex_marks_a_face_biome_coloured() {
         let json = r##"{
-            "textures": { "0": "../textures/a" },
+            "textures": { "0": "../../textures/blocks/a" },
             "elements": [{ "from": [0,0,0], "to": [16,16,16],
                 "faces": {
                     "up":   {"uv": [0,0,16,16], "texture": "#0", "tintindex": 0},
@@ -756,7 +848,7 @@ mod tests {
     #[test]
     fn a_face_without_uv_derives_it_from_the_element() {
         let json = r##"{
-            "textures": { "0": "../textures/a" },
+            "textures": { "0": "../../textures/blocks/a" },
             "elements": [{ "from": [0,0,0], "to": [16,16,16],
                 "faces": { "up": {"texture": "#0"} } }]
         }"##;
@@ -775,7 +867,8 @@ mod tests {
 
     #[test]
     fn malformed_json_is_reported() {
-        let err = load(b"{ not json", "assets/blocks", &MapSource::new()).expect_err("bad json");
+        let err =
+            load(b"{ not json", "assets/models/blocks", &MapSource::new()).expect_err("bad json");
         assert!(err.contains("invalid block model JSON"), "{err}");
     }
 
@@ -790,7 +883,7 @@ mod tests {
                 "faces": { "up": {"uv": [0,0,16,16], "texture": "#0"} } }]
         }"##;
         let model = load_inline(json).expect("loads");
-        assert_eq!(model.texture_paths, vec!["assets/textures/a.png"]);
+        assert_eq!(model.texture_paths, vec!["assets/textures/blocks/a.png"]);
     }
 
     /// Every face naming the same bare texture must share one entry — the
@@ -819,7 +912,7 @@ mod tests {
     #[test]
     fn a_zero_area_face_is_not_emitted() {
         let json = r##"{
-            "textures": { "0": "../textures/a" },
+            "textures": { "0": "../../textures/blocks/a" },
             "elements": [{
                 "from": [8, 0, 0], "to": [8, 16, 16],
                 "faces": {
@@ -847,7 +940,7 @@ mod tests {
     #[test]
     fn the_tint_index_is_carried_through_verbatim() {
         let json = r##"{
-            "textures": { "0": "../textures/a" },
+            "textures": { "0": "../../textures/blocks/a" },
             "elements": [{ "from": [0,0,0], "to": [16,16,16],
                 "faces": {
                     "up":    {"uv": [0,0,16,16], "texture": "#0", "tintindex": 0},
@@ -869,8 +962,8 @@ mod tests {
     #[test]
     fn a_full_cube_face_culls_against_its_own_direction() {
         for path in [
-            "assets/blocks/copper_ore_block.json",
-            "assets/blocks/iron_ore_block.json",
+            "assets/models/blocks/copper_ore.json",
+            "assets/models/blocks/iron_ore.json",
         ] {
             let model = load_file(path);
             assert_eq!(model.quads.len(), 6, "{path}");
@@ -891,7 +984,7 @@ mod tests {
     fn the_shipped_dirt_block_loads() {
         let model = load_file(DIRT);
         assert_eq!(model.quads.len(), 6, "a cube has six faces");
-        assert_eq!(model.texture_paths, vec!["assets/textures/dirt.png"]);
+        assert_eq!(model.texture_paths, vec!["assets/textures/blocks/dirt.png"]);
         assert_eq!(model.textures[0].size, [256, 256]);
     }
 
@@ -903,10 +996,10 @@ mod tests {
         assert_eq!(
             paths,
             vec![
-                "assets/textures/dirt.png",
-                "assets/textures/grass_block_side.png",
-                "assets/textures/grass_block_side_overlay.png",
-                "assets/textures/grass_block_top.png",
+                "assets/textures/blocks/dirt.png",
+                "assets/textures/blocks/grass_side.png",
+                "assets/textures/blocks/grass_side_overlay.png",
+                "assets/textures/blocks/grass_top.png",
             ],
             "the single-texture Model type could never have carried this"
         );
