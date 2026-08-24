@@ -33,6 +33,19 @@ impl Camera {
         self.aspect = if height > 0.0 { width / height } else { 1.0 };
     }
 
+    /// Radius of the sphere through the near plane's four corners, measured from
+    /// the eye. Nothing nearer than this is drawn, so it is exactly the clearance
+    /// a camera needs in front of a surface to keep it out of frame.
+    ///
+    /// Derived from `near`, `fov_y` and `aspect` rather than tuned: the field of
+    /// view is a player setting, and a padding sized for the shipped 70° would
+    /// let a wide FOV clip through walls again.
+    pub fn near_radius(&self) -> f32 {
+        let half_h = self.near * (self.fov_y * 0.5).tan();
+        let half_w = half_h * self.aspect;
+        (self.near * self.near + half_h * half_h + half_w * half_w).sqrt()
+    }
+
     pub fn view_matrix(&self) -> Mat4 {
         Mat4::look_to_rh(self.position, self.forward, Vec3::Y)
     }
@@ -151,6 +164,20 @@ mod tests {
             screen.x > 1.0,
             "expected off-screen right, got {}",
             screen.x
+        );
+    }
+
+    /// The whole point of deriving it: a player who widens their FOV must get a
+    /// wider berth around walls, or the third-person camera starts clipping again.
+    #[test]
+    fn the_near_radius_grows_with_the_field_of_view() {
+        let narrow = Camera::new(70.0, 16.0 / 9.0).near_radius();
+        let wide = Camera::new(110.0, 16.0 / 9.0).near_radius();
+
+        assert!(wide > narrow, "110° gave {wide}, 70° gave {narrow}");
+        assert!(
+            narrow > 0.1,
+            "the corner is further from the eye than the near plane itself, got {narrow}"
         );
     }
 

@@ -29,9 +29,10 @@ impl InGameState {
         if screen.height() <= 0.0 {
             return;
         }
+        let aspect = screen.width() / screen.height();
         let camera = self
             .view
-            .camera(&self.player, screen.width() / screen.height());
+            .camera(&self.player, aspect, self.camera_distance(aspect));
 
         let alpha = self.view.render_alpha;
         let plates: Vec<Nameplate<'_>> = self
@@ -410,7 +411,12 @@ impl GameState<Wyvencraft> for InGameState {
     }
 
     fn scene_frame(&self, aspect: f32) -> Option<SceneFrame<'_>> {
-        Some(self.view.scene_frame(&self.player, &self.day_cycle, aspect))
+        Some(self.view.scene_frame(
+            &self.player,
+            &self.day_cycle,
+            aspect,
+            self.camera_distance(aspect),
+        ))
     }
 
     fn preview_frame(&self) -> Option<PreviewFrame<'_>> {

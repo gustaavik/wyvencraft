@@ -27,7 +27,7 @@ use crate::content::{ItemModel, ItemShape};
 use crate::core::{Aabb, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, ChunkPos, DayCycle};
 use crate::entity::viewmodel::{self, HandPose};
 use crate::entity::{
-    AnimationState, Arrow, DroppedItem, HandAnchor, HumanoidModel, Mob, Perspective, Player,
+    AnimationState, Arrow, DroppedItem, HandAnchor, HumanoidModel, Mob, Player, camera,
 };
 use crate::inventory::{ARMOR_SIZE, Inventory, ItemId, ItemRegistry};
 use crate::net::{PlayerId, RemotePlayer};
@@ -849,24 +849,21 @@ impl SceneCache {
     /// The camera for this frame, placed by the player's perspective. Physics
     /// ticks at a fixed rate, so the eye is blended between steps to stay smooth
     /// when the display runs faster than the simulation.
-    pub fn camera(&self, player: &Player, aspect: f32) -> Camera {
+    ///
+    /// `distance` is how far along the perspective's offset the camera may
+    /// actually sit — resolved against the world by
+    /// [`InGameState::camera_distance`], because this cache deliberately cannot
+    /// reach one. Ignored in first person, where the camera *is* the eye.
+    pub fn camera(&self, player: &Player, aspect: f32, distance: f32) -> Camera {
         let mut camera = Camera::new(self.fov_degrees, aspect);
         let eye = player.interpolated_eye_position(self.render_alpha);
         let look = player.look_direction();
-        match player.perspective {
-            Perspective::First => {
-                camera.position = eye;
-                camera.forward = look;
-            }
-            Perspective::ThirdBack => {
-                camera.position = eye - look * THIRD_PERSON_DISTANCE;
-                camera.forward = look;
-            }
-            Perspective::ThirdFront => {
-                camera.position = eye + look * THIRD_PERSON_DISTANCE;
-                camera.forward = -look;
-            }
-        }
+        let (offset, forward) = player
+            .perspective
+            .camera_placement(look)
+            .unwrap_or((Vec3::ZERO, look));
+        camera.position = eye + offset * distance;
+        camera.forward = forward;
         camera
     }
 
@@ -877,8 +874,9 @@ impl SceneCache {
         player: &Player,
         day_cycle: &DayCycle,
         aspect: f32,
+        camera_distance: f32,
     ) -> SceneFrame<'_> {
-        let camera = self.camera(player, aspect);
+        let camera = self.camera(player, aspect, camera_distance);
         let frustum = camera.frustum();
         let in_view = |pos: &ChunkPos| {
             let origin = pos.origin();
@@ -1098,6 +1096,33 @@ fn armor_item_ids(
 }
 
 impl super::InGameState {
+    /// How far the third-person camera sits from the eye this frame: the desired
+    /// [`THIRD_PERSON_DISTANCE`], pulled in so nothing solid ends up between the
+    /// camera and the player.
+    ///
+    /// Lives here rather than on [`SceneCache`] because it needs the world, which
+    /// the view deliberately cannot reach. Recomputed per call rather than
+    /// cached: it is a pure function of the world and the player, so the
+    /// nameplate camera and the world camera work out the same answer within a
+    /// frame without having to share state to do it.
+    ///
+    /// The predicate is `is_solid_for_collision`, the one player physics uses:
+    /// it counts an unloaded chunk as solid, so at the streaming edge the camera
+    /// pulls in rather than drifting into terrain that has not arrived yet.
+    pub(super) fn camera_distance(&self, aspect: f32) -> f32 {
+        let look = self.player.look_direction();
+        let Some((dir, _)) = self.player.perspective.camera_placement(look) else {
+            return 0.0;
+        };
+        let clearance = Camera::new(self.view.fov_degrees, aspect).near_radius();
+        let eye = self
+            .player
+            .interpolated_eye_position(self.view.render_alpha);
+        camera::clear_distance(eye, dir, THIRD_PERSON_DISTANCE, clearance, |p| {
+            self.world.is_solid_for_collision(p)
+        })
+    }
+
     /// Bring every GPU resource in line with the simulation state this frame.
     ///
     /// This is the single seam where rendering meets simulation: it is the only

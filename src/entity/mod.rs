@@ -4,6 +4,7 @@
 
 pub mod animation;
 pub mod brain;
+pub mod camera;
 pub mod dropped_item;
 pub mod kind;
 pub mod mob;

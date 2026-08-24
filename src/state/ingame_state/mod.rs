@@ -368,6 +368,76 @@ mod tests {
         );
     }
 
+    /// The bug this guards: a third-person camera placed a flat
+    /// `THIRD_PERSON_DISTANCE` behind the eye walks straight into whatever is
+    /// behind the player. It must stop short of a wall, and first person must
+    /// stay exactly on the eye.
+    #[test]
+    fn the_third_person_camera_stops_short_of_a_wall_behind_the_player() {
+        use crate::entity::Perspective;
+        use crate::world::block::blocks;
+
+        let mut state = InGameState::new(GameContent::load(), 7, GameMode::Survival);
+        // High above the terrain, inside the chunks loaded around spawn, so the
+        // only thing the camera can meet is the wall placed below.
+        state.player.position = Vec3::new(2.5, 200.0, 2.5);
+        // Fully caught up to the position just set, rather than interpolating
+        // from wherever the player spawned.
+        state.view.render_alpha = 1.0;
+        // Looking down +X, so the third-person camera swings out along -X.
+        state.player.yaw = std::f32::consts::FRAC_PI_2;
+        state.player.pitch = 0.0;
+
+        let aspect = 16.0 / 9.0;
+        let eye = state.player.eye_position();
+
+        state.player.perspective = Perspective::First;
+        let first = state
+            .view
+            .camera(&state.player, aspect, state.camera_distance(aspect));
+        assert!(
+            (first.position - eye).length() < 1.0e-5,
+            "first person sits on the eye, got {:?}",
+            first.position
+        );
+
+        // Nothing behind: the camera takes the whole distance.
+        state.player.perspective = Perspective::ThirdBack;
+        let open = state
+            .view
+            .camera(&state.player, aspect, state.camera_distance(aspect));
+        assert!(
+            ((open.position - eye).length() - THIRD_PERSON_DISTANCE).abs() < 1.0e-3,
+            "open sky should give the full pullback, got {:?}",
+            open.position
+        );
+
+        // A wall two cells behind must push the camera in front of it. It goes
+        // at the *eye's* height, not the feet's — the trace is horizontal.
+        let wall = BlockPos::from_world(eye - Vec3::X * 2.0);
+        assert!(state.world.set_block(wall, blocks::STONE).is_some());
+        let blocked = state
+            .view
+            .camera(&state.player, aspect, state.camera_distance(aspect));
+        // The wall's near face is at x = 1.0. The camera must sit just outside
+        // it — clear of the block, but not thrown all the way to the player.
+        let gap = blocked.position.x - 1.0;
+        assert!(
+            gap > 0.0,
+            "the camera entered the wall at x = 0..1, ending up at {:?}",
+            blocked.position
+        );
+        assert!(
+            gap < 0.5,
+            "it stopped {gap} short of the wall, far more than the near plane needs"
+        );
+        assert!(
+            blocked.position.x < eye.x,
+            "it should still be behind the player, got {:?}",
+            blocked.position
+        );
+    }
+
     /// The crosshair reaches *through* water but stops on ground cover: both
     /// are `solid = false`, and only the fluid check separates them.
     #[test]
