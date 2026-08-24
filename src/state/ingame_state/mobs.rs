@@ -93,9 +93,15 @@ impl RemoteMob {
         } else {
             0.0
         };
-        self.anim.advance(speed, dt);
+        self.anim.advance(speed, self.yaw, dt);
         self.last_pos = self.position;
-        (&self.visual, self.position, self.yaw, self.anim.pose(0.0))
+        // Drawn at the torso yaw, which follows the snapshot yaw the head keeps.
+        (
+            &self.visual,
+            self.position,
+            self.anim.body_yaw(),
+            self.anim.pose(0.0),
+        )
     }
 
     pub(super) fn push_snapshot(&mut self, position: Vec3, yaw: f32) {

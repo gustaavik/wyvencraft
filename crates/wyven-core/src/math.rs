@@ -1,6 +1,8 @@
 //! Math helpers layered on top of [`glam`]: bounding boxes, rays, and view
 //! frustums. Pure data + geometry, no rendering or world knowledge.
 
+use std::f32::consts::{PI, TAU};
+
 use glam::{Mat4, Vec3, Vec4};
 
 use crate::types::Direction;
@@ -21,6 +23,18 @@ pub fn rotate_y(p: Vec3, yaw: f32) -> Vec3 {
 /// rotation sense with the engine's yaw.
 pub fn yaw_matrix(yaw: f32) -> Mat4 {
     Mat4::from_rotation_y(-yaw)
+}
+
+/// The shortest-arc equivalent of `radians`, in `(-π, π]`.
+///
+/// Yaws accumulate unbounded — `Player::rotate` just adds the mouse delta — so a
+/// difference of two of them is only meaningful once it has been wrapped: without
+/// this, turning right past π reads as a near-full turn the other way.
+pub fn wrap_angle(radians: f32) -> f32 {
+    let wrapped = (radians + PI).rem_euclid(TAU) - PI;
+    // `rem_euclid` lands exactly on -π rather than π at the seam; both name the
+    // same direction, but the positive end keeps the range half-open as documented.
+    if wrapped <= -PI { PI } else { wrapped }
 }
 
 /// Axis-aligned bounding box. Used for entity collision and frustum culling.
@@ -264,6 +278,43 @@ mod tests {
                 let b = yaw_matrix(yaw).transform_point3(p);
                 assert!(a.abs_diff_eq(b, 1e-5), "yaw {yaw}, point {p}: {a} vs {b}");
             }
+        }
+    }
+
+    #[test]
+    fn wrap_angle_leaves_an_angle_already_in_range_alone() {
+        for a in [0.0, 0.7, -1.3, 3.0, -3.0] {
+            assert!(
+                (wrap_angle(a) - a).abs() < 1e-6,
+                "{a} moved to {}",
+                wrap_angle(a)
+            );
+        }
+    }
+
+    #[test]
+    fn wrap_angle_takes_the_short_way_round_the_seam() {
+        // A hair past π is a hair *before* -π, not almost a full turn away.
+        let just_past = PI + 0.1;
+        assert!(
+            (wrap_angle(just_past) - (-PI + 0.1)).abs() < 1e-5,
+            "wrapped to {}",
+            wrap_angle(just_past)
+        );
+        // ...and the difference of two yaws either side of the seam is small.
+        assert!(wrap_angle(-3.1 - 3.1).abs() < 0.1);
+    }
+
+    #[test]
+    fn wrap_angle_is_bounded_however_far_the_yaw_has_wound() {
+        // Yaws accumulate all session; the wrap must stay exact, not drift.
+        for turns in [1.0, -1.0, 12.0, -37.0] {
+            let a = 0.4 + turns * TAU;
+            assert!(
+                (wrap_angle(a) - 0.4).abs() < 1e-3,
+                "{a} wrapped to {}",
+                wrap_angle(a)
+            );
         }
     }
 }

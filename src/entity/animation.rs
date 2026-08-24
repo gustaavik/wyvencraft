@@ -7,6 +7,7 @@
 
 use std::f32::consts::PI;
 
+use crate::core::wrap_angle;
 use crate::entity::model::Pose;
 
 const TAU: f32 = 2.0 * PI;
@@ -28,6 +29,21 @@ const SWING_DURATION: f32 = 0.25;
 /// Peak forward rotation of the arm during a one-shot swing (radians).
 const SWING_REACH: f32 = 1.4;
 
+/// How far the head may turn off the torso before the torso starts to follow
+/// (radians, 45°). Inside this cone the head turns alone — this is the "neck".
+const FREE_HEAD_TURN: f32 = 45.0 * PI / 180.0;
+/// Hard limit on the neck (radians, 50°). Past it the torso is dragged bodily so
+/// the offset can never grow, whatever the head did in one frame — a mouse flick,
+/// a snapped remote yaw, or a mob's brain slamming its facing round.
+const MAX_HEAD_TURN: f32 = 50.0 * PI / 180.0;
+/// Exponential rate the torso eases toward the head once the head leaves the free
+/// cone (per second). Minecraft's 0.3-per-tick works out at about this.
+const BODY_FOLLOW_RATE: f32 = 8.0;
+/// Rate the torso squares up under the look direction at a full walk (per second),
+/// scaled by `walk_amount`. Faster than [`BODY_FOLLOW_RATE`] because a walking
+/// body that stayed twisted would read as sliding sideways.
+const BODY_WALK_RATE: f32 = 12.0;
+
 /// Accumulated animation state for one humanoid. `Default` is the rest pose.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AnimationState {
@@ -39,6 +55,12 @@ pub struct AnimationState {
     idle_phase: f32,
     /// Remaining time of a one-shot arm swing (seconds); `0` = not swinging.
     swing_timer: f32,
+    /// Torso facing (radians about Y). `None` until the first [`Self::advance`],
+    /// which squares it under the head rather than spinning up from zero.
+    body_yaw: Option<f32>,
+    /// The look yaw last handed to [`Self::advance`], so [`Self::pose`] can give
+    /// the head its offset from the torso.
+    look_yaw: f32,
 }
 
 impl AnimationState {
@@ -46,8 +68,13 @@ impl AnimationState {
         Self::default()
     }
 
-    /// Advance by `dt` seconds given the entity's current horizontal speed.
-    pub fn advance(&mut self, horizontal_speed: f32, dt: f32) {
+    /// Advance by `dt` seconds given the entity's current horizontal speed and the
+    /// direction it is *looking* (its head yaw — the camera for a player, the
+    /// brain's chosen facing for a mob).
+    ///
+    /// The look yaw is what drives [`Self::body_yaw`]: the torso is a follower, so
+    /// callers keep steering with their own yaw and only *draw* with this one.
+    pub fn advance(&mut self, horizontal_speed: f32, look_yaw: f32, dt: f32) {
         let dt = dt.max(0.0);
         let speed = horizontal_speed.max(0.0);
 
@@ -60,7 +87,50 @@ impl AnimationState {
         let blend = 1.0 - (-dt * BLEND_RATE).exp();
         self.walk_amount += (target - self.walk_amount) * blend;
 
+        self.turn_body(look_yaw, dt);
+
         self.swing_timer = (self.swing_timer - dt).max(0.0);
+    }
+
+    /// Drag the torso after the head: free inside [`FREE_HEAD_TURN`], easing once
+    /// the head leaves that cone, squaring up under the look direction while
+    /// walking, and never twisted past [`MAX_HEAD_TURN`].
+    ///
+    /// Reads `walk_amount`, so it must run *after* the blend above.
+    fn turn_body(&mut self, look_yaw: f32, dt: f32) {
+        let mut body = *self.body_yaw.get_or_insert(look_yaw);
+        let mut offset = wrap_angle(look_yaw - body);
+
+        // Walking always squares up; standing still, only a head outside the cone
+        // pulls — which is what lets the head turn alone while you stand.
+        let rate = BODY_WALK_RATE * self.walk_amount
+            + if offset.abs() > FREE_HEAD_TURN {
+                BODY_FOLLOW_RATE
+            } else {
+                0.0
+            };
+        if rate > 0.0 {
+            // Same frame-rate-independent blend as `walk_amount`.
+            body += offset * (1.0 - (-dt * rate).exp());
+            offset = wrap_angle(look_yaw - body);
+        }
+
+        // Whatever the easing did, the neck never over-twists: a head that jumped
+        // takes the torso with it rather than wrapping round.
+        if offset.abs() > MAX_HEAD_TURN {
+            body = look_yaw - offset.clamp(-MAX_HEAD_TURN, MAX_HEAD_TURN);
+        }
+
+        // Wrapping the stored torso yaw is what keeps precision bounded: a look
+        // yaw winds up all session, and the torso would follow it out of range.
+        self.body_yaw = Some(wrap_angle(body));
+        self.look_yaw = look_yaw;
+    }
+
+    /// Where the torso faces — the yaw a humanoid mesh is *built* at, as opposed
+    /// to the look yaw that drives the camera and the movement basis.
+    pub fn body_yaw(&self) -> f32 {
+        self.body_yaw.unwrap_or(self.look_yaw)
     }
 
     /// Start a one-shot arm swing (e.g. placing a block, or a single click).
@@ -122,8 +192,10 @@ impl AnimationState {
 
         Pose {
             head_pitch,
-            // Head turn is only driven by the inventory preview; gameplay leaves it 0.
-            head_yaw: 0.0,
+            // How far the head is turned off the torso. The mesh is built at
+            // `body_yaw`, so this puts the face back where the entity is looking.
+            // The inventory preview overrides it to track the cursor instead.
+            head_yaw: wrap_angle(self.look_yaw - self.body_yaw()),
             // Arms swing opposite the legs (diagonal gait); idle sway mirrors between
             // the arms; the one-shot swing rides on top of the right arm.
             left_arm: swing + idle,
@@ -143,7 +215,7 @@ mod tests {
     #[test]
     fn idle_leaves_limbs_at_rest() {
         let mut anim = AnimationState::new();
-        anim.advance(0.0, 0.1);
+        anim.advance(0.0, 0.0, 0.1);
         let p = anim.pose(0.0);
         assert_eq!(p.left_leg, 0.0);
         assert_eq!(p.right_leg, 0.0);
@@ -152,11 +224,11 @@ mod tests {
     #[test]
     fn walk_phase_advances_only_when_moving() {
         let mut idle = AnimationState::new();
-        idle.advance(0.0, 0.5);
+        idle.advance(0.0, 0.0, 0.5);
         assert_eq!(idle.walk_phase, 0.0);
 
         let mut moving = AnimationState::new();
-        moving.advance(REFERENCE_SPEED, 0.5);
+        moving.advance(REFERENCE_SPEED, 0.0, 0.5);
         assert!(moving.walk_phase > 0.0, "walk_phase={}", moving.walk_phase);
     }
 
@@ -164,11 +236,11 @@ mod tests {
     fn walk_amount_rises_toward_one_then_decays() {
         let mut anim = AnimationState::new();
         for _ in 0..60 {
-            anim.advance(REFERENCE_SPEED, DT);
+            anim.advance(REFERENCE_SPEED, 0.0, DT);
         }
         assert!(anim.walk_amount > 0.9, "rose to {}", anim.walk_amount);
         for _ in 0..60 {
-            anim.advance(0.0, DT);
+            anim.advance(0.0, 0.0, DT);
         }
         assert!(anim.walk_amount < 0.1, "decayed to {}", anim.walk_amount);
     }
@@ -177,7 +249,7 @@ mod tests {
     fn walk_pose_legs_and_arms_are_anti_phase() {
         let mut anim = AnimationState::new();
         for _ in 0..20 {
-            anim.advance(REFERENCE_SPEED, DT);
+            anim.advance(REFERENCE_SPEED, 0.0, DT);
         }
         let p = anim.pose(0.0);
         // Limbs are actually swinging.
@@ -193,12 +265,12 @@ mod tests {
         let baseline = anim.pose(0.0).right_arm;
 
         anim.trigger_swing();
-        anim.advance(0.0, SWING_DURATION / 2.0); // mid-swing → near peak reach
+        anim.advance(0.0, 0.0, SWING_DURATION / 2.0); // mid-swing → near peak reach
         let mid = anim.pose(0.0).right_arm;
         // Positive = toward the model's front (-Z), i.e. the punch swings forward.
         assert!(mid > baseline + 1.0, "mid={mid}, baseline={baseline}");
 
-        anim.advance(0.0, SWING_DURATION); // exhaust the swing window
+        anim.advance(0.0, 0.0, SWING_DURATION); // exhaust the swing window
         let after = anim.pose(0.0).right_arm;
         assert!(
             (after - baseline).abs() < 0.2,
@@ -231,7 +303,7 @@ mod tests {
                 blows += 1;
             }
             anim.keep_swinging();
-            anim.advance(0.0, dt);
+            anim.advance(0.0, 0.0, dt);
             deepest = deepest.max(anim.swing_progress());
         }
         // Three frames to a swing, so twelve frames of holding is four blows.
@@ -247,7 +319,7 @@ mod tests {
     fn a_held_swing_ends_when_the_button_does() {
         let mut anim = AnimationState::new();
         anim.keep_swinging();
-        anim.advance(0.0, SWING_DURATION);
+        anim.advance(0.0, 0.0, SWING_DURATION);
         assert_eq!(anim.swing_progress(), 0.0);
     }
 
@@ -256,9 +328,141 @@ mod tests {
     fn keeping_a_swing_alive_does_not_restart_it() {
         let mut anim = AnimationState::new();
         anim.trigger_swing();
-        anim.advance(0.0, SWING_DURATION / 2.0);
+        anim.advance(0.0, 0.0, SWING_DURATION / 2.0);
         let midway = anim.swing_progress();
         anim.keep_swinging();
         assert_eq!(anim.swing_progress(), midway);
+    }
+
+    /// Hold a look yaw for a second while standing still.
+    fn stand_looking(look_yaw: f32) -> AnimationState {
+        let mut anim = AnimationState::new();
+        // Square up first, then turn the head — otherwise the first frame adopts
+        // the new yaw wholesale and there is nothing to follow.
+        anim.advance(0.0, 0.0, DT);
+        for _ in 0..60 {
+            anim.advance(0.0, look_yaw, DT);
+        }
+        anim
+    }
+
+    /// A fresh state must not spin its torso up from zero — an entity that appears
+    /// already facing somewhere (a spawned mob, a remote player's first snapshot)
+    /// is standing that way, not mid-turn.
+    #[test]
+    fn the_first_frame_squares_the_body_to_the_look() {
+        let mut anim = AnimationState::new();
+        anim.advance(0.0, 2.0, DT);
+        assert!(
+            (anim.body_yaw() - 2.0).abs() < 1e-4,
+            "body at {}",
+            anim.body_yaw()
+        );
+        assert!(anim.pose(0.0).head_yaw.abs() < 1e-4);
+    }
+
+    /// The point of the whole thing: standing still, a modest head turn moves the
+    /// head and leaves the torso where it was.
+    #[test]
+    fn the_head_turns_freely_before_the_body_follows() {
+        let look = 30.0 * PI / 180.0;
+        let anim = stand_looking(look);
+        assert!(
+            anim.body_yaw().abs() < 1e-4,
+            "torso should not have moved, but sits at {}",
+            anim.body_yaw()
+        );
+        assert!(
+            (anim.pose(0.0).head_yaw - look).abs() < 1e-4,
+            "head_yaw={}, expected {look}",
+            anim.pose(0.0).head_yaw
+        );
+    }
+
+    /// ...but keep turning and the torso comes with you, settling just inside the
+    /// free cone rather than at the hard cap.
+    #[test]
+    fn a_far_head_turn_drags_the_body_along() {
+        let look = 90.0 * PI / 180.0;
+        let anim = stand_looking(look);
+        let offset = anim.pose(0.0).head_yaw;
+        assert!(
+            offset > 0.0,
+            "the head should still lead, but offset={offset}"
+        );
+        assert!(
+            offset <= FREE_HEAD_TURN + 1e-3,
+            "torso stopped following at {offset} rad, past the free cone"
+        );
+        assert!(
+            anim.body_yaw() > 0.5,
+            "torso barely moved: {}",
+            anim.body_yaw()
+        );
+    }
+
+    /// One frame can jump the look yaw arbitrarily — a mouse flick, a snapped
+    /// remote yaw, a mob's brain slamming its facing round. The neck must not wrap.
+    #[test]
+    fn the_neck_never_twists_past_the_cap() {
+        let mut anim = AnimationState::new();
+        anim.advance(0.0, 0.0, DT);
+        for look in [PI, -PI, 2.5, -2.5] {
+            let mut flicked = anim;
+            flicked.advance(0.0, look, DT);
+            let offset = flicked.pose(0.0).head_yaw;
+            assert!(
+                offset.abs() <= MAX_HEAD_TURN + 1e-4,
+                "look {look} twisted the neck to {offset}"
+            );
+        }
+    }
+
+    /// Walking squares the torso up under the look direction, so nobody runs with
+    /// a permanently twisted back.
+    #[test]
+    fn walking_squares_the_body_up_under_the_look() {
+        let look = 40.0 * PI / 180.0;
+        let mut anim = AnimationState::new();
+        anim.advance(0.0, 0.0, DT);
+        for _ in 0..60 {
+            anim.advance(REFERENCE_SPEED, look, DT);
+        }
+        let offset = anim.pose(0.0).head_yaw;
+        assert!(
+            offset.abs() < 0.02,
+            "a walking torso should be square under the head, but offset={offset}"
+        );
+    }
+
+    /// The seam at ±π is nothing special: a look yaw that crosses it turns the
+    /// short way, and the stored torso yaw stays bounded however far the head has
+    /// wound round over a session.
+    #[test]
+    fn body_yaw_follows_across_the_wrap_seam() {
+        let mut anim = AnimationState::new();
+        anim.advance(0.0, PI - 0.05, DT);
+        // Step just past the seam: a hair's turn, not a near-full one.
+        for _ in 0..60 {
+            anim.advance(REFERENCE_SPEED, -PI + 0.05, DT);
+        }
+        assert!(
+            anim.body_yaw().abs() > PI - 0.2,
+            "torso wandered to {}",
+            anim.body_yaw()
+        );
+        assert!(anim.pose(0.0).head_yaw.abs() < 0.02);
+
+        // A look yaw wound many turns round must not carry the torso out of range.
+        let mut wound = AnimationState::new();
+        for _ in 0..120 {
+            wound.advance(REFERENCE_SPEED, 0.4 + 40.0 * TAU, DT);
+        }
+        assert!(
+            wound.body_yaw().abs() <= PI,
+            "torso yaw left (-pi, pi]: {}",
+            wound.body_yaw()
+        );
+        assert!(wound.pose(0.0).head_yaw.abs() < 0.02);
     }
 }

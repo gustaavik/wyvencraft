@@ -346,8 +346,8 @@ impl SceneCache {
     // --- Animated models ------------------------------------------------------------
 
     /// Advance the local player's animation clock.
-    pub fn advance_player_anim(&mut self, speed: f32, dt: f32) {
-        self.player_anim.advance(speed, dt);
+    pub fn advance_player_anim(&mut self, speed: f32, look_yaw: f32, dt: f32) {
+        self.player_anim.advance(speed, look_yaw, dt);
     }
 
     /// Trigger the main-hand swing on the local player's model.
@@ -381,15 +381,19 @@ impl SceneCache {
         self.hand_held_mesh = None;
         self.hand_held_atlas = None;
         let pose = self.player_anim.pose(player.pitch);
+        // The body is drawn at the torso yaw, which lags the look yaw the camera
+        // uses; `pose.head_yaw` is what puts the face back where the player looks.
+        // The hand anchor must take the *same* yaw, or the held item leaves the fist.
+        let body_yaw = self.player_anim.body_yaw();
         let armor = inventory.equipped_armor();
         let mesh =
             self.player_model
-                .build_mesh_armored(player.position, player.yaw, &pose, &armor, items);
+                .build_mesh_armored(player.position, body_yaw, &pose, &armor, items);
         self.player_mesh = GpuMesh::upload(&ctx.memory_allocator, &mesh).ok().flatten();
 
         let anchor = self
             .player_model
-            .hand_anchor(player.position, player.yaw, &pose);
+            .hand_anchor(player.position, body_yaw, &pose);
         self.held_mesh = self.bake_held(ctx, content, inventory, anchor);
         self.held_atlas = self.bake_held_atlas(ctx, content, inventory, anchor);
     }
@@ -590,14 +594,17 @@ impl SceneCache {
             let delta = pos - state.last_pos;
             let speed =
                 (Vec3::new(delta.x, 0.0, delta.z).length() / dt.max(1e-4)).min(REMOTE_MAX_SPEED);
-            state.anim.advance(speed, dt);
+            state.anim.advance(speed, yaw, dt);
             state.last_pos = pos;
             let pose = state.anim.pose(pitch);
+            // Derived here rather than sent: only the look yaw crosses the wire, and
+            // a torso that follows it is cosmetic, so every peer can work it out.
+            let body_yaw = state.anim.body_yaw();
 
             let armor = armor_item_ids(armor_ids, items);
             let mesh = self
                 .player_model
-                .build_mesh_armored(pos, yaw, &pose, &armor, items);
+                .build_mesh_armored(pos, body_yaw, &pose, &armor, items);
             if let Ok(Some(gpu)) = GpuMesh::upload(&ctx.memory_allocator, &mesh) {
                 self.remote_meshes.push(gpu);
             }
@@ -624,7 +631,7 @@ impl SceneCache {
             if let Some(visual) = mob_mesh(
                 &mob.visual,
                 mob.position,
-                mob.yaw,
+                mob.anim.body_yaw(),
                 &mob.anim.pose(0.0),
                 models,
             ) {
@@ -1165,7 +1172,8 @@ impl super::InGameState {
             let v = self.player.velocity;
             Vec3::new(v.x, 0.0, v.z).length()
         };
-        self.view.advance_player_anim(local_speed, dt);
+        self.view
+            .advance_player_anim(local_speed, self.player.yaw, dt);
         self.view.update_player_mesh(
             ctx,
             &self.player,
