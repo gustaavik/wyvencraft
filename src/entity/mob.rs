@@ -201,7 +201,8 @@ impl Mob {
         }
 
         let horizontal = Vec3::new(self.velocity.x, 0.0, self.velocity.z).length();
-        self.anim.advance(horizontal, dt);
+        // `self.yaw` is where the mob *looks* (and walks); the torso follows it.
+        self.anim.advance(horizontal, self.yaw, dt);
 
         self.resolve_attack(intent, &perception)
     }

@@ -1140,4 +1140,61 @@ mod tests {
             turned.position
         );
     }
+
+    /// The neck: `Pose::head_yaw` turns the head about the neck and leaves every
+    /// other part where it was. This is what lets a humanoid be drawn at its
+    /// *torso* yaw while still facing where it looks — see
+    /// [`crate::entity::AnimationState::body_yaw`].
+    #[test]
+    fn a_head_yaw_turns_the_head_without_turning_the_body() {
+        // Parts are pushed base-then-overlay in table order (head, body, ...), 24
+        // vertices to a box, so the head is the first two boxes and the torso the
+        // next two.
+        const BOX: usize = 24;
+        let model = HumanoidModel::player();
+        let rest = model.build_mesh(Vec3::ZERO, 0.0, &Pose::default());
+        let turned = model.build_mesh(
+            Vec3::ZERO,
+            0.0,
+            &Pose {
+                head_yaw: std::f32::consts::FRAC_PI_2,
+                ..Pose::default()
+            },
+        );
+        assert_eq!(rest.vertices.len(), turned.vertices.len());
+
+        let moved = |i: usize| {
+            let a = Vec3::from_array(rest.vertices[i].position);
+            let b = Vec3::from_array(turned.vertices[i].position);
+            (a - b).length()
+        };
+
+        // The head (and its hat shell) swung round.
+        let head_shift = (0..2 * BOX).map(moved).fold(0.0f32, f32::max);
+        assert!(head_shift > 0.1, "the head barely moved: {head_shift}");
+
+        // Everything from the torso down stayed exactly put.
+        for i in 2 * BOX..rest.vertices.len() {
+            assert!(
+                moved(i) < 1e-5,
+                "vertex {i} moved {} — head yaw must not turn the body",
+                moved(i)
+            );
+        }
+
+        // And the turn is about the neck, so the head stays on the centre line
+        // rather than orbiting the model.
+        let centre = |m: &CpuMesh| {
+            (0..2 * BOX)
+                .map(|i| Vec3::from_array(m.vertices[i].position))
+                .fold(Vec3::ZERO, |a, b| a + b)
+                / (2 * BOX) as f32
+        };
+        assert!(
+            (centre(&rest) - centre(&turned)).length() < 1e-5,
+            "the head orbited instead of turning: {} vs {}",
+            centre(&rest),
+            centre(&turned)
+        );
+    }
 }

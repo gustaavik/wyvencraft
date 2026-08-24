@@ -12,7 +12,7 @@ pub mod rng;
 pub mod time;
 pub mod types;
 
-pub use math::{Aabb, Frustum, Ray, rotate_y};
+pub use math::{Aabb, Frustum, Ray, rotate_y, wrap_angle};
 pub use rng::Rng64;
 pub use time::{Clock, FIXED_DT};
 pub use types::{
