@@ -19,7 +19,7 @@ env:
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   # Baked into the binary by `option_env!` in `auth::DEFAULT_AUTH_URL` — this is
   # what a downloaded release talks to. No trailing slash.
-  WYVEN_AUTH_URL: http://llzdmervhd2eyewlrapa8jhi.100.94.237.98.sslip.io
+  WYVEN_AUTH_URL: https://auth.wyvencraft.com
 
 jobs:
   build:
