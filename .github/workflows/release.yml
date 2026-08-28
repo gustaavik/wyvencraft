@@ -91,12 +91,36 @@ jobs:
       # are read from a CWD-relative `assets/` at runtime. Only the shaders are
       # compiled in.
       - name: Package
+        env:
+          # The Vulkan driver, mirrored by wc-launcher's moltenvk.yml: the
+          # universal dylib and its licence, about 3 MB. Bundling it is what
+          # lets a macOS player run a downloaded build without installing
+          # Homebrew first. The launcher looks here before anywhere else, and
+          # installs its own copy only if this is missing.
+          MOLTENVK_URL: https://github.com/gustaavik/wc-launcher/releases/download/deps%2Fmoltenvk-1.4.2/moltenvk-1.4.2-macos-universal.tar.gz
+          MOLTENVK_SHA256: bf3fa76db4d01efede0f3d08d3f9e43497316d968d6b2c672c1df42c5fbe002f
         run: |
           NAME="wyvencraft-${TAG}-${{ matrix.target }}"
           mkdir -p "dist/${NAME}"
           cp "target/${{ matrix.target }}/release/wyvencraft" "dist/${NAME}/"
           cp -R assets "dist/${NAME}/"
           cp README.md "dist/${NAME}/"
+
+          # macOS only: on Windows and Linux the Vulkan loader ships with the
+          # GPU driver, so there is nothing to bundle.
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            curl -fL --retry 3 -o moltenvk.tar.gz "$MOLTENVK_URL"
+            echo "${MOLTENVK_SHA256}  moltenvk.tar.gz" | shasum -a 256 -c -
+            mkdir -p "dist/${NAME}/MoltenVK"
+            tar -xzf moltenvk.tar.gz --strip-components=1 -C "dist/${NAME}/MoltenVK"
+            # The ICD manifest is written here rather than mirrored, so that
+            # library_path is always relative to the dylib beside it. A loader
+            # that cannot resolve it finds no driver at all.
+            printf '%s\n' '{"file_format_version":"1.0.0","ICD":{"library_path":"./libMoltenVK.dylib","api_version":"1.4.0","is_portability_driver":true}}' \
+              > "dist/${NAME}/MoltenVK/MoltenVK_icd.json"
+            test -s "dist/${NAME}/MoltenVK/libMoltenVK.dylib"
+          fi
+
           tar -czf "dist/${NAME}.tar.gz" -C dist "${NAME}"
           # Recorded from inside dist/, so the file names a bare filename and a
           # downloader can `shasum -c` it next to the tarball.
