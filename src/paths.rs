@@ -6,7 +6,8 @@
 //!   It is read-only in spirit — a launcher replaces the whole of it to apply an
 //!   update, so nothing that must survive belongs there.
 //! * **The data directory** is everything the player accumulates: `saves/`,
-//!   `profile.toml`, `ops.toml`, `authkeys.toml`. It lives outside the install
+//!   `profile.toml`, `ops.toml`, `authkeys.toml`, `servers.toml`. It lives
+//!   outside the install
 //!   so an update cannot take a world with it.
 //!
 //! Only the second is resolved here. `assets/` stays working-directory relative
@@ -49,6 +50,8 @@ pub const PROFILE_FILE: &str = "profile.toml";
 pub const OPS_FILE: &str = "ops.toml";
 /// Cached auth-server public keys, used to verify join tickets.
 pub const KEYS_FILE: &str = "authkeys.toml";
+/// The player's saved multiplayer servers, as shown in the server browser.
+pub const SERVERS_FILE: &str = "servers.toml";
 
 static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
@@ -76,6 +79,10 @@ pub fn ops_path() -> PathBuf {
 
 pub fn keys_path() -> PathBuf {
     data_dir().join(KEYS_FILE)
+}
+
+pub fn servers_path() -> PathBuf {
+    data_dir().join(SERVERS_FILE)
 }
 
 fn resolve_data_dir() -> PathBuf {
@@ -119,14 +126,20 @@ fn app_data_root() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    /// The four runtime files are siblings under one root. A launcher relies on
+    /// The runtime files are siblings under one root. A launcher relies on
     /// this: it points `WYVEN_DATA_DIR` at one directory and expects to find
     /// (and write) all of them there.
     #[test]
     fn every_runtime_file_sits_directly_under_the_data_root() {
         let root = data_dir();
 
-        for path in [profile_path(), ops_path(), keys_path(), saves_root()] {
+        for path in [
+            profile_path(),
+            ops_path(),
+            keys_path(),
+            servers_path(),
+            saves_root(),
+        ] {
             assert_eq!(
                 path.parent(),
                 Some(root),
@@ -141,6 +154,7 @@ mod tests {
         assert_eq!(profile_path().file_name().unwrap(), PROFILE_FILE);
         assert_eq!(ops_path().file_name().unwrap(), OPS_FILE);
         assert_eq!(keys_path().file_name().unwrap(), KEYS_FILE);
+        assert_eq!(servers_path().file_name().unwrap(), SERVERS_FILE);
         assert_eq!(saves_root().file_name().unwrap(), SAVES_DIR);
     }
 

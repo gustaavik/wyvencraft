@@ -136,6 +136,10 @@ Screen chain: `MainMenuState` → `SingleplayerMenuState` /
 `PauseMenuState`. There is no login screen: `boot::start::boot_account` settles
 the account before the first screen is built.
 
+`SingleplayerMenuState` reaches `InGameState` two ways — Play (offline) and Host
+(the same world, with a socket bound on it). `MultiplayerMenuState` is the server
+browser and only ever leads to `ConnectingState`.
+
 ---
 
 ## 4. The render seam

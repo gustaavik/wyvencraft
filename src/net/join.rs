@@ -3,6 +3,8 @@
 //! Two small declarations that turn the generic transport in [`wyven_net`] into
 //! this game's multiplayer.
 
+use std::path::Path;
+
 use wyven_auth::{AccountIdentity, KeyCache, TicketVerifier};
 use wyven_net::{HostConfig, JoinVerifier, Protocol, UserData};
 
@@ -12,7 +14,7 @@ use crate::net::protocol::{ClientMessage, ServerMessage};
 pub const PROTOCOL_ID: u64 = 0x5759_564E_0001; // "WYVN" v1
 
 /// How many peers a host admits.
-const MAX_CLIENTS: usize = 16;
+pub const MAX_CLIENTS: usize = 16;
 
 /// Wyvencraft's message pair.
 pub struct WyvenProtocol;
@@ -48,8 +50,14 @@ impl TicketJoin {
     /// Wyvencraft keeps its data is a fact about Wyvencraft, and `wyven-auth` is
     /// an engine crate that must not learn it.
     pub fn from_cache() -> Self {
-        let path = crate::paths::keys_path();
-        let cached = KeyCache::at(&path).load();
+        Self::at(crate::paths::keys_path())
+    }
+
+    /// Load the keys from an explicit file, so a test can stand a host up
+    /// against keys it minted itself rather than the player's real ones.
+    pub fn at(path: impl AsRef<Path>) -> Self {
+        let path = path.as_ref();
+        let cached = KeyCache::at(path).load();
         if cached.is_empty() {
             log::warn!(
                 "no {} — this host cannot verify players and will refuse every join. \

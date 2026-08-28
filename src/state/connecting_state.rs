@@ -1,11 +1,14 @@
-//! Transient state while connecting to a host: fetches a join ticket, pumps the
-//! client until it connects and receives the `Welcome` (which carries the world
-//! seed), then enters the world as a client.
+//! Transient state while connecting to a host: resolves the address, fetches a
+//! join ticket, pumps the client until it connects and receives the `Welcome`
+//! (which carries the world seed), then enters the world as a client.
 //!
 //! The ticket is fetched here rather than at login because it lives about two
 //! minutes — one obtained at sign-in would be long stale by the time anyone
-//! clicked Join. The fetch is blocking, so it happens on a worker while this
-//! screen spins.
+//! clicked Join. Both the fetch and the name lookup block, so both happen on a
+//! worker while this screen spins. That is also why the target is carried as
+//! *text*: a saved server is a hostname the player typed, and resolving it on
+//! the frame that drew the Join button would freeze the menu for as long as the
+//! resolver takes to give up.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -13,20 +16,21 @@ use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::time::Duration;
 
 use super::{GameState, InGameState, MultiplayerMenuState, StateContext, Transition, Wyvencraft};
-use crate::net::{Client, ServerMessage};
+use crate::net::{Client, ServerMessage, address};
 use wyven_auth::{AccountState, AuthClient, AuthError, HttpAuthClient, JoinTicket};
 
 const TIMEOUT_SECS: f32 = 12.0;
 
-/// What the ticket worker reports back.
-type TicketResult = Result<JoinTicket, AuthError>;
+/// What the worker reports back: where to connect, and what to present there.
+type ConnectPrep = (Result<SocketAddr, String>, Result<JoinTicket, AuthError>);
 
 pub struct ConnectingState {
-    address: SocketAddr,
+    /// Where the player asked to go, as typed. Shown while connecting.
+    target: String,
     /// The netcode identity to present — derived from the account.
     identity: u64,
-    /// In flight until the ticket lands.
-    pending_ticket: Option<Receiver<TicketResult>>,
+    /// In flight until the address and ticket land.
+    pending: Option<Receiver<ConnectPrep>>,
     client: Option<Client>,
     elapsed: f32,
     status: String,
@@ -35,24 +39,27 @@ pub struct ConnectingState {
 }
 
 impl ConnectingState {
-    /// Start connecting. The account is used to obtain the join ticket.
-    pub fn new(address: SocketAddr, account: &AccountState) -> Self {
-        Self::with_client(address, account, Arc::new(HttpAuthClient::from_env()))
+    /// Start connecting to `target` — `host`, `host:port` or an address, exactly
+    /// as the player typed or saved it. The account is used to obtain the join
+    /// ticket.
+    pub fn new(target: impl Into<String>, account: &AccountState) -> Self {
+        Self::with_client(target, account, Arc::new(HttpAuthClient::from_env()))
     }
 
     /// With an injected auth client, for tests.
     pub fn with_client(
-        address: SocketAddr,
+        target: impl Into<String>,
         account: &AccountState,
         auth: Arc<dyn AuthClient>,
     ) -> Self {
+        let target = target.into();
         // Checked here as well as in the menu, because this is the path that
         // matters: the menu's greyed-out button is a courtesy, this is the gate.
         if !account.can_play_multiplayer() {
             return Self {
-                address,
+                target,
                 identity: 0,
-                pending_ticket: None,
+                pending: None,
                 client: None,
                 elapsed: 0.0,
                 status: "Sign in to play with other people.".to_string(),
@@ -72,15 +79,22 @@ impl ConnectingState {
 
         let (tx, rx) = channel();
         let account = account.clone();
+        let lookup = target.clone();
         std::thread::spawn(move || {
             let now = unix_now();
-            let _ = tx.send(account.issue_ticket(auth.as_ref(), now));
+            // Both blocking halves on one worker: the DNS lookup and the ticket
+            // request. The ticket is issued through `net::ticket` rather than
+            // the account directly, so a refresh token rotated on the way is
+            // written to disk before it can be lost.
+            let resolved = address::resolve(&lookup);
+            let ticket = crate::net::ticket::issue(&account, auth.as_ref(), now);
+            let _ = tx.send((resolved, ticket));
         });
 
         Self {
-            address,
+            target,
             identity,
-            pending_ticket: Some(rx),
+            pending: Some(rx),
             client: None,
             elapsed: 0.0,
             status: "Getting a join ticket...".to_string(),
@@ -88,34 +102,27 @@ impl ConnectingState {
         }
     }
 
-    /// Once the ticket lands, open the connection with it attached.
-    fn poll_ticket(&mut self) -> Transition {
-        let Some(rx) = self.pending_ticket.as_ref() else {
+    /// Once the address and ticket land, open the connection with it attached.
+    fn poll_prep(&mut self) -> Transition {
+        let Some(rx) = self.pending.as_ref() else {
             return Transition::None;
         };
 
-        match rx.try_recv() {
-            Ok(Ok(ticket)) => {
-                self.pending_ticket = None;
-                match Client::connect(
-                    self.address,
-                    self.identity,
-                    crate::net::PROTOCOL_ID,
-                    Some(ticket.slot),
-                ) {
-                    Ok(client) => {
-                        self.client = Some(client);
-                        self.status = format!("Connecting to {}...", self.address);
-                    }
-                    Err(err) => {
-                        self.status = format!("Connection failed: {err}");
-                        self.failed = true;
-                    }
-                }
-                Transition::None
+        let (resolved, ticket) = match rx.try_recv() {
+            Ok(prep) => prep,
+            Err(TryRecvError::Empty) => return Transition::None,
+            Err(TryRecvError::Disconnected) => {
+                self.pending = None;
+                self.status = "Could not get a join ticket.".to_string();
+                self.failed = true;
+                return Transition::None;
             }
-            Ok(Err(err)) => {
-                self.pending_ticket = None;
+        };
+        self.pending = None;
+
+        let ticket = match ticket {
+            Ok(ticket) => ticket,
+            Err(err) => {
                 log::warn!("could not get a join ticket: {err}");
                 self.status = if err.is_offline() {
                     "The account server is unreachable — cannot join.".to_string()
@@ -123,16 +130,34 @@ impl ConnectingState {
                     format!("Could not join: {err}")
                 };
                 self.failed = true;
-                Transition::None
+                return Transition::None;
             }
-            Err(TryRecvError::Empty) => Transition::None,
-            Err(TryRecvError::Disconnected) => {
-                self.pending_ticket = None;
-                self.status = "Could not get a join ticket.".to_string();
+        };
+        let address = match resolved {
+            Ok(address) => address,
+            Err(reason) => {
+                self.status = reason;
                 self.failed = true;
-                Transition::None
+                return Transition::None;
+            }
+        };
+
+        match Client::connect(
+            address,
+            self.identity,
+            crate::net::PROTOCOL_ID,
+            Some(ticket.slot),
+        ) {
+            Ok(client) => {
+                self.client = Some(client);
+                self.status = format!("Connecting to {}...", self.target);
+            }
+            Err(err) => {
+                self.status = format!("Connection failed: {err}");
+                self.failed = true;
             }
         }
+        Transition::None
     }
 }
 
@@ -155,12 +180,12 @@ impl GameState<Wyvencraft> for ConnectingState {
         // Long enough to read why, short enough not to feel stuck.
         if self.failed {
             if self.elapsed > 3.0 {
-                return Transition::Replace(Box::new(MultiplayerMenuState::new()));
+                return Transition::Replace(Box::new(MultiplayerMenuState::new(ctx)));
             }
             return Transition::None;
         }
 
-        let transition = self.poll_ticket();
+        let transition = self.poll_prep();
         if !matches!(transition, Transition::None) {
             return transition;
         }
@@ -176,7 +201,7 @@ impl GameState<Wyvencraft> for ConnectingState {
 
         if let Err(err) = client.pump(Duration::from_secs_f32(ctx.dt.max(1.0e-4))) {
             log::warn!("connection error: {err}");
-            return Transition::Replace(Box::new(MultiplayerMenuState::new()));
+            return Transition::Replace(Box::new(MultiplayerMenuState::new(ctx)));
         }
 
         // Wait for the Welcome message carrying the world seed + our id + mode
@@ -201,7 +226,7 @@ impl GameState<Wyvencraft> for ConnectingState {
                         "content mismatch: host {content_hash:#018x} vs ours {:#018x}; refusing to join",
                         ctx.shared.content.hash
                     );
-                    return Transition::Replace(Box::new(MultiplayerMenuState::new()));
+                    return Transition::Replace(Box::new(MultiplayerMenuState::new(ctx)));
                 }
                 welcome = Some((
                     seed,
@@ -243,7 +268,7 @@ impl GameState<Wyvencraft> for ConnectingState {
 
         if self.elapsed > TIMEOUT_SECS {
             self.status = "Timed out".to_string();
-            return Transition::Replace(Box::new(MultiplayerMenuState::new()));
+            return Transition::Replace(Box::new(MultiplayerMenuState::new(ctx)));
         }
         Transition::None
     }

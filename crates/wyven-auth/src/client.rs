@@ -371,6 +371,11 @@ fn parse_rfc3339_unix(text: &str) -> Option<u64> {
 /// Scriptable [`AuthClient`] for tests.
 ///
 /// A working implementation rather than a mock: it holds accounts in a map and
+/// The instant tickets from this double claim to have been issued at, unless
+/// [`FakeAuthClient::issuing_at`] moves it. A fixed point, so a test that
+/// verifies at a fixed `now` keeps passing next year.
+const DEFAULT_FAKE_ISSUE_TIME: u64 = 1_800_000_000;
+
 /// really issues sessions, so a test exercises the same control flow the HTTP
 /// client drives.
 pub struct FakeAuthClient {
@@ -383,6 +388,13 @@ pub struct FakeAuthClient {
     signing_key: wcauth_ticket::SigningKey,
     key_id: u8,
     issued: Mutex<u64>,
+    /// The moment tickets are stamped as issued at.
+    ///
+    /// Fixed by default, so a test can verify against a fixed `now` and get the
+    /// same answer on any day. A test standing this double next to a *real*
+    /// host — which reads the wall clock — has to move it: a ticket issued in
+    /// 2027 is refused today as "not valid yet".
+    issued_at: u64,
 }
 
 impl FakeAuthClient {
@@ -393,7 +405,14 @@ impl FakeAuthClient {
             signing_key: wcauth_ticket::SigningKey::from_bytes(&[42; 32]),
             key_id: 1,
             issued: Mutex::new(0),
+            issued_at: DEFAULT_FAKE_ISSUE_TIME,
         }
+    }
+
+    /// Stamp tickets as issued at `now_unix` rather than at the fixed default.
+    pub fn issuing_at(mut self, now_unix: u64) -> Self {
+        self.issued_at = now_unix;
+        self
     }
 
     /// Pre-register an account.
@@ -502,7 +521,7 @@ impl AuthClient for FakeAuthClient {
                 })?;
 
         let session = Self::session_for(username);
-        let now = 1_800_000_000;
+        let now = self.issued_at;
 
         // A fresh nonce per ticket, or a host's replay cache would reject the
         // second join in any test that makes two.

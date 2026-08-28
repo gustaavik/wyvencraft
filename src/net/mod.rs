@@ -12,16 +12,23 @@
 //!   joins**, never "everyone joins".
 //!
 //! The wire format itself lives in [`protocol`]; remote-player smoothing in
-//! [`sync`].
+//! [`sync`]. The player's saved servers and how they are asked what they are
+//! live in [`serverlist`] and [`status`].
 
+pub mod address;
 pub mod join;
 pub mod protocol;
+pub mod serverlist;
+pub mod status;
 pub mod sync;
+pub mod ticket;
 
-pub use join::{PROTOCOL_ID, TicketJoin, WyvenProtocol, host_config};
+pub use join::{MAX_CLIENTS, PROTOCOL_ID, TicketJoin, WyvenProtocol, host_config};
 pub use protocol::{
     ChatKind, ClientMessage, NetItemStack, NetVec3, PlayerRestore, RecipeData, ServerMessage,
 };
+pub use serverlist::{FileServerStore, ServerEntry, ServerList, ServerStore};
+pub use status::{NetStatusProbe, ServerStatus, StatusOutcome, StatusProbe};
 pub use sync::RemotePlayer;
 pub use wyven_net::{Channel, DEFAULT_PORT, PlayerId};
 
