@@ -125,3 +125,22 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+
+# CI-only. CI never *runs* the game, so it wants build speed where profile.dev
+# wants runtime speed. Two separate decisions, both measured on the 409 root-package
+# tests (cold build + test run):
+#   our crates 1 -> 0   79s -> 70s   they are what recompiles on every PR
+#   deps       3 -> 1   79s -> 66s   only helps a cold build; deps come from cache warm
+#   both                        60s
+# Deps stop at 1 rather than 0 because `noise` unoptimized turns the worldgen
+# tests from a 0.5s run into a 27s one — a cost paid on every run, warm or cold,
+# which is more than the extra build time it saves.
+[profile.ci]
+inherits = "dev"
+opt-level = 0
+# All CI reads from a backtrace is file:line; the variable/type tables are the
+# bulk of a debug target/ dir and nothing here steps through them.
+debug = "line-tables-only"
+
+[profile.ci.package."*"]
+opt-level = 1

@@ -30,11 +30,6 @@ env:
   # Every job here is a fresh runner, so they are pure cost: slower codegen and a
   # larger cache to upload and download.
   CARGO_INCREMENTAL: "0"
-  # Full debuginfo is the bulk of a debug `target/` dir — the thing being cached.
-  # `line-tables-only` keeps file:line in panic backtraces, which is all CI ever
-  # reads, and drops the variable/type tables nothing here steps through.
-  CARGO_PROFILE_DEV_DEBUG: line-tables-only
-  CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 jobs:
   # Split out so a formatting slip reports in seconds instead of waiting on a
@@ -114,6 +109,9 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
-      - run: cargo clippy --all-targets --locked -- -D warnings
+      # `--profile ci` is the build-speed-over-runtime-speed profile defined in
+      # Cargo.toml; both commands use it so they share one target/ci dir, which is
+      # what lets the test run reuse clippy's shaderc build instead of redoing it.
+      - run: cargo clippy --all-targets --locked --profile ci -- -D warnings
 
-      - run: cargo test --locked
+      - run: cargo test --locked --profile ci
