@@ -199,11 +199,11 @@ mod tests {
 
     #[test]
     fn join_parses_an_address() {
-        let plan = BootPlan::from_env(&MapEnv::new().with("WYVEN_JOIN", "127.0.0.1:25565"));
+        let plan = BootPlan::from_env(&MapEnv::new().with("WYVEN_JOIN", "127.0.0.1:6091"));
         assert_eq!(
             plan,
             BootPlan::Join {
-                address: "127.0.0.1:25565".parse().unwrap(),
+                address: "127.0.0.1:6091".parse().unwrap(),
             }
         );
     }
@@ -221,7 +221,7 @@ mod tests {
         let env = MapEnv::new()
             .with("WYVEN_BOOT_INGAME", "1")
             .with("WYVEN_HOST", "1")
-            .with("WYVEN_JOIN", "127.0.0.1:25565");
+            .with("WYVEN_JOIN", "127.0.0.1:6091");
         assert!(matches!(
             BootPlan::from_env(&env),
             BootPlan::Singleplayer { .. }
@@ -229,7 +229,7 @@ mod tests {
 
         let env = MapEnv::new()
             .with("WYVEN_HOST", "1")
-            .with("WYVEN_JOIN", "127.0.0.1:25565");
+            .with("WYVEN_JOIN", "127.0.0.1:6091");
         assert!(matches!(BootPlan::from_env(&env), BootPlan::Host { .. }));
     }
 }

@@ -18,7 +18,7 @@ use crate::session::{JoinVerifier, Protocol};
 use crate::wire::{self, Channel, PlayerId};
 
 /// Default UDP port the host listens on.
-pub const DEFAULT_PORT: u16 = 25_565;
+pub const DEFAULT_PORT: u16 = 6091;
 
 /// What a host needs settling before it binds.
 #[derive(Debug, Clone, Copy)]

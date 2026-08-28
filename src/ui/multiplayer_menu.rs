@@ -445,7 +445,7 @@ mod tests {
     fn a_rows_subtitle_names_the_world_when_it_differs_from_the_label() {
         let row = ServerRow {
             name: "Friend's box",
-            address: "example.com:25565",
+            address: "example.com:6091",
             state: RowState::Online {
                 world: "Cliffs",
                 online: 1,
@@ -455,7 +455,7 @@ mod tests {
             },
             joinable: true,
         };
-        assert_eq!(subtitle(&row), "example.com:25565 · Cliffs");
+        assert_eq!(subtitle(&row), "example.com:6091 · Cliffs");
     }
 
     /// A server the player named after its world should not read
@@ -464,7 +464,7 @@ mod tests {
     fn a_rows_subtitle_does_not_repeat_a_matching_name() {
         let row = ServerRow {
             name: "Cliffs",
-            address: "example.com:25565",
+            address: "example.com:6091",
             state: RowState::Online {
                 world: "Cliffs",
                 online: 1,
@@ -474,6 +474,6 @@ mod tests {
             },
             joinable: true,
         };
-        assert_eq!(subtitle(&row), "example.com:25565");
+        assert_eq!(subtitle(&row), "example.com:6091");
     }
 }

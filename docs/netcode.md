@@ -24,14 +24,14 @@ transport is not where identity lives.
 
 ## 1. Transport
 
-renet 2.0 + `renet_netcode` 2.0 over UDP. A host binds `0.0.0.0:25565` by default
+renet 2.0 + `renet_netcode` 2.0 over UDP. A host binds `0.0.0.0:6091` by default
 (`crates/wyven-net/src/server.rs:21`); a client binds an ephemeral port and connects.
 
 | Setting              | Value                            | Where                                                                           |
 | -------------------- | -------------------------------- | ------------------------------------------------------------------------------- |
 | Protocol id          | `0x5759_564E_0001` (`"WYVN"` v1) | `src/net/join.rs:12` — the *game* picks it; the engine takes it in `HostConfig` |
 | Max clients          | 16                               | `src/net/join.rs:15`                                                            |
-| Default port         | 25565                            | `crates/wyven-net/src/server.rs:21` (no override exists)                        |
+| Default port         | 6091                            | `crates/wyven-net/src/server.rs:21` (no override exists)                        |
 | Encoding             | bincode 2, `config::standard()`  | `crates/wyven-net/src/wire.rs:43`                                               |
 | Connection timeout   | 15 s without a received packet   | from the synthesised connect token                                              |
 | Keep-alive           | 250 ms                           | netcode default                                                                 |
@@ -515,7 +515,7 @@ For a live check, launch two processes:
 
 ```sh
 WYVEN_HOST=1 cargo run
-WYVEN_JOIN=127.0.0.1:25565 cargo run
+WYVEN_JOIN=127.0.0.1:6091 cargo run
 ```
 
 The client logs `connected; world seed … player id …` on a successful handshake. Both need

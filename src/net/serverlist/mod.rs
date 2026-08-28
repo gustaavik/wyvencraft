@@ -175,8 +175,8 @@ mod tests {
     #[test]
     fn a_list_survives_a_round_trip_through_toml() {
         let list = ServerList::new(vec![
-            entry("My Server", "play.example.com:25565"),
-            entry("LAN box", "192.168.1.20:25565"),
+            entry("My Server", "play.example.com:6091"),
+            entry("LAN box", "192.168.1.20:6091"),
         ]);
 
         let text = list.to_toml().expect("serializes");
@@ -196,7 +196,7 @@ mod tests {
             r#"
             [[server]]
             name = "Good"
-            address = "example.com:25565"
+            address = "example.com:6091"
 
             [[server]]
             name = "Broken"
