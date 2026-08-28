@@ -76,7 +76,7 @@ Skip the menus with environment variables:
 | Variable               | Effect                                    |
 | ---------------------- | ----------------------------------------- |
 | `WYVEN_BOOT_INGAME=1`  | Boot straight into a singleplayer world   |
-| `WYVEN_HOST=1`         | Host a session immediately (port `25565`) |
+| `WYVEN_HOST=1`         | Host a session immediately (port `6091`) |
 | `WYVEN_JOIN=addr:port` | Connect to a host immediately             |
 | `WYVEN_WORLD=test`     | Select the world too connect too          |
 
@@ -98,9 +98,9 @@ Skip the menus with environment variables:
 
 ## Multiplayer
 
-1. One player chooses **Multiplayer → Host Game** (listens on UDP `25565`).
+1. One player chooses **Multiplayer → Host Game** (listens on UDP `6091`).
 2. Others choose **Multiplayer → Join** and enter the host's `address:port`
-   (e.g. `192.168.1.20:25565`, or `127.0.0.1:25565` on the same machine).
+   (e.g. `192.168.1.20:6091`, or `127.0.0.1:6091` on the same machine).
 
 The connection is host-authoritative over direct/LAN UDP (no NAT traversal — use a
 LAN address or port-forward). The host shares its world seed so all peers generate

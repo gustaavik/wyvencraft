@@ -43,8 +43,8 @@ Run with logging: `RUST_LOG=info,wyvencraft=debug cargo run`.
 
 **Dev boot env vars** (skip the menus — invaluable for headless testing):
 - `WYVEN_BOOT_INGAME=1` → singleplayer world directly
-- `WYVEN_HOST=1` → host a session (port 25565)
-- `WYVEN_JOIN=127.0.0.1:25565` → join a session
+- `WYVEN_HOST=1` → host a session (port 6091)
+- `WYVEN_JOIN=127.0.0.1:6091` → join a session
 - `WYVEN_WORLD=name` → load-or-create this named world under `saves/` (combines
   with BOOT_INGAME/HOST). Without it, boot worlds are ephemeral — never saved.
 - `WYVEN_SEED=...` → seed if `WYVEN_WORLD` creates a new world (number, hex, or text)
@@ -375,7 +375,7 @@ those systems are testable without a Vulkan device.
   app (it renders on a real display) or by trusting vulkano validation + a stable
   run.
 - **Multiplayer testing:** launch two processes with `WYVEN_HOST=1` and
-  `WYVEN_JOIN=127.0.0.1:25565`; the client logs `connected; world seed ... player id ...`
+  `WYVEN_JOIN=127.0.0.1:6091`; the client logs `connected; world seed ... player id ...`
   on a successful handshake.
 - **Commands run on the authority, never on the client.** A client sends its
   raw chat line (command or not) as `ClientMessage::Chat`; the host parses it,

@@ -148,7 +148,7 @@ mod tests {
         let mut store = FileServerStore::at(&path);
 
         let list = ServerList::new(vec![
-            ServerEntry::parse("My Server", "play.example.com:25565").unwrap(),
+            ServerEntry::parse("My Server", "play.example.com:6091").unwrap(),
         ]);
         store.save(&list).expect("writes");
 

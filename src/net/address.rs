@@ -21,7 +21,7 @@ pub fn resolve(input: &str) -> Result<SocketAddr, String> {
     }
     // A bare IPv6 literal has colons of its own, so "contains a colon" would
     // read `::1` as a host with a port. Trying it as an address first settles
-    // that without a parser: `::1` parses, `::1:25565` does not.
+    // that without a parser: `::1` parses, `::1:6091` does not.
     let with_port = if trimmed.parse::<SocketAddr>().is_ok() {
         trimmed.to_string()
     } else if trimmed.parse::<std::net::IpAddr>().is_ok() {
@@ -62,7 +62,7 @@ mod tests {
     }
 
     /// `::1` is an address, not a host called `:` with a port. Splitting on the
-    /// last colon without checking would send the player to `::1:25565`, which
+    /// last colon without checking would send the player to `::1:6091`, which
     /// resolves to nothing at all.
     #[test]
     fn an_ipv6_literal_is_not_mistaken_for_a_host_and_port() {
