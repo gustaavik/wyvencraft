@@ -97,6 +97,16 @@ impl<P: Protocol> Client<P> {
         }
     }
 
+    /// Leave now, telling the host so rather than falling silent.
+    ///
+    /// Dropping a `Client` only closes its socket, which the host cannot tell
+    /// apart from a crashed peer until the connection times out — and it holds
+    /// a slot for the whole of that. Anything that connects deliberately
+    /// briefly (a server-list status query) should say goodbye instead.
+    pub fn disconnect(&mut self) {
+        self.transport.disconnect();
+    }
+
     /// Flush queued messages. Call once per frame, last.
     pub fn flush(&mut self) -> Result<(), String> {
         self.transport

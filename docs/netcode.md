@@ -193,24 +193,26 @@ Wyvencraft is a game you host for people you invited.
 
 ### Client → host
 
-| Message                                | Channel    | Sent when                                            |
-| -------------------------------------- | ---------- | ---------------------------------------------------- |
-| `Move { position, yaw, pitch }`        | Unreliable | **every frame**, unconditionally                     |
-| `Break { pos }`                        | Reliable   | on a local break                                     |
-| `Place { pos, block }`                 | Reliable   | on a local place                                     |
-| `Stats { health, hunger, saturation }` | Reliable   | every `STATS_INTERVAL = 0.25 s`                      |
-| `SyncInventory { slots, selected }`    | Reliable   | checked every 1.0 s, sent **only on change**         |
-| `SetMode(GameMode)`                    | Reliable   | on the game-mode toggle                              |
-| `Chat(String)`                         | Reliable   | every submitted line, **including commands, raw**    |
-| `RequestWorldState`                    | Reliable   | once, on the first connected frame                   |
-| `Attack { id }`                        | Reliable   | on a melee click with a replica mob in the crosshair |
+| Message                                | Channel    | Sent when                                                         |
+| -------------------------------------- | ---------- | ----------------------------------------------------------------- |
+| `Move { position, yaw, pitch }`        | Unreliable | **every frame**, unconditionally                                  |
+| `Break { pos }`                        | Reliable   | on a local break                                                  |
+| `Place { pos, block }`                 | Reliable   | on a local place                                                  |
+| `Stats { health, hunger, saturation }` | Reliable   | every `STATS_INTERVAL = 0.25 s`                                   |
+| `SyncInventory { slots, selected }`    | Reliable   | checked every 1.0 s, sent **only on change**                      |
+| `SetMode(GameMode)`                    | Reliable   | on the game-mode toggle                                           |
+| `Chat(String)`                         | Reliable   | every submitted line, **including commands, raw**                 |
+| `RequestWorldState`                    | Reliable   | once, on the first connected frame                                |
+| `RequestStatus`                        | Reliable   | **only** by the server browser's probe, never by a playing client |
+| `Attack { id }`                        | Reliable   | on a melee click with a replica mob in the crosshair              |
 
 ### Host → clients
 
 | Message                                                                                     | Channel               | Sent when                                                                                                 |
 | ------------------------------------------------------------------------------------------- | --------------------- | --------------------------------------------------------------------------------------------------------- |
 | `Welcome { seed, your_id, spawn, time_of_day, game_mode, content_hash, recipes, restored }` | Reliable, addressed   | once per join                                                                                             |
-| `PlayerJoined { id, name }`                                                                 | Reliable, broadcast   | once per join; `name` comes from the verified account                                                     |
+| `PlayerJoined { id, name }`                                                                 | Reliable, broadcast   | on the peer's **first `RequestWorldState`**, not on connect; `name` comes from the verified account       |
+| `Status { name, online, max, content_hash }`                                                | Reliable, addressed   | reply to `RequestStatus`; nothing else happens                                                            |
 | `PlayerLeft { id }`                                                                         | Reliable, broadcast   | on disconnect                                                                                             |
 | `PlayerState { id, position, yaw, pitch }`                                                  | Unreliable, broadcast | **every frame, one message per player**                                                                   |
 | `BlockChanged { pos, block }`                                                               | Reliable, broadcast   | any edit, or a fluid tick result                                                                          |
@@ -274,8 +276,6 @@ sequenceDiagram
     C->>H: netcode connect (ticket in user_data)
     Note over H: TicketJoin::verify → PlayerId minted
     H->>C: Welcome { seed, your_id, spawn, time_of_day,<br/>game_mode, content_hash, recipes, restored }
-    H-->>C: PlayerJoined (broadcast)
-    H-->>C: PlayerEquipment × everyone already in
 
     alt content_hash != ours
         Note over C: log both hashes, drop the socket,<br/>Replace(MultiplayerMenuState)
@@ -283,6 +283,9 @@ sequenceDiagram
 
     Note over C: → InGameState::new_client<br/>generate spawn chunks, apply `restored`
     C->>H: RequestWorldState
+    Note over H: peer is now an *announced player*
+    H-->>C: PlayerJoined (broadcast)
+    H-->>C: PlayerEquipment × everyone already in
     H->>C: WorldEdits × ceil(n / 4096)   [Chunk channel]
     H->>C: MobSpawned × live mobs
     C->>H: Move (every frame from here)
@@ -298,6 +301,36 @@ sequenceDiagram
 **World state is pull-based, not pushed on join.** `RequestWorldState` exists because
 `ConnectingState` drains the transport before `InGameState` exists — a pushed snapshot could
 land in that window and be discarded. The client asks once it is actually in the world.
+
+**A connected peer is not yet a player.** `RequestWorldState` also carries a second meaning:
+it is what promotes a verified peer to an *announced* player (`Peers::announced`). Until it
+arrives the host has minted a `PlayerId` and sent a `Welcome`, but has told nobody — and on
+disconnect it records nothing. That is what lets the server browser's probe hold a real
+ticket, connect, ask `RequestStatus`, and leave without anyone playing seeing a join and a
+leave, and without the probe's spawn-fresh vitals overwriting that account's saved state.
+
+## 4a. The status query
+
+```mermaid
+sequenceDiagram
+    participant P as Server browser (probe)
+    participant H as Host
+
+    Note over P: one ticket per Refresh, for every row<br/>(a host refuses a nonce it has already seen)
+    P->>H: netcode connect (ticket in user_data)
+    Note over H: TicketJoin::verify → PlayerId minted
+    H->>P: Welcome  (ignored)
+    P->>H: RequestStatus
+    H->>P: Status { name, online, max, content_hash }
+    Note over P: ping = the round trip of those two
+    P->>H: netcode disconnect
+    Note over H: never announced, never recorded
+```
+
+`online` counts *announced* players plus the host, so probes — including other people's,
+arriving at the same moment — never inflate a row. A probe cannot query a server the same
+account is already connected to: netcode admits one connection per client id, and that id is
+derived from the account.
 
 That same window is a real hazard for everything *except* world state.
 `ConnectingState` drains `client.receive()`, keeps the `Welcome`, and **discards every other
@@ -430,17 +463,17 @@ the same frame as the join is applied to a player the state layer already knows 
 
 ### During the join
 
-| Failure                                                                      | Client sees                                                 |
-| ---------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| Not signed in                                                                | "Sign in to play with other people." — no thread, no socket |
-| Ticket fetch failed, server unreachable                                      | "The account server is unreachable — cannot join."          |
-| Ticket fetch failed, refused                                                 | "Could not join: {err}"                                     |
-| `Client::connect` socket error                                               | "Connection failed: {err}"                                  |
-| **Any verifier refusal** (no keys, bad/expired/replayed ticket, id mismatch) | **Nothing** — a transport drop, then the 12 s timeout       |
-| Server full (16 clients)                                                     | netcode denies the connect request → timeout                |
-| Same account already connected                                               | netcode denies it silently → timeout                        |
-| Content hash mismatch                                                        | both hashes logged, straight back to the multiplayer menu   |
-| No `Welcome` within 12 s                                                     | "Timed out" → menu                                          |
+| Failure                                                                      | Client sees                                                                                                              |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| Not signed in                                                                | "Sign in to play with other people." — no thread, no socket                                                              |
+| Ticket fetch failed, server unreachable                                      | "The account server is unreachable — cannot join."                                                                       |
+| Ticket fetch failed, refused                                                 | "Could not join: {err}"                                                                                                  |
+| `Client::connect` socket error                                               | "Connection failed: {err}"                                                                                               |
+| **Any verifier refusal** (no keys, bad/expired/replayed ticket, id mismatch) | **Nothing** — a transport drop, then the 12 s timeout                                                                    |
+| Server full (16 clients)                                                     | netcode denies the connect request → timeout                                                                             |
+| Same account already connected                                               | netcode denies it silently → timeout                                                                                     |
+| Content hash mismatch                                                        | both hashes logged, straight back to the multiplayer menu; the browser marks the row *Incompatible* first, from `Status` |
+| No `Welcome` within 12 s                                                     | "Timed out" → menu                                                                                                       |
 
 The refusal reason is logged on the host and never sent. That is intentional — a refused
 peer learns only that it was refused — but it does mean the client-side symptom for six

@@ -179,6 +179,6 @@ pub fn initial_screen(
                 }
             }
         }
-        BootPlan::Join { address } => Box::new(ConnectingState::new(address, account)),
+        BootPlan::Join { address } => Box::new(ConnectingState::new(address.to_string(), account)),
     }
 }

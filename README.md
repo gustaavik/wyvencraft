@@ -25,9 +25,10 @@ the multiplayer wire protocol, and the engine/game seams — is in [`docs/`](doc
 - **First & third person** — toggle with `F5` (first → third-behind → third-front);
   a box-part humanoid model is drawn in third person and for remote players.
 - **Peer-to-peer multiplayer** — host-authoritative, direct/LAN connect. One player
-  hosts; others join by IP. The world seed is shared on join and only block edits +
+  hosts from their world list; others keep a list of saved servers showing each
+  one's name, players online and ping. The world seed is shared on join and only block edits +
   player positions travel the wire.
-- **Menus, HUD & inventory** — main menu, multiplayer (host / join) menu, pause
+- **Menus, HUD & inventory** — main menu, world list (play / host), server browser, pause
   overlay, crosshair, hotbar, `F3` debug overlay, and a click-to-move inventory
   screen.
 - **Transparent rendering** — water and glass are drawn in a separate alpha-blended

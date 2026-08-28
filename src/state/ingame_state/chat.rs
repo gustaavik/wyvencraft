@@ -470,6 +470,13 @@ mod tests {
             identity,
             account,
         });
+        // A real client asks for the world on its first connected frame, and
+        // that request is what promotes a connected peer to an announced player
+        // — see `Peers::announced`.
+        handle.deliver(Inbound::Request {
+            player: pid,
+            msg: ClientMessage::RequestWorldState,
+        });
         state.pump_network(1.0 / 60.0);
     }
 

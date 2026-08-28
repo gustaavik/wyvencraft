@@ -1,10 +1,20 @@
-//! Singleplayer setup: pick an existing world (play/delete) or create a new one
+//! Your worlds: pick one to play or to host, delete one, or create a new one
 //! with a name, optional seed, and game mode.
+//!
+//! Hosting lives here rather than in the multiplayer menu because it is a thing
+//! you do *to a world of yours*, beside Play and Delete — the multiplayer menu
+//! is for visiting other people's. To host a brand-new world, create it here
+//! and then press Host on it.
 
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{GameState, LoadingState, MainMenuState, StateContext, Transition, Wyvencraft};
+use super::{
+    GameState, InGameState, LoadingState, MainMenuState, StateContext, Transition, Wyvencraft,
+};
+use crate::content::GameContent;
 use crate::core::GameMode;
+use crate::net::{DEFAULT_PORT, Host};
 use crate::save::{self, WorldEntry, WorldSave};
 
 pub struct SingleplayerMenuState {
@@ -50,6 +60,34 @@ impl SingleplayerMenuState {
         }
     }
 
+    /// Open a world and bind a host on it, entering as the host's own player.
+    ///
+    /// The server is bound on the world's *own* seed, so `Host::seed()` and the
+    /// world a joining client generates cannot disagree.
+    fn host(&mut self, slug: &str, content: Arc<GameContent>) -> Transition {
+        let game = match WorldSave::open(&save::saves_root(), slug).and_then(WorldSave::load) {
+            Ok(game) => game,
+            Err(err) => {
+                self.error = Some(format!("Failed to load: {err}"));
+                return Transition::None;
+            }
+        };
+        match Host::bind(
+            DEFAULT_PORT,
+            game.save.meta.seed,
+            crate::net::host_config(),
+            crate::net::TicketJoin::from_cache(),
+        ) {
+            Ok(host) => {
+                Transition::Replace(Box::new(InGameState::new_host_saved(content, game, host)))
+            }
+            Err(err) => {
+                self.error = Some(format!("Host failed: {err}"));
+                Transition::None
+            }
+        }
+    }
+
     fn create(&mut self) -> Transition {
         let name = self.name.trim().to_string();
         if name.is_empty() {
@@ -79,12 +117,14 @@ impl GameState<Wyvencraft> for SingleplayerMenuState {
         Transition::None
     }
 
-    fn ui(&mut self, egui_ctx: &egui::Context, _ctx: &mut StateContext) -> Transition {
+    fn ui(&mut self, egui_ctx: &egui::Context, ctx: &mut StateContext) -> Transition {
         let mut transition = Transition::None;
+        let content = ctx.shared.content.clone();
+        let can_host = ctx.shared.account.can_play_multiplayer();
         egui::CentralPanel::default().show(egui_ctx, |ui| {
             ui.vertical_centered(|ui| {
                 ui.add_space(40.0);
-                ui.heading("Singleplayer");
+                ui.heading("Worlds");
                 ui.add_space(16.0);
 
                 // --- Existing worlds ---
@@ -95,11 +135,12 @@ impl GameState<Wyvencraft> for SingleplayerMenuState {
                     );
                 } else {
                     let mut play: Option<String> = None;
+                    let mut host: Option<String> = None;
                     let mut delete: Option<String> = None;
                     egui::ScrollArea::vertical()
                         .max_height(220.0)
                         .show(ui, |ui| {
-                            ui.set_width(420.0);
+                            ui.set_width(500.0);
                             for world in &self.worlds {
                                 ui.horizontal(|ui| {
                                     ui.vertical(|ui| {
@@ -141,6 +182,27 @@ impl GameState<Wyvencraft> for SingleplayerMenuState {
                                             {
                                                 play = Some(world.slug.clone());
                                             }
+                                            // Greyed out with a reason rather
+                                            // than hidden, on the same
+                                            // principle the main menu greys
+                                            // Multiplayer: a host that cannot
+                                            // check a join ticket refuses every
+                                            // player, which is a far worse thing
+                                            // to discover after binding a port.
+                                            ui.add_enabled_ui(can_host, |ui| {
+                                                let response = ui.add_sized(
+                                                    [70.0, 28.0],
+                                                    egui::Button::new("Host"),
+                                                );
+                                                if response.clicked() {
+                                                    host = Some(world.slug.clone());
+                                                }
+                                                if !can_host {
+                                                    response.on_hover_text(
+                                                        "Sign in to host — nobody could be let in.",
+                                                    );
+                                                }
+                                            });
                                         },
                                     );
                                 });
@@ -158,6 +220,10 @@ impl GameState<Wyvencraft> for SingleplayerMenuState {
                     if let Some(slug) = play {
                         self.confirm_delete = None;
                         transition = self.play(&slug);
+                    }
+                    if let Some(slug) = host {
+                        self.confirm_delete = None;
+                        transition = self.host(&slug, content.clone());
                     }
                 }
 

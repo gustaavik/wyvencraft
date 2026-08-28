@@ -9,7 +9,7 @@
 //! `InGameState`, sitting between the world and the inventory with nothing
 //! marking them as one concern.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::inventory::{ARMOR_SIZE, Inventory};
 use crate::net::{NetItemStack, PlayerId, RemotePlayer, ServerMessage};
@@ -34,6 +34,17 @@ pub(super) struct Peers {
     /// Host: last equipment broadcast for each player, so `PlayerEquipment` is
     /// only re-sent on change and a joiner can be brought up to date.
     pub equipment: HashMap<PlayerId, [Option<u16>; ARMOR_SIZE]>,
+    /// Host: peers that have identified themselves as players by asking for the
+    /// world.
+    ///
+    /// A connected peer is not yet a player. The server browser's probe holds a
+    /// perfectly valid ticket and gets all the way to a `PlayerId`, but it only
+    /// wants a status line — so announcing on connect would show a join and a
+    /// leave to everyone playing each time somebody refreshed their list, and
+    /// recording one on the way out would overwrite that account's saved state
+    /// with spawn-fresh values. Announcing (and recording) is therefore deferred
+    /// until a peer asks for the world, which only a real client does.
+    pub announced: HashSet<PlayerId>,
 
     /// Host: reliable mob events queued by this frame's simulation, drained
     /// into the broadcast by the network pump. A field rather than a return
@@ -57,6 +68,7 @@ impl Peers {
         self.accounts.remove(&pid);
         self.inventories.remove(&pid);
         self.equipment.remove(&pid);
+        self.announced.remove(&pid);
     }
 
     /// The replica for `id`, created at `fallback` if this is the first we've

@@ -72,9 +72,10 @@ impl InGameState {
 
     // --- Host: connection lifecycle -------------------------------------------------
 
-    /// Admit a joining player: hand back their saved state if this world
-    /// remembers them, announce them, and bring them up to date on everyone's
-    /// current gear (unchanging equipment isn't otherwise re-broadcast).
+    /// Admit a joining peer: hand back their saved state if this world
+    /// remembers them, and give them a replica to be tracked by.
+    ///
+    /// It does *not* announce them — see [`InGameState::announce_player`].
     fn welcome_player(
         &mut self,
         pid: PlayerId,
@@ -119,12 +120,6 @@ impl InGameState {
             .map(|account| account.username.clone())
             .unwrap_or_else(|| format!("Player {}", pid.0));
 
-        let joined = ServerMessage::PlayerJoined {
-            id: pid,
-            name: name.clone(),
-        };
-        self.session.broadcast(&joined, Channel::Reliable);
-
         self.peers.identities.insert(pid, identity);
         if let Some(account) = account {
             self.peers.accounts.insert(pid, account);
@@ -132,6 +127,27 @@ impl InGameState {
         self.peers
             .players
             .insert(pid, RemotePlayer::new(pid, name, Vec3::from_array(spawn)));
+    }
+
+    /// Tell everyone a peer is really here, and bring it up to date on what
+    /// everyone is wearing.
+    ///
+    /// Deliberately *not* part of admitting a peer. A status probe from the
+    /// server browser connects with a valid ticket and gets a `Welcome` like
+    /// anyone else, but it never asks for the world — so it never reaches here,
+    /// and nobody playing ever sees it come and go. See `Peers::announced`.
+    fn announce_player(&mut self, pid: PlayerId) {
+        if !self.peers.announced.insert(pid) {
+            return;
+        }
+        let Some(name) = self.peers.players.get(&pid).map(|rp| rp.name.clone()) else {
+            return;
+        };
+
+        self.session.broadcast(
+            &ServerMessage::PlayerJoined { id: pid, name },
+            Channel::Reliable,
+        );
 
         let equipment: Vec<(PlayerId, [Option<u16>; ARMOR_SIZE])> = self
             .peers
@@ -148,9 +164,39 @@ impl InGameState {
         }
     }
 
+    /// Answer a status query: what the server browser puts in a row.
+    ///
+    /// Sent only to the peer that asked. Nothing else happens — no announcement,
+    /// no world state, no record — which is the whole reason a probe can ask.
+    fn report_status(&mut self, pid: PlayerId) {
+        // The host counts as one of the players, and as one of the slots: it is
+        // in the world and it is occupying capacity, so a row reading "1/17" on
+        // an empty server is the truth rather than an off-by-one.
+        let status = ServerMessage::Status {
+            name: self.save.world_name().to_string(),
+            // Announced players, not connected peers: a probe gives itself a
+            // replica in `peers` like anyone else, and must not count itself
+            // (nor the other probes refreshing their lists at the same moment).
+            online: (self.peers.announced.len() + 1) as u32,
+            max: (crate::net::MAX_CLIENTS + 1) as u32,
+            content_hash: self.content.hash,
+        };
+        self.session.send_to(pid, &status, Channel::Reliable);
+    }
+
     /// Snapshot a leaving player so their state survives a rejoin, then drop
     /// every trace of them from this session.
     fn forget_player(&mut self, pid: PlayerId) {
+        // A peer nobody was told about is a peer nobody has to be told left —
+        // and, more importantly, one whose account must not be written over. A
+        // status probe never plays, so recording it would replace a real
+        // player's saved position and vitals with the spawn values it was
+        // handed a moment earlier.
+        if !self.peers.announced.contains(&pid) {
+            self.peers.remove(pid);
+            return;
+        }
+
         record_remote(
             &mut self.save.records,
             &self.peers.identities,
@@ -206,7 +252,14 @@ impl InGameState {
             // The only place a command is ever parsed and run: the host knows
             // who is authorized, so the host decides.
             ClientMessage::Chat(text) => self.dispatch_chat(pid, text),
-            ClientMessage::RequestWorldState => self.replay_world_state(pid),
+            ClientMessage::RequestWorldState => {
+                // The first thing a real client asks for, and the thing a status
+                // probe never asks for — so this is where a connected peer
+                // becomes a player everyone else can see.
+                self.announce_player(pid);
+                self.replay_world_state(pid);
+            }
+            ClientMessage::RequestStatus => self.report_status(pid),
             ClientMessage::Attack { id } => self.apply_client_attack(pid, id),
         }
     }
@@ -299,6 +352,10 @@ impl InGameState {
         match msg {
             // The welcome is consumed during construction, not here.
             ServerMessage::Welcome { .. } => {}
+            // Only the server browser's probe ever asks for one, and it is not
+            // an `InGameState` — a playing client seeing this is the host
+            // answering a question nobody in the world asked.
+            ServerMessage::Status { .. } => {}
             ServerMessage::PlayerJoined { id, name } if id != local_id => {
                 self.peers
                     .players
@@ -740,9 +797,17 @@ pub(super) fn recipes_from_wire(data: &[RecipeData], items: &ItemRegistry) -> Re
 
 #[cfg(test)]
 mod tests {
+    use std::net::UdpSocket;
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    use wyven_auth::{AccountState, AuthClient, FakeAuthClient, KeyCache};
+
     use super::*;
     use crate::content::GameContent;
     use crate::core::GameMode;
+    use crate::net::status::{NetStatusProbe, StatusOutcome, StatusProbe};
+    use crate::net::{Client, Host, TicketJoin, host_config};
     use crate::state::session::{FakeHandle, FakeSession};
     use crate::world::block::blocks;
 
@@ -850,7 +915,8 @@ mod tests {
     }
 
     /// A first-time joiner is welcomed with this world's seed and their new id,
-    /// announced to everyone, and registered as a remote player.
+    /// announced to everyone once it asks for the world, and registered as a
+    /// remote player.
     #[test]
     fn a_joining_player_is_welcomed_and_announced() {
         let (mut state, handle) = host_session();
@@ -859,6 +925,12 @@ mod tests {
             player: pid,
             identity: 42,
             account: None,
+        });
+        // What a real client sends on its first connected frame, and what marks
+        // this peer as a player rather than a status probe.
+        handle.deliver(Inbound::Request {
+            player: pid,
+            msg: ClientMessage::RequestWorldState,
         });
 
         state.pump_network(1.0 / 60.0);
@@ -889,6 +961,96 @@ mod tests {
         drop(net);
         assert!(state.peers.players.contains_key(&pid));
         assert_eq!(state.peers.identities.get(&pid), Some(&42));
+    }
+
+    /// The server browser's probe holds a real ticket and gets a real
+    /// `PlayerId`, so the only thing keeping a Refresh from reading as a join to
+    /// everyone playing is that it never asks for the world.
+    #[test]
+    fn a_status_query_is_answered_without_announcing_anybody() {
+        let (mut state, handle) = host_session();
+        let pid = PlayerId(1);
+        handle.deliver(Inbound::Joined {
+            player: pid,
+            identity: 42,
+            account: None,
+        });
+        handle.deliver(Inbound::Request {
+            player: pid,
+            msg: ClientMessage::RequestStatus,
+        });
+
+        state.pump_network(1.0 / 60.0);
+
+        let net = handle.lock();
+        let Some(ServerMessage::Status {
+            online,
+            max,
+            content_hash,
+            ..
+        }) = net
+            .messages_to(pid)
+            .into_iter()
+            .find(|m| matches!(m, ServerMessage::Status { .. }))
+        else {
+            panic!("the probe must be told the status");
+        };
+        assert_eq!(*online, 1, "the host itself is on the server");
+        assert_eq!(*max, (crate::net::MAX_CLIENTS + 1) as u32);
+        assert_eq!(*content_hash, state.content.hash);
+        assert!(
+            !net.broadcasts()
+                .iter()
+                .any(|m| matches!(m, ServerMessage::PlayerJoined { .. })),
+            "nobody playing should see a status query"
+        );
+    }
+
+    /// The dangerous half of the same story: a probe is handed spawn-fresh
+    /// vitals in its `Welcome`, so recording it on the way out would overwrite
+    /// the real player's saved health, hunger and position for that account.
+    #[test]
+    fn a_peer_that_never_played_does_not_overwrite_its_accounts_saved_state() {
+        let (mut state, handle) = host_session();
+        let pid = PlayerId(1);
+        let identity = 7;
+        let saved = PlayerData {
+            position: [12.0, 65.0, -8.0],
+            yaw: 1.5,
+            pitch: 0.2,
+            flying: false,
+            health: 3.0,
+            hunger: 4.0,
+            saturation: 0.0,
+            selected_slot: 3,
+            slots: vec![None; crate::inventory::TOTAL_SLOTS],
+        };
+        state.save.records.0.insert(identity, saved.clone());
+
+        handle.deliver(Inbound::Joined {
+            player: pid,
+            identity,
+            account: None,
+        });
+        handle.deliver(Inbound::Request {
+            player: pid,
+            msg: ClientMessage::RequestStatus,
+        });
+        state.pump_network(1.0 / 60.0);
+        handle.deliver(Inbound::Left { player: pid });
+        state.pump_network(1.0 / 60.0);
+
+        let record = state.save.records.0.get(&identity).expect("still recorded");
+        assert_eq!(record.health, saved.health, "vitals were rewritten");
+        assert_eq!(record.position, saved.position, "position was rewritten");
+        assert!(
+            !handle
+                .lock()
+                .broadcasts()
+                .iter()
+                .any(|m| matches!(m, ServerMessage::PlayerLeft { .. })),
+            "nobody was told they arrived, so nobody is told they left"
+        );
     }
 
     /// A returning identity gets its saved position and inventory handed back
@@ -960,6 +1122,12 @@ mod tests {
             player: pid,
             identity: 99,
             account: None,
+        });
+        // Asking for the world is what makes them a player rather than a passing
+        // status query, and so what makes them worth recording.
+        handle.deliver(Inbound::Request {
+            player: pid,
+            msg: ClientMessage::RequestWorldState,
         });
         state.pump_network(1.0 / 60.0);
 
@@ -1133,5 +1301,150 @@ mod tests {
             "and asks for the world's existing edits exactly once on connect"
         );
         assert_eq!(net.flushes, 1, "one flush per frame");
+    }
+
+    fn now_unix() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
+    /// A port nothing else is on, found by letting the OS pick one and handing
+    /// it straight back.
+    fn free_port() -> u16 {
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("a spare port");
+        socket.local_addr().expect("bound").port()
+    }
+
+    fn temp_keys(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "wyven-authkeys-{tag}-{}-{:?}.toml",
+            std::process::id(),
+            std::thread::current().id()
+        ))
+    }
+
+    /// The whole status path over a real socket: a host bound on loopback
+    /// verifying a real Ed25519 ticket, and a probe that connects, asks, is
+    /// answered, and leaves.
+    ///
+    /// Every other test here fakes the transport away, which is the right
+    /// default — but the one thing this feature adds that cannot be faked is
+    /// that a probe *is* a client, and that a host will answer one without
+    /// treating it as a player.
+    #[test]
+    fn a_probe_reaches_a_real_host_and_is_answered_without_joining_it() {
+        let keys_path = temp_keys("probe");
+        // Stamped against the wall clock, because the host on the other end of
+        // the socket checks its own: the double's fixed default sits years in
+        // the future and would be refused as "not valid yet".
+        let auth: Arc<dyn AuthClient> = Arc::new(
+            FakeAuthClient::new()
+                .with_account("gustav", "hunter2")
+                .with_account("mira", "hunter2")
+                .issuing_at(now_unix()),
+        );
+        KeyCache::at(&keys_path)
+            .store(&auth.public_keys().expect("the double publishes keys"))
+            .expect("keys are cached");
+
+        // A host on a real port, refusing anyone it cannot verify — exactly the
+        // gate a live server runs behind.
+        let port = free_port();
+        let content = GameContent::builtin();
+        let ours = content.hash;
+        let host = Host::bind(port, 4242, host_config(), TicketJoin::at(&keys_path))
+            .expect("binds loopback");
+        assert!(host.can_verify(), "the host must be able to check tickets");
+        let mut server = InGameState::new_host(content, 4242, host, GameMode::Survival);
+
+        let account = AccountState::new();
+        account.sign_in(auth.login("gustav", "hunter2").expect("signs in"));
+        let mut probe = NetStatusProbe::with_client(&account, Arc::clone(&auth));
+        probe.begin(vec![format!("127.0.0.1:{port}")]);
+
+        let dt = Duration::from_millis(16);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let outcome = loop {
+            server.pump_network(dt.as_secs_f32());
+            if let Some((_, outcome)) = probe.poll(dt).into_iter().next() {
+                break outcome;
+            }
+            assert!(Instant::now() < deadline, "the probe never got an answer");
+            std::thread::sleep(dt);
+        };
+
+        let StatusOutcome::Online(status) = outcome else {
+            panic!("expected the host to answer, got {outcome:?}");
+        };
+        // Counted while the probe is still connected, which is the point: the
+        // probe holds a `PlayerId` at this moment and must not be one of the
+        // players the row reports.
+        assert_eq!(status.online, 1, "only the host is in the world");
+        assert_eq!(status.max, (crate::net::MAX_CLIENTS + 1) as u32);
+        assert_eq!(status.content_hash, ours);
+        assert!(!status.name.is_empty(), "a row needs something to show");
+
+        // --- and the other half: a real client still announces itself ---
+        //
+        // Announcing moved off the connect event and onto the first request for
+        // the world, which is the change that makes a probe invisible. This is
+        // the half that has to keep working: a peer that *does* ask for the
+        // world must still be counted, or the browser would report every server
+        // as empty.
+        //
+        // A second account, because a netcode id is derived from the account and
+        // netcode admits each id once: one person cannot be playing on a server
+        // and querying it in the same breath.
+        let player_account = AccountState::new();
+        player_account.sign_in(auth.login("mira", "hunter2").expect("signs in"));
+        let ticket = crate::net::ticket::issue(&player_account, auth.as_ref(), now_unix())
+            .expect("a ticket for the player");
+        let mut player = Client::connect(
+            format!("127.0.0.1:{port}").parse().expect("loopback"),
+            player_account.netcode_id().expect("signed in"),
+            crate::net::PROTOCOL_ID,
+            Some(ticket.slot),
+        )
+        .expect("connects");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut asked = false;
+        loop {
+            server.pump_network(dt.as_secs_f32());
+            player.pump(dt).expect("still connected");
+            let _ = player.receive();
+            if !asked && player.is_connected() {
+                player.send(&ClientMessage::RequestWorldState, Channel::Reliable);
+                asked = true;
+            }
+            let _ = player.flush();
+            if asked && server.peers.announced.len() == 1 {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the client was never announced");
+            std::thread::sleep(dt);
+        }
+
+        probe.begin(vec![format!("127.0.0.1:{port}")]);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let outcome = loop {
+            server.pump_network(dt.as_secs_f32());
+            player.pump(dt).expect("still connected");
+            let _ = player.flush();
+            if let Some((_, outcome)) = probe.poll(dt).into_iter().next() {
+                break outcome;
+            }
+            assert!(Instant::now() < deadline, "the second probe got no answer");
+            std::thread::sleep(dt);
+        };
+        let StatusOutcome::Online(status) = outcome else {
+            panic!("expected the host to answer again, got {outcome:?}");
+        };
+        assert_eq!(status.online, 2, "the host and the player who joined");
+
+        player.disconnect();
+        let _ = std::fs::remove_file(&keys_path);
     }
 }
