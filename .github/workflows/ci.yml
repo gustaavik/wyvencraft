@@ -3,12 +3,21 @@ name: CI
 on:
   pull_request:
     branches: [master]
+  # Not just for the badge: an Actions cache is readable by the ref that wrote it
+  # and by that ref's children, so a cache saved on a PR ref is reachable *only*
+  # from that one PR. Without a run on master there is nothing for a new PR to
+  # inherit, and every PR pays the full cold build. This trigger is what fills
+  # the cache the `save-if` below restricts writing to.
+  push:
+    branches: [master]
   workflow_dispatch:
 
-# A push to a PR supersedes whatever is still running for it.
+# A push to a PR supersedes whatever is still running for it. A push to master
+# does not: that run exists to write the cache every later PR reads, so letting
+# a second merge cancel it would leave the cache stale.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -16,6 +25,15 @@ env:
   # `wcauth-ticket` lives in a private repo; fetching it through the system git
   # is what lets the credential below apply.
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  # Incremental artifacts only pay off across repeated builds on one machine.
+  # Here every job is a fresh runner, so they are pure cost: slower codegen and a
+  # much larger cache to upload and download.
+  CARGO_INCREMENTAL: "0"
+  # Full debuginfo is the bulk of a debug `target/` dir — the thing being cached.
+  # `line-tables-only` keeps file:line in panic backtraces, which is all CI ever
+  # reads, and drops the variable/type tables no one here steps through.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 jobs:
   # Split out so a formatting slip reports in seconds instead of waiting on a
@@ -34,8 +52,12 @@ jobs:
 
       - run: cargo fmt --all --check
 
-  clippy-test:
-    name: clippy + tests
+  # clippy and tests are two jobs rather than two steps because they barely share
+  # work: `clippy --all-targets` produces metadata through clippy-driver, `test`
+  # then needs real codegen and rebuilds anyway. Sequentially that was the sum of
+  # both; in parallel the branch waits for the longer of the two.
+  clippy:
+    name: clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -52,16 +74,20 @@ jobs:
             "https://github.com/"
 
       # `vulkano-shaders` is a proc-macro crate, so shaderc is needed to *compile*
-      # (it turns assets/shaders/*.{vert,frag} into SPIR-V) but is never linked
-      # into the binary. shaderc-sys vendors the full shaderc + glslang +
-      # SPIRV-Tools sources, so with no system library to find it builds a
-      # genuinely self-contained libshaderc_combined.a. That is what we want.
+      # (it turns crates/wyven-render/shaders/*.{vert,frag} into SPIR-V) but is
+      # never linked into the binary. shaderc-sys vendors the full shaderc +
+      # glslang + SPIRV-Tools sources, so with no system library to find it builds
+      # a genuinely self-contained libshaderc_combined.a. That is what we want.
       #
       # Do NOT "optimise" this by installing libshaderc-dev. Ubuntu's
       # libshaderc_combined.a is not actually combined — Debian unbundles glslang
       # — so the proc macro links with undefined glslang symbols (Linux permits
       # that for a shared object), and rustc then fails to dlopen it and reports
       # the baffling `E0463: can't find crate for vulkano_shaders`.
+      #
+      # It is also the single most expensive thing CI compiles, and the reason a
+      # cache hit matters so much: its build-script output lives under `target/`,
+      # so a warm cache skips the whole C++ build.
       - name: Install the shaderc build toolchain
         run: |
           sudo apt-get update
@@ -72,8 +98,45 @@ jobs:
 
       # Pinned to the v2.9.2 commit: the only third-party action in a workflow
       # whose runner holds a PAT.
+      #
+      # `save-if` restricts *writing* to master. A PR that saves its own cache
+      # helps only its own later pushes, while costing ~800 MB of a 10 GB
+      # repo-wide budget — nine open PRs were enough to evict each other. Reading
+      # is unrestricted, so every PR still restores master's.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - run: cargo clippy --all-targets --locked -- -D warnings
+
+  test:
+    name: tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to the private wcauthserver repo
+        env:
+          WCAUTH_TOKEN: ${{ secrets.WCAUTH_TOKEN }}
+        run: |
+          git config --global \
+            url."https://x-access-token:${WCAUTH_TOKEN}@github.com/".insteadOf \
+            "https://github.com/"
+
+      # See the note in the clippy job: no libshaderc-dev, vendored build only.
+      - name: Install the shaderc build toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build python3
+
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
+
+      # A separate cache entry from the clippy job by design — rust-cache keys on
+      # the job id, and clippy-driver's metadata and rustc's objects would only
+      # thrash one shared entry.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - run: cargo test --locked
