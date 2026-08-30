@@ -64,7 +64,7 @@ impl GameState<Wyvencraft> for MainMenuState {
                 ui.add_enabled_ui(multiplayer_available, |ui| {
                     let response = ui.add_sized([220.0, 36.0], egui::Button::new("Multiplayer"));
                     if response.clicked() {
-                        transition = Transition::Replace(Box::new(MultiplayerMenuState::new()));
+                        transition = Transition::Replace(Box::new(MultiplayerMenuState::new(ctx)));
                     }
                     if !multiplayer_available {
                         response.on_hover_text("Sign in to play with other people.");

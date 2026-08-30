@@ -25,9 +25,10 @@ the multiplayer wire protocol, and the engine/game seams — is in [`docs/`](doc
 - **First & third person** — toggle with `F5` (first → third-behind → third-front);
   a box-part humanoid model is drawn in third person and for remote players.
 - **Peer-to-peer multiplayer** — host-authoritative, direct/LAN connect. One player
-  hosts; others join by IP. The world seed is shared on join and only block edits +
+  hosts from their world list; others keep a list of saved servers showing each
+  one's name, players online and ping. The world seed is shared on join and only block edits +
   player positions travel the wire.
-- **Menus, HUD & inventory** — main menu, multiplayer (host / join) menu, pause
+- **Menus, HUD & inventory** — main menu, world list (play / host), server browser, pause
   overlay, crosshair, hotbar, `F3` debug overlay, and a click-to-move inventory
   screen.
 - **Transparent rendering** — water and glass are drawn in a separate alpha-blended
@@ -75,7 +76,7 @@ Skip the menus with environment variables:
 | Variable               | Effect                                    |
 | ---------------------- | ----------------------------------------- |
 | `WYVEN_BOOT_INGAME=1`  | Boot straight into a singleplayer world   |
-| `WYVEN_HOST=1`         | Host a session immediately (port `25565`) |
+| `WYVEN_HOST=1`         | Host a session immediately (port `6091`) |
 | `WYVEN_JOIN=addr:port` | Connect to a host immediately             |
 | `WYVEN_WORLD=test`     | Select the world too connect too          |
 
@@ -97,9 +98,9 @@ Skip the menus with environment variables:
 
 ## Multiplayer
 
-1. One player chooses **Multiplayer → Host Game** (listens on UDP `25565`).
+1. One player chooses **Multiplayer → Host Game** (listens on UDP `6091`).
 2. Others choose **Multiplayer → Join** and enter the host's `address:port`
-   (e.g. `192.168.1.20:25565`, or `127.0.0.1:25565` on the same machine).
+   (e.g. `192.168.1.20:6091`, or `127.0.0.1:6091` on the same machine).
 
 The connection is host-authoritative over direct/LAN UDP (no NAT traversal — use a
 LAN address or port-forward). The host shares its world seed so all peers generate

@@ -101,6 +101,12 @@ pub enum ClientMessage {
     RequestWorldState,
     /// Melee swing landed on mob `id` (the host validates range and applies).
     Attack { id: u64 },
+    /// "Tell me what this server is, I am not staying." The server-list probe
+    /// sends this instead of [`ClientMessage::RequestWorldState`]; the host
+    /// answers with [`ServerMessage::Status`] and — because this peer never
+    /// asked for the world — never announces it and never records it. A playing
+    /// client must never send it.
+    RequestStatus,
 }
 
 /// Messages the host sends to clients.
@@ -237,6 +243,21 @@ pub enum ServerMessage {
         to: PlayerId,
         position: NetVec3,
     },
+    /// The answer to [`ClientMessage::RequestStatus`]: what the server-list row
+    /// shows. Sent only to the peer that asked, and to nobody else ever.
+    ///
+    /// `content_hash` is the same fingerprint [`ServerMessage::Welcome`] carries,
+    /// repeated here so the browser can mark a row incompatible immediately
+    /// rather than after a connect that is doomed to be refused.
+    Status {
+        /// The hosted world's name.
+        name: String,
+        /// Players in the world right now, the host included.
+        online: u32,
+        /// The most it will hold, the host included.
+        max: u32,
+        content_hash: u64,
+    },
 }
 
 #[cfg(test)]
@@ -297,6 +318,38 @@ mod tests {
     fn request_world_state_roundtrips() {
         let back = decode::<ClientMessage>(&encode(&ClientMessage::RequestWorldState)).unwrap();
         assert!(matches!(back, ClientMessage::RequestWorldState));
+    }
+
+    #[test]
+    fn request_status_roundtrips() {
+        let back = decode::<ClientMessage>(&encode(&ClientMessage::RequestStatus)).unwrap();
+        assert!(matches!(back, ClientMessage::RequestStatus));
+    }
+
+    /// Every field the server browser shows comes off this one message, so a
+    /// silent loss of any of them would leave a row looking permanently blank.
+    #[test]
+    fn status_carries_everything_a_server_row_shows() {
+        let msg = ServerMessage::Status {
+            name: "Cliffs & Caves".to_string(),
+            online: 3,
+            max: 17,
+            content_hash: 0xDEAD_BEEF,
+        };
+        let back: ServerMessage = decode(&encode(&msg)).unwrap();
+        match back {
+            ServerMessage::Status {
+                name,
+                online,
+                max,
+                content_hash,
+            } => {
+                assert_eq!(name, "Cliffs & Caves");
+                assert_eq!((online, max), (3, 17));
+                assert_eq!(content_hash, 0xDEAD_BEEF);
+            }
+            _ => panic!("expected a Status"),
+        }
     }
 
     #[test]

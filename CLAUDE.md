@@ -31,8 +31,8 @@ cargo test -p wyven-voxel # one engine crate, no GPU and no game content
 as well as the workspace root, so `assets/` stays CWD-relative exactly as
 before.
 
-Runtime state — `saves/`, `profile.toml`, `ops.toml`, `authkeys.toml` — does
-not. It lives in the OS application-data directory (`~/Library/Application
+Runtime state — `saves/`, `profile.toml`, `ops.toml`, `authkeys.toml`,
+`servers.toml` — does not. It lives in the OS application-data directory (`~/Library/Application
 Support/Wyvencraft`, `%APPDATA%\Wyvencraft`, `~/.local/share/Wyvencraft`),
 resolved by `src/paths.rs`, so a launcher can replace the install directory on
 every update without taking anyone's worlds with it. `WYVEN_DATA_DIR` overrides
@@ -43,8 +43,8 @@ Run with logging: `RUST_LOG=info,wyvencraft=debug cargo run`.
 
 **Dev boot env vars** (skip the menus — invaluable for headless testing):
 - `WYVEN_BOOT_INGAME=1` → singleplayer world directly
-- `WYVEN_HOST=1` → host a session (port 25565)
-- `WYVEN_JOIN=127.0.0.1:25565` → join a session
+- `WYVEN_HOST=1` → host a session (port 6091)
+- `WYVEN_JOIN=127.0.0.1:6091` → join a session
 - `WYVEN_WORLD=name` → load-or-create this named world under `saves/` (combines
   with BOOT_INGAME/HOST). Without it, boot worlds are ephemeral — never saved.
 - `WYVEN_SEED=...` → seed if `WYVEN_WORLD` creates a new world (number, hex, or text)
@@ -143,7 +143,7 @@ content   ← all of it         GameContent: registries loaded from assets/*.tom
 chat      ← net               message log, commands (one per file), ops.toml authorization
 save      ← world, entity     world/player persistence (saves/ dir)
 ui        ← inventory, egui   HUD + inventory egui views
-net       ← wyven-net         the wire protocol, and who may join
+net       ← wyven-net         the wire protocol, who may join, the saved server list and how a server is asked what it is
 config    ← wyven-input       settings, keybinds, and raw keys → MovementInput
 boot      ← save, net         plan: pure env → BootPlan; start: plan → first screen
 state     ← everything        the screens, and the Game impl that starts them
@@ -315,15 +315,19 @@ those systems are testable without a Vulkan device.
 | Authorize a player      | `ops.toml` in the data directory (`ops = [{ id = "<account uuid>", name = "..." }]`), parsed by `chat::ops`. Keyed by the **account id from the verified join ticket**, never by anything a client asserts. The host/singleplayer player is always an op; only the authority loads the file |
 | Chat log / input bar    | `chat::{log,composer}` (pure state), drawn by `ui::chat::draw_chat`; keys `chat`/`chat_command` in `config::Keybinds` (T and /) |
 | Networking              | `wyven_net::{server,client}` + `net::protocol` transport; role behind `state::session::Session` (Singleplayer/Host/Client + `FakeSession`); message application in `state::ingame_state::net` |
+| The multiplayer screen  | `state::multiplayer_menu` — a list of saved servers, each row showing its name, players online and ping. Three pieces: `browser::ServerBrowser` is the state and rules (selection, two-click delete, which rows may be joined) with no egui and full unit tests; `ui::multiplayer_menu` draws it and reports an `MpAction`; `MultiplayerMenuState` owns both plus the dialog text. Double-clicking a row joins it. **Hosting is not here** — it is a per-world button in `state::singleplayer_menu`, beside Play and Delete |
+| Saved servers           | `net::serverlist` — `ServerEntry`/`ServerList` (pure, TOML, fail-soft per entry) behind the `ServerStore` port (`FileServerStore` → `servers.toml` in the data directory, `InMemoryServerStore` for tests). An entry keeps the address **as typed**, so a saved hostname survives its IP changing and no DNS lookup ever runs on the frame that draws the list — `net::address::resolve` is called from a worker |
+| Player count and ping   | There is no side-channel: a probe *is* a client. `net::status::NetStatusProbe` presents a real join ticket, sends `ClientMessage::RequestStatus`, times the `ServerMessage::Status` that comes back and disconnects. Behind the `StatusProbe` port (`FakeStatusProbe` is the double). The host answers in `state::ingame_state::net::report_status` **without announcing or recording the peer** — see `Peers::announced` and the next row. One ticket per Refresh, never reused across refreshes (a host refuses a nonce it has seen) |
 | Accounts / login        | `wyven_auth::{client,session,account,keys,username,verifier}`. `AuthClient` is a port (`HttpAuthClient` via ureq / `FakeAuthClient`). **There is no login screen** — signing in belongs to the launcher, which writes the session into `profile.toml`; `boot::start::boot_account` restores and refreshes it before the first screen exists, and falls back to offline play. The main menu offers Sign out but not Sign in. `wyven_auth::username` hand-mirrors the server's name rule (`[A-Za-z0-9_]`, 3..=16, no leading `_`) so the form refuses locally what the server would refuse anyway — same duplication, and same obligation to keep both sides in step, as `AccountIdentity::netcode_id`. Server lives in the private repo [gustaavik/wcauthserver](https://github.com/gustaavik/wcauthserver) |
-| Who may join            | `net::TicketJoin` (the game's `JoinVerifier`) checks the Ed25519 ticket a client puts in netcode `user_data` **before** a `PlayerId` exists — a failure is disconnected with no `Welcome`. Keys come from `authkeys.toml` via `wyven_auth::KeyCache`; **no keys means no joins**, never "everyone joins". Ticket format is `wcauth-ticket`, shared verbatim with the server — literally the same crate, pulled from the wcauthserver repo as a git dependency |
+| Who may join            | `net::TicketJoin` (the game's `JoinVerifier`) checks the Ed25519 ticket a client puts in netcode `user_data` **before** a `PlayerId` exists — a failure is disconnected with no `Welcome`. Keys come from `authkeys.toml` via `wyven_auth::KeyCache` (`TicketJoin::at` takes an explicit path, which is what lets a test stand a real host up against keys it minted itself); **no keys means no joins**, never "everyone joins". Ticket format is `wcauth-ticket`, shared verbatim with the server — literally the same crate, pulled from the wcauthserver repo as a git dependency |
+| Who counts as a player  | A verified peer is **not** yet one. `welcome_player` mints the `PlayerId` and sends `Welcome`; `announce_player` — the `PlayerJoined` broadcast and the equipment catch-up — waits for that peer's first `ClientMessage::RequestWorldState`, and `forget_player` records nothing for a peer that never sent one. Without that split, every server-list Refresh would show as a join and a leave to everyone playing, and would overwrite each account's saved vitals with the spawn values the probe was handed |
 | Player nameplates       | `ui::nameplate` painted from `InGameState::draw_nameplates`; projection is `wyven_render::Camera::project`. egui composites after the world pass with no depth, so occlusion is an explicit `wyven_voxel::raycast` against `is_solid` |
 | Saving / world files    | `save` module (formats, `saves/<slug>/`) behind `save::WorldRepository` (File/Null/InMemory); triggers in `state::ingame_state::save_world` |
 | Pipelines / passes      | `wyven_render::pipeline`, `wyven_render::renderer`                                                     |
 | GPU meshes / camera     | `state::ingame_state::view` (`SceneCache`) — the only holder of `RenderContext`             |
 | Startup / dev env vars  | `boot::plan::BootPlan::from_env` (pure, tested); effects in `boot::start::initial_screen`, which runs `boot::start::boot_account` for **every** plan. The window/device/event-loop side is `wyven_app::run`, reached through the `Game` impl in `state::shared` |
 | Loading `assets/*.toml` | `wyven_assets::AssetSource` (Fs/Embedded/Map) + one `load_or_builtin` helper. CWD-relative: `assets/` belongs to the install, not the player |
-| Where runtime files go  | `src/paths.rs` — one memoised data root (`WYVEN_DATA_DIR`, else OS app-data, else CWD) with `saves_root`/`profile_path`/`ops_path`/`keys_path` off it. Engine crates never learn it: `wyven_auth::KeyCache::at` takes the path the game resolves |
+| Where runtime files go  | `src/paths.rs` — one memoised data root (`WYVEN_DATA_DIR`, else OS app-data, else CWD) with `saves_root`/`profile_path`/`ops_path`/`keys_path`/`servers_path` off it. Engine crates never learn it: `wyven_auth::KeyCache::at` takes the path the game resolves |
 | Shaders                 | `crates/wyven-render/shaders/*.{vert,frag}`, declared in `wyven_render::shaders` (they moved out of `assets/` with the renderer — they are compiled into the binary, so nothing reads that path at runtime). `voxel.vert` is shared by both chunk pipelines, so a new vertex attribute means editing it plus `wyven_render::vertex` and every `ChunkVertex { .. }` site |
 
 ## Conventions & gotchas
@@ -371,7 +375,7 @@ those systems are testable without a Vulkan device.
   app (it renders on a real display) or by trusting vulkano validation + a stable
   run.
 - **Multiplayer testing:** launch two processes with `WYVEN_HOST=1` and
-  `WYVEN_JOIN=127.0.0.1:25565`; the client logs `connected; world seed ... player id ...`
+  `WYVEN_JOIN=127.0.0.1:6091`; the client logs `connected; world seed ... player id ...`
   on a successful handshake.
 - **Commands run on the authority, never on the client.** A client sends its
   raw chat line (command or not) as `ClientMessage::Chat`; the host parses it,
@@ -429,8 +433,12 @@ those systems are testable without a Vulkan device.
 ## Verifying a change
 
 1. `cargo build --workspace` / `cargo clippy --workspace --all-targets` clean.
-2. `cargo test --workspace` green (596 tests: 54 auth, 11 core, 86 model,
-   50 render, 21 voxel, 374 game).
+2. `cargo test --workspace` green (631 tests: 54 auth, 11 core, 86 model,
+   50 render, 21 voxel, 409 game). One of the game tests
+   (`a_probe_reaches_a_real_host_and_is_answered_without_joining_it`) binds a
+   real loopback socket and drives the whole status/join path through it — it is
+   the only test here that touches a network, and deliberately so: a probe *is* a
+   client, which is the one thing `FakeSession` cannot prove.
 3. Run it: `WYVEN_BOOT_INGAME=1 cargo run` (or host/join for net changes) and
    confirm no panic over several seconds. In a sandbox, launch in the background and
    poll the log rather than blocking on a foreground `sleep` — `timeout` is not
