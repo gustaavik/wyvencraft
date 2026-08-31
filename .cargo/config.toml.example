@@ -14,3 +14,17 @@
 SHADERC_LIB_DIR = "/usr/local/opt/shaderc/lib"
 VK_ICD_FILENAMES = "/usr/local/etc/vulkan/icd.d/MoltenVK_icd.json"
 VK_DRIVER_FILES = "/usr/local/etc/vulkan/icd.d/MoltenVK_icd.json"
+
+# `wcauth-ticket` is a git dependency on the *private* gustaavik/wcauthserver.
+# libgit2 cannot read the `gh` keyring token or the osxkeychain helper, so route
+# the fetch through the system `git`, which can. Without this, `cargo build` fails
+# with "failed to authenticate when downloading repository" before compiling
+# anything. CI sets CARGO_NET_GIT_FETCH_WITH_CLI instead — `.cargo/config.toml` is
+# gitignored and never reaches it.
+[net]
+git-fetch-with-cli = true
+
+# While co-editing the ticket crate itself, point `wcauth-ticket` at a sibling
+# wcauthserver/ checkout. Leave the Cargo.lock churn this causes uncommitted.
+# [patch."https://github.com/gustaavik/wcauthserver.git"]
+# wcauth-ticket = { path = "../wcauthserver/crates/ticket" }
