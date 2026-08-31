@@ -3960,7 +3960,7 @@ dependencies = [
 [[package]]
 name = "wcauth-ticket"
 version = "0.1.0"
-source = "git+https://github.com/gustaavik/wcauthserver.git?branch=main#eb3ffb0d9f589bfd0a10dd4260542997f75430f6"
+source = "git+https://github.com/gustaavik/wcauthserver.git?branch=main#527762d3844ff4d66d9bd746674cdc3047d3662a"
 dependencies = [
  "ed25519-dalek",
  "thiserror 2.0.20",

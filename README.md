@@ -11,6 +11,15 @@ in — solo or with friends over the network.
 Developer documentation on how the systems communicate — accounts and join tickets,
 the multiplayer wire protocol, and the engine/game seams — is in [`docs/`](docs/README.md).
 
+## Account
+
+Singleplayer needs no account. **Multiplayer does** — a host verifies a signed join
+ticket before admitting a player, and the game has no login screen of its own: the
+[launcher](https://github.com/gustaavik/wc-launcher) signs you in and hands the
+session to the game.
+
+Register at **[wyvencraft.com](https://wyvencraft.com)**.
+
 ## Features
 
 - **Procedural world generation** — seeded, multi-octave Perlin/Simplex noise for
@@ -73,12 +82,12 @@ Logging honours `RUST_LOG` (e.g. `RUST_LOG=info,wyvencraft=debug cargo run`).
 
 Skip the menus with environment variables:
 
-| Variable               | Effect                                    |
-| ---------------------- | ----------------------------------------- |
-| `WYVEN_BOOT_INGAME=1`  | Boot straight into a singleplayer world   |
+| Variable               | Effect                                   |
+| ---------------------- | ---------------------------------------- |
+| `WYVEN_BOOT_INGAME=1`  | Boot straight into a singleplayer world  |
 | `WYVEN_HOST=1`         | Host a session immediately (port `6091`) |
-| `WYVEN_JOIN=addr:port` | Connect to a host immediately             |
-| `WYVEN_WORLD=test`     | Select the world too connect too          |
+| `WYVEN_JOIN=addr:port` | Connect to a host immediately            |
+| `WYVEN_WORLD=test`     | Select the world too connect too         |
 
 ## Controls
 
@@ -101,6 +110,8 @@ Skip the menus with environment variables:
 1. One player chooses **Multiplayer → Host Game** (listens on UDP `6091`).
 2. Others choose **Multiplayer → Join** and enter the host's `address:port`
    (e.g. `192.168.1.20:6091`, or `127.0.0.1:6091` on the same machine).
+
+Everyone taking part needs an account — see [Account](#account).
 
 The connection is host-authoritative over direct/LAN UDP (no NAT traversal — use a
 LAN address or port-forward). The host shares its world seed so all peers generate
