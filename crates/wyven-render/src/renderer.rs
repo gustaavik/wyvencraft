@@ -31,7 +31,17 @@ use super::texture::Texture;
 /// Fallback clear colour used as the menu background (when there is no scene to
 /// draw the procedural sky behind).
 const SKY_COLOR: [f32; 4] = [0.52, 0.70, 0.96, 1.0];
+/// Depth attachment format for every pass here.
+///
+/// A float format is what makes **reversed-Z** worth having: the near plane maps
+/// to `1.0` and the far plane to `0.0` (see `Camera::projection_matrix`), so the
+/// depths that a conventional range would bunch against 1.0 instead spread
+/// across the exponent range near 0. Consequently every depth attachment below
+/// clears to `DEPTH_CLEAR` rather than `1.0`, and every pipeline that tests
+/// depth uses `CompareOp::Greater`.
 const DEPTH_FORMAT: Format = Format::D32_SFLOAT;
+/// "Nothing has been drawn here yet" under reversed-Z — the far plane.
+const DEPTH_CLEAR: f32 = 0.0;
 /// Backdrop for the inventory player preview: a near-black opaque fill matching
 /// the mockup's box. Opaque (not transparent) sidesteps premultiplied-alpha
 /// halos when egui composites the sampled image over the inventory panel.
@@ -450,7 +460,7 @@ impl Renderer {
                 depth_attachment: Some(RenderingAttachmentInfo {
                     load_op: AttachmentLoadOp::Clear,
                     store_op: AttachmentStoreOp::DontCare,
-                    clear_value: Some(ClearValue::Depth(1.0)),
+                    clear_value: Some(ClearValue::Depth(DEPTH_CLEAR)),
                     ..RenderingAttachmentInfo::image_view(depth)
                 }),
                 ..Default::default()
@@ -518,7 +528,7 @@ impl Renderer {
             if let Some(foreground) = scene.foreground.as_ref().filter(|f| !f.is_empty()) {
                 builder
                     .clear_attachments(
-                        [ClearAttachment::Depth(1.0)].into_iter().collect(),
+                        [ClearAttachment::Depth(DEPTH_CLEAR)].into_iter().collect(),
                         [ClearRect {
                             offset: [0, 0],
                             extent: size,
@@ -594,7 +604,7 @@ impl Renderer {
                 depth_attachment: Some(RenderingAttachmentInfo {
                     load_op: AttachmentLoadOp::Clear,
                     store_op: AttachmentStoreOp::DontCare,
-                    clear_value: Some(ClearValue::Depth(1.0)),
+                    clear_value: Some(ClearValue::Depth(DEPTH_CLEAR)),
                     ..RenderingAttachmentInfo::image_view(depth)
                 }),
                 ..Default::default()
@@ -673,7 +683,7 @@ impl Renderer {
                 depth_attachment: Some(RenderingAttachmentInfo {
                     load_op: AttachmentLoadOp::Clear,
                     store_op: AttachmentStoreOp::DontCare,
-                    clear_value: Some(ClearValue::Depth(1.0)),
+                    clear_value: Some(ClearValue::Depth(DEPTH_CLEAR)),
                     ..RenderingAttachmentInfo::image_view(depth)
                 }),
                 ..Default::default()

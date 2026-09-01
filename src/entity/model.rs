@@ -17,7 +17,7 @@ use crate::core::Direction;
 use crate::core::math::yaw_matrix;
 use crate::entity::kind::QuadrupedVisual;
 use wyven_render::mesh::CpuMesh;
-use wyven_render::vertex::{ChunkVertex, NO_TINT};
+use wyven_render::vertex::{ChunkVertex, NO_OVERLAY, NO_TINT};
 
 /// One rectangular box part of a model, in model-local space (origin at feet).
 #[derive(Debug, Clone, Copy)]
@@ -507,6 +507,8 @@ pub fn push_box_with(
                 // Skin sheets live in the atlas, not the block texture array.
                 layer: 0,
                 tint: NO_TINT,
+                overlay_layer: NO_OVERLAY,
+                overlay_tint: NO_TINT,
             }
         });
         mesh.push_quad(quad);

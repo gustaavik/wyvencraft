@@ -11,6 +11,8 @@ layout(location = 2) in vec3 v_normal;
 layout(location = 3) flat in uint v_flags;
 layout(location = 4) flat in uint v_layer;
 layout(location = 5) in vec4 v_tint;
+layout(location = 6) flat in uint v_overlay_layer;
+layout(location = 7) in vec4 v_overlay_tint;
 
 layout(set = 0, binding = 0) uniform sampler2DArray block_textures;
 
@@ -27,6 +29,9 @@ layout(location = 0) out vec4 f_color;
 const uint ANIM_FRAMES_SHIFT = 8u;
 const uint ANIM_FPS_SHIFT = 16u;
 const uint ANIM_FIELD_MASK = 0xffu;
+
+// Must match render::vertex::NO_OVERLAY.
+const uint NO_OVERLAY = 0xffffffffu;
 
 void main() {
     // An animated texture occupies `frames` consecutive layers, so stepping the
@@ -48,6 +53,16 @@ void main() {
     // elsewhere, so this is the identity for a texture that carries its own
     // colour.
     vec3 albedo = tex.rgb * v_tint.rgb;
+    // A second layer painted over the first, the way the grass block's tinted
+    // side sits on its dirt side. Authored as two coincident quads, merged onto
+    // one by the mesher, and blended here rather than depth-tested: coplanar
+    // geometry has no dependable draw order. The alpha test above deliberately
+    // does not apply to it — an overlay fades against what it covers rather
+    // than cutting out against the background.
+    if (v_overlay_layer != NO_OVERLAY) {
+        vec4 over = texture(block_textures, vec3(v_uv, float(v_overlay_layer)));
+        albedo = mix(albedo, over.rgb * v_overlay_tint.rgb, over.a);
+    }
     // Baked face shade (v_ao) plus a time-of-day directional term: ambient floor
     // lifted by the sun/moon contribution, then tinted by the light color.
     float ambient = pc.light_color.w;

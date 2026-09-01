@@ -112,7 +112,10 @@ pub fn create(
                     // Transparent geometry tests depth but doesn't write it, so it
                     // doesn't occlude other transparent surfaces incorrectly.
                     write_enable: !transparent,
-                    compare_op: CompareOp::Less,
+                    // `Greater`, not `Less`: the camera is reversed-Z, so a
+                    // nearer surface has the *larger* depth. See
+                    // `Camera::projection_matrix`.
+                    compare_op: CompareOp::Greater,
                 }),
                 ..Default::default()
             }),

@@ -24,7 +24,7 @@ use wyven_model::silhouette;
 use wyven_render::mesh::CpuMesh;
 use wyven_render::texture::{TILE_SIZE, atlas_uv};
 use wyven_render::tile_registry::TileRgba;
-use wyven_render::vertex::{ChunkVertex, NO_TINT};
+use wyven_render::vertex::{ChunkVertex, NO_OVERLAY, NO_TINT};
 
 use super::culled::face_shade;
 
@@ -97,6 +97,8 @@ pub fn push_item_sprite(
                 flags: 0,
                 layer: 0,
                 tint: NO_TINT,
+                overlay_layer: NO_OVERLAY,
+                overlay_tint: NO_TINT,
             }
         });
         mesh.push_quad(verts);

@@ -50,8 +50,28 @@ impl Camera {
         Mat4::look_to_rh(self.position, self.forward, Vec3::Y)
     }
 
+    /// Projection for drawing: **reversed-Z**, so the near plane maps to depth
+    /// `1.0` and the far plane to `0.0`.
+    ///
+    /// Swapping `near` and `far` is all reversing takes — `perspective_rh` maps
+    /// its `z_near` argument to 0 and its `z_far` to 1, so handing it the far
+    /// plane as "near" inverts the range exactly. Every pipeline that depth-tests
+    /// therefore compares with [`CompareOp::Greater`] and every depth attachment
+    /// clears to `0.0`.
+    ///
+    /// This is not a stylistic choice. With a conventional `[0,1]` range and
+    /// `near = 0.1`, every depth value in the world crowds into `0.993..=0.9996`,
+    /// where a float32's exponent is pinned and only the mantissa separates one
+    /// surface from another — so the 2 mm nudge that holds the grass overlay off
+    /// the block beneath it is worth 209 ULPs at 4 blocks but 0.2 ULPs at 128,
+    /// and coplanar faces z-fight across most of the render distance. Reversed-Z
+    /// puts the far plane at 0 where the exponent has room to work, and the
+    /// float distribution then cancels the perspective divide's bunching almost
+    /// exactly.
+    ///
+    /// [`CompareOp::Greater`]: vulkano::pipeline::graphics::depth_stencil::CompareOp::Greater
     pub fn projection_matrix(&self) -> Mat4 {
-        let mut proj = Mat4::perspective_rh(self.fov_y, self.aspect, self.near, self.far);
+        let mut proj = Mat4::perspective_rh(self.fov_y, self.aspect, self.far, self.near);
         // Flip Y for Vulkan's clip space (origin top-left, +Y down).
         proj.y_axis.y *= -1.0;
         proj
@@ -71,8 +91,15 @@ impl Camera {
         (self.projection_matrix() * view_rotation).inverse()
     }
 
-    /// Frustum for culling. Built from the *unflipped* view-proj so plane math
-    /// stays in conventional world orientation.
+    /// Frustum for culling. Built from the *unflipped, forward-Z* view-proj so
+    /// plane math stays in conventional world orientation.
+    ///
+    /// Deliberately **not** [`Self::projection_matrix`]. `Frustum::from_view_proj`
+    /// extracts its near/far pair as `row3 ± row2`, which assumes a depth that
+    /// grows with distance; hand it a reversed projection and the far plane comes
+    /// out as a second copy of the near one, silently uncapping the frustum and
+    /// culling nothing at range. `near`, `far`, `fov_y` and `aspect` are shared
+    /// with the drawing projection, so this still bounds exactly what gets drawn.
     pub fn frustum(&self) -> Frustum {
         let proj = Mat4::perspective_rh(self.fov_y, self.aspect, self.near, self.far);
         Frustum::from_view_proj(proj * self.view_matrix())
@@ -179,6 +206,44 @@ mod tests {
             narrow > 0.1,
             "the corner is further from the eye than the near plane itself, got {narrow}"
         );
+    }
+
+    /// Depth in NDC, for the reversed-Z assertions below.
+    fn ndc_z(camera: &Camera, world: Vec3) -> f32 {
+        let clip = camera.view_projection() * world.extend(1.0);
+        clip.z / clip.w
+    }
+
+    /// The invariant the whole depth setup rests on: near maps to 1, far to 0.
+    /// Flip this and every pipeline's `CompareOp::Greater` silently discards the
+    /// world instead of drawing it.
+    #[test]
+    fn the_projection_is_reversed_z() {
+        let camera = camera();
+        let near = ndc_z(&camera, Vec3::new(0.0, 0.0, -camera.near));
+        let far = ndc_z(&camera, Vec3::new(0.0, 0.0, -camera.far));
+
+        assert!(
+            (near - 1.0).abs() < 1.0e-4,
+            "near plane gave {near}, want 1.0"
+        );
+        assert!(far.abs() < 1.0e-4, "far plane gave {far}, want 0.0");
+    }
+
+    /// What reversed-Z is actually bought with: at 128 blocks — the default
+    /// render distance — the 2 mm coplanar nudge must still be worth many
+    /// float32 ULPs, or coplanar faces z-fight. Forward-Z managed 0.2 here.
+    #[test]
+    fn the_coplanar_nudge_survives_the_far_end_of_the_render_distance() {
+        const NUDGE: f32 = 0.002;
+        let camera = camera();
+
+        let back = ndc_z(&camera, Vec3::new(0.0, 0.0, -128.0));
+        let front = ndc_z(&camera, Vec3::new(0.0, 0.0, -128.0 + NUDGE));
+        let ulps = (front - back).abs() / (back * f32::EPSILON);
+
+        assert!(front > back, "the nearer face must win a `Greater` test");
+        assert!(ulps > 100.0, "only {ulps} ULPs of separation at 128 blocks");
     }
 
     #[test]

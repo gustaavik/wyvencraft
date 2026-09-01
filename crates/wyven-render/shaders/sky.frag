@@ -24,9 +24,13 @@ float hash(vec3 p) {
 }
 
 void main() {
-    // World-space view ray: unproject the far-plane point at this pixel. The
-    // matrix has no translation, so the result is a pure direction.
-    vec4 world = pc.inv_view_proj * vec4(v_ndc, 1.0, 1.0);
+    // World-space view ray: unproject the far-plane point at this pixel — depth
+    // is reversed, so the far plane is z = 0 (see Camera::projection_matrix).
+    // The matrix has no translation, so the result is a pure direction, and any
+    // depth on this pixel's ray would normalize to the same one; matching the
+    // plane sky.vert places its triangle on is what keeps the two readable as a
+    // pair.
+    vec4 world = pc.inv_view_proj * vec4(v_ndc, 0.0, 1.0);
     vec3 ray = normalize(world.xyz / world.w);
 
     vec3 sun_dir = normalize(pc.sun_dir.xyz);

@@ -188,6 +188,8 @@ mod tests {
             flags: 7,
             layer: 3,
             tint: [1, 2, 3, 4],
+            overlay_layer: 9,
+            overlay_tint: [5, 6, 7, 8],
         }
     }
 

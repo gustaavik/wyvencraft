@@ -79,7 +79,10 @@ pub fn create(
                     // Test against the opaque world so lines don't show through
                     // terrain, but don't write: lines shouldn't occlude anything.
                     write_enable: false,
-                    compare_op: CompareOp::Less,
+                    // `Greater`, not `Less`: the camera is reversed-Z, so a
+                    // nearer surface has the *larger* depth. See
+                    // `Camera::projection_matrix`.
+                    compare_op: CompareOp::Greater,
                 }),
                 ..Default::default()
             }),

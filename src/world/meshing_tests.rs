@@ -19,7 +19,7 @@ use crate::world::meshing::{ChunkMeshOutput, mesh_block_overlay, mesh_chunk, pus
 use crate::world::{BlockCatalog, Chunk, FaceTextures};
 use wyven_render::block_textures::AnimatedLayers;
 use wyven_render::vertex::{ANIM_FIELD_MASK, ANIM_FPS_SHIFT, ANIM_FRAMES_SHIFT};
-use wyven_render::{CpuMesh, NO_TINT, texture::atlas_uv};
+use wyven_render::{CpuMesh, NO_OVERLAY, NO_TINT, texture::atlas_uv};
 
 /// A fluid animation on distinct layer runs, so a face's column is
 /// identifiable from the layer alone. Every fluid block shares one entry.
@@ -359,10 +359,11 @@ fn a_blockbench_block_meshes_into_the_array_buffers() {
     assert!(out.transparent.is_empty(), "no blended atlas geometry");
     assert!(out.models.is_empty(), "no per-model bucket");
     assert!(!out.array_opaque.is_empty());
-    // Six cube faces plus the four tinted overlay sides.
-    assert_eq!(out.array_opaque.vertices.len(), 10 * 4);
-    // Confined to its own cell, give or take the sliver the overlay is
-    // nudged out by so it wins the depth test against the cube beneath it.
+    // Six cube faces and no more: the four tinted overlay sides ride along on
+    // the side faces as a second layer rather than as quads of their own.
+    assert_eq!(out.array_opaque.vertices.len(), 6 * 4);
+    // Confined strictly to its own cell — with nothing coplanar left to nudge
+    // clear, no vertex has any reason to leave it. The slack is for rounding.
     const SLACK: f32 = 0.01;
     for v in &out.array_opaque.vertices {
         assert_ne!(
@@ -439,12 +440,31 @@ fn only_tinted_faces_take_the_biome_colour() {
     chunk.set(LocalPos { x: 4, y: 10, z: 6 }, grass);
     let out = mesh_chunk(&chunk, &catalog, |_| BlockId::AIR, |_, _, _| BIOME);
 
+    // The grass top is tinted directly.
     let tinted = out.array_opaque.vertices.iter().filter(|v| v.tint == BIOME);
-    // The grass top plus the four side overlays.
-    assert_eq!(tinted.count(), 5 * 4);
+    assert_eq!(tinted.count(), 4, "the top face, and only it");
     assert!(
         out.array_opaque.vertices.iter().any(|v| v.tint == NO_TINT),
-        "the dirt bottom and the base sides must stay untinted"
+        "the dirt bottom and the sides must stay untinted"
+    );
+
+    // The four sides carry the same colour on their overlay instead, which is
+    // the layer the tint was authored on. Tinting the side itself would paint
+    // the dirt green.
+    let overlaid: Vec<_> = out
+        .array_opaque
+        .vertices
+        .iter()
+        .filter(|v| v.overlay_layer != NO_OVERLAY)
+        .collect();
+    assert_eq!(overlaid.len(), 4 * 4, "the four sides");
+    assert!(
+        overlaid.iter().all(|v| v.overlay_tint == BIOME),
+        "every overlay takes the biome colour"
+    );
+    assert!(
+        overlaid.iter().all(|v| v.tint == NO_TINT),
+        "and the side under it does not"
     );
 }
 
@@ -508,10 +528,12 @@ fn a_random_yaw_block_turns_with_its_position() {
     }
 }
 
-/// Two elements sharing a box is how the grass overlay is authored; without
-/// the nudge the overlay would lose the depth test and never appear.
+/// Two elements sharing a box is how the grass overlay is authored. It must not
+/// become coincident geometry: the depth buffer cannot separate two quads in one
+/// plane at range, which is what made distant grass flicker as the camera turned.
+/// The overlay rides on the side face as a second texture layer instead.
 #[test]
-fn the_grass_overlay_sits_just_outside_the_block_it_covers() {
+fn the_grass_overlay_rides_on_the_face_it_covers() {
     let content = GameContent::load();
     let catalog = content.appearance();
     let grass = content.blocks.find("grass").expect("shipped block");
@@ -520,18 +542,30 @@ fn the_grass_overlay_sits_just_outside_the_block_it_covers() {
     chunk.set(LocalPos { x: 0, y: 10, z: 0 }, grass);
     let out = mesh_chunk(&chunk, &catalog, |_| BlockId::AIR, |_, _, _| NO_TINT);
 
-    // North is -Z, so the overlay pokes out below z = 0.
-    let min_z = out
+    let sides: Vec<_> = out
         .array_opaque
         .vertices
         .iter()
-        .map(|v| v.position[2])
-        .fold(f32::MAX, f32::min);
+        .filter(|v| v.overlay_layer != NO_OVERLAY)
+        .collect();
+    assert_eq!(sides.len(), 4 * 4, "one overlay per side face");
     assert!(
-        min_z < 0.0,
-        "the overlay should sit proud of the cube: {min_z}"
+        sides.iter().all(|v| v.normal[1] == 0.0),
+        "the top and bottom take no overlay"
     );
-    assert!(min_z > -0.01, "but only barely: {min_z}");
+    assert!(
+        sides.iter().all(|v| v.overlay_layer != v.layer),
+        "the overlay must be a different texture from the side under it"
+    );
+
+    // And with nothing coplanar left, no vertex needs nudging out of the cell.
+    for v in &out.array_opaque.vertices {
+        assert!(
+            (0.0..=1.0).contains(&v.position[2]),
+            "z {:?} left the cell",
+            v.position
+        );
+    }
 }
 
 /// Two of the same plant must land at different angles, and each must
