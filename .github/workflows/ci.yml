@@ -44,7 +44,7 @@ jobs:
     name: rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # No argument: installs the toolchain and components named by
       # rust-toolchain.toml, so CI and developer machines never drift.
@@ -67,7 +67,7 @@ jobs:
     name: clippy + tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # `wcauth-ticket` is a git dependency on the private gustaavik/wcauthserver
       # repo. The built-in GITHUB_TOKEN is scoped to this repo only, so a PAT with
