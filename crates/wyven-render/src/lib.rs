@@ -33,4 +33,4 @@ pub use tile_registry::{
     MISSING_TEXTURE, NoTiles, ReservedTiles, TileEntry, TileRegistry, TileRgba, TileSource,
     decode_tile,
 };
-pub use vertex::{ChunkVertex, EntityVertex, LineVertex, NO_TINT, anim_flags};
+pub use vertex::{ChunkVertex, EntityVertex, LineVertex, NO_OVERLAY, NO_TINT, anim_flags};

@@ -57,6 +57,11 @@ use super::tile_registry::TileRgba;
 /// an array image, so this is an equality, not a maximum.
 pub const BLOCK_TEXTURE_SIZE: u32 = 256;
 
+/// Anisotropy ceiling for the block texture array, clamped to the device limit.
+/// 8 is the usual knee in the quality-per-bandwidth curve, and well under the 16
+/// every desktop driver offers.
+const MAX_ANISOTROPY: f32 = 8.0;
+
 /// Full mip chain down to 1×1: `log2(256) + 1`.
 pub const BLOCK_MIP_LEVELS: u32 = 9;
 
@@ -557,6 +562,21 @@ impl BlockTextureArray {
         // Nearest magnification keeps the art pixel-crisp up close; linear
         // minification through the mip chain is what stops distant terrain
         // shimmering, which 256-pixel faces do badly without it.
+        //
+        // Anisotropy is the other half of that. A mip level is chosen for the
+        // worse-compressed axis, so a ground plane seen edge-on — most of what a
+        // voxel world shows at range — is blurred along one axis and still
+        // aliased along the other, and the level flips as the camera turns.
+        // Gated on the feature actually being enabled so the sampler stays valid
+        // if that request is ever relaxed, and clamped to what the device offers.
+        let anisotropy = ctx.device().enabled_features().sampler_anisotropy.then(|| {
+            let limit = ctx
+                .device()
+                .physical_device()
+                .properties()
+                .max_sampler_anisotropy;
+            MAX_ANISOTROPY.min(limit)
+        });
         let sampler = Sampler::new(
             ctx.device().clone(),
             SamplerCreateInfo {
@@ -565,6 +585,7 @@ impl BlockTextureArray {
                 mipmap_mode: SamplerMipmapMode::Linear,
                 address_mode: [SamplerAddressMode::ClampToEdge; 3],
                 lod: 0.0..=(BLOCK_MIP_LEVELS as f32),
+                anisotropy,
                 ..Default::default()
             },
         )
@@ -583,7 +604,12 @@ impl BlockTextureArray {
         .map_err(|e| format!("block texture descriptor set: {e}"))?;
 
         log::info!(
-            "block texture array: {layers} layers of {BLOCK_TEXTURE_SIZE}px, {BLOCK_MIP_LEVELS} mips"
+            "block texture array: {layers} layers of {BLOCK_TEXTURE_SIZE}px, \
+             {BLOCK_MIP_LEVELS} mips, anisotropy {}",
+            match anisotropy {
+                Some(n) => n.to_string(),
+                None => "off".to_string(),
+            }
         );
 
         Ok(Self {

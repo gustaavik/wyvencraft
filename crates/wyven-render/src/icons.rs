@@ -124,8 +124,17 @@ pub fn frame_authored(local: Mat4) -> Mat4 {
 ///
 /// The depth range is deliberately loose: fitting only considers the two axes
 /// the camera shows, so a deep model must not be clipped front-to-back for it.
+///
+/// Reversed-Z, like [`crate::Camera::projection_matrix`] — near and far are
+/// handed over swapped. Precision is not the reason (an ortho depth is linear
+/// and never had the perspective bunching to fix); agreeing with the pipeline
+/// is. The sheet is drawn with the voxel pipeline, which depth-tests with
+/// `CompareOp::Greater`, and a conventional ortho here would not blank the sheet
+/// — it would *invert* it. Framed geometry lands around ndc z 0.5, comfortably
+/// past the `0.0` clear, so every fragment still passes; the one that wins would
+/// be the farthest, drawing every icon inside-out.
 pub fn view_projection() -> Mat4 {
-    let mut proj = Mat4::orthographic_rh(-0.5, 0.5, -0.5, 0.5, -4.0, 4.0);
+    let mut proj = Mat4::orthographic_rh(-0.5, 0.5, -0.5, 0.5, 4.0, -4.0);
     proj.y_axis.y *= -1.0;
     proj
 }
@@ -200,7 +209,7 @@ mod tests {
                 "{bounds:?} projects to {min}..{max}, outside the cell"
             );
             assert!(
-                min.z >= -1.0 && max.z <= 1.0,
+                (0.0..=1.0).contains(&min.z) && (0.0..=1.0).contains(&max.z),
                 "{bounds:?} projects to depth {}..{}, outside the clip range",
                 min.z,
                 max.z

@@ -8,6 +8,8 @@ layout(location = 3) in float ao;
 layout(location = 4) in uint flags;
 layout(location = 5) in uint layer;
 layout(location = 6) in vec4 tint;
+layout(location = 7) in uint overlay_layer;
+layout(location = 8) in vec4 overlay_tint;
 
 // Shared with voxel.frag — layout must stay identical across both stages.
 layout(push_constant) uniform PushConstants {
@@ -24,6 +26,8 @@ layout(location = 2) out vec3 v_normal;
 layout(location = 3) flat out uint v_flags;
 layout(location = 4) flat out uint v_layer;
 layout(location = 5) out vec4 v_tint;
+layout(location = 6) flat out uint v_overlay_layer;
+layout(location = 7) out vec4 v_overlay_tint;
 
 void main() {
     gl_Position = pc.view_proj * vec4(position, 1.0);
@@ -33,4 +37,6 @@ void main() {
     v_flags = flags;
     v_layer = layer;
     v_tint = tint;
+    v_overlay_layer = overlay_layer;
+    v_overlay_tint = overlay_tint;
 }

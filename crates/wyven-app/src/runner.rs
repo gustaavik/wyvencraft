@@ -93,8 +93,10 @@ struct App<G: Game> {
 
 impl<G: Game> App<G> {
     fn new(game: G) -> Self {
-        // MoltenVK is a "portability subset" device, and two features must stay
-        // on or the app aborts at startup:
+        // Every feature here is a hard requirement: a device lacking one fails
+        // device creation outright rather than degrading. The first two are
+        // gated by MoltenVK's "portability subset"; the third is plain optional
+        // core, and universally supported.
         let config = VulkanoConfig {
             device_features: DeviceFeatures {
                 // The world pass uses dynamic rendering (no VkRenderPass).
@@ -102,6 +104,11 @@ impl<G: Game> App<G> {
                 // egui uploads its font/texture images with a component
                 // swizzle, which the portability subset gates behind this.
                 image_view_format_swizzle: true,
+                // The block texture array filters anisotropically. A voxel world
+                // is mostly ground plane seen edge-on, which is the exact case
+                // an isotropic mip chain over-blurs in one axis and aliases in
+                // the other — so distant terrain shimmers as the camera turns.
+                sampler_anisotropy: true,
                 ..DeviceFeatures::empty()
             },
             ..VulkanoConfig::default()

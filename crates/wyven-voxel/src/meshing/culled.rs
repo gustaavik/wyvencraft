@@ -11,7 +11,7 @@ use wyven_core::math::rotate_y;
 use wyven_core::{Aabb, BlockId, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, Direction};
 use wyven_render::mesh::CpuMesh;
 use wyven_render::texture::atlas_uv;
-use wyven_render::vertex::{ChunkVertex, NO_TINT, anim_flags};
+use wyven_render::vertex::{ChunkVertex, NO_OVERLAY, NO_TINT, anim_flags};
 
 /// How many biome colours a block model's `tintindex` can choose between.
 /// Minecraft's numbering: `0` grass, `1` foliage, `2` water.
@@ -343,6 +343,10 @@ pub fn mesh_chunk(
                             flags,
                             layer,
                             tint: vertex_tint,
+                            // The cube mesher draws one texture per face; an
+                            // overlay only ever comes off a block model.
+                            overlay_layer: NO_OVERLAY,
+                            overlay_tint: NO_TINT,
                         }
                     });
 
@@ -393,13 +397,17 @@ fn push_baked_model(
         {
             continue;
         }
-        let tint = match quad.tint {
+        let mut resolve_tint = |index: Option<u8>| match index {
             Some(index) => {
                 let slot = usize::from(index).min(TINT_SOURCES - 1);
                 *biome_tints[slot].get_or_insert_with(|| tint(world.x, world.z, index))
             }
             None => NO_TINT,
         };
+        let vertex_tint = resolve_tint(quad.tint);
+        // An overlay carries its own `tintindex`: the grass block tints the
+        // grass growing over its side, not the dirt underneath.
+        let overlay_tint = resolve_tint(quad.overlay_tint);
         let place = |p: Vec3| match yaw {
             Some(yaw) => base + centre + rotate_y(p - centre, yaw),
             None => base + p,
@@ -415,7 +423,9 @@ fn push_baked_model(
             ao: quad.shade,
             flags: 0,
             layer: quad.layer,
-            tint,
+            tint: vertex_tint,
+            overlay_layer: quad.overlay_layer.unwrap_or(NO_OVERLAY),
+            overlay_tint,
         });
         if matches!(render, RenderType::Transparent) {
             out.array_transparent.push_quad(vertices);
@@ -446,6 +456,8 @@ pub fn mesh_block_overlay(box_: Aabb, tile: u32) -> CpuMesh {
             flags: 0,
             layer: 0,
             tint: NO_TINT,
+            overlay_layer: NO_OVERLAY,
+            overlay_tint: NO_TINT,
         });
         mesh.push_quad(quad);
     }
@@ -486,6 +498,8 @@ pub fn push_item_cube(
                 flags: 0,
                 layer: 0,
                 tint: NO_TINT,
+                overlay_layer: NO_OVERLAY,
+                overlay_tint: NO_TINT,
             }
         });
         mesh.push_quad(quad);
