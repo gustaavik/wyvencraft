@@ -36,6 +36,11 @@ pub const fn anim_flags(frames: u8, fps: u8) -> u32 {
 /// rather than left to `Default`, whose zeroes would paint everything black.
 pub const NO_TINT: [u8; 4] = [255; 4];
 
+/// [`ChunkVertex::overlay_layer`] for a face that has no overlay — almost all of
+/// them. Spelled as a sentinel rather than a flag bit so the eight reserved low
+/// bits of [`ChunkVertex::flags`] stay free; `voxel_array.frag` mirrors it.
+pub const NO_OVERLAY: u32 = u32::MAX;
+
 /// Vertex for voxel/chunk geometry: world position, face normal, texture UV, a
 /// baked ambient-occlusion term, per-face shader-effect flags, and — for
 /// geometry drawn against the block texture array — which layer to sample and
@@ -63,6 +68,23 @@ pub struct ChunkVertex {
     /// model marked `tintindex`. [`NO_TINT`] leaves the texture as authored.
     #[format(R8G8B8A8_UNORM)]
     pub tint: [u8; 4],
+    /// A second block-texture-array layer, alpha-blended over `layer` by
+    /// `voxel_array.frag`, or [`NO_OVERLAY`] for none.
+    ///
+    /// This is what lets the grass block's tinted side overlay ride on the same
+    /// quad as the dirt side beneath it, instead of being a second quad in the
+    /// same plane. Coincident geometry cannot be depth-ordered reliably — under
+    /// the old forward-Z range the 2 mm the mesher pushes such faces apart was
+    /// worth a fifth of a depth ULP at 128 blocks, and distant grass crawled as
+    /// the camera turned. Blending sidesteps the ordering question entirely, and
+    /// along the way replaces the fragment shader's hard alpha test on the
+    /// overlay with a filtered edge.
+    #[format(R32_UINT)]
+    pub overlay_layer: u32,
+    /// Biome tint for [`Self::overlay_layer`], independent of [`Self::tint`] —
+    /// the grass block tints its overlay and not the side under it.
+    #[format(R8G8B8A8_UNORM)]
+    pub overlay_tint: [u8; 4],
 }
 
 impl Default for ChunkVertex {
@@ -75,6 +97,8 @@ impl Default for ChunkVertex {
             flags: 0,
             layer: 0,
             tint: NO_TINT,
+            overlay_layer: NO_OVERLAY,
+            overlay_tint: NO_TINT,
         }
     }
 }

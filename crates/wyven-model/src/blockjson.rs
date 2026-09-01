@@ -80,6 +80,21 @@ pub struct BlockQuad {
     /// of drawing the texture's own. Minecraft's index selects among tint
     /// sources — `0` grass, `1` foliage — and `None` here is its `-1`.
     pub tint: Option<u8>,
+    /// A second texture drawn *over* [`Self::texture`], alpha-blended, with its
+    /// own tint in [`Self::overlay_tint`].
+    ///
+    /// This is how a face that Minecraft would author as two coincident quads
+    /// on separate render layers — the grass block's dirt side and its tinted
+    /// grass overlay — becomes one quad here. Merging them is not an
+    /// optimisation: two coplanar quads have no dependable depth order wherever
+    /// the depth buffer cannot separate them, which is what made distant grass
+    /// crawl as the camera turned. It also upgrades the overlay from the
+    /// fragment shader's hard alpha test to a blend, so its edge filters down
+    /// smoothly with the mip chain instead of snapping on and off.
+    pub overlay: Option<usize>,
+    /// `tintindex` of [`Self::overlay`], independent of [`Self::tint`] — the
+    /// grass block tints its overlay and not the side beneath it.
+    pub overlay_tint: Option<u8>,
     /// Baked directional face shade, or `1.0` where the element opted out with
     /// `"shade": false`.
     pub shade: f32,
@@ -131,7 +146,7 @@ pub fn load(bytes: &[u8], dir: &str, source: &dyn ContentSource) -> Result<Block
 
     let mut textures = TextureSet::default();
     let mut quads = Vec::new();
-    let mut planes: HashMap<[i32; 4], u32> = HashMap::new();
+    let mut planes: HashMap<[i32; 4], Vec<usize>> = HashMap::new();
 
     // A generated model's texture has to be resolved *before* its elements
     // exist, because the alpha is what decides where the geometry goes.
@@ -309,7 +324,7 @@ impl Element {
         dir: &str,
         source: &dyn ContentSource,
         textures: &mut TextureSet,
-        planes: &mut HashMap<[i32; 4], u32>,
+        planes: &mut HashMap<[i32; 4], Vec<usize>>,
         out: &mut Vec<BlockQuad>,
     ) -> Result<(), String> {
         let a = Vec3::from(self.from);
@@ -352,12 +367,12 @@ impl Element {
             let positions: [Vec3; 4] =
                 std::array::from_fn(|i| transform.apply(corners[i]) / PIXELS_PER_BLOCK);
 
-            // Push co-planar faces apart in draw order so the later one wins
-            // the depth test instead of z-fighting with what it overlays.
-            let depth = planes.entry(plane_key(normal, positions[0])).or_insert(0);
-            let nudge = normal * (*depth as f32 * COPLANAR_EPSILON);
-            *depth += 1;
-
+            let tint = u8::try_from(face.tintindex).ok();
+            let shade = if self.shade {
+                super::mesh::shade(normal)
+            } else {
+                1.0
+            };
             let cull = match face.cullface.as_deref() {
                 Some(cull) => {
                     let cull = FaceDir::from_name(cull)
@@ -379,18 +394,42 @@ impl Element {
                 None => None,
             };
 
+            // Faces that land on the same plane need separating, one way or
+            // another. A face that covers an earlier one *exactly* — same
+            // corners, same UVs, same culling and shading, differing only in
+            // texture and tint — becomes that quad's overlay and emits no
+            // geometry at all. That is the grass block, and it is the case worth
+            // catching: coincident geometry has no dependable depth order.
+            let coplanar = planes.entry(plane_key(normal, positions[0])).or_default();
+            if let Some(&under) = coplanar.iter().find(|&&i| {
+                let q: &BlockQuad = &out[i];
+                q.overlay.is_none()
+                    && q.positions == positions
+                    && q.uvs == uvs
+                    && q.cull == cull
+                    && q.shade == shade
+            }) {
+                out[under].overlay = Some(texture);
+                out[under].overlay_tint = tint;
+                continue;
+            }
+
+            // Otherwise the faces genuinely differ, and the later one is pushed
+            // clear along its normal so it wins the depth test rather than
+            // fighting for it. One nudge per quad already standing on the plane.
+            let nudge = normal * (coplanar.len() as f32 * COPLANAR_EPSILON);
+            coplanar.push(out.len());
+
             out.push(BlockQuad {
                 positions: positions.map(|p| p + nudge),
                 normal,
                 uvs,
                 texture,
                 cull,
-                tint: u8::try_from(face.tintindex).ok(),
-                shade: if self.shade {
-                    super::mesh::shade(normal)
-                } else {
-                    1.0
-                },
+                tint,
+                overlay: None,
+                overlay_tint: None,
+                shade,
             });
         }
         Ok(())
@@ -740,21 +779,52 @@ mod tests {
     }
 
     /// Two elements occupying the same box is how Minecraft spells the grass
-    /// block's tinted side overlay. Without the nudge the second one loses the
-    /// depth test everywhere and is simply invisible.
+    /// block's tinted side overlay. Coincident geometry has no dependable depth
+    /// order, so the covering face must not become a second quad at all.
     #[test]
-    fn a_coplanar_face_is_nudged_clear_of_the_one_it_overlays() {
+    fn a_face_exactly_covering_another_becomes_its_overlay() {
         let json = r##"{
             "textures": { "0": "../../textures/blocks/a", "1": "../../textures/blocks/b" },
             "elements": [
                 { "from": [0,0,0], "to": [16,16,16],
                   "faces": { "north": {"uv": [0,0,16,16], "texture": "#0"} } },
                 { "from": [0,0,0], "to": [16,16,16],
-                  "faces": { "north": {"uv": [0,0,16,16], "texture": "#1"} } }
+                  "faces": { "north": {"uv": [0,0,16,16], "texture": "#1", "tintindex": 0} } }
             ]
         }"##;
         let model = load_inline(json).expect("loads");
-        assert_eq!(model.quads.len(), 2);
+
+        assert_eq!(model.quads.len(), 1, "the two faces merged into one quad");
+        let quad = &model.quads[0];
+        assert_eq!(quad.texture, 0, "the earlier face is the base");
+        assert_eq!(quad.overlay, Some(1), "the later face is the overlay");
+        assert_eq!(quad.tint, None, "the base keeps its own (absent) tint");
+        assert_eq!(quad.overlay_tint, Some(0), "and the overlay keeps its own");
+        for p in quad.positions {
+            assert!(
+                p.min_element() >= 0.0 && p.max_element() <= 1.0,
+                "{p} left the cell — a merged face needs no nudge"
+            );
+        }
+    }
+
+    /// The fallback, for coplanar faces that are *not* interchangeable. Here the
+    /// second face covers only half the first, so it cannot be folded in and has
+    /// to be pushed clear to win the depth test instead.
+    #[test]
+    fn a_partly_coplanar_face_is_nudged_clear_of_the_one_it_overlaps() {
+        let json = r##"{
+            "textures": { "0": "../../textures/blocks/a", "1": "../../textures/blocks/b" },
+            "elements": [
+                { "from": [0,0,0], "to": [16,16,16],
+                  "faces": { "north": {"uv": [0,0,16,16], "texture": "#0"} } },
+                { "from": [0,0,0], "to": [8,16,16],
+                  "faces": { "north": {"uv": [0,0,8,16], "texture": "#1"} } }
+            ]
+        }"##;
+        let model = load_inline(json).expect("loads");
+        assert_eq!(model.quads.len(), 2, "no merge — the faces differ");
+        assert!(model.quads.iter().all(|q| q.overlay.is_none()));
 
         // North is -Z, so the overlay sits slightly further out (smaller z).
         let base = model.quads[0].positions[0].z;

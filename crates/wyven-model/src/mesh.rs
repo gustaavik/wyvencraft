@@ -13,7 +13,7 @@ use wyven_core::math::yaw_matrix;
 use wyven_render::mesh::CpuMesh;
 
 use super::display::ItemTransform;
-use wyven_render::vertex::{ChunkVertex, NO_TINT};
+use wyven_render::vertex::{ChunkVertex, NO_OVERLAY, NO_TINT};
 
 /// Triangle geometry in model space: Y-up, right-handed, one block = 1.0, UVs
 /// with a top-left origin. `positions`, `normals` and `uvs` are parallel arrays
@@ -96,6 +96,8 @@ impl ModelMesh {
                 // of the block texture array, and is never biome-tinted.
                 layer: 0,
                 tint: NO_TINT,
+                overlay_layer: NO_OVERLAY,
+                overlay_tint: NO_TINT,
             }
         });
         mesh.push_indexed(vertices, self.indices.iter().copied());

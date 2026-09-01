@@ -39,6 +39,11 @@ pub struct BakedQuad {
     /// Which biome colour to multiply in, from `tintindex` — `0` grass, `1`
     /// foliage. `None` draws the texture's own colour.
     pub tint: Option<u8>,
+    /// A second layer blended over [`Self::layer`] by the fragment shader, with
+    /// its own tint. See [`wyven_model::blockjson::BlockQuad::overlay`] for why
+    /// this is a layer rather than a second coplanar quad.
+    pub overlay_layer: Option<u32>,
+    pub overlay_tint: Option<u8>,
     pub shade: f32,
 }
 
@@ -77,6 +82,10 @@ impl BakedBlockModel {
                     .resolve(&model.texture_paths[q.texture], &model.textures[q.texture]),
                 cull: q.cull,
                 tint: q.tint,
+                overlay_layer: q.overlay.map(|t| {
+                    textures.resolve(&model.texture_paths[t], &model.textures[t])
+                }),
+                overlay_tint: q.overlay_tint,
                 shade: q.shade,
             })
             .collect();
