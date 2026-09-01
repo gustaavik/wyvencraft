@@ -14,7 +14,6 @@ use wyven_render::mesh::CpuMesh;
 
 use super::display::ItemTransform;
 use super::rig::BonePart;
-use wyven_render::vertex::{ChunkVertex, NO_TINT};
 use wyven_render::vertex::{ChunkVertex, NO_OVERLAY, NO_TINT};
 
 /// Triangle geometry in model space: Y-up, right-handed, one block = 1.0, UVs
@@ -185,6 +184,8 @@ impl ModelMesh {
                     flags: 0,
                     layer: 0,
                     tint: NO_TINT,
+                    overlay_layer: NO_OVERLAY,
+                    overlay_tint: NO_TINT,
                 });
             }
         }
