@@ -223,7 +223,10 @@ mod tests {
         let near = ndc_z(&camera, Vec3::new(0.0, 0.0, -camera.near));
         let far = ndc_z(&camera, Vec3::new(0.0, 0.0, -camera.far));
 
-        assert!((near - 1.0).abs() < 1.0e-4, "near plane gave {near}, want 1.0");
+        assert!(
+            (near - 1.0).abs() < 1.0e-4,
+            "near plane gave {near}, want 1.0"
+        );
         assert!(far.abs() < 1.0e-4, "far plane gave {far}, want 0.0");
     }
 

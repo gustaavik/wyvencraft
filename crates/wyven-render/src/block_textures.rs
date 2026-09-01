@@ -569,18 +569,14 @@ impl BlockTextureArray {
         // aliased along the other, and the level flips as the camera turns.
         // Gated on the feature actually being enabled so the sampler stays valid
         // if that request is ever relaxed, and clamped to what the device offers.
-        let anisotropy = ctx
-            .device()
-            .enabled_features()
-            .sampler_anisotropy
-            .then(|| {
-                let limit = ctx
-                    .device()
-                    .physical_device()
-                    .properties()
-                    .max_sampler_anisotropy;
-                MAX_ANISOTROPY.min(limit)
-            });
+        let anisotropy = ctx.device().enabled_features().sampler_anisotropy.then(|| {
+            let limit = ctx
+                .device()
+                .physical_device()
+                .properties()
+                .max_sampler_anisotropy;
+            MAX_ANISOTROPY.min(limit)
+        });
         let sampler = Sampler::new(
             ctx.device().clone(),
             SamplerCreateInfo {

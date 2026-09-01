@@ -82,9 +82,9 @@ impl BakedBlockModel {
                     .resolve(&model.texture_paths[q.texture], &model.textures[q.texture]),
                 cull: q.cull,
                 tint: q.tint,
-                overlay_layer: q.overlay.map(|t| {
-                    textures.resolve(&model.texture_paths[t], &model.textures[t])
-                }),
+                overlay_layer: q
+                    .overlay
+                    .map(|t| textures.resolve(&model.texture_paths[t], &model.textures[t])),
                 overlay_tint: q.overlay_tint,
                 shade: q.shade,
             })
