@@ -15,3 +15,16 @@ run-release:
 # the working directory. Use this to check the shipped layout by hand.
 run-release-packaged:
 	./target/release/wyvencraft
+
+# A release tarball ships the compiled form of ~460 MIT/BSD/Apache dependencies,
+# and those licenses require their texts to travel with a binary distribution.
+# The release workflow copies THIRD-PARTY.txt into every archive; regenerate it
+# whenever Cargo.lock moves.
+licenses:
+	python3 scripts/third-party-notices.py > THIRD-PARTY.txt
+	@echo "wrote THIRD-PARTY.txt ($$(grep -m1 ' components\.$$' THIRD-PARTY.txt))"
+
+licenses-check:
+	@python3 scripts/third-party-notices.py --check
+
+.PHONY: run build run-release run-release-packaged licenses licenses-check

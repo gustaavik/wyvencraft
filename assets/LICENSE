@@ -1,0 +1,57 @@
+Wyvencraft game assets
+Copyright (c) 2026 The Wyvencraft Authors
+All rights reserved.
+
+This directory is NOT covered by the MIT/Apache-2.0 licenses that apply to the
+source code of this repository. Those licenses cover `src/`, `crates/`, and the
+build tooling; they stop at this directory.
+
+"Assets" means every file under `assets/` — the textures under
+`assets/textures/`, the models under `assets/models/`, and the content tables
+(`blocks.toml`, `items.toml`, `entities.toml`, `worldgen.toml`, `recipes.toml`,
+`spawning.toml`).
+
+WHAT YOU MAY DO
+
+  - Use these assets to build, run, modify and test this software, including a
+    fork of it, for your own personal or development purposes.
+  - Reproduce them incidentally where the software itself is reproduced — a
+    clone of the repository, a build artifact, a screenshot, a video.
+
+WHAT YOU MAY NOT DO
+
+  - Redistribute the assets on their own, or as part of another product, game,
+    resource pack, or asset pack.
+  - Use them in a work that presents itself as Wyvencraft, or that implies an
+    association with Wyvencraft. See TRADEMARK.md.
+  - Sell them, or sell access to a product whose distinguishing appearance is
+    these assets.
+
+The engine — the nine `wyven-*` crates — carries no assets and is licensed
+permissively. Building something of your own on it is expressly encouraged;
+bring your own art.
+
+PROVENANCE
+
+These assets are original work. They follow Minecraft's conventions — canvas
+sizes, sheet layouts, UV unwraps and file-naming — because the software reads
+and writes those formats, and a model's unwrap is determined by its geometry.
+Conventions and layouts are interoperability facts; the artwork itself is not
+copied.
+
+That was verified rather than assumed. Every tracked PNG was decoded and
+compared against all 3,392 textures shipped in Minecraft 1.21.8, at native size
+and at every integer nearest-neighbour downsample — the transform an upscaled
+copy would have gone through. No file matched any of them, and in the 59
+directed comparisons against the same-named Minecraft texture, not one shared a
+single exact pixel value. The mob sheets do share their *silhouette* with
+Minecraft's at 98-99%, which is expected and not evidence of copying: a skin's
+opaque region is the model's UV unwrap, and these models deliberately use the
+same box layout so that a sheet authored for one reads correctly on the other.
+The colours within that silhouette differ throughout.
+
+This compares against Minecraft 1.21.8. It is evidence about that release, not
+a warranty against every possible source.
+
+For third-party notices covering the compiled dependencies of a distributed
+binary, see the build's THIRD-PARTY notices rather than this file.

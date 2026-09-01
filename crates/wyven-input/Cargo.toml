@@ -2,6 +2,8 @@
 name = "wyven-input"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Frame-coherent input state derived from winit events."
 
 [dependencies]

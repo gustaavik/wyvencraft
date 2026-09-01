@@ -2,6 +2,8 @@
 name = "wyven-model"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Model file loaders (.gltf / .bbmodel / Blockbench block JSON)."
 
 [dependencies]
