@@ -26,7 +26,7 @@ pub use camera::Camera;
 pub use context::RenderContext;
 pub use mesh::{CpuMesh, GpuLines, GpuMesh};
 pub use renderer::{
-    ForegroundFrame, LightParams, PreviewFrame, Renderer, SceneFrame, SkyParams, TexturedMesh,
+    ForegroundFrame, LightParams, Renderer, SceneFrame, SkyParams, TexturedMesh,
 };
 pub use texture::{Rgba8, Texture};
 pub use tile_registry::{

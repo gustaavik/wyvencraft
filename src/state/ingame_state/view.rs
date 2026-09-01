@@ -38,7 +38,7 @@ use crate::world::meshing::{
 use wyven_model::mesh as model_mesh;
 use wyven_model::{DisplayContext, ModelId, ModelRegistry};
 use wyven_render::{
-    Camera, CpuMesh, ForegroundFrame, GpuLines, GpuMesh, LightParams, PreviewFrame, RenderContext,
+    Camera, CpuMesh, ForegroundFrame, GpuLines, GpuMesh, LightParams, RenderContext,
     SceneFrame, SkyParams, Texture, TexturedMesh, TileRegistry, debug,
 };
 use wyven_voxel::FaceTextures;
@@ -80,16 +80,6 @@ impl ModelContent<'_> {
     }
 }
 
-/// How the player model is posed for the inventory preview. Set by the UI,
-/// read when the preview mesh is rebuilt.
-#[derive(Default, Clone, Copy)]
-pub(super) struct PreviewPose {
-    /// Yaw the model is turned to by dragging.
-    pub yaw: f32,
-    /// Where the head looks — (yaw, pitch) toward the cursor. Purely cosmetic.
-    pub look: (f32, f32),
-}
-
 /// All GPU state for the in-game scene.
 pub(super) struct SceneCache {
     /// Opaque GPU meshes for loaded chunks, keyed by chunk position.
@@ -115,11 +105,6 @@ pub(super) struct SceneCache {
     player_mesh: Option<GpuMesh>,
     /// Procedural animation state for the local player's model.
     player_anim: AnimationState,
-    /// Player-model mesh for the inventory preview (built only while the
-    /// inventory is open), and how it is posed.
-    preview_mesh: Option<GpuMesh>,
-    pub preview: PreviewPose,
-
     remote_meshes: Vec<GpuMesh>,
     /// Per-remote-player animation, keyed by id.
     remote_anims: HashMap<PlayerId, RemoteAnim>,
@@ -133,20 +118,17 @@ pub(super) struct SceneCache {
     /// first person, where `player_mesh` and `held_mesh` are not.
     hand_mesh: Option<GpuMesh>,
     hand_held_mesh: Option<(GpuMesh, ModelId)>,
-    /// The same model in the inventory preview, posed for the preview camera.
-    preview_held_mesh: Option<(GpuMesh, ModelId)>,
 
     /// The held item when it has **no model file** — a block cube or a flat
     /// sprite, sampling the shared atlas rather than a texture of its own.
     ///
-    /// Three fields rather than one because the three views reach the renderer
-    /// by three different routes: the foreground's atlas list, the world's
-    /// opaque/transparent lists (hence the `bool`), and the preview pass. Each
-    /// is `Some` only when its `*_mesh` counterpart above is `None` — a model
-    /// always wins, and the two can never draw at once.
+    /// Two fields rather than one because the two views reach the renderer by
+    /// two different routes: the foreground's atlas list and the world's
+    /// opaque/transparent lists (hence the `bool`). Each is `Some` only when its
+    /// `*_mesh` counterpart above is `None` — a model always wins, and the two
+    /// can never draw at once.
     hand_held_atlas: Option<GpuMesh>,
     held_atlas: Option<(GpuMesh, bool)>,
-    preview_held_atlas: Option<GpuMesh>,
     /// Model geometry for dropped stacks, one mesh per distinct model.
     drops_model_meshes: Vec<(GpuMesh, ModelId)>,
     /// GPU textures for loaded models, indexed by [`ModelId`] and uploaded on
@@ -190,21 +172,14 @@ impl SceneCache {
             player_model: HumanoidModel::player(),
             player_mesh: None,
             player_anim: AnimationState::new(),
-            preview_mesh: None,
-            preview: PreviewPose {
-                yaw: std::f32::consts::PI,
-                look: (0.0, 0.0),
-            },
             remote_meshes: Vec::new(),
             remote_anims: HashMap::new(),
             mob_meshes: Vec::new(),
             held_mesh: None,
             hand_mesh: None,
             hand_held_mesh: None,
-            preview_held_mesh: None,
             hand_held_atlas: None,
             held_atlas: None,
-            preview_held_atlas: None,
             drops_model_meshes: Vec::new(),
             model_textures: Vec::new(),
             break_mesh: None,
@@ -438,7 +413,7 @@ impl SceneCache {
             .flatten()
     }
 
-    /// The third-person/preview counterpart of [`SceneCache::bake_held`], for an
+    /// The third-person counterpart of [`SceneCache::bake_held`], for an
     /// item with no model. Returns the mesh and whether it belongs in the
     /// blended pass, so a held glass block reads like the block it places.
     fn bake_held_atlas(
@@ -522,51 +497,6 @@ impl SceneCache {
             }
             _ => None,
         };
-    }
-
-    /// Rebuild the inventory-preview player mesh: the model at the origin,
-    /// turned to the preview yaw, wearing the currently equipped armor. Only
-    /// built while the inventory is open; cleared otherwise so the offscreen
-    /// pass is skipped entirely.
-    pub fn update_preview_mesh(
-        &mut self,
-        ctx: &Arc<RenderContext>,
-        inventory_open: bool,
-        player: &Player,
-        inventory: &Inventory,
-        items: &ItemRegistry,
-        content: ModelContent<'_>,
-    ) {
-        if !inventory_open {
-            self.preview_mesh = None;
-            self.preview_held_mesh = None;
-            self.preview_held_atlas = None;
-            return;
-        }
-        // The preview head tracks the cursor (yaw + pitch), independent of the
-        // world player's facing; limbs still idle-animate from the anim state.
-        let mut pose = self.player_anim.pose(player.pitch);
-        pose.head_yaw = self.preview.look.0;
-        pose.head_pitch = self.preview.look.1;
-        let armor = inventory.equipped_armor();
-        let mesh = self.player_model.build_mesh_armored(
-            Vec3::ZERO,
-            self.preview.yaw,
-            &pose,
-            &armor,
-            items,
-        );
-        self.preview_mesh = GpuMesh::upload(&ctx.memory_allocator, &mesh).ok().flatten();
-
-        let anchor = self
-            .player_model
-            .hand_anchor(Vec3::ZERO, self.preview.yaw, &pose);
-        self.preview_held_mesh = self.bake_held(ctx, content, inventory, anchor);
-        // The preview is lit by its own neutral lamp, so the transparency split
-        // the world pass needs is meaningless here — take just the mesh.
-        self.preview_held_atlas = self
-            .bake_held_atlas(ctx, content, inventory, anchor)
-            .map(|(mesh, _)| mesh);
     }
 
     /// Rebuild GPU meshes for remote players, advancing each one's animation
@@ -1039,32 +969,6 @@ impl SceneCache {
         })
     }
 
-    /// The offscreen player-model preview, when the inventory is open.
-    pub fn preview_frame(&self) -> Option<PreviewFrame<'_>> {
-        let model = self.preview_mesh.as_ref()?;
-        // Fixed head-height orbit looking at the model built at the origin.
-        // The preview image is 0.48:1 (see PREVIEW_SIZE in app.rs).
-        let target = Vec3::new(0.0, 1.05, 0.0);
-        let mut camera = Camera::new(32.0, 0.48);
-        camera.position = Vec3::new(0.0, 1.05, 3.9);
-        camera.forward = (target - camera.position).normalize();
-        // Neutral, mostly-ambient light so the model reads clearly against the
-        // dark preview backdrop, independent of the world's time of day.
-        Some(PreviewFrame {
-            view_proj: camera.view_projection(),
-            light: LightParams {
-                light_dir: Vec3::new(0.3, 0.8, 0.5).normalize(),
-                light_color: Vec3::splat(0.9),
-                ambient: 0.55,
-            },
-            model,
-            held: self
-                .preview_held_mesh
-                .as_ref()
-                .and_then(|(mesh, id)| self.textured_mesh(mesh, *id)),
-            held_atlas: self.preview_held_atlas.as_ref(),
-        })
-    }
 }
 
 /// Which display table places a held item that has no model file of its own.
@@ -1201,14 +1105,6 @@ impl super::InGameState {
             .advance_player_anim(local_speed, self.player.yaw, dt);
         self.view.update_player_mesh(
             ctx,
-            &self.player,
-            &self.inventory,
-            &self.content.items,
-            content,
-        );
-        self.view.update_preview_mesh(
-            ctx,
-            self.inventory_open,
             &self.player,
             &self.inventory,
             &self.content.items,

@@ -1,18 +1,26 @@
-//! Inventory-screen interactions: open/close, click-to-move between slots, and
-//! crafting from the recipe list.
+//! Inventory-screen interactions: open/close and click-to-move between slots.
 
 use super::InGameState;
-use crate::entity::DroppedItem;
 use crate::inventory::ItemStack;
 
 impl InGameState {
     /// Open/close the inventory screen; returns a held stack to storage on close.
+    ///
+    /// Whatever no longer fits is thrown rather than dropped on the floor of the
+    /// function: closing the panel is not a reason to destroy items, and a full
+    /// inventory is exactly when a player is most likely to be holding one.
     pub(super) fn toggle_inventory(&mut self) {
         self.inventory_open = !self.inventory_open;
         if !self.inventory_open
             && let Some(held) = self.held.take()
         {
-            self.inventory.add(held, &self.content.items);
+            let leftover = self.inventory.add(held, &self.content.items);
+            if leftover > 0 {
+                self.throw(ItemStack {
+                    count: leftover,
+                    ..held
+                });
+            }
         }
     }
 
@@ -54,29 +62,6 @@ impl InGameState {
                 }
             }
             (None, None) => {}
-        }
-    }
-
-    /// Craft the recipe at `index`: consume its ingredients and store the
-    /// output; whatever doesn't fit is tossed out in front of the player.
-    pub(super) fn handle_craft(&mut self, index: usize) {
-        let Some(recipe) = self.recipes.get(index) else {
-            return;
-        };
-        let Some(stack) = recipe.craft(&mut self.inventory, &self.content.items) else {
-            return;
-        };
-        let leftover = self.inventory.add(stack, &self.content.items);
-        if leftover > 0 {
-            self.drops.push(DroppedItem::thrown(
-                ItemStack {
-                    count: leftover,
-                    ..stack
-                },
-                self.player.eye_position(),
-                self.player.look_direction(),
-                self.content.entities.dropped_item(),
-            ));
         }
     }
 }

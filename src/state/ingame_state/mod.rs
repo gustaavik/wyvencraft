@@ -12,7 +12,7 @@
 //! - [`view`] — every GPU resource, the camera, and the animation clocks.
 //! - [`inventory`] — the inventory-screen click/craft handlers.
 //! - [`persistence`] — world save + restore.
-//! - [`frame`] — the [`GameState`] impl (update/ui/scene_frame/preview_frame).
+//! - [`frame`] — the [`GameState`] impl (update/ui/scene_frame).
 
 mod chat;
 mod frame;
@@ -55,8 +55,6 @@ const REQUEST_BUDGET: usize = 64;
 const MESH_BUDGET: usize = 8;
 /// Camera distance behind/in front of the player in third-person view.
 const THIRD_PERSON_DISTANCE: f32 = 4.0;
-/// Radians of preview rotation per pixel dragged across the model preview.
-const PREVIEW_DRAG_SENSITIVITY: f32 = 0.01;
 /// Upper bound on a remote player's derived speed, so a teleport or first snapshot
 /// can't drive an absurd walk cadence.
 const REMOTE_MAX_SPEED: f32 = 12.0;

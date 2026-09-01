@@ -22,14 +22,9 @@ use crate::boot::{BootPlan, SystemEnv};
 use crate::config::Settings;
 use crate::content::GameContent;
 
-/// Fixed size of the inventory player-model preview image, in pixels. The 0.48
-/// aspect (tall and narrow) matches the mockup's black box; the image is
-/// downscaled into whatever rect the inventory reserves.
-const PREVIEW_SIZE: [u32; 2] = [384, 800];
-
 /// egui texture handles the game registers once and hands to the UI each frame:
-/// the block atlas (for tile-based item icons), the sheet of pre-rendered 3D
-/// icons (for items with a model), and the offscreen player-model preview.
+/// the block atlas (for tile-based item icons) and the sheet of pre-rendered 3D
+/// icons (for items with a model).
 #[derive(Clone, Copy)]
 pub struct UiTextures {
     pub atlas: egui::TextureId,
@@ -38,7 +33,6 @@ pub struct UiTextures {
     /// the UI needs to turn a cell index into UVs.
     pub model_icons: egui::TextureId,
     pub model_count: u32,
-    pub preview: egui::TextureId,
 }
 
 /// Everything Wyvencraft's screens read and write.
@@ -52,9 +46,6 @@ pub struct Shared {
     /// nothing needs a global.
     pub account: wyven_auth::AccountState,
     pub ui_tex: UiTextures,
-    /// Offscreen colour image the player-model preview renders into, sampled by
-    /// egui inside the inventory screen.
-    preview_image: Arc<ImageView>,
 }
 
 /// The game, before a window exists.
@@ -116,14 +107,12 @@ impl Game for Wyvencraft {
             &self.content.models,
             boot.color_format,
         );
-        let preview_image = create_preview_image(boot.render, boot.color_format);
 
-        // Register the three images with egui once. The atlas is nearest, for
-        // crisp pixel-art item icons; the other two are linear, since both are
-        // rendered larger than the rect they land in.
+        // Register the two images with egui once. The atlas is nearest, for
+        // crisp pixel-art item icons; the icon sheet is linear, since it is
+        // rendered larger than the rect it lands in.
         let atlas = register(boot.gui, boot.renderer.atlas_view(), Filter::Nearest);
         let model_icons = register(boot.gui, icon_sheet, Filter::Linear);
-        let preview = register(boot.gui, preview_image.clone(), Filter::Linear);
 
         let shared = Shared {
             settings: self.settings,
@@ -134,16 +123,10 @@ impl Game for Wyvencraft {
                 atlas,
                 model_icons,
                 model_count: self.content.models.len() as u32,
-                preview,
             },
-            preview_image,
         };
         let first = crate::boot::initial_screen(self.plan, &self.content, &self.account);
         (shared, first)
-    }
-
-    fn preview_target(shared: &Shared) -> Option<&Arc<ImageView>> {
-        Some(&shared.preview_image)
     }
 }
 
@@ -157,25 +140,6 @@ fn register(gui: &mut Gui, view: Arc<ImageView>, filter: Filter) -> egui::Textur
             ..Default::default()
         },
     )
-}
-
-/// Offscreen colour target for the inventory's live player preview, in the
-/// swapchain format the pipelines were built with, usable both as a render
-/// target and as an egui-sampled texture.
-fn create_preview_image(ctx: &Arc<RenderContext>, color_format: Format) -> Arc<ImageView> {
-    let image = Image::new(
-        ctx.memory_allocator.clone(),
-        ImageCreateInfo {
-            image_type: ImageType::Dim2d,
-            format: color_format,
-            extent: [PREVIEW_SIZE[0], PREVIEW_SIZE[1], 1],
-            usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED,
-            ..Default::default()
-        },
-        AllocationCreateInfo::default(),
-    )
-    .expect("preview image");
-    ImageView::new_default(image).expect("preview view")
 }
 
 /// Render every loaded model into its cell of an offscreen icon sheet, once.

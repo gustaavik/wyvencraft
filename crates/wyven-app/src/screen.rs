@@ -9,7 +9,7 @@
 //! its own `Shared` payload without the engine knowing a field of it.
 
 use wyven_input::InputState;
-use wyven_render::{PreviewFrame, SceneFrame};
+use wyven_render::SceneFrame;
 
 use crate::Game;
 
@@ -77,12 +77,6 @@ pub trait Screen<G: Game> {
         None
     }
 
-    /// A model to render into the game's offscreen preview image this frame, if
-    /// any. Returning `None` skips the extra pass entirely.
-    fn preview_frame(&self) -> Option<PreviewFrame<'_>> {
-        None
-    }
-
     /// Human-readable name, for logs.
     fn name(&self) -> &'static str;
 }
@@ -114,12 +108,6 @@ impl<G: Game> ScreenStack<G> {
             .iter()
             .rev()
             .find_map(|s| s.scene_frame(aspect))
-    }
-
-    /// The preview to render this frame, searched top-down like
-    /// [`ScreenStack::scene_frame`].
-    pub fn preview_frame(&self) -> Option<PreviewFrame<'_>> {
-        self.screens.iter().rev().find_map(|s| s.preview_frame())
     }
 
     /// Update the top screen and apply its transition. `false` means the app

@@ -1,13 +1,13 @@
 //! The [`GameState`] implementation: the per-frame update, the egui HUD /
-//! inventory / death UI, and the scene + preview render frames.
+//! inventory / death UI, and the scene render frame.
 
 use winit::event::MouseButton;
 
-use super::{AUTOSAVE_INTERVAL, DOUBLE_TAP_WINDOW, InGameState, PREVIEW_DRAG_SENSITIVITY};
+use super::{AUTOSAVE_INTERVAL, DOUBLE_TAP_WINDOW, InGameState};
 use crate::state::{GameState, PauseMenuState, StateContext, Transition, Wyvencraft};
 use crate::ui::hud;
 use crate::ui::nameplate::{self, Nameplate};
-use wyven_render::{PreviewFrame, SceneFrame};
+use wyven_render::SceneFrame;
 
 impl InGameState {
     /// Paint every visible player's username above their model.
@@ -318,24 +318,16 @@ impl GameState<Wyvencraft> for InGameState {
                 egui_ctx,
                 &self.inventory,
                 &self.content.items,
-                &self.recipes,
                 &ctx.shared.content.item_icons,
                 &ctx.shared.content.item_display_names,
                 self.held,
                 self.player.mode,
                 ctx.shared.ui_tex,
             );
-            if let Some(look) = out.head_look {
-                self.view.preview.look = look;
-            }
-            if let Some(action) = out.action {
+            if let Some(action) = out {
                 match action {
                     InvAction::Slot(index) => self.handle_slot_click(index),
                     InvAction::Pick(id) => self.held = Some(self.content.items.full_stack(id)),
-                    InvAction::Craft(index) => self.handle_craft(index),
-                    InvAction::Rotate(dx) => {
-                        self.view.preview.yaw -= dx * PREVIEW_DRAG_SENSITIVITY;
-                    }
                 }
             }
             return Transition::None;
@@ -417,10 +409,6 @@ impl GameState<Wyvencraft> for InGameState {
             aspect,
             self.camera_distance(aspect),
         ))
-    }
-
-    fn preview_frame(&self) -> Option<PreviewFrame<'_>> {
-        self.view.preview_frame()
     }
 }
 

@@ -9,8 +9,7 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
-use super::inventory::Inventory;
-use super::item::{ItemId, ItemRegistry, ItemStack};
+use super::item::{ItemId, ItemRegistry};
 
 /// On-disk recipe file, relative to the working directory (the repo root under
 /// `cargo run`). Editable without recompiling; read once at world start.
@@ -46,32 +45,6 @@ pub struct Recipe {
     pub output: ItemId,
     pub count: u8,
     pub ingredients: Vec<(ItemId, u32)>,
-}
-
-impl Recipe {
-    /// Whether `inventory` holds every ingredient in sufficient quantity.
-    pub fn can_craft(&self, inventory: &Inventory) -> bool {
-        self.ingredients
-            .iter()
-            .all(|&(item, count)| inventory.count_of(item) >= count)
-    }
-
-    /// Consume the ingredients from `inventory` and return the crafted stack
-    /// (with full durability for tools), or `None` if ingredients are missing.
-    /// The caller decides where the output goes (inventory, ground, ...).
-    pub fn craft(&self, inventory: &mut Inventory, items: &ItemRegistry) -> Option<ItemStack> {
-        if !self.can_craft(inventory) {
-            return None;
-        }
-        for &(item, count) in &self.ingredients {
-            inventory.remove(item, count);
-        }
-        Some(ItemStack {
-            item: self.output,
-            count: self.count,
-            durability: items.max_durability(self.output),
-        })
-    }
 }
 
 /// All loaded recipes, in file order.
@@ -122,10 +95,6 @@ impl RecipeBook {
 
     pub fn recipes(&self) -> &[Recipe] {
         &self.recipes
-    }
-
-    pub fn get(&self, index: usize) -> Option<&Recipe> {
-        self.recipes.get(index)
     }
 }
 
@@ -213,59 +182,6 @@ mod tests {
         "#;
         let book = RecipeBook::from_toml(text, &items).expect("valid TOML");
         assert_eq!(book.recipes().len(), 1, "only the last recipe is valid");
-        assert_eq!(book.get(0).unwrap().output, items.find("glass").unwrap());
-    }
-
-    #[test]
-    fn crafting_consumes_ingredients_and_produces_the_output() {
-        let items = registry();
-        let text = r#"
-            [[recipe]]
-            output = "glass"
-            count = 2
-            ingredients = { sand = 3, "coal_ore" = 1 }
-        "#;
-        let book = RecipeBook::from_toml(text, &items).expect("valid TOML");
-        let recipe = book.get(0).unwrap();
-
-        let sand = items.find("sand").unwrap();
-        let coal = items.find("coal_ore").unwrap();
-        let mut inv = Inventory::new();
-        inv.add(ItemStack::new(sand, 4), &items);
-
-        assert!(!recipe.can_craft(&inv), "missing the coal ore");
-        assert!(recipe.craft(&mut inv, &items).is_none());
-        assert_eq!(inv.count_of(sand), 4, "failed craft consumes nothing");
-
-        inv.add(ItemStack::new(coal, 1), &items);
-        let out = recipe.craft(&mut inv, &items).expect("craftable now");
-        assert_eq!(out.item, items.find("glass").unwrap());
-        assert_eq!(out.count, 2);
-        assert_eq!(inv.count_of(sand), 1);
-        assert_eq!(inv.count_of(coal), 0);
-    }
-
-    #[test]
-    fn crafted_tools_start_with_full_durability() {
-        let items = registry();
-        let text = r#"
-            [[recipe]]
-            output = "wooden_pickaxe"
-            ingredients = { "oak_log" = 3 }
-        "#;
-        let book = RecipeBook::from_toml(text, &items).expect("valid TOML");
-        let mut inv = Inventory::new();
-        inv.add(ItemStack::new(items.find("oak_log").unwrap(), 3), &items);
-
-        let out = book
-            .get(0)
-            .unwrap()
-            .craft(&mut inv, &items)
-            .expect("crafts");
-        assert_eq!(out.item, items.find("wooden_pickaxe").unwrap());
-        assert_eq!(
-            out.durability,
-            items.max_durability(items.find("wooden_pickaxe").unwrap())
-        );
+        assert_eq!(book.recipes()[0].output, items.find("glass").unwrap());
     }
 }

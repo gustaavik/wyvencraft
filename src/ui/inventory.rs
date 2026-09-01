@@ -1,11 +1,10 @@
-//! The inventory screen: armor slots and a live player preview down the left,
-//! a crafting list (or the creative item palette) on the right, and the storage
-//! grid + hotbar across the bottom — matching `inventory overhaul.png`.
+//! The inventory screen: armor slots down the left of the panel and the whole
+//! 9x4 storage grid — hotbar included as its bottom row — to their right.
 //!
 //! Interaction is click-to-move (Minecraft-style): the caller owns a "held"
-//! stack; this view reports the slot clicked (or palette item picked, recipe
-//! crafted, or preview dragged) and paints the grid and the held stack under
-//! the cursor. The move/craft logic lives with the inventory owner.
+//! stack; this view reports the slot clicked (or palette item picked) and
+//! paints the grid and the held stack under the cursor. The move logic lives
+//! with the inventory owner.
 
 use egui::{Align2, Color32, Context, FontId, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 
@@ -13,7 +12,7 @@ use crate::content::ItemIcon;
 use crate::core::GameMode;
 use crate::inventory::{
     ARMOR_START, ArmorSlot, HOTBAR_SIZE, INVENTORY_SIZE, Inventory, ItemId, ItemRegistry,
-    ItemStack, RecipeBook,
+    ItemStack,
 };
 use crate::state::UiTextures;
 use crate::ui::icon::draw_item_icon;
@@ -21,17 +20,33 @@ use crate::ui::icon::draw_item_icon;
 const SLOT: f32 = 46.0;
 const PAD: f32 = 5.0;
 const GAP: f32 = 14.0;
-/// Width of the right-hand panel (crafting list / creative palette).
-const SIDE_PANEL_W: f32 = 360.0;
+/// The storage grid: nine columns, and every slot in `Inventory` storage.
+/// The bottom row is the hotbar, which is why there is no gap above it.
+const GRID_COLS: usize = HOTBAR_SIZE;
+const GRID_ROWS: usize = INVENTORY_SIZE / GRID_COLS;
+/// The creative item palette, shown under the grid in creative mode only.
+const PALETTE_W: f32 = GRID_COLS as f32 * (SLOT + PAD) - PAD;
+const PALETTE_H: f32 = 132.0;
+
+/// The slot at `row`, `col` of the drawn grid.
+///
+/// Storage sits above the hotbar on screen, but the hotbar is slots `0..9` —
+/// so the last drawn row is the *first* nine indices, and the rows above it
+/// run `9..36` in order.
+const fn slot_at(row: usize, col: usize) -> usize {
+    if row + 1 == GRID_ROWS {
+        col
+    } else {
+        HOTBAR_SIZE + row * GRID_COLS + col
+    }
+}
 
 // Light-grey panel palette, matching the mockup regardless of egui's theme.
 const PANEL_BG: Color32 = Color32::from_rgb(196, 196, 196);
 const SLOT_BG: Color32 = Color32::from_rgb(122, 122, 122);
 const SLOT_HOVER: Color32 = Color32::from_rgb(150, 150, 152);
 const SLOT_STROKE: Color32 = Color32::from_rgb(92, 92, 92);
-const DISABLED_BG: Color32 = Color32::from_rgb(104, 104, 104);
 const TEXT: Color32 = Color32::from_rgb(40, 40, 42);
-const DISABLED_TEXT: Color32 = Color32::from_rgb(96, 96, 98);
 
 /// What the player did in the inventory screen this frame.
 pub enum InvAction {
@@ -39,24 +54,7 @@ pub enum InvAction {
     Slot(usize),
     /// Picked an item from the creative palette (grab a full stack).
     Pick(ItemId),
-    /// Clicked a recipe's craft button (index into the recipe book).
-    Craft(usize),
-    /// Dragged across the player preview by this many pixels horizontally.
-    Rotate(f32),
 }
-
-/// The inventory screen's output for a frame: the discrete action (if any) plus
-/// where the preview model's head should look — the cursor position mapped to a
-/// head (yaw, pitch), so the model looks toward the cursor without touching the
-/// world player's facing.
-pub struct InvOutput {
-    pub action: Option<InvAction>,
-    pub head_look: Option<(f32, f32)>,
-}
-
-/// Maximum head turn / tilt for the cursor-tracking preview (radians).
-const HEAD_LOOK_MAX_YAW: f32 = 0.7;
-const HEAD_LOOK_MAX_PITCH: f32 = 0.5;
 
 /// Everything the view needs to draw a slot's contents, bundled so the many
 /// slot calls don't each take a fistful of arguments.
@@ -71,19 +69,18 @@ struct View<'a> {
     tex: UiTextures,
 }
 
-/// Draw the inventory window. Returns the frame's action and head-look.
+/// Draw the inventory panel. Returns the frame's action, if any.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_inventory(
     ctx: &Context,
     inventory: &Inventory,
     items: &ItemRegistry,
-    recipes: &RecipeBook,
     icons: &[ItemIcon],
     names: &[String],
     held: Option<ItemStack>,
     mode: GameMode,
     tex: UiTextures,
-) -> InvOutput {
+) -> Option<InvAction> {
     let view = View {
         inventory,
         items,
@@ -96,10 +93,6 @@ pub fn draw_inventory(
         .inner_margin(14.0)
         .corner_radius(6.0);
 
-    // Set by the preview box each frame to where the head should look; a `Cell`
-    // so the layout closures can write it without a mutable-capture tangle.
-    let head_look = std::cell::Cell::new(None);
-
     let inner = egui::Window::new("Inventory")
         .title_bar(false)
         .collapsible(false)
@@ -109,57 +102,23 @@ pub fn draw_inventory(
         .show(ctx, |ui| {
             let mut action = None;
 
-            // --- Top row: armor column, player preview, right-hand panel. ---
+            // --- Armor column beside the grid. ---
             let top = ui
                 .horizontal_top(|ui| {
                     let mut a = view.armor_column(ui);
                     ui.add_space(GAP);
-                    let (pv_action, pv_rect) = preview_box(ui, tex.preview);
-                    // Head tracks the cursor relative to the preview box centre.
-                    if let Some(cursor) = ui.ctx().pointer_latest_pos() {
-                        head_look.set(Some(look_angles(pv_rect, cursor)));
-                    }
-                    a = a.or(pv_action);
-                    ui.add_space(GAP);
-                    a.or(view.side_panel(ui, recipes, mode))
+                    a = a.or(view.grid(ui));
+                    a
                 })
                 .inner;
             action = action.or(top);
 
-            ui.add_space(12.0);
-
-            // --- Storage grid: three rows of nine. ---
-            let mut index = HOTBAR_SIZE;
-            while index < INVENTORY_SIZE {
-                let row = ui
-                    .horizontal(|ui| {
-                        let mut a = None;
-                        for _ in 0..HOTBAR_SIZE {
-                            if index < INVENTORY_SIZE {
-                                a = a.or(view.slot(ui, index, None, false));
-                                index += 1;
-                            }
-                        }
-                        a
-                    })
-                    .inner;
-                action = action.or(row);
+            // --- Creative palette: the only in-UI item source in creative. ---
+            if mode.is_creative() {
+                ui.add_space(GAP);
+                action = action.or(view.palette(ui, PALETTE_W, PALETTE_H));
             }
-
-            ui.add_space(10.0);
-
-            // --- Hotbar row: the selected slot gets a white outline. ---
-            let hotbar = ui
-                .horizontal(|ui| {
-                    let mut a = None;
-                    for i in 0..HOTBAR_SIZE {
-                        let selected = i == inventory.selected_index();
-                        a = a.or(view.slot(ui, i, None, selected));
-                    }
-                    a
-                })
-                .inner;
-            action.or(hotbar)
+            action
         });
     // `show` → Option (window open) of InnerResponse whose `.inner` is itself
     // Option (the body ran / wasn't collapsed); flatten both to the action.
@@ -179,45 +138,7 @@ pub fn draw_inventory(
         paint_count(&painter, rect, stack.count);
     }
 
-    InvOutput {
-        action,
-        head_look: head_look.get(),
-    }
-}
-
-/// Map a cursor position to head (yaw, pitch), relative to the preview box's
-/// centre. The model faces the viewer, so a rightward cursor turns the head to
-/// screen-right and a downward cursor tilts it down; both clamp to a natural range.
-fn look_angles(box_rect: Rect, cursor: egui::Pos2) -> (f32, f32) {
-    let d = cursor - box_rect.center();
-    let nx = (d.x / (box_rect.width() * 0.5)).clamp(-1.0, 1.0);
-    let ny = (d.y / (box_rect.height() * 0.5)).clamp(-1.0, 1.0);
-    (-nx * HEAD_LOOK_MAX_YAW, -ny * HEAD_LOOK_MAX_PITCH)
-}
-
-/// The offscreen player-model image; dragging it rotates the preview. Returns
-/// the drag action (if any) and the box rect (for cursor head-tracking).
-fn preview_box(ui: &mut egui::Ui, preview: egui::TextureId) -> (Option<InvAction>, Rect) {
-    let height = 6.0 * (SLOT + PAD) - PAD; // matches the armor column height
-    let width = height * 0.48; // PREVIEW_SIZE aspect (see app.rs)
-    let (rect, resp) = ui.allocate_exact_size(vec2(width, height), Sense::drag());
-    let painter = ui.painter();
-    painter.rect_filled(rect, 4.0, Color32::from_rgb(8, 8, 10));
-    painter.image(
-        preview,
-        rect,
-        Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-        Color32::WHITE,
-    );
-    painter.rect_stroke(
-        rect,
-        4.0,
-        Stroke::new(2.0_f32, SLOT_STROKE),
-        StrokeKind::Inside,
-    );
-    let action = (resp.dragged() && resp.drag_delta().x != 0.0)
-        .then(|| InvAction::Rotate(resp.drag_delta().x));
-    (action, rect)
+    action
 }
 
 impl View<'_> {
@@ -349,37 +270,28 @@ impl View<'_> {
         })
     }
 
-    /// The right-hand panel: the crafting list in survival, the item palette in
-    /// creative (crafting is meaningless there, so the panel is never wasted).
-    fn side_panel(
-        &self,
-        ui: &mut egui::Ui,
-        recipes: &RecipeBook,
-        mode: GameMode,
-    ) -> Option<InvAction> {
-        let panel_h = 6.0 * (SLOT + PAD) - PAD;
-        ui.allocate_ui(vec2(SIDE_PANEL_W, panel_h), |ui| {
-            // `allocate_ui` reserves space but does not clip; clamp everything
-            // drawn here to the panel box so a wide row or an overscrolled icon
-            // can't spill into the rest of the window.
-            ui.set_clip_rect(ui.max_rect());
-            let header = if mode.is_creative() {
-                "Items"
-            } else {
-                "Crafting"
-            };
-            ui.label(egui::RichText::new(header).strong().color(TEXT));
-            // Fixed inner extents (below the header, minus the scrollbar) so the
-            // scroll list can't stretch the auto-sized window or push past the
-            // panel edge — the regression this replaced relied on `allocate_ui`
-            // bounding the scroll area, which it doesn't during layout passes.
-            let inner_w = SIDE_PANEL_W - 16.0;
-            let inner_h = panel_h - 24.0;
-            if mode.is_creative() {
-                self.palette(ui, inner_w, inner_h)
-            } else {
-                self.crafting_list(ui, recipes, inner_w, inner_h)
+    /// The whole 9x4 storage grid, one contiguous block: rows 0..3 are the
+    /// storage slots and the bottom row is the hotbar, which is why it is the
+    /// one row that can be selected.
+    fn grid(&self, ui: &mut egui::Ui) -> Option<InvAction> {
+        ui.vertical(|ui| {
+            let mut action = None;
+            for row in 0..GRID_ROWS {
+                let inner = ui
+                    .horizontal(|ui| {
+                        let mut a = None;
+                        for col in 0..GRID_COLS {
+                            let index = slot_at(row, col);
+                            let selected =
+                                index < HOTBAR_SIZE && index == self.inventory.selected_index();
+                            a = a.or(self.slot(ui, index, None, selected));
+                        }
+                        a
+                    })
+                    .inner;
+                action = action.or(inner);
             }
+            action
         })
         .inner
     }
@@ -411,93 +323,6 @@ impl View<'_> {
             .inner
     }
 
-    /// Survival crafting list: one clickable row per recipe, greyed when the
-    /// ingredients aren't in the storage grid.
-    fn crafting_list(
-        &self,
-        ui: &mut egui::Ui,
-        recipes: &RecipeBook,
-        width: f32,
-        height: f32,
-    ) -> Option<InvAction> {
-        egui::ScrollArea::vertical()
-            .id_salt("crafting")
-            .max_height(height)
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.set_width(width);
-                let mut a = None;
-                for (index, recipe) in recipes.recipes().iter().enumerate() {
-                    let craftable = recipe.can_craft(self.inventory);
-                    a = a.or(self.recipe_row(ui, index, recipe, craftable));
-                    ui.add_space(4.0);
-                }
-                a
-            })
-            .inner
-    }
-
-    fn recipe_row(
-        &self,
-        ui: &mut egui::Ui,
-        index: usize,
-        recipe: &crate::inventory::Recipe,
-        craftable: bool,
-    ) -> Option<InvAction> {
-        let width = ui.available_width();
-        let (rect, resp) = ui.allocate_exact_size(vec2(width, 44.0), Sense::click());
-        let painter = ui.painter();
-        let bg = if !craftable {
-            DISABLED_BG
-        } else if resp.hovered() {
-            SLOT_HOVER
-        } else {
-            SLOT_BG
-        };
-        painter.rect_filled(rect, 4.0, bg);
-
-        let mid = rect.center().y;
-        let icon = 30.0;
-        let mut x = rect.left() + 8.0;
-        for &(item, n) in &recipe.ingredients {
-            let r = Rect::from_min_size(pos2(x, mid - icon / 2.0), vec2(icon, icon));
-            draw_item_icon(painter, r, self.icon_of(item), self.tex);
-            painter.text(
-                r.right_bottom(),
-                Align2::RIGHT_BOTTOM,
-                format!("{n}"),
-                FontId::monospace(12.0),
-                Color32::WHITE,
-            );
-            x += icon + 12.0;
-        }
-        painter.text(
-            pos2(x, mid),
-            Align2::LEFT_CENTER,
-            "→",
-            FontId::proportional(18.0),
-            TEXT,
-        );
-        x += 26.0;
-        let out = Rect::from_min_size(pos2(x, mid - icon / 2.0), vec2(icon, icon));
-        draw_item_icon(painter, out, self.icon_of(recipe.output), self.tex);
-        x += icon + 8.0;
-        let name = self.name_of(recipe.output);
-        let label = if recipe.count > 1 {
-            format!("{}× {name}", recipe.count)
-        } else {
-            name.to_string()
-        };
-        painter.text(
-            pos2(x, mid),
-            Align2::LEFT_CENTER,
-            label,
-            FontId::proportional(15.0),
-            if craftable { TEXT } else { DISABLED_TEXT },
-        );
-
-        (resp.clicked() && craftable).then_some(InvAction::Craft(index))
-    }
 }
 
 /// Paint a stack count in the slot's bottom-right corner (hidden for singles).
