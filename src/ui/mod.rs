@@ -12,3 +12,4 @@ pub mod icon;
 pub mod inventory;
 pub mod multiplayer_menu;
 pub mod nameplate;
+pub mod ninepatch;

@@ -15,6 +15,7 @@ use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
 use vulkano::memory::allocator::AllocationCreateInfo;
 use vulkano::sync::GpuFuture;
 use wyven_app::{Boot, Game, RendererTextures, Screen, WindowConfig};
+use wyven_assets::decode_png;
 use wyven_model::{DisplayContext, ModelRegistry};
 use wyven_render::{GpuMesh, RenderContext, Renderer, Texture, TexturedMesh, icons};
 
@@ -23,8 +24,12 @@ use crate::config::Settings;
 use crate::content::GameContent;
 
 /// egui texture handles the game registers once and hands to the UI each frame:
-/// the block atlas (for tile-based item icons) and the sheet of pre-rendered 3D
-/// icons (for items with a model).
+/// the block atlas (for tile-based item icons), the sheet of pre-rendered 3D
+/// icons (for items with a model), and the nine-slice UI sheet.
+///
+/// Registering is only possible during [`Game::start`], which is the one moment
+/// a `&mut Gui` exists — so everything the UI will ever sample is loaded here,
+/// and a screen can never pull in a texture of its own later.
 #[derive(Clone, Copy)]
 pub struct UiTextures {
     pub atlas: egui::TextureId,
@@ -33,6 +38,8 @@ pub struct UiTextures {
     /// the UI needs to turn a cell index into UVs.
     pub model_icons: egui::TextureId,
     pub model_count: u32,
+    /// Panel frames, slots and the tooltip backing — see [`crate::ui::ninepatch`].
+    pub gui: egui::TextureId,
 }
 
 /// Everything Wyvencraft's screens read and write.
@@ -108,11 +115,13 @@ impl Game for Wyvencraft {
             boot.color_format,
         );
 
-        // Register the two images with egui once. The atlas is nearest, for
-        // crisp pixel-art item icons; the icon sheet is linear, since it is
-        // rendered larger than the rect it lands in.
+        // Register the three images with egui once. The atlas and the UI sheet
+        // are nearest — both are pixel art, and the UI sheet's bevels are two
+        // texels wide, which linear filtering would turn to mush. The icon
+        // sheet is linear, since it is rendered larger than the rect it lands in.
         let atlas = register(boot.gui, boot.renderer.atlas_view(), Filter::Nearest);
         let model_icons = register(boot.gui, icon_sheet, Filter::Linear);
+        let gui = register(boot.gui, load_gui_sheet(boot.render), Filter::Nearest);
 
         let shared = Shared {
             settings: self.settings,
@@ -123,11 +132,41 @@ impl Game for Wyvencraft {
                 atlas,
                 model_icons,
                 model_count: self.content.models.len() as u32,
+                gui,
             },
         };
         let first = crate::boot::initial_screen(self.plan, &self.content, &self.account);
         (shared, first)
     }
+}
+
+/// The nine-slice UI sheet, uploaded for egui to sample.
+///
+/// The one place an arbitrary PNG becomes an egui texture: `decode_png` accepts
+/// any size (unlike `art::load_png`, which forces the atlas's tile size), and
+/// `Texture::create` puts it on the GPU. Fail-soft with the compiled-in copy,
+/// like every other asset — a missing or corrupt file should not stop the game
+/// booting, and the built-in sheet is always correct.
+fn load_gui_sheet(ctx: &Arc<RenderContext>) -> Arc<ImageView> {
+    const PATH: &str = "assets/textures/gui/panel.png";
+    const BUILTIN: &[u8] = include_bytes!("../../assets/textures/gui/panel.png");
+
+    let bytes = match std::fs::read(PATH) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            log::info!("could not read {PATH} ({err}); using the built-in UI sheet");
+            BUILTIN.to_vec()
+        }
+    };
+    let image = decode_png(&bytes)
+        .or_else(|err| {
+            log::warn!("ignoring {PATH}: {err}; using the built-in UI sheet");
+            decode_png(BUILTIN)
+        })
+        .expect("built-in UI sheet decodes");
+    Texture::create(ctx, &image)
+        .expect("upload UI sheet")
+        .image_view
 }
 
 fn register(gui: &mut Gui, view: Arc<ImageView>, filter: Filter) -> egui::TextureId {
