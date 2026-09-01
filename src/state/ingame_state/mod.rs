@@ -55,6 +55,12 @@ const REQUEST_BUDGET: usize = 64;
 const MESH_BUDGET: usize = 8;
 /// Camera distance behind/in front of the player in third-person view.
 const THIRD_PERSON_DISTANCE: f32 = 4.0;
+/// How far into the inventory sweep the player's own body appears.
+///
+/// Not zero: the sweep starts with the camera on the eye, and geometry is drawn
+/// with culling off, so a body meshed at progress 0 would show the inside of
+/// its own head. By this point the camera has pulled clear of it.
+const INSPECT_MODEL_FROM: f32 = 0.25;
 /// Upper bound on a remote player's derived speed, so a teleport or first snapshot
 /// can't drive an absurd walk cadence.
 const REMOTE_MAX_SPEED: f32 = 12.0;
@@ -393,9 +399,7 @@ mod tests {
         let eye = state.player.eye_position();
 
         state.player.perspective = Perspective::First;
-        let first = state
-            .view
-            .camera(&state.player, aspect, state.camera_distance(aspect));
+        let first = state.world_camera(aspect);
         assert!(
             (first.position - eye).length() < 1.0e-5,
             "first person sits on the eye, got {:?}",
@@ -404,9 +408,7 @@ mod tests {
 
         // Nothing behind: the camera takes the whole distance.
         state.player.perspective = Perspective::ThirdBack;
-        let open = state
-            .view
-            .camera(&state.player, aspect, state.camera_distance(aspect));
+        let open = state.world_camera(aspect);
         assert!(
             ((open.position - eye).length() - THIRD_PERSON_DISTANCE).abs() < 1.0e-3,
             "open sky should give the full pullback, got {:?}",
@@ -417,9 +419,7 @@ mod tests {
         // at the *eye's* height, not the feet's — the trace is horizontal.
         let wall = BlockPos::from_world(eye - Vec3::X * 2.0);
         assert!(state.world.set_block(wall, blocks::STONE).is_some());
-        let blocked = state
-            .view
-            .camera(&state.player, aspect, state.camera_distance(aspect));
+        let blocked = state.world_camera(aspect);
         // The wall's near face is at x = 1.0. The camera must sit just outside
         // it — clear of the block, but not thrown all the way to the player.
         let gap = blocked.position.x - 1.0;

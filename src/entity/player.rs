@@ -6,6 +6,7 @@
 use glam::Vec3;
 
 use crate::core::{Aabb, BlockPos, FIXED_DT, GameMode};
+use crate::entity::camera::Shot;
 use crate::entity::kind::{EntityKind, MovementParams, PhysicsParams, VitalsParams};
 use crate::entity::physics::{self};
 
@@ -39,17 +40,28 @@ impl Perspective {
         matches!(self, Perspective::First)
     }
 
-    /// Where the camera sits relative to the eye and which way it looks, given
-    /// the player's look direction: the unit offset *toward* the camera, then
-    /// the forward vector. `None` in first person — there the camera is the eye.
+    /// Where the camera sits relative to the eye, as a [`Shot`].
     ///
-    /// The one place that knows this, so the camera's placement and the collision
-    /// trace that decides how far along the offset it may go cannot drift apart.
-    pub fn camera_placement(self, look: Vec3) -> Option<(Vec3, Vec3)> {
-        match self {
-            Perspective::First => None,
-            Perspective::ThirdBack => Some((-look, look)),
-            Perspective::ThirdFront => Some((look, -look)),
+    /// The one place that knows this, so the camera's placement and the
+    /// collision trace that decides how far along the offset it may go cannot
+    /// drift apart.
+    ///
+    /// First person is not a special case: it is `ThirdBack` at zero distance,
+    /// which puts the camera on the eye looking along the look direction. That
+    /// is what the old `None` return and its `unwrap_or((Vec3::ZERO, look))`
+    /// spelled out longhand — and collapsing it is what lets the inventory's
+    /// framing shot be blended in from first person like any other.
+    pub fn shot(self, pitch: f32, distance: f32) -> Shot {
+        let (azimuth, elevation) = match self {
+            Perspective::First | Perspective::ThirdBack => (std::f32::consts::PI, -pitch),
+            Perspective::ThirdFront => (0.0, pitch),
+        };
+        Shot {
+            azimuth,
+            elevation,
+            distance: if self.is_first_person() { 0.0 } else { distance },
+            aim: 0.0,
+            shift: 0.0,
         }
     }
 }

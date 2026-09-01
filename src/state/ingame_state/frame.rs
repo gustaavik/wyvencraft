@@ -13,9 +13,9 @@ impl InGameState {
     /// Paint every visible player's username above their model.
     ///
     /// The camera is rebuilt here rather than threaded through, and it is
-    /// bit-identical to the one the world pass will use: `update` has already
-    /// run this frame and set `render_alpha`, and `SceneCache::camera` is a pure
-    /// function of the player and that alpha.
+    /// bit-identical to the one the world pass will use: both go through
+    /// [`InGameState::world_camera`], `update` has already run this frame and
+    /// set `render_alpha`, and nothing it reads changes in between.
     ///
     /// `aspect` comes from egui's screen rect rather than the swapchain. The
     /// scale factor is uniform, so the ratio matches — and `ui` is not given the
@@ -30,9 +30,7 @@ impl InGameState {
             return;
         }
         let aspect = screen.width() / screen.height();
-        let camera = self
-            .view
-            .camera(&self.player, aspect, self.camera_distance(aspect));
+        let camera = self.world_camera(aspect);
 
         let alpha = self.view.render_alpha;
         let plates: Vec<Nameplate<'_>> = self
@@ -417,12 +415,10 @@ impl GameState<Wyvencraft> for InGameState {
     }
 
     fn scene_frame(&self, aspect: f32) -> Option<SceneFrame<'_>> {
-        Some(self.view.scene_frame(
-            &self.player,
-            &self.day_cycle,
-            aspect,
-            self.camera_distance(aspect),
-        ))
+        Some(
+            self.view
+                .scene_frame(&self.player, &self.day_cycle, self.world_camera(aspect)),
+        )
     }
 }
 

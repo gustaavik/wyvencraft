@@ -17,14 +17,16 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
+use egui::{Rect, pos2, vec2};
 use glam::Vec3;
 
 use super::mobs::{RemoteMob, mob_mesh};
-use super::{OUTLINE_COLOR, REMOTE_MAX_SPEED, THIRD_PERSON_DISTANCE};
+use super::{INSPECT_MODEL_FROM, OUTLINE_COLOR, REMOTE_MAX_SPEED, THIRD_PERSON_DISTANCE};
 use crate::art::cracks;
 use crate::content::BlockAppearance;
 use crate::content::{ItemModel, ItemShape};
 use crate::core::{Aabb, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, ChunkPos, DayCycle};
+use crate::entity::camera::Shot;
 use crate::entity::viewmodel::{self, HandPose};
 use crate::entity::{
     AnimationState, Arrow, DroppedItem, HandAnchor, HumanoidModel, Mob, Player, camera,
@@ -337,15 +339,21 @@ impl SceneCache {
 
     /// Rebuild the player model mesh in third person, or the view model in
     /// first — never both, since in first person the body is the camera.
+    ///
+    /// `show_body` forces the world model on even in first person, for the
+    /// inventory's camera pan — which would otherwise swing out to frame an
+    /// empty stage. It suppresses the view-model arm at the same instant, since
+    /// the two are alternatives.
     pub fn update_player_mesh(
         &mut self,
         ctx: &Arc<RenderContext>,
         player: &Player,
         inventory: &Inventory,
         items: &ItemRegistry,
+        show_body: bool,
         content: ModelContent<'_>,
     ) {
-        if player.perspective.is_first_person() {
+        if player.perspective.is_first_person() && !show_body {
             self.player_mesh = None;
             self.held_mesh = None;
             self.held_atlas = None;
@@ -780,33 +788,25 @@ impl SceneCache {
     /// ticks at a fixed rate, so the eye is blended between steps to stay smooth
     /// when the display runs faster than the simulation.
     ///
-    /// `distance` is how far along the perspective's offset the camera may
-    /// actually sit — resolved against the world by
-    /// [`InGameState::camera_distance`], because this cache deliberately cannot
-    /// reach one. Ignored in first person, where the camera *is* the eye.
-    pub fn camera(&self, player: &Player, aspect: f32, distance: f32) -> Camera {
-        let mut camera = Camera::new(self.fov_degrees, aspect);
-        let eye = player.interpolated_eye_position(self.render_alpha);
-        let look = player.look_direction();
-        let (offset, forward) = player
-            .perspective
-            .camera_placement(look)
-            .unwrap_or((Vec3::ZERO, look));
-        camera.position = eye + offset * distance;
-        camera.forward = forward;
-        camera
+    /// The yaw the local player's model is *drawn* at — the torso, which eases
+    /// after the look direction rather than tracking it.
+    pub fn player_body_yaw(&self) -> f32 {
+        self.player_anim.body_yaw()
     }
 
     /// Collect this frame's visible geometry: frustum-culled chunk meshes plus
     /// every entity and overlay mesh, split by render pass.
+    ///
+    /// Takes the finished camera rather than building one: it is derived once,
+    /// by [`InGameState::world_camera`], and shared with the nameplate pass so
+    /// the two cannot disagree about where the viewer is.
     pub fn scene_frame(
         &self,
         player: &Player,
         day_cycle: &DayCycle,
-        aspect: f32,
-        camera_distance: f32,
+        camera: Camera,
     ) -> SceneFrame<'_> {
-        let camera = self.camera(player, aspect, camera_distance);
+        let aspect = camera.aspect;
         let frustum = camera.frustum();
         let in_view = |pos: &ChunkPos| {
             let origin = pos.origin();
@@ -1013,18 +1013,63 @@ impl super::InGameState {
     /// The predicate is `is_solid_for_collision`, the one player physics uses:
     /// it counts an unloaded chunk as solid, so at the streaming edge the camera
     /// pulls in rather than drifting into terrain that has not arrived yet.
-    pub(super) fn camera_distance(&self, aspect: f32) -> f32 {
-        let look = self.player.look_direction();
-        let Some((dir, _)) = self.player.perspective.camera_placement(look) else {
-            return 0.0;
-        };
-        let clearance = Camera::new(self.view.fov_degrees, aspect).near_radius();
+    pub(super) fn world_camera(&self, aspect: f32) -> Camera {
+        let shot = self.camera_shot(aspect);
+        let yaw = self.framing_yaw();
         let eye = self
             .player
             .interpolated_eye_position(self.view.render_alpha);
-        camera::clear_distance(eye, dir, THIRD_PERSON_DISTANCE, clearance, |p| {
-            self.world.is_solid_for_collision(p)
-        })
+
+        let distance = if shot.distance <= 0.0 {
+            // First person, or a sweep that has not left the eye yet: there is
+            // no gap between camera and player for anything to get into.
+            0.0
+        } else {
+            let clearance = Camera::new(self.view.fov_degrees, aspect).near_radius();
+            camera::clear_distance(eye, shot.offset(yaw), shot.distance, clearance, |p| {
+                self.world.is_solid_for_collision(p)
+            })
+        };
+
+        shot.camera(eye, yaw, distance, self.view.fov_degrees, aspect)
+    }
+
+    /// The yaw the shot is framed on.
+    ///
+    /// The *body* yaw while the inventory is up, not the look yaw: the model is
+    /// drawn at `AnimationState::body_yaw`, which lags the look yaw and can sit
+    /// a good way off it when the player is standing still. Framing on the look
+    /// yaw would show a model visibly turned away from the camera.
+    fn framing_yaw(&self) -> f32 {
+        if self.inventory_anim.active() {
+            self.view.player_body_yaw()
+        } else {
+            self.player.yaw
+        }
+    }
+
+    /// This frame's shot: the player's chosen perspective, blended toward the
+    /// inventory's framing shot by however far through the sweep we are.
+    ///
+    /// Blending happens in [`Shot`]'s polar form, so a swing from behind the
+    /// player to in front of them orbits around them instead of passing through
+    /// their head at the halfway point.
+    fn camera_shot(&self, aspect: f32) -> Shot {
+        let gameplay = self
+            .player
+            .perspective
+            .shot(self.player.pitch, THIRD_PERSON_DISTANCE);
+        let t = self.inventory_anim.progress();
+        if t <= 0.0 {
+            return gameplay;
+        }
+        let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(aspect, 1.0));
+        let stage = crate::ui::inventory::layout(screen, self.player.mode.is_creative())
+            .stage_center_x;
+        gameplay.blend(
+            Shot::inspect(self.view.fov_degrees.to_radians(), stage),
+            t,
+        )
     }
 
     /// Bring every GPU resource in line with the simulation state this frame.
@@ -1103,11 +1148,19 @@ impl super::InGameState {
         };
         self.view
             .advance_player_anim(local_speed, self.player.yaw, dt);
+        // Geometry is drawn with culling off, so a camera inside the head sees
+        // the back of its own faces. The pan starts on the eye and only clears
+        // the head a little way in, which is where the body appears — the same
+        // instant the panel starts fading in, so the arm-to-body cut lands on
+        // one beat rather than two. It cannot be cross-faded: the shader is an
+        // alpha-test `discard` with no per-draw opacity.
+        let show_body = self.inventory_anim.progress() >= INSPECT_MODEL_FROM;
         self.view.update_player_mesh(
             ctx,
             &self.player,
             &self.inventory,
             &self.content.items,
+            show_body,
             content,
         );
         self.view
