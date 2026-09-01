@@ -350,4 +350,57 @@ mod tests {
             "with no vitals the label should sit lower, got {lower:?} vs {label:?}"
         );
     }
+
+    /// The inventory panel unfolds out of `hotbar_rect`, so that function has to
+    /// describe where the hotbar actually *is*. It is used to place the `Area`
+    /// as well as to answer the question, but only a painted frame proves the
+    /// two ended up the same.
+    #[test]
+    fn the_painted_hotbar_lands_on_the_computed_rect() {
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 720.0));
+        let ctx = Context::default();
+        let input = || egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+
+        let blocks = crate::world::block::BlockRegistry::with_builtins();
+        let items = ItemRegistry::from_blocks(&blocks);
+        let inventory = Inventory::new();
+        let icons = vec![ItemIcon::Flat(0); items.len()];
+        let tex = UiTextures {
+            atlas: egui::TextureId::Managed(0),
+            model_icons: egui::TextureId::Managed(0),
+            model_count: 1,
+            gui: egui::TextureId::Managed(0),
+        };
+
+        let run = |ctx: &Context| draw_hotbar(ctx, &inventory, &items, &icons, tex);
+        let output = ctx.run(input(), run);
+
+        // The hotbar paints straight to the background layer rather than into
+        // an `Area`, so there is no rect to read back — measure what it drew.
+        let painted = output
+            .shapes
+            .iter()
+            .filter(|s| !matches!(s.shape, egui::Shape::Noop))
+            .fold(egui::Rect::NOTHING, |acc, s| {
+                acc.union(s.shape.visual_bounding_rect())
+            });
+        assert!(painted.is_positive(), "the hotbar painted nothing");
+
+        // The cells, which is all the hotbar paints — it has no backing of its
+        // own, deliberately: at progress 0 the inventory panel draws exactly
+        // these nine cells and nothing else, and anything extra here would pop
+        // on the frame the two swap.
+        let computed = hotbar_rect(screen);
+        let cells = (0..HOTBAR_SIZE).fold(egui::Rect::NOTHING, |acc, i| {
+            acc.union(hotbar_cell(computed, i))
+        });
+        assert!(
+            (painted.min - cells.min).abs().max_elem() < 1.0
+                && (painted.max - cells.max).abs().max_elem() < 1.0,
+            "painted {painted:?} but the computed cells span {cells:?}"
+        );
+    }
 }

@@ -345,6 +345,12 @@ impl View<'_> {
 
     /// The whole 9x4 grid, one contiguous block. The bottom row is the hotbar,
     /// which is why it is the one row that shows a selection.
+    ///
+    /// That row is drawn at **full opacity whatever `tint` says**: it is the
+    /// HUD hotbar continuing, and it is the only thing on screen at progress 0,
+    /// where the fade has not started and the HUD's own copy is already hidden.
+    /// Fading it with the rest would blink the hotbar out for the first frames
+    /// of every open.
     fn grid(
         &self,
         ui: &mut egui::Ui,
@@ -355,14 +361,15 @@ impl View<'_> {
     ) -> Option<InvAction> {
         let mut action = None;
         for (index, cell) in grid_cells(rect) {
-            let selected = index < HOTBAR_SIZE && index == self.inventory.selected_index();
+            let is_hotbar = index < HOTBAR_SIZE;
+            let selected = is_hotbar && index == self.inventory.selected_index();
             slot::paint_slot(
                 painter,
                 cell,
                 self.contents(index),
                 None,
                 selected,
-                tint,
+                if is_hotbar { Color32::WHITE } else { tint },
                 self.tex,
             );
             if interactive && clicked(ui, cell) {

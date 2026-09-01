@@ -95,15 +95,16 @@ Per frame:
    stack.ui(&egui_ctx, Frame) → Screen::ui
 4. apply_cursor_grab, input.end_frame()
 5. renderer.acquire()
-   ├─ preview pass:  G::preview_target + stack.preview_frame() → draw_model  (offscreen)
    ├─ world pass:    stack.scene_frame(aspect)                 → draw
    ├─ egui:          gui.draw_on_image                         (composites, no depth)
    └─ present
 ```
 
-**The preview pass must go first.** The world pass clears, so it has to be the swapchain
-image's first writer before the egui overlay; inserting an offscreen pass between world and
-egui breaks vulkano's swapchain layout tracking.
+There is exactly **one** writer to the swapchain image before the egui overlay. There used
+to be an offscreen pass ahead of it, for the inventory's player preview; it was constrained
+to run *first*, because the world pass clears and inserting an offscreen pass between world
+and egui breaks vulkano's swapchain layout tracking. The inventory now pans the world camera
+onto the player instead, so the pass — and the constraint — are gone.
 
 Two `Frame` values get built per frame rather than one, because `gui` is borrowed mutably
 between steps 2 and 3.
@@ -122,9 +123,8 @@ only cover the frame between opening the bar and the widget taking focus.
 
 `ScreenStack` drives only the top screen, and applies the returned `Transition`
 (`crates/wyven-app/src/screen.rs:39`): `Push` / `Replace` / `Pop` / `ReplaceAll` / `Quit`,
-running `on_exit` and `on_enter` hooks around each. But `scene_frame` and `preview_frame`
-search the stack **top-down**, which is how the pause overlay keeps the world drawing behind
-it — `PauseMenuState::is_overlay()` returns true, its `scene_frame` returns `None`, and the
+running `on_exit` and `on_enter` hooks around each. But `scene_frame` searches the stack
+**top-down**, which is how the pause overlay keeps the world drawing behind it — `PauseMenuState::is_overlay()` returns true, its `scene_frame` returns `None`, and the
 search falls through to `InGameState`.
 
 Because `Push` runs `on_exit` on the covered screen, **pausing autosaves**.
