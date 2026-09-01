@@ -47,7 +47,8 @@ renet_netcode = "2.0"
 #
 # Only `wyven-auth` and the game depend on this, so every other engine crate
 # builds with no credential at all.
-wcauth-ticket = { git = "https://github.com/gustaavik/wcauthserver.git", branch = "main" }
+# wcauth-ticket = { git = "https://github.com/gustaavik/wcauthserver.git", branch = "main" }
+wcauth-ticket = { version = "0.1.0" }
 uuid = { version = "1", features = ["v4", "serde"] }
 # Locates the OS application-data directory, so saves outlive an install
 # directory that a launcher replaces on every update.

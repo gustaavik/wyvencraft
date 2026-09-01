@@ -3971,7 +3971,8 @@ dependencies = [
 [[package]]
 name = "wcauth-ticket"
 version = "0.1.0"
-source = "git+https://github.com/gustaavik/wcauthserver.git?branch=main#7f1acf2c85fa0feb5e53ab400b38928ba27aff04"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59e5a2cab54cc1f859fe7e38f63cbe0211fc526402e9c7d8ede919df5ce41701"
 dependencies = [
  "ed25519-dalek",
  "thiserror 2.0.20",
