@@ -2,6 +2,8 @@
 name = "wyven-net"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Host-authoritative netcode transport, generic over the wire protocol."
 
 [dependencies]

@@ -429,6 +429,23 @@ those systems are testable without a Vulkan device.
   quit, and window close via `StateStack::shutdown`) + a 60 s autosave. Only
   singleplayer/host sessions of a *named* world hold a save handle; clients and
   `WYVEN_BOOT_INGAME`-without-`WYVEN_WORLD` boots never write.
+- **The code is open; the art and the name are not.** `src/` and all nine
+  `wyven-*` crates are `MIT OR Apache-2.0` (inherited from
+  `[workspace.package]`), and the engine crates are meant for crates.io — which
+  is why the internal deps in `[workspace.dependencies]` carry a `version`
+  beside their `path`, and why the root `wyvencraft` package is `publish =
+  false` (publishing it would drag `assets/` along). Everything under `assets/`
+  is proprietary: see [`assets/LICENSE`](assets/LICENSE), and do not add art
+  without knowing where it came from. The name is
+  [`TRADEMARK.md`](TRADEMARK.md). Adding a `license` field that contradicts any
+  of this is a mistake, not a tidy-up.
+- **`wcauth-ticket` must stay permissive.** It lives in the *private*
+  wcauthserver repo, whose workspace is `LicenseRef-Proprietary`, but its own
+  manifest overrides that with `MIT OR Apache-2.0` because it is compiled into
+  this permissively licensed client. If it ever inherited the workspace license,
+  every distributed Wyvencraft binary would be encumbered by proprietary terms.
+  If you are editing that crate's manifest, do not "fix" it to
+  `license.workspace = true`.
 
 ## Verifying a change
 

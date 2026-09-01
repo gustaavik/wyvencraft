@@ -2,6 +2,8 @@
 name = "wyven-core"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Foundational voxel math, coordinate types, RNG and frame timing."
 
 [dependencies]

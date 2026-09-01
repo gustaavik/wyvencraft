@@ -117,3 +117,11 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
 
       - run: cargo test --locked
+
+      # A release tarball ships the dependencies' compiled form, and their
+      # licenses require the notices to travel with it. Catch a stale
+      # THIRD-PARTY.txt here rather than at the release that would ship it.
+      # In this job rather than `fmt` because it resolves the dependency graph,
+      # which needs the private-repo token above.
+      - name: Third-party notices are current
+        run: make licenses-check

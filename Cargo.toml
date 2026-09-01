@@ -4,18 +4,20 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/gustaavik/wyvencraft"
 
 [workspace.dependencies]
 # --- Engine crates ---
-wyven-core = { path = "crates/wyven-core" }
-wyven-assets = { path = "crates/wyven-assets" }
-wyven-render = { path = "crates/wyven-render" }
-wyven-model = { path = "crates/wyven-model" }
-wyven-voxel = { path = "crates/wyven-voxel" }
-wyven-net = { path = "crates/wyven-net" }
-wyven-input = { path = "crates/wyven-input" }
-wyven-auth = { path = "crates/wyven-auth" }
-wyven-app = { path = "crates/wyven-app" }
+wyven-core = { path = "crates/wyven-core", version = "0.1.0" }
+wyven-assets = { path = "crates/wyven-assets", version = "0.1.0" }
+wyven-render = { path = "crates/wyven-render", version = "0.1.0" }
+wyven-model = { path = "crates/wyven-model", version = "0.1.0" }
+wyven-voxel = { path = "crates/wyven-voxel", version = "0.1.0" }
+wyven-net = { path = "crates/wyven-net", version = "0.1.0" }
+wyven-input = { path = "crates/wyven-input", version = "0.1.0" }
+wyven-auth = { path = "crates/wyven-auth", version = "0.1.0" }
+wyven-app = { path = "crates/wyven-app", version = "0.1.0" }
 
 # --- Rendering (Vulkan) ---
 vulkano = "0.35"
@@ -77,7 +79,14 @@ png = "0.17"
 name = "wyvencraft"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "A Minecraft-style voxel sandbox written in Rust with Vulkan (vulkano)."
+# The engine crates are publishable; the game is not. A published package would
+# carry `assets/` with it, and the art is licensed separately from the code —
+# see `assets/LICENSE`. The nine `wyven-*` crates carry no assets and go to
+# crates.io on their own.
+publish = false
 
 [dependencies]
 wyven-core.workspace = true

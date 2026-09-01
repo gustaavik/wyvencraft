@@ -163,3 +163,29 @@ Optional polish not yet implemented:
 - In-game settings screen (render distance / FOV / sensitivity)
 - NAT traversal / relay for internet play
 - Textures for items
+
+## License
+
+The **code** is dual licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+  <https://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
+
+at your option. This covers `src/` and the nine `wyven-*` engine crates under
+`crates/`, which are usable on their own — the engine knows nothing about
+Wyvencraft and depends on none of it.
+
+The **assets** are not. Everything under `assets/` is proprietary; see
+[assets/LICENSE](assets/LICENSE). You may use them to build, run and modify this
+software, but not redistribute them separately or ship them in another product.
+Fork the engine freely and bring your own art.
+
+The **name** is not either — see [TRADEMARK.md](TRADEMARK.md). Building on this
+and saying so is fine; calling your own thing Wyvencraft is not.
+
+### Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
+dual licensed as above, without any additional terms or conditions.
