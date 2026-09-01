@@ -29,8 +29,8 @@ pub const SKIN_ROW: u32 = 0;
 /// The player skin's atlas origin as an `[col, row]` tile pair.
 pub const SKIN_ORIGIN: [u32; 2] = [SKIN_COL, SKIN_ROW];
 
-const SKIN_PATH: &str = "assets/textures/entity/defaultskin.png";
-const EMBEDDED_SKIN: &[u8] = include_bytes!("../../assets/textures/entity/defaultskin.png");
+const SKIN_PATH: &str = "assets/textures/entity/player/defaultskin.png";
+const EMBEDDED_SKIN: &[u8] = include_bytes!("../../assets/textures/entity/player/defaultskin.png");
 
 /// The whole skin sheet as RGBA pixels, indexed `[y][x]` with y = 0 at the top.
 pub type SkinRgba = [[[u8; 4]; SKIN_SIZE as usize]; SKIN_SIZE as usize];
@@ -216,12 +216,18 @@ pub fn atlas_tiles(skin: &SkinRgba) -> impl Iterator<Item = (u32, TileRgba)> + '
 }
 
 /// Load the default player skin: the PNG on disk if present and valid, else
-/// the embedded copy. The base face rects are forced opaque (matching how
-/// Minecraft treats the base layer); overlay regions keep their alpha for the
-/// separate inflated overlay shell the model draws.
+/// the embedded copy.
+///
+/// Plain [`decode`], **not** [`decode_humanoid`]: the player is drawn from
+/// `assets/models/entity/player/player.bbmodel`, which carries its own unwrap
+/// rather than Minecraft's. [`force_base_opaque`] and [`mirror_legacy_limbs`]
+/// both address the sheet through the [`PARTS`] rects, and on a custom unwrap
+/// those rects name the wrong pixels — they would stamp alpha over art that is
+/// transparent on purpose and mirror one limb onto another. Mob sheets still go
+/// through `decode_humanoid`, because those *are* Minecraft-unwrapped.
 pub fn load_default() -> Box<SkinRgba> {
     match std::fs::read(SKIN_PATH) {
-        Ok(bytes) => match decode_humanoid(&bytes) {
+        Ok(bytes) => match decode(&bytes) {
             Ok(skin) => {
                 log::info!("player skin: using {SKIN_PATH}");
                 skin
@@ -236,7 +242,7 @@ pub fn load_default() -> Box<SkinRgba> {
 }
 
 fn embedded() -> Box<SkinRgba> {
-    decode_humanoid(EMBEDDED_SKIN).expect("embedded default skin decodes")
+    decode(EMBEDDED_SKIN).expect("embedded default skin decodes")
 }
 
 /// Decode a skin/armor/mob PNG into a 64×64 sheet.
@@ -431,9 +437,28 @@ mod tests {
         assert_eq!(art[0][0], skin[0][0]);
     }
 
+    /// The player sheet is taken exactly as authored.
+    ///
+    /// It belongs to `assets/models/entity/player/player.bbmodel`, which carries
+    /// its own unwrap rather than Minecraft's — so the [`PARTS`] rects name the
+    /// wrong pixels on it and [`force_base_opaque`] would stamp alpha over art
+    /// that is transparent on purpose. Mob sheets still get the fixing up, which
+    /// is what the test below pins.
     #[test]
-    fn default_skin_base_faces_are_opaque() {
-        let skin = load_default();
+    fn the_player_sheet_is_loaded_untouched() {
+        let raw = decode(EMBEDDED_SKIN).expect("the embedded sheet decodes");
+        assert_eq!(embedded(), raw, "no Minecraft-layout fixing up");
+        assert!(
+            raw.iter().flatten().any(|px| px[3] == 0),
+            "and it does have transparent texels to lose"
+        );
+    }
+
+    /// A Minecraft-unwrapped sheet — which is what every mob still uses — does
+    /// get its base layer forced opaque, so an inner body never shows through.
+    #[test]
+    fn a_minecraft_unwrapped_sheet_still_gets_its_base_forced_opaque() {
+        let skin = decode_humanoid(EMBEDDED_SKIN).expect("decodes");
         for part in PARTS {
             for dir in Direction::ALL {
                 let [x, y, w, h] = part.face_rect(dir);

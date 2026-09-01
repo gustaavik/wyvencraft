@@ -11,6 +11,7 @@ use super::{HOST_PLAYER_ID, InGameState};
 use crate::art::{mobskin, skin};
 use crate::core::{Aabb, BlockPos, Rng64};
 use crate::entity::kind::VisualSpec;
+use crate::entity::rigged;
 use crate::entity::{
     AnimationState, Arrow, HumanoidModel, Mob, MobAction, MobId, Perception, PlayerSighting,
     QuadrupedModel,
@@ -177,6 +178,22 @@ pub(super) fn mob_mesh(
                 ),
                 model: Some(id),
             })
+        }
+        VisualSpec::Rigged(v) => {
+            // A model that failed to load leaves the entity invisible rather
+            // than crashing the frame; `ModelRegistry::load` already warned.
+            let model = models.get(models.find(&v.path)?)?;
+            let origin = v
+                .skin
+                .as_deref()
+                .and_then(mobskin::origin_for)
+                .unwrap_or(skin::SKIN_ORIGIN);
+            // Mobs are drawn in the rest pose: the clip layer lives with the
+            // player, which is the only rigged entity so far. Giving a mob its
+            // clips means threading its `AnimationState` in here and binding a
+            // `HumanoidRig` per model — the geometry path below is already the
+            // one the player uses.
+            atlas(rigged::bake_rest(model, v.scale, origin, position, yaw)?)
         }
         VisualSpec::ItemCube(_) => None,
     }
@@ -670,24 +687,35 @@ mod tests {
     /// The shamble has to reach *at* you. The sign is easy to get backwards and
     /// nothing else would catch it — a zombie with its arms behind it still
     /// walks, chases and hits exactly the same.
+    ///
+    /// Read off the built mesh rather than off a hand anchor: the player's hand
+    /// moved to the rigged model, and a box-model mob has no anchor of its own.
     #[test]
     fn the_shamble_holds_the_arms_out_in_front() {
         let model = HumanoidModel::player();
-        let rest = model.hand_anchor(Vec3::ZERO, 0.0, &Pose::default());
-        let shamble = model.hand_anchor(
-            Vec3::ZERO,
-            0.0,
-            &Pose {
-                right_arm: ARMS_FORWARD_ANGLE,
-                ..Default::default()
-            },
-        );
+        let sheet = crate::art::skin::SKIN_ORIGIN;
+        let forward = |pose: &Pose| {
+            // The model faces -Z, so "reaching" is the most negative z the arm
+            // geometry gets to. Arms are the third and fourth parts, pushed as
+            // base+overlay boxes of 24 vertices each after head and body.
+            model
+                .build_mesh_sheet(Vec3::ZERO, 0.0, pose, sheet)
+                .vertices
+                .iter()
+                .skip(4 * 24)
+                .take(4 * 24)
+                .map(|v| v.position[2])
+                .fold(f32::MAX, f32::min)
+        };
+        let rest = forward(&Pose::default());
+        let shamble = forward(&Pose {
+            left_arm: ARMS_FORWARD_ANGLE,
+            right_arm: ARMS_FORWARD_ANGLE,
+            ..Default::default()
+        });
         assert!(
-            shamble.position.z < rest.position.z - 0.2,
-            "the model faces -Z, so the fists must end up ahead of the shoulders: \
-             rest {}, shamble {}",
-            rest.position.z,
-            shamble.position.z
+            shamble < rest - 0.2,
+            "the shamble should reach forward (-Z): rest {rest}, shamble {shamble}"
         );
     }
 }

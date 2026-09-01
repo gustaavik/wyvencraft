@@ -16,7 +16,6 @@ use std::sync::Arc;
 
 use crate::core::Direction;
 use crate::core::ident::title_case;
-use crate::entity::kind::VisualSpec;
 use crate::entity::{EntityRegistry, SpawnConfig};
 use crate::inventory::item::ItemVisuals;
 use crate::inventory::{ItemId, ItemRegistry};
@@ -281,8 +280,8 @@ impl GameContent {
         // however many definitions share it.
         let mut models = ModelRegistry::new();
         for kind in entities.iter() {
-            if let VisualSpec::Model(spec) = &kind.visual {
-                models.load(&spec.path, source);
+            if let Some(path) = kind.visual.model_path() {
+                models.load(path, source);
             }
         }
         // A block and the item that places it typically name the same file;
@@ -822,10 +821,10 @@ mod tests {
             "the shipped content names models"
         );
         for kind in content.entities.iter() {
-            if let VisualSpec::Model(spec) = &kind.visual {
+            if let Some(path) = kind.visual.model_path() {
                 let id = content
                     .models
-                    .find(&spec.path)
+                    .find(path)
                     .unwrap_or_else(|| panic!("{} names an unloadable model", kind.name));
                 assert!(
                     content

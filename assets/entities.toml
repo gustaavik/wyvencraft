@@ -73,7 +73,12 @@ regen_rate = 1.0
 starve_rate = 1.0
 
 [entity.visual]
-kind = "humanoid"
+kind = "rigged"
+path = "assets/models/entity/player/player.bbmodel"
+# The model is authored 17.55 px tall — 1.096875 blocks — so this is what
+# stands it up in its own 1.8-block collision box. Change the model's height in
+# Blockbench and this is the one number that follows.
+scale = 1.641026
 
 [[entity]]
 name = "dropped item"

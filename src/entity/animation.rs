@@ -51,6 +51,12 @@ pub struct AnimationState {
     walk_phase: f32,
     /// Smoothed locomotion magnitude in `[0,1]` (idle↔walk blend).
     walk_amount: f32,
+    /// Smoothed horizontal speed (blocks/s), on the same blend as
+    /// `walk_amount`. Kept separately because `walk_amount` saturates at
+    /// [`REFERENCE_SPEED`] and so cannot tell a walk from a sprint — which is
+    /// exactly the choice a model with both a `walk` and a `run` clip has to
+    /// make.
+    speed: f32,
     /// Idle sway phase (radians), advanced by wall-clock time.
     idle_phase: f32,
     /// Remaining time of a one-shot arm swing (seconds); `0` = not swinging.
@@ -86,6 +92,7 @@ impl AnimationState {
         let target = (speed / REFERENCE_SPEED).clamp(0.0, 1.0);
         let blend = 1.0 - (-dt * BLEND_RATE).exp();
         self.walk_amount += (target - self.walk_amount) * blend;
+        self.speed += (speed - self.speed) * blend;
 
         self.turn_body(look_yaw, dt);
 
@@ -175,6 +182,22 @@ impl AnimationState {
         self.walk_amount
     }
 
+    /// Smoothed horizontal speed in blocks/s — which *gait* is being used, as
+    /// opposed to [`Self::walk_amount`]'s how much of one.
+    pub fn speed(&self) -> f32 {
+        self.speed
+    }
+
+    /// How far the head is turned off the torso (radians).
+    ///
+    /// The mesh is drawn at [`Self::body_yaw`], which lags the look direction;
+    /// this is what puts the face back where the entity is actually looking.
+    /// Exposed as well as folded into [`Self::pose`] because a rigged model
+    /// applies it to a *bone* rather than reading it off a box pose.
+    pub fn head_offset(&self) -> f32 {
+        wrap_angle(self.look_yaw - self.body_yaw())
+    }
+
     /// Sample the current articulation into a [`Pose`]. `head_pitch` orients the head.
     pub fn pose(&self, head_pitch: f32) -> Pose {
         let swing = self.walk_phase.sin() * SWING_MAX * self.walk_amount;
@@ -192,10 +215,8 @@ impl AnimationState {
 
         Pose {
             head_pitch,
-            // How far the head is turned off the torso. The mesh is built at
-            // `body_yaw`, so this puts the face back where the entity is looking.
-            // The inventory preview overrides it to track the cursor instead.
-            head_yaw: wrap_angle(self.look_yaw - self.body_yaw()),
+            // The inventory preview overrides this to track the cursor instead.
+            head_yaw: self.head_offset(),
             // Arms swing opposite the legs (diagonal gait); idle sway mirrors between
             // the arms; the one-shot swing rides on top of the right arm.
             left_arm: swing + idle,

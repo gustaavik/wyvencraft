@@ -12,6 +12,7 @@ pub mod model;
 pub mod physics;
 pub mod player;
 pub mod projectile;
+pub mod rigged;
 pub mod spawning;
 pub mod viewmodel;
 
@@ -20,8 +21,9 @@ pub use brain::{Perception, PlayerSighting};
 pub use dropped_item::DroppedItem;
 pub use kind::{EntityKind, EntityRegistry};
 pub use mob::{Mob, MobAction, MobId};
-pub use model::{HandAnchor, HumanoidModel, ModelBox, Pose, QuadrupedModel};
+pub use model::{HumanoidModel, ModelBox, Pose, QuadrupedModel};
 pub use player::{MovementInput, Perspective, Player};
 pub use projectile::Arrow;
+pub use rigged::{Character, HeadLook, HumanoidRig};
 pub use spawning::{SpawnConfig, SpawnRequest, Spawner};
 pub use viewmodel::HandPose;

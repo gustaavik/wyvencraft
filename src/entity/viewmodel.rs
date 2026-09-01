@@ -1,9 +1,9 @@
 //! The first-person view model: the player's own arm, and whatever it holds.
 //!
-//! In third person the hand is a consequence of the body —
-//! [`HumanoidModel::hand_anchor`] finds the fist at the end of a swinging arm,
-//! and the held item hangs off it. First person has no body to hang off: the
-//! camera *is* the head, and the arm has to be placed against it directly.
+//! In third person the hand is a consequence of the body — the rig puts the
+//! fist at the end of a swinging arm, and the held item hangs off that bone.
+//! First person has no body to hang off: the camera *is* the head, and the arm
+//! has to be placed against it directly.
 //!
 //! **Hand space is Minecraft's.** The offset below is the one vanilla uses, and
 //! a `display` entry's numbers are measured against exactly this frame — which
@@ -22,10 +22,10 @@ use std::f32::consts::{PI, TAU};
 
 use glam::{Mat4, Vec3};
 
-use crate::art::skin::{self, SkinPart};
-use crate::entity::model::{BoxPlacement, HumanoidModel, ModelBox, push_box_with};
+use crate::entity::rigged::Character;
 use wyven_model::display::{DisplayContext, ItemTransform};
 use wyven_model::mesh as model_mesh;
+use wyven_model::rig::Pose;
 use wyven_render::mesh::CpuMesh;
 
 /// Where the main hand sits in camera space: right, a little below the eye, and
@@ -49,11 +49,6 @@ pub const HAND_FOV_DEGREES: f32 = 70.0;
 const ARM_PITCH: f32 = 143.0;
 const ARM_YAW: f32 = 36.0;
 const ARM_ROLL: f32 = 0.0;
-
-/// Overlay-shell inflation for the sleeve, per side. Matches the value
-/// `HumanoidModel::build_mesh_sheet` uses for limbs, so the first-person sleeve
-/// sits exactly where the third-person one does.
-const SLEEVE_INFLATE: f32 = 0.25 / 16.0;
 
 /// How far the hand travels on each axis over one walk cycle, in blocks.
 const BOB_SIDEWAYS: f32 = 0.06;
@@ -128,13 +123,6 @@ fn arm_orientation() -> Mat4 {
         * Mat4::from_rotation_y(ARM_ROLL.to_radians())
 }
 
-/// The fist in the arm box's own model space: the far end of the arm, a little
-/// inside the cuff. The same point [`HumanoidModel::hand_anchor`] uses, so the
-/// first- and third-person hands hold an item in the same place.
-fn fist(arm: ModelBox) -> Vec3 {
-    arm.center - Vec3::new(0.0, arm.size.y * 0.5 - 1.0 / 16.0, 0.0)
-}
-
 /// Where the held item goes, given the hand `frame`: at the fist, oriented by
 /// hand space, with the model's own placement applied on top by the caller.
 pub fn item_anchor(frame: Mat4) -> Mat4 {
@@ -175,51 +163,51 @@ pub fn block_placement(context: DisplayContext) -> ItemTransform {
     }
 }
 
-/// Build the player's right arm — the base box plus its sleeve overlay — in
-/// world space, hanging off `frame`.
+/// Build the player's right arm — the shoulder, elbow and hand of the rigged
+/// model — in world space, hanging off `frame`.
+///
+/// Only that limb is baked, out of the same rig and the same pose the whole body
+/// is drawn from in third person, so the two views can never disagree about
+/// where an elbow is. The arm is shifted so its **fist** — not its shoulder —
+/// sits at the frame's origin, which is where the held item is too: that is what
+/// keeps an item in the hand while the arm swings.
 ///
 /// Lit as though it were fixed in front of the eye rather than turning with it:
-/// see [`BoxPlacement`]. Without that the hand would pulse between bright and
-/// dim as the player spun on the spot, which reads as a rendering fault.
-pub fn arm_mesh(model: &HumanoidModel, frame: Mat4) -> CpuMesh {
-    let arm = model.right_arm;
-    let orientation = arm_orientation();
-    let local = orientation * Mat4::from_translation(-fist(arm));
-    let placement = BoxPlacement::new(frame * local)
-        .lit_as(orientation)
-        .shaded_as(orientation);
-
-    let mut mesh = CpuMesh::new();
-    push_box_with(
-        &mut mesh,
-        arm,
-        skin::RIGHT_ARM,
-        skin::SKIN_ORIGIN,
-        placement,
-    );
-    // The sleeve: the same box grown on every side, sharing the arm's placement
-    // so it stays locked to it. Its transparent texels are alpha-tested away.
-    let sleeve = ModelBox {
-        center: arm.center,
-        size: arm.size + Vec3::splat(2.0 * SLEEVE_INFLATE),
+/// without that the hand would pulse between bright and dim as the player spun
+/// on the spot, which reads as a rendering fault.
+pub fn arm_mesh(character: &Character<'_>, pose: &Pose, frame: Mat4) -> CpuMesh {
+    let Some(arm) = character.clips.right_arm() else {
+        return CpuMesh::new();
     };
-    push_box_with(
-        &mut mesh,
-        sleeve,
-        skin::RIGHT_SLEEVE,
-        skin::SKIN_ORIGIN,
-        placement,
-    );
-    mesh
-}
+    let Some(hand) = character.clips.right_hand() else {
+        return CpuMesh::new();
+    };
+    let Some(fist) = character.joint(pose, hand) else {
+        return CpuMesh::new();
+    };
 
-/// The skin parts a first-person arm is drawn from, for callers that need to
-/// know the sheet is the player's own.
-pub const ARM_PARTS: [SkinPart; 2] = [skin::RIGHT_ARM, skin::RIGHT_SLEEVE];
+    let orientation = arm_orientation();
+    let scale = Mat4::from_scale(Vec3::splat(character.scale));
+    // The bake applies `transform * bone`, and the bone matrices are in the
+    // model's own units — so the fist has to be scaled the same way before it
+    // can be subtracted off.
+    let transform = frame * orientation * Mat4::from_translation(-fist * character.scale) * scale;
+    character.bake_selected(pose, transform, orientation, character.subtree_filter(arm))
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entity::rigged::fixture::{Player, walking};
+
+    /// The arm as it is drawn standing still.
+    fn rested(player: &Player) -> (Character<'_>, Pose) {
+        let character = player.character();
+        let pose = character
+            .pose(&walking(0.0), crate::entity::HeadLook::default())
+            .expect("a rest pose");
+        (character, pose)
+    }
 
     fn pose(yaw: f32, pitch: f32) -> HandPose {
         HandPose {
@@ -232,11 +220,15 @@ mod tests {
         }
     }
 
-    /// Two boxes — the arm and its sleeve — six faces each, four corners a face.
+    /// The whole arm chain and nothing else: shoulder, forearm and hand, six
+    /// faces each, four unwelded corners a face. If the subtree filter let the
+    /// torso through, this is what would catch it.
     #[test]
-    fn the_arm_is_two_boxes() {
-        let mesh = arm_mesh(&HumanoidModel::player(), pose(0.0, 0.0).frame());
-        assert_eq!(mesh.vertices.len(), 2 * 6 * 4);
+    fn the_arm_is_the_three_bones_of_one_limb() {
+        let player = Player::load();
+        let (character, arm_pose) = rested(&player);
+        let mesh = arm_mesh(&character, &arm_pose, pose(0.0, 0.0).frame());
+        assert_eq!(mesh.vertices.len(), 3 * 6 * 4);
     }
 
     /// The check that cannot be made by looking at the screen without running
@@ -244,7 +236,8 @@ mod tests {
     /// every direction they might be facing.
     #[test]
     fn the_arm_sits_in_front_of_the_eye_and_to_the_right() {
-        let model = HumanoidModel::player();
+        let player = Player::load();
+        let (character, arm_pose) = rested(&player);
         for &(yaw, pitch) in &[(0.0, 0.0), (1.7, 0.0), (-2.4, 0.6), (3.0, -0.9), (5.5, 0.2)] {
             let pose = pose(yaw, pitch);
             // `Player::look_direction` for this yaw/pitch, spelled out so the
@@ -253,7 +246,7 @@ mod tests {
             let (sp, cp) = pitch.sin_cos();
             let look = Vec3::new(cp * sy, sp, -cp * cy).normalize();
             let right = Vec3::new(yaw.cos(), 0.0, yaw.sin());
-            let mesh = arm_mesh(&model, pose.frame());
+            let mesh = arm_mesh(&character, &arm_pose, pose.frame());
             for vertex in &mesh.vertices {
                 let offset = Vec3::from(vertex.position) - pose.eye;
                 assert!(
@@ -268,27 +261,66 @@ mod tests {
         }
     }
 
-    /// The arm's fist and the held item's origin are the same point, at rest and
-    /// mid-swing alike. This is what stops an item drifting out of the hand.
+    /// The hand and the held item's origin are the same point, at rest and
+    /// mid-swing alike. This is what stops an item drifting out of the fist —
+    /// and with a three-joint arm there are two more places it could drift.
+    ///
+    /// Measured off the baked hand geometry rather than off the placement maths
+    /// that produced it, so a sign error in either has somewhere to show.
     #[test]
     fn the_arm_and_the_item_share_a_fist() {
-        let model = HumanoidModel::player();
-        let arm = model.right_arm;
+        let player = Player::load();
+        let character = player.character();
+        let hand = character.clips.right_hand().expect("a hand bone");
         for swing in [0.0, 0.25, 0.5, 0.9] {
-            let pose = HandPose {
-                swing,
+            let mut anim = walking(0.0);
+            anim.trigger_swing();
+            anim.advance(0.0, 0.0, swing * 0.25);
+            let arm_pose = character
+                .pose(&anim, crate::entity::HeadLook::default())
+                .expect("a pose");
+
+            let hand_pose = HandPose {
+                swing: anim.swing_progress(),
                 ..pose(0.8, -0.2)
             };
-            let frame = pose.frame();
-            // Where the arm mesh puts its fist...
-            let local = arm_orientation() * Mat4::from_translation(-fist(arm));
-            let arm_fist = (frame * local).transform_point3(fist(arm));
+            let frame = hand_pose.frame();
+
+            // Where the hand's own geometry ended up...
+            let mesh = arm_mesh(&character, &arm_pose, frame);
+            let all = arm_mesh(&character, &arm_pose, frame).vertices.len();
+            let hand_only = {
+                let orientation = arm_orientation();
+                let fist = character.joint(&arm_pose, hand).expect("a joint");
+                let transform = frame
+                    * orientation
+                    * Mat4::from_translation(-fist * character.scale)
+                    * Mat4::from_scale(Vec3::splat(character.scale));
+                character.bake_selected(
+                    &arm_pose,
+                    transform,
+                    orientation,
+                    character.subtree_filter(hand),
+                )
+            };
+            assert!(
+                hand_only.vertices.len() < all,
+                "the hand is part of the arm"
+            );
+            let centre: Vec3 = hand_only
+                .vertices
+                .iter()
+                .map(|v| Vec3::from(v.position))
+                .sum::<Vec3>()
+                / hand_only.vertices.len() as f32;
+
             // ...and where a held model is anchored.
             let held = item_anchor(frame).transform_point3(Vec3::ZERO);
             assert!(
-                arm_fist.abs_diff_eq(held, 1e-5),
-                "swing {swing}: fist {arm_fist} vs item {held}"
+                (centre - held).length() < 0.1,
+                "swing {swing}: hand centre {centre} vs item {held}"
             );
+            assert!(!mesh.vertices.is_empty());
         }
     }
 
@@ -345,9 +377,10 @@ mod tests {
     /// The hand rides the camera, so turning must not change its shading.
     #[test]
     fn turning_does_not_change_the_arms_lighting() {
-        let model = HumanoidModel::player();
-        let a = arm_mesh(&model, pose(0.0, 0.0).frame());
-        let b = arm_mesh(&model, pose(2.9, 0.4).frame());
+        let player = Player::load();
+        let (character, arm_pose) = rested(&player);
+        let a = arm_mesh(&character, &arm_pose, pose(0.0, 0.0).frame());
+        let b = arm_mesh(&character, &arm_pose, pose(2.9, 0.4).frame());
         for (x, y) in a.vertices.iter().zip(&b.vertices) {
             assert_eq!(x.normal, y.normal);
             assert_eq!(x.ao, y.ao);

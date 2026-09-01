@@ -35,9 +35,10 @@ const FAR_FONT: f32 = 11.0;
 
 /// How far above a player's feet the plate sits.
 ///
-/// The humanoid model's head tops out at y = 2.0 (see `entity::model`); the
-/// extra clearance keeps the text off the hair.
-pub const ANCHOR_HEIGHT: f32 = 2.25;
+/// The rigged player model is scaled in `assets/entities.toml` so its head tops
+/// out at the collision height, 1.8; the extra clearance keeps the text off the
+/// hair.
+pub const ANCHOR_HEIGHT: f32 = 2.05;
 
 /// One player's plate, ready to draw.
 pub struct Nameplate<'a> {
@@ -181,8 +182,8 @@ mod tests {
     /// The plate sits above the model, not inside it.
     #[test]
     fn the_anchor_clears_the_head() {
-        // `entity::model::HumanoidModel::player` puts the top of the head at 2.0
-        // blocks above the feet.
-        const { assert!(ANCHOR_HEIGHT > 2.0) };
+        // The player model is fitted to its 1.8-block collision box, so that is
+        // where the top of the head is.
+        const { assert!(ANCHOR_HEIGHT > 1.8) };
     }
 }
