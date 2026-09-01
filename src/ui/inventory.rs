@@ -1,52 +1,49 @@
-//! The inventory screen: armor slots down the left of the panel and the whole
-//! 9x4 storage grid — hotbar included as its bottom row — to their right.
+//! The inventory panel: a four-slot armor column down its left edge and the
+//! whole 9x4 storage grid — hotbar included as its bottom row — to their right.
 //!
 //! Interaction is click-to-move (Minecraft-style): the caller owns a "held"
 //! stack; this view reports the slot clicked (or palette item picked) and
 //! paints the grid and the held stack under the cursor. The move logic lives
 //! with the inventory owner.
+//!
+//! **The panel unfolds out of the hotbar.** Its bottom row is laid out from
+//! [`crate::ui::slot`]'s metrics, which is what the HUD hotbar uses too, so at
+//! progress 0 the two are the same nine cells at the same size in the same
+//! place and the hand-off between them is invisible. Everything above that row
+//! is revealed by a clip rect growing out of it. Both endpoints are *computed*
+//! ([`layout`] and [`hud::hotbar_rect`]) rather than read back from egui, which
+//! matters because the animation starts on a frame where egui has placed
+//! nothing yet.
 
-use egui::{Align2, Color32, Context, FontId, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
+use egui::{Align2, Color32, Context, FontId, Rect, Sense, pos2, vec2};
 
 use crate::content::ItemIcon;
 use crate::core::GameMode;
 use crate::inventory::{
-    ARMOR_START, ArmorSlot, HOTBAR_SIZE, INVENTORY_SIZE, Inventory, ItemId, ItemRegistry,
-    ItemStack,
+    ARMOR_SIZE, ARMOR_START, ArmorSlot, HOTBAR_SIZE, INVENTORY_SIZE, Inventory, ItemId,
+    ItemRegistry, ItemStack,
 };
 use crate::state::UiTextures;
+use crate::ui::hud;
 use crate::ui::icon::draw_item_icon;
+use crate::ui::ninepatch;
+use crate::ui::slot::{self, GAP, PITCH, SIZE, SlotContents};
 
-const SLOT: f32 = 46.0;
-const PAD: f32 = 5.0;
-const GAP: f32 = 14.0;
-/// The storage grid: nine columns, and every slot in `Inventory` storage.
+/// The storage grid: nine columns, and every slot the inventory has.
 /// The bottom row is the hotbar, which is why there is no gap above it.
 const GRID_COLS: usize = HOTBAR_SIZE;
 const GRID_ROWS: usize = INVENTORY_SIZE / GRID_COLS;
-/// The creative item palette, shown under the grid in creative mode only.
-const PALETTE_W: f32 = GRID_COLS as f32 * (SLOT + PAD) - PAD;
-const PALETTE_H: f32 = 132.0;
 
-/// The slot at `row`, `col` of the drawn grid.
-///
-/// Storage sits above the hotbar on screen, but the hotbar is slots `0..9` —
-/// so the last drawn row is the *first* nine indices, and the rows above it
-/// run `9..36` in order.
-const fn slot_at(row: usize, col: usize) -> usize {
-    if row + 1 == GRID_ROWS {
-        col
-    } else {
-        HOTBAR_SIZE + row * GRID_COLS + col
-    }
-}
-
-// Light-grey panel palette, matching the mockup regardless of egui's theme.
-const PANEL_BG: Color32 = Color32::from_rgb(196, 196, 196);
-const SLOT_BG: Color32 = Color32::from_rgb(122, 122, 122);
-const SLOT_HOVER: Color32 = Color32::from_rgb(150, 150, 152);
-const SLOT_STROKE: Color32 = Color32::from_rgb(92, 92, 92);
-const TEXT: Color32 = Color32::from_rgb(40, 40, 42);
+/// The dark carcass's margin around its contents, and the gap between the
+/// armor column and the grid.
+const PANEL_PAD: f32 = 10.0;
+const COLUMN_GAP: f32 = 10.0;
+/// How far the panel floats inside the screen's right edge.
+const SCREEN_MARGIN: f32 = 28.0;
+/// Height of the creative palette strip below the grid.
+const PALETTE_H: f32 = 118.0;
+/// Size of the stack riding on the cursor.
+const HELD_ICON: f32 = 40.0;
 
 /// What the player did in the inventory screen this frame.
 pub enum InvAction {
@@ -54,6 +51,85 @@ pub enum InvAction {
     Slot(usize),
     /// Picked an item from the creative palette (grab a full stack).
     Pick(ItemId),
+}
+
+/// Where the panel rests and how much screen it leaves for the player model.
+///
+/// Pure, so the camera (which needs to know where *not* to put the model) and
+/// the painter derive their numbers from one place and cannot disagree.
+#[derive(Clone, Copy, Debug)]
+pub struct InventoryLayout {
+    /// The panel at rest.
+    pub panel: Rect,
+    /// The armor column's cells and their padding.
+    pub armor: Rect,
+    /// The grid's backing.
+    pub grid: Rect,
+    /// The grid's bottom row — the hotbar, and the animation's anchor.
+    pub hotbar_row: Rect,
+    /// The creative palette strip; `Rect::NOTHING` in survival.
+    pub palette: Rect,
+    /// Centre of the column left clear for the player model, as a fraction of
+    /// the screen's width.
+    pub stage_center_x: f32,
+}
+
+/// Lay the panel out for a screen of this size.
+pub fn layout(screen: Rect, creative: bool) -> InventoryLayout {
+    let grid_size = vec2(
+        GRID_COLS as f32 * PITCH + GAP,
+        GRID_ROWS as f32 * PITCH + GAP,
+    );
+    let armor_size = vec2(PITCH + GAP, ARMOR_SIZE as f32 * PITCH + GAP);
+    let strip = if creative { PALETTE_H + COLUMN_GAP } else { 0.0 };
+
+    let body = vec2(
+        armor_size.x + COLUMN_GAP + grid_size.x,
+        grid_size.y.max(armor_size.y) + strip,
+    );
+    let panel_size = body + vec2(2.0 * PANEL_PAD, 2.0 * PANEL_PAD);
+
+    // Flush right, vertically centred. Clamped to the screen so a window
+    // narrower than the panel shows the panel rather than half of it.
+    let left = (screen.right() - SCREEN_MARGIN - panel_size.x).max(screen.left());
+    let top = (screen.center().y - panel_size.y * 0.5).max(screen.top());
+    let panel = Rect::from_min_size(pos2(left, top), panel_size);
+
+    let armor = Rect::from_min_size(panel.min + vec2(PANEL_PAD, PANEL_PAD), armor_size);
+    let grid = Rect::from_min_size(
+        pos2(armor.right() + COLUMN_GAP, panel.top() + PANEL_PAD),
+        grid_size,
+    );
+    // The bottom row, with the grid's own padding around it — which is exactly
+    // the shape `hud::hotbar_rect` produces.
+    let hotbar_row = Rect::from_min_size(
+        pos2(grid.left(), grid.top() + (GRID_ROWS - 1) as f32 * PITCH),
+        vec2(grid_size.x, SIZE + 2.0 * GAP),
+    );
+    let palette = if creative {
+        Rect::from_min_size(
+            pos2(grid.left(), grid.bottom() + COLUMN_GAP),
+            vec2(grid_size.x, PALETTE_H),
+        )
+    } else {
+        Rect::NOTHING
+    };
+
+    // Everything left of the panel is the model's stage; centre it in that.
+    let stage_center_x = if screen.width() > 0.0 {
+        (panel.left() - screen.left()) / screen.width() * 0.5
+    } else {
+        0.25
+    };
+
+    InventoryLayout {
+        panel,
+        armor,
+        grid,
+        hotbar_row,
+        palette,
+        stage_center_x,
+    }
 }
 
 /// Everything the view needs to draw a slot's contents, bundled so the many
@@ -69,7 +145,11 @@ struct View<'a> {
     tex: UiTextures,
 }
 
-/// Draw the inventory panel. Returns the frame's action, if any.
+/// Draw the inventory panel at `progress` through its unfold.
+///
+/// `progress` is 0 at the hotbar and 1 at rest; the caller owns the easing.
+/// Clicks are only reported once the panel has arrived, so a slot can never be
+/// hit while it is still travelling under the cursor.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_inventory(
     ctx: &Context,
@@ -79,6 +159,7 @@ pub fn draw_inventory(
     names: &[String],
     held: Option<ItemStack>,
     mode: GameMode,
+    progress: f32,
     tex: UiTextures,
 ) -> Option<InvAction> {
     let view = View {
@@ -88,57 +169,107 @@ pub fn draw_inventory(
         names,
         tex,
     };
-    let frame = egui::Frame::new()
-        .fill(PANEL_BG)
-        .inner_margin(14.0)
-        .corner_radius(6.0);
+    let screen = ctx.screen_rect();
+    let l = layout(screen, mode.is_creative());
+    let t = progress.clamp(0.0, 1.0);
+    let interactive = t >= 1.0;
 
-    let inner = egui::Window::new("Inventory")
-        .title_bar(false)
-        .collapsible(false)
-        .resizable(false)
-        .frame(frame)
-        .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+    // The panel's hotbar row travels from the HUD hotbar to its resting place.
+    // Both rects are the same size, so this is a pure translation — no scaling,
+    // and so no half-pixel slots on the way.
+    let row = lerp_rect(hud::hotbar_rect(screen), l.hotbar_row, t);
+    let shift = row.min - l.hotbar_row.min;
+
+    // Reveal the rest of the panel by growing the clip out of that row.
+    let panel = l.panel.translate(shift);
+    let clip = lerp_rect(row, panel, t);
+
+    // The carcass and the rows above the hotbar fade in slightly behind the
+    // unfold, so the reveal reads as one motion rather than a wipe.
+    let body = tint(smoothstep(0.10, 0.65, t));
+
+    let action = egui::Area::new(egui::Id::new("inventory"))
+        .fixed_pos(clip.min)
+        .order(egui::Order::Middle)
         .show(ctx, |ui| {
-            let mut action = None;
+            ui.set_clip_rect(clip);
+            let painter = ui.painter().clone();
 
-            // --- Armor column beside the grid. ---
-            let top = ui
-                .horizontal_top(|ui| {
-                    let mut a = view.armor_column(ui);
-                    ui.add_space(GAP);
-                    a = a.or(view.grid(ui));
-                    a
-                })
-                .inner;
-            action = action.or(top);
+            ninepatch::draw_nine(&painter, panel, ninepatch::PANEL, body, tex.gui);
+            ninepatch::draw_nine(
+                &painter,
+                l.grid.translate(shift),
+                ninepatch::GRID,
+                body,
+                tex.gui,
+            );
 
-            // --- Creative palette: the only in-UI item source in creative. ---
+            let armor = l.armor.translate(shift);
+            let grid = l.grid.translate(shift);
+            let mut action = view
+                .armor_column(ui, &painter, armor, body, interactive)
+                .or(view.grid(ui, &painter, grid, body, interactive));
+
             if mode.is_creative() {
-                ui.add_space(GAP);
-                action = action.or(view.palette(ui, PALETTE_W, PALETTE_H));
+                let palette = l.palette.translate(shift);
+                action = action.or(view.palette(ui, &painter, palette, body, interactive));
             }
             action
-        });
-    // `show` → Option (window open) of InnerResponse whose `.inner` is itself
-    // Option (the body ran / wasn't collapsed); flatten both to the action.
-    let action = inner.and_then(|r| r.inner).flatten();
+        })
+        .inner;
 
-    // The held stack follows the cursor, painted on a foreground layer so it
-    // rides above the window.
-    if let Some(stack) = held
-        && let Some(pos) = ctx.pointer_latest_pos()
-    {
-        let painter = ctx.layer_painter(egui::LayerId::new(
-            egui::Order::Foreground,
-            egui::Id::new("held_item"),
-        ));
-        let rect = Rect::from_center_size(pos, vec2(40.0, 40.0));
-        draw_item_icon(&painter, rect, view.icon_of(stack.item), tex);
-        paint_count(&painter, rect, stack.count);
+    // The held stack and the tooltip ride above the panel on their own layer.
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("inventory_overlay"),
+    ));
+    match (held, ctx.pointer_latest_pos()) {
+        (Some(stack), Some(pos)) => {
+            let rect = Rect::from_center_size(pos, vec2(HELD_ICON, HELD_ICON));
+            draw_item_icon(&painter, rect, view.icon_of(stack.item), tex);
+            paint_count(&painter, rect, stack.count);
+        }
+        (None, Some(pos)) if interactive => {
+            if let Some(name) = view.name_under(&l, shift, pos, mode) {
+                draw_tooltip(&painter, screen, pos, name, tex);
+            }
+        }
+        _ => {}
     }
 
     action
+}
+
+/// A tooltip naming the hovered item, offset from the cursor and kept on screen.
+fn draw_tooltip(
+    painter: &egui::Painter,
+    screen: Rect,
+    cursor: egui::Pos2,
+    name: &str,
+    tex: UiTextures,
+) {
+    const OFFSET: egui::Vec2 = egui::vec2(18.0, 18.0);
+    const PAD: f32 = 10.0;
+
+    let galley = painter.layout_no_wrap(
+        name.to_string(),
+        FontId::proportional(15.0),
+        Color32::WHITE,
+    );
+    let size = galley.size() + vec2(2.0 * PAD, 2.0 * PAD);
+
+    // Flip to the other side of the cursor rather than run off the screen.
+    let mut min = cursor + OFFSET;
+    if min.x + size.x > screen.right() {
+        min.x = cursor.x - OFFSET.x - size.x;
+    }
+    if min.y + size.y > screen.bottom() {
+        min.y = cursor.y - OFFSET.y - size.y;
+    }
+    let rect = Rect::from_min_size(min, size);
+
+    ninepatch::draw_nine(painter, rect, ninepatch::TOOLTIP, Color32::WHITE, tex.gui);
+    painter.galley(rect.min + vec2(PAD, PAD), galley, Color32::PLACEHOLDER);
 }
 
 impl View<'_> {
@@ -155,107 +286,155 @@ impl View<'_> {
             .unwrap_or_else(|| &self.items.get(item).id)
     }
 
-    /// One inventory slot: background, optional ghost hint, item icon, count and
-    /// durability. Returns the click action, if any.
-    fn slot(
+    /// The display name of whatever the cursor is over, for the tooltip.
+    ///
+    /// Hit-tested against the same rects the painter uses rather than read off
+    /// a `Response`, so the tooltip cannot name something other than what is
+    /// drawn under the cursor.
+    fn name_under(
         &self,
-        ui: &mut egui::Ui,
-        index: usize,
-        ghost: Option<u32>,
-        selected: bool,
-    ) -> Option<InvAction> {
-        let (rect, resp) = ui.allocate_exact_size(vec2(SLOT, SLOT), Sense::click());
-        let painter = ui.painter();
-        let bg = if resp.hovered() { SLOT_HOVER } else { SLOT_BG };
-        painter.rect_filled(rect, 3.0, bg);
-
-        let inner = rect.shrink(5.0);
-        match self.inventory.slot(index) {
-            Some(stack) => {
-                draw_item_icon(painter, inner, self.icon_of(stack.item), self.tex);
-                paint_count(painter, rect, stack.count);
-                self.paint_durability(painter, rect, stack);
+        l: &InventoryLayout,
+        shift: egui::Vec2,
+        cursor: egui::Pos2,
+        mode: GameMode,
+    ) -> Option<&str> {
+        let cells = armor_cells(l.armor.translate(shift)).chain(grid_cells(l.grid.translate(shift)));
+        for (index, cell) in cells {
+            if cell.contains(cursor) {
+                return self.inventory.slot(index).map(|s| self.name_of(s.item));
             }
-            None => {
-                if let Some(tile) = ghost {
-                    // Faded silhouette hinting what the slot holds.
-                    draw_item_icon(painter, inner, ItemIcon::Flat(tile), self.tex);
-                    painter.rect_filled(
-                        inner,
-                        0.0,
-                        Color32::from_rgba_unmultiplied(SLOT_BG.r(), SLOT_BG.g(), SLOT_BG.b(), 150),
-                    );
+        }
+        if mode.is_creative() {
+            for (id, cell) in self.palette_cells(l.palette.translate(shift)) {
+                if cell.contains(cursor) {
+                    return Some(self.name_of(id));
                 }
             }
         }
-
-        let stroke = if selected {
-            Stroke::new(2.5_f32, Color32::WHITE)
-        } else {
-            Stroke::new(1.0_f32, SLOT_STROKE)
-        };
-        painter.rect_stroke(rect, 3.0, stroke, StrokeKind::Inside);
-
-        // Naming the item on hover happens here rather than at each caller,
-        // because `slot` is the one path the storage grid, the hotbar row and
-        // the armor column all go through.
-        let resp = match self.inventory.slot(index) {
-            Some(stack) => resp.on_hover_text(self.name_of(stack.item)),
-            None => resp,
-        };
-
-        resp.clicked().then_some(InvAction::Slot(index))
+        None
     }
 
-    /// A tool/armor durability bar along the bottom of a slot.
-    fn paint_durability(&self, painter: &egui::Painter, cell: Rect, stack: ItemStack) {
-        let (Some(dur), Some(max)) = (stack.durability, self.items.max_durability(stack.item))
-        else {
-            return;
-        };
-        if max == 0 || dur >= max {
-            return;
-        }
-        let ratio = dur as f32 / max as f32;
-        let bar_w = SLOT - 10.0;
-        let track = Rect::from_min_size(
-            pos2(cell.left() + 5.0, cell.bottom() - 8.0),
-            vec2(bar_w, 4.0),
-        );
-        painter.rect_filled(track, 1.0, Color32::from_black_alpha(160));
-        let fill = Rect::from_min_size(track.min, vec2(bar_w * ratio, 4.0));
-        let r = ((1.0 - ratio) * 255.0) as u8;
-        let g = (ratio * 220.0) as u8;
-        painter.rect_filled(fill, 1.0, Color32::from_rgb(r.max(40), g, 40));
-    }
-
-    /// The left column: one labelled slot per armor piece, empties showing a
-    /// faded ghost of what fits.
-    fn armor_column(&self, ui: &mut egui::Ui) -> Option<InvAction> {
-        ui.vertical(|ui| {
-            let mut a = None;
-            for piece in ArmorSlot::ALL {
-                let index = ARMOR_START + piece.index();
-                let ghost = self.armor_ghost(piece);
-                let row = ui
-                    .horizontal(|ui| {
-                        // `horizontal` centres cross-axis, so the label sits
-                        // vertically centred against the taller slot.
-                        let clicked = self.slot(ui, index, ghost, false);
-                        ui.add_space(6.0);
-                        // Fixed-width label cell so the column edge stays straight.
-                        ui.allocate_ui(vec2(84.0, SLOT), |ui| {
-                            ui.label(egui::RichText::new(piece.label()).size(15.0).color(TEXT));
-                        });
-                        clicked
-                    })
-                    .inner;
-                a = a.or(row);
-                ui.add_space(PAD);
+    /// The armor column: one slot per piece, empties showing a faded ghost of
+    /// what fits.
+    fn armor_column(
+        &self,
+        ui: &mut egui::Ui,
+        painter: &egui::Painter,
+        rect: Rect,
+        tint: Color32,
+        interactive: bool,
+    ) -> Option<InvAction> {
+        let mut action = None;
+        for (index, cell) in armor_cells(rect) {
+            let piece = ArmorSlot::ALL[index - ARMOR_START];
+            slot::paint_slot(
+                painter,
+                cell,
+                self.contents(index),
+                self.armor_ghost(piece),
+                false,
+                tint,
+                self.tex,
+            );
+            if interactive && clicked(ui, cell) {
+                action = action.or(Some(InvAction::Slot(index)));
             }
-            a
+        }
+        action
+    }
+
+    /// The whole 9x4 grid, one contiguous block. The bottom row is the hotbar,
+    /// which is why it is the one row that shows a selection.
+    fn grid(
+        &self,
+        ui: &mut egui::Ui,
+        painter: &egui::Painter,
+        rect: Rect,
+        tint: Color32,
+        interactive: bool,
+    ) -> Option<InvAction> {
+        let mut action = None;
+        for (index, cell) in grid_cells(rect) {
+            let selected = index < HOTBAR_SIZE && index == self.inventory.selected_index();
+            slot::paint_slot(
+                painter,
+                cell,
+                self.contents(index),
+                None,
+                selected,
+                tint,
+                self.tex,
+            );
+            if interactive && clicked(ui, cell) {
+                action = action.or(Some(InvAction::Slot(index)));
+            }
+        }
+        action
+    }
+
+    /// Creative palette: items as click-to-grab icons in the strip below the
+    /// grid. The only in-UI way to get items in creative.
+    fn palette(
+        &self,
+        ui: &mut egui::Ui,
+        painter: &egui::Painter,
+        rect: Rect,
+        tint: Color32,
+        interactive: bool,
+    ) -> Option<InvAction> {
+        ninepatch::draw_nine(painter, rect, ninepatch::GRID, tint, self.tex.gui);
+        let mut action = None;
+        for (id, cell) in self.palette_cells(rect) {
+            slot::paint_slot(
+                painter,
+                cell,
+                Some(SlotContents {
+                    stack: ItemStack::single(id),
+                    icon: self.icon_of(id),
+                    items: self.items,
+                }),
+                None,
+                false,
+                tint,
+                self.tex,
+            );
+            if interactive && clicked(ui, cell) {
+                action = action.or(Some(InvAction::Pick(id)));
+            }
+        }
+        action
+    }
+
+    /// Palette cells, wrapped left to right and clipped to the strip.
+    fn palette_cells(&self, rect: Rect) -> Vec<(ItemId, Rect)> {
+        if !rect.is_positive() {
+            return Vec::new();
+        }
+        let cols = ((rect.width() - GAP) / PITCH).floor().max(1.0) as usize;
+        let rows = ((rect.height() - GAP) / PITCH).floor().max(1.0) as usize;
+        self.items
+            .iter()
+            .take(cols * rows)
+            .enumerate()
+            .map(|(n, (id, _))| {
+                let (row, col) = (n / cols, n % cols);
+                (
+                    id,
+                    Rect::from_min_size(
+                        rect.min + vec2(GAP + col as f32 * PITCH, GAP + row as f32 * PITCH),
+                        vec2(SIZE, SIZE),
+                    ),
+                )
+            })
+            .collect()
+    }
+
+    fn contents(&self, index: usize) -> Option<SlotContents<'_>> {
+        self.inventory.slot(index).map(|stack| SlotContents {
+            stack,
+            icon: self.icon_of(stack.item),
+            items: self.items,
         })
-        .inner
     }
 
     /// The icon tile of the armor item that fits `piece`, for the ghost hint.
@@ -269,81 +448,204 @@ impl View<'_> {
             }
         })
     }
-
-    /// The whole 9x4 storage grid, one contiguous block: rows 0..3 are the
-    /// storage slots and the bottom row is the hotbar, which is why it is the
-    /// one row that can be selected.
-    fn grid(&self, ui: &mut egui::Ui) -> Option<InvAction> {
-        ui.vertical(|ui| {
-            let mut action = None;
-            for row in 0..GRID_ROWS {
-                let inner = ui
-                    .horizontal(|ui| {
-                        let mut a = None;
-                        for col in 0..GRID_COLS {
-                            let index = slot_at(row, col);
-                            let selected =
-                                index < HOTBAR_SIZE && index == self.inventory.selected_index();
-                            a = a.or(self.slot(ui, index, None, selected));
-                        }
-                        a
-                    })
-                    .inner;
-                action = action.or(inner);
-            }
-            action
-        })
-        .inner
-    }
-
-    /// Creative palette: every item as a click-to-grab icon, wrapping to fit.
-    fn palette(&self, ui: &mut egui::Ui, width: f32, height: f32) -> Option<InvAction> {
-        egui::ScrollArea::vertical()
-            .id_salt("palette")
-            .max_height(height)
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.set_width(width);
-                ui.horizontal_wrapped(|ui| {
-                    let mut a = None;
-                    for (id, _) in self.items.iter() {
-                        let (rect, resp) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::click());
-                        let painter = ui.painter();
-                        painter.rect_filled(rect, 3.0, SLOT_BG);
-                        draw_item_icon(painter, rect.shrink(4.0), self.icon_of(id), self.tex);
-                        let resp = resp.on_hover_text(self.name_of(id));
-                        if resp.clicked() {
-                            a = a.or(Some(InvAction::Pick(id)));
-                        }
-                    }
-                    a
-                })
-                .inner
-            })
-            .inner
-    }
-
 }
 
-/// Paint a stack count in the slot's bottom-right corner (hidden for singles).
+/// Whether `cell` was clicked this frame.
+fn clicked(ui: &mut egui::Ui, cell: Rect) -> bool {
+    ui.allocate_rect(cell, Sense::click()).clicked()
+}
+
+/// The armor column's cells, paired with the slot index each shows.
+fn armor_cells(rect: Rect) -> impl Iterator<Item = (usize, Rect)> {
+    (0..ARMOR_SIZE).map(move |i| {
+        (
+            ARMOR_START + i,
+            Rect::from_min_size(
+                rect.min + vec2(GAP, GAP + i as f32 * PITCH),
+                vec2(SIZE, SIZE),
+            ),
+        )
+    })
+}
+
+/// The grid's cells, paired with the slot index each shows.
+///
+/// Storage sits above the hotbar on screen, but the hotbar is slots `0..9` — so
+/// the last drawn row is the *first* nine indices, and the rows above it run
+/// `9..36` in order.
+fn grid_cells(rect: Rect) -> impl Iterator<Item = (usize, Rect)> {
+    (0..GRID_ROWS).flat_map(move |row| {
+        (0..GRID_COLS).map(move |col| {
+            let index = if row + 1 == GRID_ROWS {
+                col
+            } else {
+                HOTBAR_SIZE + row * GRID_COLS + col
+            };
+            (
+                index,
+                Rect::from_min_size(
+                    rect.min + vec2(GAP + col as f32 * PITCH, GAP + row as f32 * PITCH),
+                    vec2(SIZE, SIZE),
+                ),
+            )
+        })
+    })
+}
+
+fn lerp_rect(a: Rect, b: Rect, t: f32) -> Rect {
+    let lerp = |a: f32, b: f32| a + (b - a) * t;
+    Rect::from_min_max(
+        pos2(lerp(a.min.x, b.min.x), lerp(a.min.y, b.min.y)),
+        pos2(lerp(a.max.x, b.max.x), lerp(a.max.y, b.max.y)),
+    )
+}
+
+/// GLSL-style smoothstep, for fading one part in behind another.
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn tint(alpha: f32) -> Color32 {
+    Color32::from_rgba_unmultiplied(255, 255, 255, (alpha.clamp(0.0, 1.0) * 255.0) as u8)
+}
+
+/// Paint a stack count in the bottom-right of `cell`, hidden for singles.
+///
+/// The slot painter has its own copy for cells; this one is for the stack
+/// riding on the cursor, which is not in a slot.
 fn paint_count(painter: &egui::Painter, cell: Rect, count: u8) {
     if count <= 1 {
         return;
     }
     let pos = cell.right_bottom() - vec2(3.0, 2.0);
-    // A cheap drop shadow keeps the number legible over any icon.
+    let font = FontId::proportional(14.0);
     painter.text(
         pos + vec2(1.0, 1.0),
         Align2::RIGHT_BOTTOM,
         count.to_string(),
-        FontId::proportional(13.0),
+        font.clone(),
         Color32::BLACK,
     );
     painter.text(
         pos,
         Align2::RIGHT_BOTTOM,
         count.to_string(),
-        FontId::proportional(13.0),
+        font,
         Color32::WHITE,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn screen(w: f32, h: f32) -> Rect {
+        Rect::from_min_size(pos2(0.0, 0.0), vec2(w, h))
+    }
+
+    /// The animation's whole no-gap, no-double-draw guarantee: at progress 0
+    /// the panel's bottom row is the HUD hotbar, exactly. Asserted rather than
+    /// eyeballed, because the two are laid out by different functions.
+    #[test]
+    fn the_panels_bottom_row_is_the_shape_of_the_hotbar() {
+        for (w, h) in [(1920.0, 1080.0), (1280.0, 720.0), (2560.0, 1080.0)] {
+            let s = screen(w, h);
+            let l = layout(s, false);
+            let hud_rect = hud::hotbar_rect(s);
+            assert!(
+                (l.hotbar_row.width() - hud_rect.width()).abs() < 1e-3
+                    && (l.hotbar_row.height() - hud_rect.height()).abs() < 1e-3,
+                "at {w}x{h}: panel row {:?} vs hotbar {:?}",
+                l.hotbar_row.size(),
+                hud_rect.size()
+            );
+        }
+    }
+
+    /// ...and the nine cells inside it land on the hotbar's nine cells, so the
+    /// items do not jump on the frame the panel takes over from the HUD.
+    #[test]
+    fn the_bottom_rows_cells_land_on_the_hotbars() {
+        let s = screen(1920.0, 1080.0);
+        let l = layout(s, false);
+        let hud_rect = hud::hotbar_rect(s);
+        // At progress 0 the row is translated onto the hotbar.
+        let shift = hud_rect.min - l.hotbar_row.min;
+
+        let bottom: Vec<_> = grid_cells(l.grid.translate(shift))
+            .filter(|(index, _)| *index < HOTBAR_SIZE)
+            .collect();
+        assert_eq!(bottom.len(), HOTBAR_SIZE);
+        for (index, cell) in bottom {
+            let expected = hud::hotbar_cell(hud_rect, index);
+            assert!(
+                (cell.min.x - expected.min.x).abs() < 1e-3
+                    && (cell.min.y - expected.min.y).abs() < 1e-3,
+                "slot {index}: {cell:?} vs {expected:?}"
+            );
+        }
+    }
+
+    /// The camera frames the model in the space the panel leaves. If the two
+    /// disagree the model ends up behind the panel.
+    #[test]
+    fn the_panel_rests_clear_of_the_model_stage() {
+        for (w, h) in [(1920.0, 1080.0), (2560.0, 1080.0), (1440.0, 1080.0)] {
+            let s = screen(w, h);
+            let l = layout(s, false);
+            assert!(
+                l.stage_center_x * 2.0 * w <= l.panel.left() + 1e-3,
+                "at {w}x{h} the stage runs under the panel"
+            );
+            assert!(l.stage_center_x > 0.0, "at {w}x{h} there is no stage left");
+        }
+    }
+
+    /// Every storage slot is drawn exactly once, and nothing else is.
+    #[test]
+    fn the_grid_covers_every_storage_slot_once() {
+        let l = layout(screen(1920.0, 1080.0), false);
+        let mut seen: Vec<usize> = grid_cells(l.grid).map(|(i, _)| i).collect();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..INVENTORY_SIZE).collect::<Vec<_>>());
+    }
+
+    /// And every armor slot, in `ArmorSlot::ALL` order.
+    #[test]
+    fn the_armor_column_covers_every_armor_slot_once() {
+        let l = layout(screen(1920.0, 1080.0), false);
+        let seen: Vec<usize> = armor_cells(l.armor).map(|(i, _)| i).collect();
+        assert_eq!(
+            seen,
+            (ARMOR_START..ARMOR_START + ARMOR_SIZE).collect::<Vec<_>>()
+        );
+    }
+
+    /// Creative adds the palette strip; survival must not reserve space for it.
+    #[test]
+    fn the_palette_strip_is_creative_only() {
+        let s = screen(1920.0, 1080.0);
+        let survival = layout(s, false);
+        let creative = layout(s, true);
+        assert!(!survival.palette.is_positive());
+        assert!(creative.palette.is_positive());
+        assert!(
+            creative.panel.height() > survival.panel.height(),
+            "the strip has to make the panel taller"
+        );
+    }
+
+    /// Every cell has to sit inside the panel that frames it.
+    #[test]
+    fn every_cell_sits_inside_the_panel() {
+        let l = layout(screen(1920.0, 1080.0), true);
+        for (index, cell) in grid_cells(l.grid).chain(armor_cells(l.armor)) {
+            assert!(
+                l.panel.contains_rect(cell),
+                "slot {index} at {cell:?} escapes {:?}",
+                l.panel
+            );
+        }
+    }
 }

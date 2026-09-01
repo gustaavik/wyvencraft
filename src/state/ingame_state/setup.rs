@@ -249,6 +249,7 @@ impl InGameState {
             loader,
             day_cycle,
             inventory_open: false,
+            inventory_anim: Default::default(),
             chat: ChatState::default(),
             // A client never authorizes anything, so it never reads the file.
             ops: if session_is_authority {

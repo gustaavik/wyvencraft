@@ -113,9 +113,17 @@ impl GameState<Wyvencraft> for InGameState {
             }
         }
 
-        if self.inventory_open || self.dead || self.chat.composer.open {
+        // One tick per frame, here rather than in `ui`: `scene_frame` is `&self`
+        // and reads the same progress, so it must already be advanced by the
+        // time the world camera is derived.
+        self.inventory_anim.tick(ctx.dt);
+
+        if self.inventory_anim.active() || self.dead || self.chat.composer.open {
             // Inventory screen / death screen: free cursor, freeze player control,
-            // and abandon any in-progress mining.
+            // and abandon any in-progress mining. Keyed off the *animation*, so
+            // control stays frozen through the close sweep and comes back only
+            // once the camera is back on the eye — where there is nothing left
+            // to blend and the hand-back is seamless.
             ctx.grab_cursor = false;
             self.breaking = None;
         } else {
@@ -313,7 +321,12 @@ impl GameState<Wyvencraft> for InGameState {
             return Transition::None;
         }
 
-        if self.inventory_open {
+        // The panel is drawn for the whole sweep, not just while open, because
+        // the close animation runs after `inventory_open` has already gone
+        // false. It takes over from the HUD hotbar rather than covering it: the
+        // two are the same nine slots and at progress 0 they coincide exactly,
+        // so exactly one of them is drawn and the swap is invisible.
+        if self.inventory_anim.active() {
             let out = crate::ui::inventory::draw_inventory(
                 egui_ctx,
                 &self.inventory,
@@ -322,6 +335,7 @@ impl GameState<Wyvencraft> for InGameState {
                 &ctx.shared.content.item_display_names,
                 self.held,
                 self.player.mode,
+                self.inventory_anim.progress(),
                 ctx.shared.ui_tex,
             );
             if let Some(action) = out {

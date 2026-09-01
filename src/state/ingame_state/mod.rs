@@ -129,8 +129,11 @@ pub struct InGameState {
     loader: ChunkLoader,
     /// Time-of-day clock driving the sky and world lighting.
     day_cycle: DayCycle,
-    /// Inventory screen state.
+    /// Whether the player has asked for the inventory. The *rendered* state is
+    /// `inventory_anim`, which lags this while the panel and camera move.
     inventory_open: bool,
+    /// How far through the open/close sweep the panel and camera are.
+    inventory_anim: inventory::OpenAnim,
     /// The chat history this peer has seen and the line it is typing. Purely
     /// local: only the messages travel, never this.
     chat: ChatState,

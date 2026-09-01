@@ -6,7 +6,7 @@ use egui::{Align2, Color32, Context, Stroke};
 use crate::content::ItemIcon;
 use crate::inventory::{HOTBAR_SIZE, Inventory, ItemRegistry};
 use crate::state::UiTextures;
-use crate::ui::icon::draw_item_icon;
+use crate::ui::slot;
 
 /// How far the vitals row floats above the bottom edge, and how tall it is.
 /// The held-item label clears both, so the three rows stack rather than overlap.
@@ -15,6 +15,8 @@ const VITALS_HEIGHT: f32 = 22.0;
 /// Where the held-item label sits with and without a vitals row beneath it.
 const LABEL_Y_ABOVE_VITALS: f32 = VITALS_Y - VITALS_HEIGHT - 4.0;
 const LABEL_Y_ABOVE_HOTBAR: f32 = VITALS_Y;
+/// How far the hotbar floats above the bottom edge.
+const HOTBAR_MARGIN: f32 = -8.0;
 
 /// Draw a simple crosshair at the screen centre.
 pub fn draw_crosshair(ctx: &Context) {
@@ -33,8 +35,37 @@ pub fn draw_crosshair(ctx: &Context) {
     );
 }
 
+/// Where the hotbar sits, without drawing it.
+///
+/// Computed rather than read back from egui: the inventory panel animates out
+/// of this rect, and it needs it on the very frame the player presses E — when
+/// `ctx.memory().area_rect(..)` would still be `None`, because an anchored
+/// `Area` is placed from the size it had *last* frame. [`draw_hotbar`] places
+/// itself from this same function, so the two cannot drift.
+pub fn hotbar_rect(screen: egui::Rect) -> egui::Rect {
+    let size = egui::vec2(
+        HOTBAR_SIZE as f32 * slot::PITCH + slot::GAP,
+        slot::SIZE + 2.0 * slot::GAP,
+    );
+    Align2::CENTER_BOTTOM
+        .align_size_within_rect(size, screen)
+        .translate(egui::vec2(0.0, HOTBAR_MARGIN))
+}
+
+/// The cell rect of hotbar slot `index` within a hotbar occupying `rect`.
+pub fn hotbar_cell(rect: egui::Rect, index: usize) -> egui::Rect {
+    egui::Rect::from_min_size(
+        rect.min + egui::vec2(slot::GAP + index as f32 * slot::PITCH, slot::GAP),
+        egui::vec2(slot::SIZE, slot::SIZE),
+    )
+}
+
 /// Draw the hotbar (9 slots) anchored to the bottom-centre, highlighting the
 /// selected slot and drawing each item's icon + count.
+///
+/// Painted through [`slot::paint_slot`], the same painter the inventory grid's
+/// bottom row uses — they are the same nine slots, and on the frame the panel
+/// takes over they are drawn in the same place.
 pub fn draw_hotbar(
     ctx: &Context,
     inventory: &Inventory,
@@ -42,66 +73,34 @@ pub fn draw_hotbar(
     icons: &[ItemIcon],
     tex: UiTextures,
 ) {
-    let slot = 48.0;
-    let pad = 4.0;
-    let width = HOTBAR_SIZE as f32 * (slot + pad) + pad;
+    let rect = hotbar_rect(ctx.screen_rect());
+    let painter = ctx.layer_painter(egui::LayerId::background());
+    draw_hotbar_row(&painter, rect, inventory, items, icons, Color32::WHITE, tex);
+}
 
-    egui::Area::new(egui::Id::new("hotbar"))
-        .anchor(Align2::CENTER_BOTTOM, egui::vec2(0.0, -8.0))
-        .show(ctx, |ui| {
-            let (rect, _) =
-                ui.allocate_exact_size(egui::vec2(width, slot + 2.0 * pad), egui::Sense::hover());
-            let painter = ui.painter();
-            painter.rect_filled(rect, 4.0, Color32::from_black_alpha(120));
-
-            for i in 0..HOTBAR_SIZE {
-                let x = rect.left() + pad + i as f32 * (slot + pad);
-                let cell = egui::Rect::from_min_size(
-                    egui::pos2(x, rect.top() + pad),
-                    egui::vec2(slot, slot),
-                );
-                let selected = i == inventory.selected_index();
-                painter.rect_filled(cell, 3.0, Color32::from_white_alpha(20));
-                if selected {
-                    painter.rect_stroke(
-                        cell,
-                        3.0,
-                        Stroke::new(2.5_f32, Color32::WHITE),
-                        egui::StrokeKind::Inside,
-                    );
-                }
-
-                if let Some(stack) = inventory.slot(i) {
-                    draw_item_icon(painter, cell.shrink(6.0), icons[stack.item.0 as usize], tex);
-                    if stack.count > 1 {
-                        painter.text(
-                            cell.right_bottom() - egui::vec2(2.0, 1.0),
-                            Align2::RIGHT_BOTTOM,
-                            stack.count.to_string(),
-                            egui::FontId::proportional(12.0),
-                            Color32::YELLOW,
-                        );
-                    }
-                    // Tool durability bar along the bottom of the cell.
-                    if let (Some(dur), Some(max)) =
-                        (stack.durability, items.max_durability(stack.item))
-                        && max > 0
-                        && dur < max
-                    {
-                        let ratio = dur as f32 / max as f32;
-                        let bar_w = slot - 8.0;
-                        let track = egui::Rect::from_min_size(
-                            egui::pos2(cell.left() + 4.0, cell.bottom() - 7.0),
-                            egui::vec2(bar_w, 4.0),
-                        );
-                        painter.rect_filled(track, 1.0, Color32::from_black_alpha(160));
-                        let fill =
-                            egui::Rect::from_min_size(track.min, egui::vec2(bar_w * ratio, 4.0));
-                        painter.rect_filled(fill, 1.0, durability_color(ratio));
-                    }
-                }
-            }
+/// The hotbar's nine cells and their backing, drawn into `rect`.
+///
+/// Shared with the inventory panel's bottom row, which is why it takes a
+/// painter and a rect rather than reaching for the screen itself.
+pub fn draw_hotbar_row(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    inventory: &Inventory,
+    items: &ItemRegistry,
+    icons: &[ItemIcon],
+    tint: Color32,
+    tex: UiTextures,
+) {
+    for i in 0..HOTBAR_SIZE {
+        let cell = hotbar_cell(rect, i);
+        let contents = inventory.slot(i).map(|stack| slot::SlotContents {
+            stack,
+            icon: icons[stack.item.0 as usize],
+            items,
         });
+        let selected = i == inventory.selected_index();
+        slot::paint_slot(painter, cell, contents, None, selected, tint, tex);
+    }
 }
 
 /// Name the item the player is holding, centred above the hotbar and fading
@@ -150,12 +149,6 @@ pub fn draw_held_label(ctx: &Context, name: &str, alpha: f32, above_vitals: bool
         });
 }
 
-/// Green→red colour for a tool's remaining-durability ratio.
-fn durability_color(ratio: f32) -> Color32 {
-    let r = ((1.0 - ratio) * 255.0) as u8;
-    let g = (ratio * 220.0) as u8;
-    Color32::from_rgb(r.max(40), g, 40)
-}
 
 /// Draw a heart icon (two lobes + a point) centred at `c`, sized `s`.
 fn heart(painter: &egui::Painter, c: egui::Pos2, s: f32, color: Color32) {
