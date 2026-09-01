@@ -384,8 +384,7 @@ mod tests {
 
         // Find each piece by the slot it declares rather than by id, so a
         // renamed or re-tiered set of armor doesn't break the test. A slot with
-        // nothing declared for it yet is skipped rather than failing: `glove`
-        // and `cape` render, but ship no item to fill them.
+        // nothing declared for it yet is skipped rather than failing.
         let mut worn = 0;
         for slot in ArmorSlot::ALL {
             let Some((id, _)) = items

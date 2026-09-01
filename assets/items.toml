@@ -31,7 +31,7 @@
 #   [item.food] makes the item edible: hunger + saturation restored
 #   [item.armor] makes the item wearable:
 #       slot        which equipment slot it fits: helmet, chestplate, leggings,
-#                   boots, glove, cape. A piece only goes in its own slot.
+#                   boots. A piece only goes in its own slot.
 #       defense     defense points, summed across worn pieces
 #       durability  hits taken before the piece breaks
 #   [item.model] draws the item as a 3D model instead of the default cube,
@@ -432,14 +432,12 @@ path = "assets/models/items/flint.json"
 [[item]]
 id = "copper_ingot"
 
-# Armor. Worn pieces live in the six equipment slots; their `defense` sums into
+# Armor. Worn pieces live in the four equipment slots; their `defense` sums into
 # the damage reduction applied by `Player::damage`, and every hit wears each worn
 # piece by one point. A piece only fits the slot it names.
 #
 # The four plate pieces are the copper tier and are named for it, so a second
-# tier can be added beside them rather than replacing them. The `glove` and
-# `cape` slots exist and render, but no item fills them yet — declare one here
-# when the art is drawn.
+# tier can be added beside them rather than replacing them.
 
 [item.model]
 path = "assets/models/items/copper_ingot.json"

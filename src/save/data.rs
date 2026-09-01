@@ -123,9 +123,14 @@ impl PlayerData {
     /// Restore onto a freshly built player/inventory. Overwrites *all* slots
     /// (clearing the starter kit); unknown item ids become empty slots.
     ///
-    /// A save written before armor existed carries only the 36 storage slots;
-    /// the missing armor entries read back as `None`, so old worlds load with an
-    /// unarmored player instead of failing the version check.
+    /// The slot list is read positionally against the *current* `TOTAL_SLOTS`,
+    /// so it survives the count changing in either direction. A save written
+    /// before armor existed carries only the 36 storage slots and the missing
+    /// armor entries read back as `None`; a save written when there were more
+    /// armor slots has its extra trailing entries ignored. Either way an old
+    /// world loads rather than failing the version check — which works only
+    /// because armor is the *last* region, so removing a slot cannot shift the
+    /// meaning of any slot before it.
     pub fn apply(&self, player: &mut Player, inventory: &mut Inventory, items: &ItemRegistry) {
         player.teleport(Vec3::from_array(self.position));
         player.yaw = self.yaw;
@@ -197,6 +202,7 @@ impl MobsData {
 mod tests {
     use super::*;
     use crate::core::GameMode;
+    use crate::inventory::ArmorSlot;
     use crate::world::block::blocks;
     use crate::world::{NoiseGenerator, WorldGenerator};
     use std::sync::Arc;
@@ -318,5 +324,59 @@ mod tests {
         assert_eq!(restored_inventory.slot(1), None, "unknown item dropped");
         assert_eq!(restored_inventory.slot(20), None, "stale slot cleared");
         assert_eq!(restored_inventory.selected_index(), 5);
+    }
+
+    /// The `glove` and `cape` slots were removed after some worlds had been
+    /// saved. Those saves carry 42 slots against today's 40 — and because armor
+    /// is the last region and the cut pieces were its last two, everything the
+    /// player actually owned must still come back.
+    #[test]
+    fn a_save_from_when_there_were_more_armor_slots_still_loads() {
+        let blocks = crate::world::block::BlockRegistry::with_builtins();
+        let items = ItemRegistry::from_blocks(&blocks);
+
+        let stack = |id: &str| {
+            Some(ItemStackData {
+                id: id.to_string(),
+                count: 1,
+                durability: None,
+            })
+        };
+        // 42 slots: 36 storage, then helmet/chestplate/leggings/boots, then the
+        // two that no longer exist.
+        let mut slots: Vec<Option<ItemStackData>> = vec![None; 36];
+        slots[0] = stack("stone");
+        slots.push(stack("copper_helmet"));
+        slots.push(stack("copper_chestplate"));
+        slots.push(stack("copper_leggings"));
+        slots.push(stack("copper_boots"));
+        slots.push(stack("stone"));
+        slots.push(stack("stone"));
+        assert_eq!(slots.len(), 42, "the save this test is about");
+
+        let data = PlayerData {
+            position: [0.0, 70.0, 0.0],
+            yaw: 0.0,
+            pitch: 0.0,
+            flying: false,
+            health: 20.0,
+            hunger: 20.0,
+            saturation: 5.0,
+            selected_slot: 0,
+            slots,
+        };
+
+        let kinds = crate::entity::EntityRegistry::builtin();
+        let mut player = Player::new(Vec3::ZERO, GameMode::Survival, kinds.player());
+        let mut inventory = Inventory::new();
+        data.apply(&mut player, &mut inventory, &items);
+
+        assert_eq!(inventory.slot(0).map(|s| s.item), items.find("stone"));
+        for slot in ArmorSlot::ALL {
+            assert!(
+                inventory.equipped(slot).is_some(),
+                "{slot:?} came back off the longer save"
+            );
+        }
     }
 }
