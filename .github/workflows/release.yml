@@ -130,7 +130,7 @@ jobs:
 
       # Also kept as a workflow artifact, so a workflow_dispatch run is useful on
       # its own and a failed upload leaves the build recoverable.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ env.NAME }}
           path: |
