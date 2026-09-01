@@ -17,10 +17,13 @@ impl InGameState {
     /// [`InGameState::world_camera`], `update` has already run this frame and
     /// set `render_alpha`, and nothing it reads changes in between.
     ///
-    /// `aspect` comes from egui's screen rect rather than the swapchain. The
-    /// scale factor is uniform, so the ratio matches — and `ui` is not given the
-    /// physical size.
-    fn draw_nameplates(&self, egui_ctx: &egui::Context) {
+    /// `aspect` is the runner's, the same value the world pass is given —
+    /// **not** egui's screen rect. The two agree to within rounding, but
+    /// `world_camera` derives its clearance from `near_radius()`, which depends
+    /// on the aspect, so a disagreement can resolve to a different clamped
+    /// distance: a different camera *position*, not merely a different
+    /// projection, and nameplates that drift off their players.
+    fn draw_nameplates(&self, egui_ctx: &egui::Context, aspect: f32) {
         if self.peers.players.is_empty() {
             return;
         }
@@ -29,7 +32,6 @@ impl InGameState {
         if screen.height() <= 0.0 {
             return;
         }
-        let aspect = screen.width() / screen.height();
         let camera = self.world_camera(aspect);
 
         let alpha = self.view.render_alpha;
@@ -347,7 +349,7 @@ impl GameState<Wyvencraft> for InGameState {
 
         // Before the HUD, so a name can never sit on top of the hotbar or the
         // vitals.
-        self.draw_nameplates(egui_ctx);
+        self.draw_nameplates(egui_ctx, ctx.aspect);
 
         self.draw_chat(egui_ctx);
 

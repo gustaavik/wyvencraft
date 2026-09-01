@@ -340,19 +340,23 @@ impl SceneCache {
     /// Rebuild the player model mesh in third person, or the view model in
     /// first — never both, since in first person the body is the camera.
     ///
-    /// `show_body` forces the world model on even in first person, for the
-    /// inventory's camera pan — which would otherwise swing out to frame an
-    /// empty stage. It suppresses the view-model arm at the same instant, since
-    /// the two are alternatives.
+    /// `inspect` is how far through the inventory's camera pan we are. Past
+    /// [`INSPECT_MODEL_FROM`] it forces the world model on even in first
+    /// person, which would otherwise swing the camera out to frame an empty
+    /// stage, and suppresses the view-model arm at the same instant, since the
+    /// two are alternatives. It also levels the model's head: the pose inherits
+    /// the player's pitch, so a player who opened the inventory while looking
+    /// up would be shown a model staring at the ceiling.
     pub fn update_player_mesh(
         &mut self,
         ctx: &Arc<RenderContext>,
         player: &Player,
         inventory: &Inventory,
         items: &ItemRegistry,
-        show_body: bool,
+        inspect: f32,
         content: ModelContent<'_>,
     ) {
+        let show_body = inspect >= INSPECT_MODEL_FROM;
         if player.perspective.is_first_person() && !show_body {
             self.player_mesh = None;
             self.held_mesh = None;
@@ -363,7 +367,12 @@ impl SceneCache {
         self.hand_mesh = None;
         self.hand_held_mesh = None;
         self.hand_held_atlas = None;
-        let pose = self.player_anim.pose(player.pitch);
+        // Ease the head level as the camera comes round to the front, so the
+        // model meets the viewer's eye rather than holding whatever pitch the
+        // player happened to be looking at when they pressed E.
+        let pose = self
+            .player_anim
+            .pose(player.pitch * (1.0 - inspect.clamp(0.0, 1.0)));
         // The body is drawn at the torso yaw, which lags the look yaw the camera
         // uses; `pose.head_yaw` is what puts the face back where the player looks.
         // The hand anchor must take the *same* yaw, or the held item leaves the fist.
@@ -1148,19 +1157,12 @@ impl super::InGameState {
         };
         self.view
             .advance_player_anim(local_speed, self.player.yaw, dt);
-        // Geometry is drawn with culling off, so a camera inside the head sees
-        // the back of its own faces. The pan starts on the eye and only clears
-        // the head a little way in, which is where the body appears — the same
-        // instant the panel starts fading in, so the arm-to-body cut lands on
-        // one beat rather than two. It cannot be cross-faded: the shader is an
-        // alpha-test `discard` with no per-draw opacity.
-        let show_body = self.inventory_anim.progress() >= INSPECT_MODEL_FROM;
         self.view.update_player_mesh(
             ctx,
             &self.player,
             &self.inventory,
             &self.content.items,
-            show_body,
+            self.inventory_anim.progress(),
             content,
         );
         self.view
