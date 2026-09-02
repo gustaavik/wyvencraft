@@ -1145,11 +1145,12 @@ impl super::InGameState {
         self.view
             .update_arrows_mesh(ctx, &self.mobs.arrows, loaded.arrow_faces);
 
-        // Animated humanoids. The local player settles to idle while the
-        // inventory is open (movement is frozen).
-        let local_speed = if self.inventory_open {
-            0.0
-        } else {
+        // Animated humanoids. The local player's legs follow their actual
+        // horizontal speed even with the inventory open: physics keeps running
+        // there, so a player who opened it mid-stride is still moving, and
+        // forcing the idle pose would have them gliding to a stop with their
+        // feet planted — in full view of the camera that just panned onto them.
+        let local_speed = {
             let v = self.player.velocity;
             Vec3::new(v.x, 0.0, v.z).length()
         };

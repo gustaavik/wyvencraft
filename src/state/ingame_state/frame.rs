@@ -4,6 +4,7 @@
 use winit::event::MouseButton;
 
 use super::{AUTOSAVE_INTERVAL, DOUBLE_TAP_WINDOW, InGameState};
+use crate::entity::MovementInput;
 use crate::state::{GameState, PauseMenuState, StateContext, Transition, Wyvencraft};
 use crate::ui::hud;
 use crate::ui::nameplate::{self, Nameplate};
@@ -118,17 +119,21 @@ impl GameState<Wyvencraft> for InGameState {
         // time the world camera is derived.
         self.inventory_anim.tick(ctx.dt);
 
-        if self.inventory_anim.active() || self.dead || self.chat.composer.open {
-            // Inventory screen / death screen: free cursor, freeze player control,
-            // and abandon any in-progress mining. Keyed off the *animation*, so
-            // control stays frozen through the close sweep and comes back only
-            // once the camera is back on the eye — where there is nothing left
-            // to blend and the hand-back is seamless.
-            ctx.grab_cursor = false;
+        // Whether the player is driving this frame. Keyed off the inventory's
+        // *animation*, so control comes back only once the camera is home on
+        // the eye — where there is nothing left to blend and the hand-back is
+        // seamless.
+        //
+        // This gates the input below, and deliberately **not** the physics: see
+        // the step block further down.
+        let in_control = !self.inventory_anim.active() && !self.dead && !self.chat.composer.open;
+        ctx.grab_cursor = in_control;
+        if !in_control {
+            // Whatever was being mined is abandoned — that one *is* an input.
             self.breaking = None;
-        } else {
-            ctx.grab_cursor = true;
+        }
 
+        if in_control {
             if ctx.input.just_pressed(kb.toggle_perspective) {
                 self.player.toggle_perspective();
             }
@@ -179,12 +184,27 @@ impl GameState<Wyvencraft> for InGameState {
             if ctx.input.just_pressed(kb.drop_item) {
                 self.drop_selected_item();
             }
+        }
 
-            // Movement + physics. Refresh the worn defense first: `update` can
-            // raise fall damage internally, and it must be mitigated by whatever
-            // the player is wearing right now.
-            let movement = crate::config::movement(ctx.input, &kb);
-            let dt = ctx.dt.min(0.05);
+        // Physics runs whether or not the player is driving. Opening the
+        // inventory releases the *controls*, not the simulation: momentum,
+        // friction and gravity carry on, so a player who was walking when they
+        // pressed E coasts to a stop instead of stopping dead in mid-stride,
+        // and one who was falling still lands — and still takes the fall.
+        //
+        // Death is the one real freeze. There is nothing left to simulate, and
+        // a corpse sliding to a halt under the respawn dialog reads as a bug.
+        let dt = ctx.dt.min(0.05);
+        if !self.dead {
+            // No input while the controls are released — the player coasts on
+            // the velocity they already had rather than walking on for ever.
+            let movement = if in_control {
+                crate::config::movement(ctx.input, &kb)
+            } else {
+                MovementInput::default()
+            };
+            // Refresh the worn defense first: `step_fixed` can raise fall damage
+            // internally, and it must be mitigated by whatever is worn *now*.
             self.player.defense = self.inventory.total_defense(&self.content.items);
             let health_before = self.player.health;
             // Player physics is stepped at a fixed rate, not on the frame delta,
@@ -194,7 +214,7 @@ impl GameState<Wyvencraft> for InGameState {
                     .step_fixed(movement, ctx.dt, &mut self.physics_accum, |p| {
                         self.world.is_solid_for_collision(p)
                     });
-            // A health drop across `update` means fall damage landed; the health
+            // A health drop across the step means fall damage landed; the health
             // delta is the only signal that escapes it, and it's enough.
             if self.player.health < health_before {
                 self.inventory.wear_armor(1);
@@ -208,7 +228,9 @@ impl GameState<Wyvencraft> for InGameState {
                     self.breaking = None;
                 }
             }
+        }
 
+        if in_control {
             // Block interaction. The main-hand swing fires on every left click,
             // even when punching air (no block hit).
             if ctx.input.mouse_just_pressed(MouseButton::Left) {
