@@ -40,6 +40,13 @@ const PANEL_PAD: f32 = 10.0;
 const COLUMN_GAP: f32 = 10.0;
 /// How far the panel floats inside the screen's right edge.
 const SCREEN_MARGIN: f32 = 28.0;
+/// Extra space between the storage rows and the hotbar row below them.
+///
+/// They are one contiguous 9x4 block of slot *indices*, but the bottom row is
+/// the hotbar — the nine you carry — and it reads better set apart from the
+/// twenty-seven you are only storing. Each group keeps its own padding either
+/// side of this, so the visible channel is `GAP + HOTBAR_GAP + GAP`.
+const HOTBAR_GAP: f32 = 10.0;
 /// Height of the creative palette strip below the grid.
 const PALETTE_H: f32 = 118.0;
 /// Size of the stack riding on the cursor.
@@ -63,8 +70,10 @@ pub struct InventoryLayout {
     pub panel: Rect,
     /// The armor column's cells and their padding.
     pub armor: Rect,
-    /// The grid's backing.
+    /// The whole grid, both groups and the channel between them.
     pub grid: Rect,
+    /// The three storage rows' backing.
+    pub storage: Rect,
     /// The grid's bottom row — the hotbar, and the animation's anchor.
     pub hotbar_row: Rect,
     /// The creative palette strip; `Rect::NOTHING` in survival.
@@ -76,9 +85,12 @@ pub struct InventoryLayout {
 
 /// Lay the panel out for a screen of this size.
 pub fn layout(screen: Rect, creative: bool) -> InventoryLayout {
+    // Every row but the last, then the channel, then the hotbar row with
+    // padding of its own — the two groups are backed separately.
+    let storage_h = (GRID_ROWS - 1) as f32 * PITCH + GAP;
     let grid_size = vec2(
         GRID_COLS as f32 * PITCH + GAP,
-        GRID_ROWS as f32 * PITCH + GAP,
+        storage_h + HOTBAR_GAP + SIZE + 2.0 * GAP,
     );
     let armor_size = vec2(PITCH + GAP, ARMOR_SIZE as f32 * PITCH + GAP);
     let strip = if creative {
@@ -104,10 +116,11 @@ pub fn layout(screen: Rect, creative: bool) -> InventoryLayout {
         pos2(armor.right() + COLUMN_GAP, panel.top() + PANEL_PAD),
         grid_size,
     );
-    // The bottom row, with the grid's own padding around it — which is exactly
-    // the shape `hud::hotbar_rect` produces.
+    let storage = Rect::from_min_size(grid.min, vec2(grid_size.x, storage_h));
+    // The bottom row, with padding of its own around it — which is exactly the
+    // shape `hud::hotbar_rect` produces, so the two coincide at progress 0.
     let hotbar_row = Rect::from_min_size(
-        pos2(grid.left(), grid.top() + (GRID_ROWS - 1) as f32 * PITCH),
+        pos2(grid.left(), storage.bottom() + HOTBAR_GAP),
         vec2(grid_size.x, SIZE + 2.0 * GAP),
     );
     let palette = if creative {
@@ -130,6 +143,7 @@ pub fn layout(screen: Rect, creative: bool) -> InventoryLayout {
         panel,
         armor,
         grid,
+        storage,
         hotbar_row,
         palette,
         stage_center_x,
@@ -200,13 +214,17 @@ pub fn draw_inventory(
             let painter = ui.painter().clone();
 
             ninepatch::draw_nine(&painter, panel, ninepatch::PANEL, body, tex.gui);
-            ninepatch::draw_nine(
-                &painter,
-                l.grid.translate(shift),
-                ninepatch::GRID,
-                body,
-                tex.gui,
-            );
+            // One bed per group, so the channel between them shows the dark
+            // carcass through and the hotbar reads as its own row.
+            for bed in [l.storage, l.hotbar_row] {
+                ninepatch::draw_nine(
+                    &painter,
+                    bed.translate(shift),
+                    ninepatch::GRID,
+                    body,
+                    tex.gui,
+                );
+            }
 
             let armor = l.armor.translate(shift);
             let grid = l.grid.translate(shift);
@@ -485,15 +503,19 @@ fn armor_cells(rect: Rect) -> impl Iterator<Item = (usize, Rect)> {
 fn grid_cells(rect: Rect) -> impl Iterator<Item = (usize, Rect)> {
     (0..GRID_ROWS).flat_map(move |row| {
         (0..GRID_COLS).map(move |col| {
-            let index = if row + 1 == GRID_ROWS {
+            let last = row + 1 == GRID_ROWS;
+            let index = if last {
                 col
             } else {
                 HOTBAR_SIZE + row * GRID_COLS + col
             };
+            // The hotbar row clears the channel, and picks up the leading
+            // padding of its own backing on the way.
+            let y = GAP + row as f32 * PITCH + if last { HOTBAR_GAP + GAP } else { 0.0 };
             (
                 index,
                 Rect::from_min_size(
-                    rect.min + vec2(GAP + col as f32 * PITCH, GAP + row as f32 * PITCH),
+                    rect.min + vec2(GAP + col as f32 * PITCH, y),
                     vec2(SIZE, SIZE),
                 ),
             )
@@ -685,6 +707,36 @@ mod tests {
                 l.panel.left()
             );
         }
+    }
+
+    /// The hotbar has to read as its own row, so there must be a real channel
+    /// of carcass between the two beds — not merely the slot padding the rows
+    /// inside each group already have.
+    #[test]
+    fn the_hotbar_row_is_set_apart_from_the_storage_rows() {
+        let l = layout(screen(1920.0, 1080.0), false);
+        assert!(
+            l.hotbar_row.top() - l.storage.bottom() >= HOTBAR_GAP - 1e-3,
+            "the two beds are only {} apart",
+            l.hotbar_row.top() - l.storage.bottom()
+        );
+
+        // And the cells either side of it are further apart than two rows
+        // within the storage block, which is what actually reads on screen.
+        let cells: Vec<_> = grid_cells(l.grid).collect();
+        let row_of = |index: usize| {
+            cells
+                .iter()
+                .find(|(i, _)| *i == index)
+                .expect("slot is drawn")
+                .1
+        };
+        let within_storage = row_of(HOTBAR_SIZE + GRID_COLS).top() - row_of(HOTBAR_SIZE).bottom();
+        let across_channel = row_of(0).top() - row_of(INVENTORY_SIZE - GRID_COLS).bottom();
+        assert!(
+            across_channel > within_storage * 2.0,
+            "the channel ({across_channel}) barely beats the row gap ({within_storage})"
+        );
     }
 
     /// Every cell has to sit inside the panel that frames it.
