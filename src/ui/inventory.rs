@@ -2,9 +2,11 @@
 //! whole 9x4 storage grid — hotbar included as its bottom row — to their right.
 //!
 //! Interaction is click-to-move (Minecraft-style): the caller owns a "held"
-//! stack; this view reports the slot clicked (or palette item picked) and
-//! paints the grid and the held stack under the cursor. The move logic lives
-//! with the inventory owner.
+//! stack; this view reports what the player did to a slot and paints the grid
+//! and the held stack under the cursor. The move logic lives with the
+//! inventory owner. Left click moves a whole stack, right click splits one in
+//! half (or places a single item), and taking a stack outside the panel throws
+//! it into the world.
 //!
 //! **The panel unfolds out of the hotbar.** Its bottom row is laid out from
 //! [`crate::ui::slot`]'s metrics, which is what the HUD hotbar uses too, so at
@@ -54,10 +56,42 @@ const HELD_ICON: f32 = 40.0;
 
 /// What the player did in the inventory screen this frame.
 pub enum InvAction {
-    /// Clicked an inventory slot (pick up / place / merge / swap).
+    /// Left-clicked a slot: pick up / place / merge / swap the whole stack.
     Slot(usize),
+    /// Right-clicked a slot: take half of it, or place a single item into it.
+    Split(usize),
     /// Picked an item from the creative palette (grab a full stack).
     Pick(ItemId),
+    /// Dragged a slot's stack clear of the panel: throw it into the world.
+    DropSlot(usize),
+    /// Clicked outside the panel with a stack on the cursor. `all` throws the
+    /// lot, as a left click does; a right click parts with one item.
+    DropHeld { all: bool },
+}
+
+/// What happened to a slot this frame.
+#[derive(Default, Clone, Copy)]
+struct SlotHit {
+    primary: bool,
+    secondary: bool,
+    /// A press that began on this slot and was released beyond the panel.
+    dragged_out: bool,
+}
+
+impl SlotHit {
+    /// The action this hit means, most specific first: leaving the panel beats
+    /// a split, which beats an ordinary move.
+    fn action(self, index: usize) -> Option<InvAction> {
+        if self.dragged_out {
+            Some(InvAction::DropSlot(index))
+        } else if self.secondary {
+            Some(InvAction::Split(index))
+        } else if self.primary {
+            Some(InvAction::Slot(index))
+        } else {
+            None
+        }
+    }
 }
 
 /// Where the panel rests and how much screen it leaves for the player model.
@@ -206,7 +240,7 @@ pub fn draw_inventory(
     // unfold, so the reveal reads as one motion rather than a wipe.
     let body = tint(smoothstep(0.10, 0.65, t));
 
-    let action = egui::Area::new(egui::Id::new("inventory"))
+    let mut action = egui::Area::new(egui::Id::new("inventory"))
         .fixed_pos(clip.min)
         .order(egui::Order::Middle)
         .show(ctx, |ui| {
@@ -229,8 +263,8 @@ pub fn draw_inventory(
             let armor = l.armor.translate(shift);
             let grid = l.grid.translate(shift);
             let mut action = view
-                .armor_column(ui, &painter, armor, body, interactive)
-                .or(view.grid(ui, &painter, grid, body, interactive));
+                .armor_column(ui, &painter, armor, panel, body, interactive)
+                .or(view.grid(ui, &painter, grid, panel, body, interactive));
 
             if mode.is_creative() {
                 let palette = l.palette.translate(shift);
@@ -239,6 +273,24 @@ pub fn draw_inventory(
             action
         })
         .inner;
+
+    // A stack on the cursor, clicked away from the panel: throw it. This is the
+    // other half of dragging one out — the click-to-move model has no "release"
+    // of its own, so putting a stack down outside the panel is what parts with
+    // it. Right click parts with a single item, matching what it does in a slot.
+    if action.is_none()
+        && interactive
+        && held.is_some()
+        && ctx.pointer_latest_pos().is_some_and(|p| !panel.contains(p))
+    {
+        let (primary, secondary) =
+            ctx.input(|i| (i.pointer.primary_pressed(), i.pointer.secondary_pressed()));
+        if primary {
+            action = Some(InvAction::DropHeld { all: true });
+        } else if secondary {
+            action = Some(InvAction::DropHeld { all: false });
+        }
+    }
 
     // The held stack and the tooltip ride above the panel on their own layer.
     let painter = ctx.layer_painter(egui::LayerId::new(
@@ -341,6 +393,7 @@ impl View<'_> {
         ui: &mut egui::Ui,
         painter: &egui::Painter,
         rect: Rect,
+        panel: Rect,
         tint: Color32,
         interactive: bool,
     ) -> Option<InvAction> {
@@ -356,8 +409,8 @@ impl View<'_> {
                 tint,
                 self.tex,
             );
-            if interactive && clicked(ui, cell) {
-                action = action.or(Some(InvAction::Slot(index)));
+            if interactive {
+                action = action.or(interact(ui, cell, panel).action(index));
             }
         }
         action
@@ -376,6 +429,7 @@ impl View<'_> {
         ui: &mut egui::Ui,
         painter: &egui::Painter,
         rect: Rect,
+        panel: Rect,
         tint: Color32,
         interactive: bool,
     ) -> Option<InvAction> {
@@ -392,8 +446,8 @@ impl View<'_> {
                 if is_hotbar { Color32::WHITE } else { tint },
                 self.tex,
             );
-            if interactive && clicked(ui, cell) {
-                action = action.or(Some(InvAction::Slot(index)));
+            if interactive {
+                action = action.or(interact(ui, cell, panel).action(index));
             }
         }
         action
@@ -425,7 +479,7 @@ impl View<'_> {
                 tint,
                 self.tex,
             );
-            if interactive && clicked(ui, cell) {
+            if interactive && ui.allocate_rect(cell, Sense::click()).clicked() {
                 action = action.or(Some(InvAction::Pick(id)));
             }
         }
@@ -477,9 +531,23 @@ impl View<'_> {
     }
 }
 
-/// Whether `cell` was clicked this frame.
-fn clicked(ui: &mut egui::Ui, cell: Rect) -> bool {
-    ui.allocate_rect(cell, Sense::click()).clicked()
+/// What the player did to `cell` this frame.
+///
+/// Senses drags as well as clicks so a stack can be pulled out of the panel and
+/// thrown. A press that turns into a drag does not also report `clicked`, so
+/// the two gestures never both fire for one press.
+fn interact(ui: &mut egui::Ui, cell: Rect, panel: Rect) -> SlotHit {
+    let response = ui.allocate_rect(cell, Sense::click_and_drag());
+    let released_outside = response.drag_stopped()
+        && ui
+            .ctx()
+            .pointer_latest_pos()
+            .is_some_and(|p| !panel.contains(p));
+    SlotHit {
+        primary: response.clicked(),
+        secondary: response.secondary_clicked(),
+        dragged_out: released_outside,
+    }
 }
 
 /// The armor column's cells, paired with the slot index each shows.

@@ -368,7 +368,10 @@ impl GameState<Wyvencraft> for InGameState {
             if let Some(action) = out {
                 match action {
                     InvAction::Slot(index) => self.handle_slot_click(index),
+                    InvAction::Split(index) => self.handle_slot_split(index),
                     InvAction::Pick(id) => self.held = Some(self.content.items.full_stack(id)),
+                    InvAction::DropSlot(index) => self.drop_slot(index),
+                    InvAction::DropHeld { all } => self.drop_held(all),
                 }
             }
             return Transition::None;

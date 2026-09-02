@@ -98,6 +98,82 @@ impl InGameState {
         }
     }
 
+    /// Right-click on a slot: split a stack in half, or place a single item.
+    ///
+    /// Mirrors the left-click path's armor gate, so a right click can no more
+    /// put a pickaxe on your head than a left one can.
+    pub(super) fn handle_slot_split(&mut self, index: usize) {
+        if let Some(held) = self.held
+            && !self
+                .inventory
+                .can_equip(index, held.item, &self.content.items)
+        {
+            return;
+        }
+        match (self.held, self.inventory.slot(index)) {
+            // Empty hand: take the larger half, so a single item is picked up
+            // whole rather than being unsplittable.
+            (None, Some(mut stack)) => {
+                let taken = stack.count.div_ceil(2);
+                // Split off the remainder and keep the taken part, rather than
+                // the other way round: `ItemStack::split` builds a fresh stack
+                // and would drop the durability of whatever it returns.
+                let rest = stack.split(stack.count - taken);
+                self.held = Some(stack);
+                self.inventory
+                    .set_slot(index, (rest.count > 0).then_some(rest));
+            }
+            // Holding something: put one of it down.
+            (Some(mut held), slot) => {
+                match slot {
+                    Some(mut stack) if stack.item == held.item => {
+                        if stack.count >= self.content.items.max_stack(stack.item) {
+                            return;
+                        }
+                        stack.count += 1;
+                        self.inventory.set_slot(index, Some(stack));
+                    }
+                    // A different item is left alone: right-click places, it
+                    // never swaps. Swapping is what left click is for.
+                    Some(_) => return,
+                    // Copied from the held stack rather than built fresh, so a
+                    // single item put down keeps its durability.
+                    None => self
+                        .inventory
+                        .set_slot(index, Some(ItemStack { count: 1, ..held })),
+                }
+                // One decrement, after whichever branch ran — `split` would
+                // have taken it too, and the pair double-counted.
+                held.count -= 1;
+                self.held = (held.count > 0).then_some(held);
+            }
+            (None, None) => {}
+        }
+    }
+
+    /// Throw a slot's whole stack into the world — the drag-it-out gesture.
+    pub(super) fn drop_slot(&mut self, index: usize) {
+        if let Some(stack) = self.inventory.slot(index) {
+            self.inventory.set_slot(index, None);
+            self.throw(stack);
+        }
+    }
+
+    /// Throw the stack on the cursor, all of it or one item.
+    pub(super) fn drop_held(&mut self, all: bool) {
+        let Some(mut held) = self.held else {
+            return;
+        };
+        if all {
+            self.held = None;
+            self.throw(held);
+            return;
+        }
+        let one = held.split(1);
+        self.held = (held.count > 0).then_some(held);
+        self.throw(one);
+    }
+
     /// Click-to-move logic for an inventory slot (pick up / place / merge / swap).
     pub(super) fn handle_slot_click(&mut self, index: usize) {
         // An armor slot only accepts its own piece. Taking a piece back off is
@@ -238,5 +314,142 @@ mod anim_tests {
         anim.set_open(true);
         assert!(anim.active(), "active before the first tick, not after");
         assert_eq!(anim.progress(), 0.0, "but still folded into the hotbar");
+    }
+}
+
+#[cfg(test)]
+mod interaction_tests {
+    use super::*;
+    use crate::content::GameContent;
+    use crate::core::GameMode;
+    use crate::inventory::{ArmorSlot, Inventory, ItemStack};
+
+    fn state() -> InGameState {
+        InGameState::new(GameContent::builtin(), 7, GameMode::Survival)
+    }
+
+    /// A stack, in a storage slot that starts empty.
+    fn stocked(state: &mut InGameState, index: usize, id: &str, count: u8) {
+        let item = state.content.items.find(id).expect("builtin item");
+        state
+            .inventory
+            .set_slot(index, Some(ItemStack::new(item, count)));
+    }
+
+    const SLOT: usize = 9;
+
+    #[test]
+    fn right_click_takes_the_larger_half_of_a_stack() {
+        let mut state = state();
+        stocked(&mut state, SLOT, "stone", 7);
+        state.handle_slot_split(SLOT);
+
+        assert_eq!(state.held.expect("a stack on the cursor").count, 4);
+        assert_eq!(state.inventory.slot(SLOT).expect("the rest").count, 3);
+    }
+
+    /// An even stack halves cleanly, and a single item comes up whole — there
+    /// is no half of one, and leaving it behind would make it unpickable.
+    #[test]
+    fn right_click_halves_evenly_and_takes_a_single_item_whole() {
+        let mut even = state();
+        stocked(&mut even, SLOT, "stone", 8);
+        even.handle_slot_split(SLOT);
+        assert_eq!(even.held.expect("held").count, 4);
+        assert_eq!(even.inventory.slot(SLOT).expect("rest").count, 4);
+
+        let mut state = state();
+        stocked(&mut state, SLOT, "stone", 1);
+        state.handle_slot_split(SLOT);
+        assert_eq!(state.held.expect("held").count, 1);
+        assert!(state.inventory.slot(SLOT).is_none(), "the slot is emptied");
+    }
+
+    #[test]
+    fn right_click_while_holding_places_one_item_at_a_time() {
+        let mut state = state();
+        let stone = state.content.items.find("stone").expect("stone");
+        state.held = Some(ItemStack::new(stone, 3));
+
+        state.handle_slot_split(SLOT);
+        assert_eq!(state.inventory.slot(SLOT).expect("placed").count, 1);
+        assert_eq!(state.held.expect("still holding").count, 2);
+
+        state.handle_slot_split(SLOT);
+        assert_eq!(state.inventory.slot(SLOT).expect("topped up").count, 2);
+        assert_eq!(state.held.expect("still holding").count, 1);
+
+        // The last one leaves the cursor empty rather than a zero-count stack.
+        state.handle_slot_split(SLOT);
+        assert_eq!(state.inventory.slot(SLOT).expect("topped up").count, 3);
+        assert!(state.held.is_none(), "the cursor empties out");
+    }
+
+    /// Right click places; it never swaps. Swapping is left click's job, and
+    /// doing both would make a misclick on a full slot lose your place.
+    #[test]
+    fn right_click_onto_a_different_item_does_nothing() {
+        let mut state = state();
+        stocked(&mut state, SLOT, "dirt", 5);
+        let stone = state.content.items.find("stone").expect("stone");
+        state.held = Some(ItemStack::new(stone, 3));
+
+        state.handle_slot_split(SLOT);
+        assert_eq!(
+            state.held.expect("held").count,
+            3,
+            "the cursor is untouched"
+        );
+        assert_eq!(state.inventory.slot(SLOT).expect("slot").count, 5);
+    }
+
+    /// The armor gate is the left-click path's, and right click must not be a
+    /// way around it.
+    #[test]
+    fn right_click_cannot_put_the_wrong_thing_in_an_armor_slot() {
+        let mut state = state();
+        let stone = state.content.items.find("stone").expect("stone");
+        state.held = Some(ItemStack::new(stone, 4));
+
+        let helmet = Inventory::armor_slot_index(ArmorSlot::Helmet);
+        state.handle_slot_split(helmet);
+        assert!(state.inventory.slot(helmet).is_none(), "stone is not a hat");
+        assert_eq!(state.held.expect("held").count, 4);
+    }
+
+    #[test]
+    fn dragging_a_slot_out_of_the_panel_throws_the_whole_stack() {
+        let mut state = state();
+        stocked(&mut state, SLOT, "stone", 12);
+        assert!(state.drops.is_empty());
+
+        state.drop_slot(SLOT);
+        assert!(state.inventory.slot(SLOT).is_none(), "the slot empties");
+        assert_eq!(state.drops.len(), 1, "and it lands in the world");
+    }
+
+    #[test]
+    fn a_held_stack_can_be_thrown_whole_or_one_at_a_time() {
+        let mut state = state();
+        let stone = state.content.items.find("stone").expect("stone");
+
+        state.held = Some(ItemStack::new(stone, 3));
+        state.drop_held(false);
+        assert_eq!(state.held.expect("two left").count, 2);
+        assert_eq!(state.drops.len(), 1);
+
+        state.drop_held(true);
+        assert!(state.held.is_none(), "the cursor empties");
+        assert_eq!(state.drops.len(), 2);
+    }
+
+    /// Nothing on the cursor means nothing to throw — a click on the world
+    /// behind the panel must not conjure an item.
+    #[test]
+    fn throwing_with_an_empty_cursor_does_nothing() {
+        let mut state = state();
+        state.drop_held(true);
+        state.drop_held(false);
+        assert!(state.drops.is_empty());
     }
 }
