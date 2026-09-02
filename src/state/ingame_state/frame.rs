@@ -363,6 +363,10 @@ impl GameState<Wyvencraft> for InGameState {
                 self.held,
                 self.player.mode,
                 self.inventory_anim.progress(),
+                // The panel has the keyboard to itself here: it holds no text
+                // field, so egui consumes nothing and the binding still lands.
+                ctx.input
+                    .just_pressed(ctx.shared.settings.controls.keybinds.drop_item),
                 ctx.shared.ui_tex,
             );
             if let Some(action) = out {
@@ -372,6 +376,7 @@ impl GameState<Wyvencraft> for InGameState {
                     InvAction::Pick(id) => self.held = Some(self.content.items.full_stack(id)),
                     InvAction::DropSlot(index) => self.drop_slot(index),
                     InvAction::DropHeld { all } => self.drop_held(all),
+                    InvAction::DropOne(index) => self.drop_one(index),
                 }
             }
             return Transition::None;

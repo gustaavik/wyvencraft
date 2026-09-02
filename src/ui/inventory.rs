@@ -67,6 +67,8 @@ pub enum InvAction {
     /// Clicked outside the panel with a stack on the cursor. `all` throws the
     /// lot, as a left click does; a right click parts with one item.
     DropHeld { all: bool },
+    /// Pressed the drop key over a slot: throw one item out of it.
+    DropOne(usize),
 }
 
 /// What happened to a slot this frame.
@@ -212,6 +214,10 @@ pub fn draw_inventory(
     held: Option<ItemStack>,
     mode: GameMode,
     progress: f32,
+    // `drop_pressed`: the drop key went down this frame — throw one of whatever
+    // is under the cursor. Passed in rather than read from egui because the
+    // binding is the game's, and egui's key enum is not winit's.
+    drop_pressed: bool,
     tex: UiTextures,
 ) -> Option<InvAction> {
     let view = View {
@@ -273,6 +279,17 @@ pub fn draw_inventory(
             action
         })
         .inner;
+
+    // The drop key acts on whatever the player is dealing with: the stack on
+    // the cursor if they are carrying one, otherwise the slot under it. One
+    // item either way — the whole stack has the drag-it-out gesture.
+    if action.is_none() && interactive && drop_pressed {
+        action = match (held, ctx.pointer_latest_pos()) {
+            (Some(_), _) => Some(InvAction::DropHeld { all: false }),
+            (None, Some(cursor)) => slot_under(&l, shift, cursor).map(InvAction::DropOne),
+            (None, None) => None,
+        };
+    }
 
     // A stack on the cursor, clicked away from the panel: throw it. This is the
     // other half of dragging one out — the click-to-move model has no "release"
@@ -369,12 +386,8 @@ impl View<'_> {
         cursor: egui::Pos2,
         mode: GameMode,
     ) -> Option<&str> {
-        let cells =
-            armor_cells(l.armor.translate(shift)).chain(grid_cells(l.grid.translate(shift)));
-        for (index, cell) in cells {
-            if cell.contains(cursor) {
-                return self.inventory.slot(index).map(|s| self.name_of(s.item));
-            }
+        if let Some(index) = slot_under(l, shift, cursor) {
+            return self.inventory.slot(index).map(|s| self.name_of(s.item));
         }
         if mode.is_creative() {
             for (id, cell) in self.palette_cells(l.palette.translate(shift)) {
@@ -529,6 +542,18 @@ impl View<'_> {
             }
         })
     }
+}
+
+/// The inventory slot under `cursor`, if any.
+///
+/// Hit-tested against the same rects the painter uses, so the drop key and the
+/// tooltip can never disagree with what is drawn under the cursor. Palette
+/// entries are deliberately excluded: they are an infinite source, not slots.
+fn slot_under(l: &InventoryLayout, shift: egui::Vec2, cursor: egui::Pos2) -> Option<usize> {
+    armor_cells(l.armor.translate(shift))
+        .chain(grid_cells(l.grid.translate(shift)))
+        .find(|(_, cell)| cell.contains(cursor))
+        .map(|(index, _)| index)
 }
 
 /// What the player did to `cell` this frame.

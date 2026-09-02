@@ -198,9 +198,18 @@ impl Inventory {
     /// Take a single item off the selected stack — the last one takes the whole
     /// stack (preserving tool durability). Used by the drop key.
     pub fn take_one_selected(&mut self) -> Option<ItemStack> {
-        let slot = self.slots[self.selected].as_mut()?;
+        self.take_one(self.selected)
+    }
+
+    /// Remove one item from `index`, emptying the slot if it was the last.
+    ///
+    /// The last item is moved out whole rather than rebuilt, so a tool taken
+    /// this way keeps the wear it had. Above one there is nothing to keep —
+    /// only stackables reach a count of two.
+    pub fn take_one(&mut self, index: usize) -> Option<ItemStack> {
+        let slot = self.slots.get_mut(index)?.as_mut()?;
         if slot.count <= 1 {
-            return self.slots[self.selected].take();
+            return self.slots[index].take();
         }
         slot.count -= 1;
         Some(ItemStack::single(slot.item))

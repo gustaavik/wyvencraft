@@ -159,6 +159,13 @@ impl InGameState {
         }
     }
 
+    /// Throw a single item out of a slot — the drop key over a slot.
+    pub(super) fn drop_one(&mut self, index: usize) {
+        if let Some(one) = self.inventory.take_one(index) {
+            self.throw(one);
+        }
+    }
+
     /// Throw the stack on the cursor, all of it or one item.
     pub(super) fn drop_held(&mut self, all: bool) {
         let Some(mut held) = self.held else {
@@ -415,6 +422,49 @@ mod interaction_tests {
         state.handle_slot_split(helmet);
         assert!(state.inventory.slot(helmet).is_none(), "stone is not a hat");
         assert_eq!(state.held.expect("held").count, 4);
+    }
+
+    #[test]
+    fn the_drop_key_parts_with_one_item_and_leaves_the_rest() {
+        let mut state = state();
+        stocked(&mut state, SLOT, "stone", 5);
+
+        state.drop_one(SLOT);
+        assert_eq!(state.inventory.slot(SLOT).expect("the rest").count, 4);
+        assert_eq!(state.drops.len(), 1);
+    }
+
+    /// The last item empties the slot rather than leaving a zero-count stack
+    /// behind, and a tool dropped this way keeps the wear it had.
+    #[test]
+    fn dropping_the_last_item_empties_the_slot_and_keeps_its_wear() {
+        let mut state = state();
+        let pick = state
+            .content
+            .items
+            .find("wooden_pickaxe")
+            .expect("builtin pickaxe");
+        let worn = ItemStack {
+            durability: Some(7),
+            ..ItemStack::single(pick)
+        };
+        state.inventory.set_slot(SLOT, Some(worn));
+
+        state.drop_one(SLOT);
+        assert!(state.inventory.slot(SLOT).is_none(), "the slot empties");
+        assert_eq!(state.drops.len(), 1);
+        assert_eq!(
+            state.drops[0].stack.durability,
+            Some(7),
+            "a dropped tool keeps its wear"
+        );
+    }
+
+    #[test]
+    fn the_drop_key_on_an_empty_slot_does_nothing() {
+        let mut state = state();
+        state.drop_one(SLOT);
+        assert!(state.drops.is_empty());
     }
 
     #[test]
