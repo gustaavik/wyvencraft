@@ -232,25 +232,6 @@ impl<G: Game> App<G> {
             .unwrap()
             .swapchain_image_view();
 
-        // The preview goes first, so the swapchain image's only writer before
-        // the egui overlay is the world pass — exactly the no-preview path.
-        // Inserting this *between* world and egui breaks vulkano's swapchain
-        // layout tracking. egui samples the finished image via the future chain.
-        let target = match &self.stage {
-            Stage::Running { shared, .. } => G::preview_target(shared).cloned(),
-            _ => None,
-        };
-        let preview = match &self.stage {
-            Stage::Running { stack, .. } => stack.preview_frame(),
-            _ => None,
-        };
-        let before = match (preview.as_ref(), self.renderer.as_mut(), target) {
-            (Some(preview), Some(renderer), Some(target)) => {
-                renderer.draw_model(before, target, preview)
-            }
-            _ => before,
-        };
-
         let scene = match &self.stage {
             Stage::Running { stack, .. } => stack.scene_frame(aspect),
             _ => None,

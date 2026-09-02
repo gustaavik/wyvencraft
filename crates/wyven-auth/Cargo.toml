@@ -2,6 +2,8 @@
 name = "wyven-auth"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Account sessions, key caching and Ed25519 join-ticket verification."
 
 [dependencies]

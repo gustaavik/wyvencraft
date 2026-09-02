@@ -1,62 +1,182 @@
-//! The inventory screen: armor slots and a live player preview down the left,
-//! a crafting list (or the creative item palette) on the right, and the storage
-//! grid + hotbar across the bottom — matching `inventory overhaul.png`.
+//! The inventory panel: a four-slot armor column down its left edge and the
+//! whole 9x4 storage grid — hotbar included as its bottom row — to their right.
 //!
 //! Interaction is click-to-move (Minecraft-style): the caller owns a "held"
-//! stack; this view reports the slot clicked (or palette item picked, recipe
-//! crafted, or preview dragged) and paints the grid and the held stack under
-//! the cursor. The move/craft logic lives with the inventory owner.
+//! stack; this view reports what the player did to a slot and paints the grid
+//! and the held stack under the cursor. The move logic lives with the
+//! inventory owner. Left click moves a whole stack, right click splits one in
+//! half (or places a single item), and taking a stack outside the panel throws
+//! it into the world.
+//!
+//! **The panel unfolds out of the hotbar.** Its bottom row is laid out from
+//! [`crate::ui::slot`]'s metrics, which is what the HUD hotbar uses too, so at
+//! progress 0 the two are the same nine cells at the same size in the same
+//! place and the hand-off between them is invisible. Everything above that row
+//! is revealed by a clip rect growing out of it. Both endpoints are *computed*
+//! ([`layout`] and [`hud::hotbar_rect`]) rather than read back from egui, which
+//! matters because the animation starts on a frame where egui has placed
+//! nothing yet.
 
-use egui::{Align2, Color32, Context, FontId, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
+use egui::{Align2, Color32, Context, FontId, Rect, pos2, vec2};
 
 use crate::content::ItemIcon;
 use crate::core::GameMode;
 use crate::inventory::{
-    ARMOR_START, ArmorSlot, HOTBAR_SIZE, INVENTORY_SIZE, Inventory, ItemId, ItemRegistry,
-    ItemStack, RecipeBook,
+    ARMOR_SIZE, ARMOR_START, ArmorSlot, HOTBAR_SIZE, INVENTORY_SIZE, Inventory, ItemId,
+    ItemRegistry, ItemStack,
 };
 use crate::state::UiTextures;
+use crate::ui::hud;
 use crate::ui::icon::draw_item_icon;
+use crate::ui::ninepatch;
+use crate::ui::slot::{self, GAP, PITCH, SIZE, SlotContents};
 
-const SLOT: f32 = 46.0;
-const PAD: f32 = 5.0;
-const GAP: f32 = 14.0;
-/// Width of the right-hand panel (crafting list / creative palette).
-const SIDE_PANEL_W: f32 = 360.0;
+/// The storage grid: nine columns, and every slot the inventory has.
+/// The bottom row is the hotbar, which is why there is no gap above it.
+const GRID_COLS: usize = HOTBAR_SIZE;
+const GRID_ROWS: usize = INVENTORY_SIZE / GRID_COLS;
 
-// Light-grey panel palette, matching the mockup regardless of egui's theme.
-const PANEL_BG: Color32 = Color32::from_rgb(196, 196, 196);
-const SLOT_BG: Color32 = Color32::from_rgb(122, 122, 122);
-const SLOT_HOVER: Color32 = Color32::from_rgb(150, 150, 152);
-const SLOT_STROKE: Color32 = Color32::from_rgb(92, 92, 92);
-const DISABLED_BG: Color32 = Color32::from_rgb(104, 104, 104);
-const TEXT: Color32 = Color32::from_rgb(40, 40, 42);
-const DISABLED_TEXT: Color32 = Color32::from_rgb(96, 96, 98);
+/// The dark carcass's margin around its contents, and the gap between the
+/// armor column and the grid.
+const PANEL_PAD: f32 = 10.0;
+const COLUMN_GAP: f32 = 10.0;
+/// How far the panel floats inside the screen's right edge.
+const SCREEN_MARGIN: f32 = 28.0;
+/// Extra space between the storage rows and the hotbar row below them.
+///
+/// They are one contiguous 9x4 block of slot *indices*, but the bottom row is
+/// the hotbar — the nine you carry — and it reads better set apart from the
+/// twenty-seven you are only storing. Each group keeps its own padding either
+/// side of this, so the visible channel is `GAP + HOTBAR_GAP + GAP`.
+const HOTBAR_GAP: f32 = 10.0;
+/// Height of the creative palette strip below the grid.
+const PALETTE_H: f32 = 118.0;
+/// Size of the stack riding on the cursor.
+const HELD_ICON: f32 = 40.0;
 
 /// What the player did in the inventory screen this frame.
 pub enum InvAction {
-    /// Clicked an inventory slot (pick up / place / merge / swap).
+    /// Left-clicked a slot: pick up / place / merge / swap the whole stack.
     Slot(usize),
+    /// Right-clicked a slot: take half of it, or place a single item into it.
+    Split(usize),
     /// Picked an item from the creative palette (grab a full stack).
     Pick(ItemId),
-    /// Clicked a recipe's craft button (index into the recipe book).
-    Craft(usize),
-    /// Dragged across the player preview by this many pixels horizontally.
-    Rotate(f32),
+    /// Dragged a slot's stack clear of the panel: throw it into the world.
+    DropSlot(usize),
+    /// Clicked outside the panel with a stack on the cursor. `all` throws the
+    /// lot, as a left click does; a right click parts with one item.
+    DropHeld { all: bool },
+    /// Pressed the drop key over a slot: throw one item out of it.
+    DropOne(usize),
 }
 
-/// The inventory screen's output for a frame: the discrete action (if any) plus
-/// where the preview model's head should look — the cursor position mapped to a
-/// head (yaw, pitch), so the model looks toward the cursor without touching the
-/// world player's facing.
-pub struct InvOutput {
-    pub action: Option<InvAction>,
-    pub head_look: Option<(f32, f32)>,
+/// What a press landed on, remembered until the button comes back up.
+///
+/// Stored in egui's temp memory rather than a `Response`, because a slot has to
+/// act on press-and-release over itself *however long it took and however much
+/// the mouse slid in between*. egui only calls that a click within 6 points and
+/// 0.8 seconds ([`egui::InputOptions`]); past either it is a drag and the click
+/// is dropped on the floor. For a button that is the right call. For an
+/// inventory slot it is the single most confusing thing the panel can do —
+/// the click visibly lands on the slot and nothing happens.
+#[derive(Clone, Copy, PartialEq)]
+enum PressTarget {
+    Slot(usize),
+    Palette(ItemId),
+    /// Pressed on the world beyond the panel.
+    Outside,
 }
 
-/// Maximum head turn / tilt for the cursor-tracking preview (radians).
-const HEAD_LOOK_MAX_YAW: f32 = 0.7;
-const HEAD_LOOK_MAX_PITCH: f32 = 0.5;
+/// Where the panel rests and how much screen it leaves for the player model.
+///
+/// Pure, so the camera (which needs to know where *not* to put the model) and
+/// the painter derive their numbers from one place and cannot disagree.
+#[derive(Clone, Copy, Debug)]
+pub struct InventoryLayout {
+    /// The panel at rest.
+    pub panel: Rect,
+    /// The armor column's cells and their padding.
+    pub armor: Rect,
+    /// The whole grid, both groups and the channel between them.
+    pub grid: Rect,
+    /// The three storage rows' backing.
+    pub storage: Rect,
+    /// The grid's bottom row — the hotbar, and the animation's anchor.
+    pub hotbar_row: Rect,
+    /// The creative palette strip; `Rect::NOTHING` in survival.
+    pub palette: Rect,
+    /// Centre of the column left clear for the player model, as a fraction of
+    /// the screen's width.
+    pub stage_center_x: f32,
+}
+
+/// Lay the panel out for a screen of this size.
+pub fn layout(screen: Rect, creative: bool) -> InventoryLayout {
+    // Every row but the last, then the channel, then the hotbar row with
+    // padding of its own — the two groups are backed separately.
+    let storage_h = (GRID_ROWS - 1) as f32 * PITCH + GAP;
+    let grid_size = vec2(
+        GRID_COLS as f32 * PITCH + GAP,
+        storage_h + HOTBAR_GAP + SIZE + 2.0 * GAP,
+    );
+    let armor_size = vec2(PITCH + GAP, ARMOR_SIZE as f32 * PITCH + GAP);
+    let strip = if creative {
+        PALETTE_H + COLUMN_GAP
+    } else {
+        0.0
+    };
+
+    let body = vec2(
+        armor_size.x + COLUMN_GAP + grid_size.x,
+        grid_size.y.max(armor_size.y) + strip,
+    );
+    let panel_size = body + vec2(2.0 * PANEL_PAD, 2.0 * PANEL_PAD);
+
+    // Flush right, vertically centred. Clamped to the screen so a window
+    // narrower than the panel shows the panel rather than half of it.
+    let left = (screen.right() - SCREEN_MARGIN - panel_size.x).max(screen.left());
+    let top = (screen.center().y - panel_size.y * 0.5).max(screen.top());
+    let panel = Rect::from_min_size(pos2(left, top), panel_size);
+
+    let armor = Rect::from_min_size(panel.min + vec2(PANEL_PAD, PANEL_PAD), armor_size);
+    let grid = Rect::from_min_size(
+        pos2(armor.right() + COLUMN_GAP, panel.top() + PANEL_PAD),
+        grid_size,
+    );
+    let storage = Rect::from_min_size(grid.min, vec2(grid_size.x, storage_h));
+    // The bottom row, with padding of its own around it — which is exactly the
+    // shape `hud::hotbar_rect` produces, so the two coincide at progress 0.
+    let hotbar_row = Rect::from_min_size(
+        pos2(grid.left(), storage.bottom() + HOTBAR_GAP),
+        vec2(grid_size.x, SIZE + 2.0 * GAP),
+    );
+    let palette = if creative {
+        Rect::from_min_size(
+            pos2(grid.left(), grid.bottom() + COLUMN_GAP),
+            vec2(grid_size.x, PALETTE_H),
+        )
+    } else {
+        Rect::NOTHING
+    };
+
+    // Everything left of the panel is the model's stage; centre it in that.
+    let stage_center_x = if screen.width() > 0.0 {
+        (panel.left() - screen.left()) / screen.width() * 0.5
+    } else {
+        0.25
+    };
+
+    InventoryLayout {
+        panel,
+        armor,
+        grid,
+        storage,
+        hotbar_row,
+        palette,
+        stage_center_x,
+    }
+}
 
 /// Everything the view needs to draw a slot's contents, bundled so the many
 /// slot calls don't each take a fistful of arguments.
@@ -71,19 +191,27 @@ struct View<'a> {
     tex: UiTextures,
 }
 
-/// Draw the inventory window. Returns the frame's action and head-look.
+/// Draw the inventory panel at `progress` through its unfold.
+///
+/// `progress` is 0 at the hotbar and 1 at rest; the caller owns the easing.
+/// Clicks are only reported once the panel has arrived, so a slot can never be
+/// hit while it is still travelling under the cursor.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_inventory(
     ctx: &Context,
     inventory: &Inventory,
     items: &ItemRegistry,
-    recipes: &RecipeBook,
     icons: &[ItemIcon],
     names: &[String],
     held: Option<ItemStack>,
     mode: GameMode,
+    progress: f32,
+    // `drop_pressed`: the drop key went down this frame — throw one of whatever
+    // is under the cursor. Passed in rather than read from egui because the
+    // binding is the game's, and egui's key enum is not winit's.
+    drop_pressed: bool,
     tex: UiTextures,
-) -> InvOutput {
+) -> Option<InvAction> {
     let view = View {
         inventory,
         items,
@@ -91,133 +219,129 @@ pub fn draw_inventory(
         names,
         tex,
     };
-    let frame = egui::Frame::new()
-        .fill(PANEL_BG)
-        .inner_margin(14.0)
-        .corner_radius(6.0);
+    let screen = ctx.screen_rect();
+    let l = layout(screen, mode.is_creative());
+    let t = progress.clamp(0.0, 1.0);
+    let interactive = t >= 1.0;
 
-    // Set by the preview box each frame to where the head should look; a `Cell`
-    // so the layout closures can write it without a mutable-capture tangle.
-    let head_look = std::cell::Cell::new(None);
+    // The panel's hotbar row travels from the HUD hotbar to its resting place.
+    // Both rects are the same size, so this is a pure translation — no scaling,
+    // and so no half-pixel slots on the way.
+    let row = lerp_rect(hud::hotbar_rect(screen), l.hotbar_row, t);
+    let shift = row.min - l.hotbar_row.min;
 
-    let inner = egui::Window::new("Inventory")
-        .title_bar(false)
-        .collapsible(false)
-        .resizable(false)
-        .frame(frame)
-        .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+    // Reveal the rest of the panel by growing the clip out of that row.
+    let panel = l.panel.translate(shift);
+    let clip = lerp_rect(row, panel, t);
+
+    // The carcass and the rows above the hotbar fade in slightly behind the
+    // unfold, so the reveal reads as one motion rather than a wipe.
+    let body = tint(smoothstep(0.10, 0.65, t));
+
+    egui::Area::new(egui::Id::new("inventory"))
+        .fixed_pos(clip.min)
+        .order(egui::Order::Middle)
         .show(ctx, |ui| {
-            let mut action = None;
+            ui.set_clip_rect(clip);
+            let painter = ui.painter().clone();
 
-            // --- Top row: armor column, player preview, right-hand panel. ---
-            let top = ui
-                .horizontal_top(|ui| {
-                    let mut a = view.armor_column(ui);
-                    ui.add_space(GAP);
-                    let (pv_action, pv_rect) = preview_box(ui, tex.preview);
-                    // Head tracks the cursor relative to the preview box centre.
-                    if let Some(cursor) = ui.ctx().pointer_latest_pos() {
-                        head_look.set(Some(look_angles(pv_rect, cursor)));
-                    }
-                    a = a.or(pv_action);
-                    ui.add_space(GAP);
-                    a.or(view.side_panel(ui, recipes, mode))
-                })
-                .inner;
-            action = action.or(top);
-
-            ui.add_space(12.0);
-
-            // --- Storage grid: three rows of nine. ---
-            let mut index = HOTBAR_SIZE;
-            while index < INVENTORY_SIZE {
-                let row = ui
-                    .horizontal(|ui| {
-                        let mut a = None;
-                        for _ in 0..HOTBAR_SIZE {
-                            if index < INVENTORY_SIZE {
-                                a = a.or(view.slot(ui, index, None, false));
-                                index += 1;
-                            }
-                        }
-                        a
-                    })
-                    .inner;
-                action = action.or(row);
+            ninepatch::draw_nine(&painter, panel, ninepatch::PANEL, body, tex.gui);
+            // One bed per group, so the channel between them shows the dark
+            // carcass through and the hotbar reads as its own row.
+            for bed in [l.storage, l.hotbar_row] {
+                ninepatch::draw_nine(
+                    &painter,
+                    bed.translate(shift),
+                    ninepatch::GRID,
+                    body,
+                    tex.gui,
+                );
             }
 
-            ui.add_space(10.0);
-
-            // --- Hotbar row: the selected slot gets a white outline. ---
-            let hotbar = ui
-                .horizontal(|ui| {
-                    let mut a = None;
-                    for i in 0..HOTBAR_SIZE {
-                        let selected = i == inventory.selected_index();
-                        a = a.or(view.slot(ui, i, None, selected));
-                    }
-                    a
-                })
-                .inner;
-            action.or(hotbar)
+            view.armor_column(&painter, l.armor.translate(shift), body);
+            view.grid(&painter, l.grid.translate(shift), body);
+            if mode.is_creative() {
+                view.palette(&painter, l.palette.translate(shift), body);
+            }
         });
-    // `show` → Option (window open) of InnerResponse whose `.inner` is itself
-    // Option (the body ran / wasn't collapsed); flatten both to the action.
-    let action = inner.and_then(|r| r.inner).flatten();
 
-    // The held stack follows the cursor, painted on a foreground layer so it
-    // rides above the window.
-    if let Some(stack) = held
-        && let Some(pos) = ctx.pointer_latest_pos()
-    {
-        let painter = ctx.layer_painter(egui::LayerId::new(
-            egui::Order::Foreground,
-            egui::Id::new("held_item"),
-        ));
-        let rect = Rect::from_center_size(pos, vec2(40.0, 40.0));
-        draw_item_icon(&painter, rect, view.icon_of(stack.item), tex);
-        paint_count(&painter, rect, stack.count);
+    // Interaction is resolved from the raw pointer rather than from egui
+    // `Response`s — see `gesture` — so it is decided here rather than inside
+    // the painting closure.
+    let mut action = interactive
+        .then(|| {
+            gesture(
+                ctx,
+                &view,
+                &l,
+                shift,
+                panel,
+                held.is_some(),
+                mode.is_creative(),
+            )
+        })
+        .flatten();
+
+    // The drop key acts on whatever the player is dealing with: the stack on
+    // the cursor if they are carrying one, otherwise the slot under it. One
+    // item either way — the whole stack has the drag-it-out gesture.
+    if action.is_none() && interactive && drop_pressed {
+        action = match (held, ctx.pointer_latest_pos()) {
+            (Some(_), _) => Some(InvAction::DropHeld { all: false }),
+            (None, Some(cursor)) => slot_under(&l, shift, cursor).map(InvAction::DropOne),
+            (None, None) => None,
+        };
     }
 
-    InvOutput {
-        action,
-        head_look: head_look.get(),
+    // The held stack and the tooltip ride above the panel on their own layer.
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("inventory_overlay"),
+    ));
+    match (held, ctx.pointer_latest_pos()) {
+        (Some(stack), Some(pos)) => {
+            let rect = Rect::from_center_size(pos, vec2(HELD_ICON, HELD_ICON));
+            draw_item_icon(&painter, rect, view.icon_of(stack.item), tex);
+            paint_count(&painter, rect, stack.count);
+        }
+        (None, Some(pos)) if interactive => {
+            if let Some(name) = view.name_under(&l, shift, pos, mode) {
+                draw_tooltip(&painter, screen, pos, name, tex);
+            }
+        }
+        _ => {}
     }
+
+    action
 }
 
-/// Map a cursor position to head (yaw, pitch), relative to the preview box's
-/// centre. The model faces the viewer, so a rightward cursor turns the head to
-/// screen-right and a downward cursor tilts it down; both clamp to a natural range.
-fn look_angles(box_rect: Rect, cursor: egui::Pos2) -> (f32, f32) {
-    let d = cursor - box_rect.center();
-    let nx = (d.x / (box_rect.width() * 0.5)).clamp(-1.0, 1.0);
-    let ny = (d.y / (box_rect.height() * 0.5)).clamp(-1.0, 1.0);
-    (-nx * HEAD_LOOK_MAX_YAW, -ny * HEAD_LOOK_MAX_PITCH)
-}
+/// A tooltip naming the hovered item, offset from the cursor and kept on screen.
+fn draw_tooltip(
+    painter: &egui::Painter,
+    screen: Rect,
+    cursor: egui::Pos2,
+    name: &str,
+    tex: UiTextures,
+) {
+    const OFFSET: egui::Vec2 = egui::vec2(18.0, 18.0);
+    const PAD: f32 = 10.0;
 
-/// The offscreen player-model image; dragging it rotates the preview. Returns
-/// the drag action (if any) and the box rect (for cursor head-tracking).
-fn preview_box(ui: &mut egui::Ui, preview: egui::TextureId) -> (Option<InvAction>, Rect) {
-    let height = 6.0 * (SLOT + PAD) - PAD; // matches the armor column height
-    let width = height * 0.48; // PREVIEW_SIZE aspect (see app.rs)
-    let (rect, resp) = ui.allocate_exact_size(vec2(width, height), Sense::drag());
-    let painter = ui.painter();
-    painter.rect_filled(rect, 4.0, Color32::from_rgb(8, 8, 10));
-    painter.image(
-        preview,
-        rect,
-        Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-        Color32::WHITE,
-    );
-    painter.rect_stroke(
-        rect,
-        4.0,
-        Stroke::new(2.0_f32, SLOT_STROKE),
-        StrokeKind::Inside,
-    );
-    let action = (resp.dragged() && resp.drag_delta().x != 0.0)
-        .then(|| InvAction::Rotate(resp.drag_delta().x));
-    (action, rect)
+    let galley =
+        painter.layout_no_wrap(name.to_string(), FontId::proportional(15.0), Color32::WHITE);
+    let size = galley.size() + vec2(2.0 * PAD, 2.0 * PAD);
+
+    // Flip to the other side of the cursor rather than run off the screen.
+    let mut min = cursor + OFFSET;
+    if min.x + size.x > screen.right() {
+        min.x = cursor.x - OFFSET.x - size.x;
+    }
+    if min.y + size.y > screen.bottom() {
+        min.y = cursor.y - OFFSET.y - size.y;
+    }
+    let rect = Rect::from_min_size(min, size);
+
+    ninepatch::draw_nine(painter, rect, ninepatch::TOOLTIP, Color32::WHITE, tex.gui);
+    painter.galley(rect.min + vec2(PAD, PAD), galley, Color32::PLACEHOLDER);
 }
 
 impl View<'_> {
@@ -234,107 +358,123 @@ impl View<'_> {
             .unwrap_or_else(|| &self.items.get(item).id)
     }
 
-    /// One inventory slot: background, optional ghost hint, item icon, count and
-    /// durability. Returns the click action, if any.
-    fn slot(
+    /// The display name of whatever the cursor is over, for the tooltip.
+    ///
+    /// Hit-tested against the same rects the painter uses rather than read off
+    /// a `Response`, so the tooltip cannot name something other than what is
+    /// drawn under the cursor.
+    fn name_under(
         &self,
-        ui: &mut egui::Ui,
-        index: usize,
-        ghost: Option<u32>,
-        selected: bool,
-    ) -> Option<InvAction> {
-        let (rect, resp) = ui.allocate_exact_size(vec2(SLOT, SLOT), Sense::click());
-        let painter = ui.painter();
-        let bg = if resp.hovered() { SLOT_HOVER } else { SLOT_BG };
-        painter.rect_filled(rect, 3.0, bg);
-
-        let inner = rect.shrink(5.0);
-        match self.inventory.slot(index) {
-            Some(stack) => {
-                draw_item_icon(painter, inner, self.icon_of(stack.item), self.tex);
-                paint_count(painter, rect, stack.count);
-                self.paint_durability(painter, rect, stack);
-            }
-            None => {
-                if let Some(tile) = ghost {
-                    // Faded silhouette hinting what the slot holds.
-                    draw_item_icon(painter, inner, ItemIcon::Flat(tile), self.tex);
-                    painter.rect_filled(
-                        inner,
-                        0.0,
-                        Color32::from_rgba_unmultiplied(SLOT_BG.r(), SLOT_BG.g(), SLOT_BG.b(), 150),
-                    );
+        l: &InventoryLayout,
+        shift: egui::Vec2,
+        cursor: egui::Pos2,
+        mode: GameMode,
+    ) -> Option<&str> {
+        if let Some(index) = slot_under(l, shift, cursor) {
+            return self.inventory.slot(index).map(|s| self.name_of(s.item));
+        }
+        if mode.is_creative() {
+            for (id, cell) in self.palette_cells(l.palette.translate(shift)) {
+                if cell.contains(cursor) {
+                    return Some(self.name_of(id));
                 }
             }
         }
-
-        let stroke = if selected {
-            Stroke::new(2.5_f32, Color32::WHITE)
-        } else {
-            Stroke::new(1.0_f32, SLOT_STROKE)
-        };
-        painter.rect_stroke(rect, 3.0, stroke, StrokeKind::Inside);
-
-        // Naming the item on hover happens here rather than at each caller,
-        // because `slot` is the one path the storage grid, the hotbar row and
-        // the armor column all go through.
-        let resp = match self.inventory.slot(index) {
-            Some(stack) => resp.on_hover_text(self.name_of(stack.item)),
-            None => resp,
-        };
-
-        resp.clicked().then_some(InvAction::Slot(index))
+        None
     }
 
-    /// A tool/armor durability bar along the bottom of a slot.
-    fn paint_durability(&self, painter: &egui::Painter, cell: Rect, stack: ItemStack) {
-        let (Some(dur), Some(max)) = (stack.durability, self.items.max_durability(stack.item))
-        else {
-            return;
-        };
-        if max == 0 || dur >= max {
-            return;
+    /// The armor column: one slot per piece, empties showing a faded ghost of
+    /// what fits.
+    fn armor_column(&self, painter: &egui::Painter, rect: Rect, tint: Color32) {
+        for (index, cell) in armor_cells(rect) {
+            let piece = ArmorSlot::ALL[index - ARMOR_START];
+            slot::paint_slot(
+                painter,
+                cell,
+                self.contents(index),
+                self.armor_ghost(piece),
+                false,
+                tint,
+                self.tex,
+            );
         }
-        let ratio = dur as f32 / max as f32;
-        let bar_w = SLOT - 10.0;
-        let track = Rect::from_min_size(
-            pos2(cell.left() + 5.0, cell.bottom() - 8.0),
-            vec2(bar_w, 4.0),
-        );
-        painter.rect_filled(track, 1.0, Color32::from_black_alpha(160));
-        let fill = Rect::from_min_size(track.min, vec2(bar_w * ratio, 4.0));
-        let r = ((1.0 - ratio) * 255.0) as u8;
-        let g = (ratio * 220.0) as u8;
-        painter.rect_filled(fill, 1.0, Color32::from_rgb(r.max(40), g, 40));
     }
 
-    /// The left column: one labelled slot per armor piece, empties showing a
-    /// faded ghost of what fits.
-    fn armor_column(&self, ui: &mut egui::Ui) -> Option<InvAction> {
-        ui.vertical(|ui| {
-            let mut a = None;
-            for piece in ArmorSlot::ALL {
-                let index = ARMOR_START + piece.index();
-                let ghost = self.armor_ghost(piece);
-                let row = ui
-                    .horizontal(|ui| {
-                        // `horizontal` centres cross-axis, so the label sits
-                        // vertically centred against the taller slot.
-                        let clicked = self.slot(ui, index, ghost, false);
-                        ui.add_space(6.0);
-                        // Fixed-width label cell so the column edge stays straight.
-                        ui.allocate_ui(vec2(84.0, SLOT), |ui| {
-                            ui.label(egui::RichText::new(piece.label()).size(15.0).color(TEXT));
-                        });
-                        clicked
-                    })
-                    .inner;
-                a = a.or(row);
-                ui.add_space(PAD);
-            }
-            a
+    /// The whole 9x4 grid, one contiguous block. The bottom row is the hotbar,
+    /// which is why it is the one row that shows a selection.
+    ///
+    /// That row is drawn at **full opacity whatever `tint` says**: it is the
+    /// HUD hotbar continuing, and it is the only thing on screen at progress 0,
+    /// where the fade has not started and the HUD's own copy is already hidden.
+    /// Fading it with the rest would blink the hotbar out for the first frames
+    /// of every open.
+    fn grid(&self, painter: &egui::Painter, rect: Rect, tint: Color32) {
+        for (index, cell) in grid_cells(rect) {
+            let is_hotbar = index < HOTBAR_SIZE;
+            let selected = is_hotbar && index == self.inventory.selected_index();
+            slot::paint_slot(
+                painter,
+                cell,
+                self.contents(index),
+                None,
+                selected,
+                if is_hotbar { Color32::WHITE } else { tint },
+                self.tex,
+            );
+        }
+    }
+
+    /// Creative palette: items as click-to-grab icons in the strip below the
+    /// grid. The only in-UI way to get items in creative.
+    fn palette(&self, painter: &egui::Painter, rect: Rect, tint: Color32) {
+        ninepatch::draw_nine(painter, rect, ninepatch::GRID, tint, self.tex.gui);
+        for (id, cell) in self.palette_cells(rect) {
+            slot::paint_slot(
+                painter,
+                cell,
+                Some(SlotContents {
+                    stack: ItemStack::single(id),
+                    icon: self.icon_of(id),
+                    items: self.items,
+                }),
+                None,
+                false,
+                tint,
+                self.tex,
+            );
+        }
+    }
+
+    /// Palette cells, wrapped left to right and clipped to the strip.
+    fn palette_cells(&self, rect: Rect) -> Vec<(ItemId, Rect)> {
+        if !rect.is_positive() {
+            return Vec::new();
+        }
+        let cols = ((rect.width() - GAP) / PITCH).floor().max(1.0) as usize;
+        let rows = ((rect.height() - GAP) / PITCH).floor().max(1.0) as usize;
+        self.items
+            .iter()
+            .take(cols * rows)
+            .enumerate()
+            .map(|(n, (id, _))| {
+                let (row, col) = (n / cols, n % cols);
+                (
+                    id,
+                    Rect::from_min_size(
+                        rect.min + vec2(GAP + col as f32 * PITCH, GAP + row as f32 * PITCH),
+                        vec2(SIZE, SIZE),
+                    ),
+                )
+            })
+            .collect()
+    }
+
+    fn contents(&self, index: usize) -> Option<SlotContents<'_>> {
+        self.inventory.slot(index).map(|stack| SlotContents {
+            stack,
+            icon: self.icon_of(stack.item),
+            items: self.items,
         })
-        .inner
     }
 
     /// The icon tile of the armor item that fits `piece`, for the ghost hint.
@@ -348,177 +488,563 @@ impl View<'_> {
             }
         })
     }
+}
 
-    /// The right-hand panel: the crafting list in survival, the item palette in
-    /// creative (crafting is meaningless there, so the panel is never wasted).
-    fn side_panel(
-        &self,
-        ui: &mut egui::Ui,
-        recipes: &RecipeBook,
-        mode: GameMode,
-    ) -> Option<InvAction> {
-        let panel_h = 6.0 * (SLOT + PAD) - PAD;
-        ui.allocate_ui(vec2(SIDE_PANEL_W, panel_h), |ui| {
-            // `allocate_ui` reserves space but does not clip; clamp everything
-            // drawn here to the panel box so a wide row or an overscrolled icon
-            // can't spill into the rest of the window.
-            ui.set_clip_rect(ui.max_rect());
-            let header = if mode.is_creative() {
-                "Items"
-            } else {
-                "Crafting"
-            };
-            ui.label(egui::RichText::new(header).strong().color(TEXT));
-            // Fixed inner extents (below the header, minus the scrollbar) so the
-            // scroll list can't stretch the auto-sized window or push past the
-            // panel edge — the regression this replaced relied on `allocate_ui`
-            // bounding the scroll area, which it doesn't during layout passes.
-            let inner_w = SIDE_PANEL_W - 16.0;
-            let inner_h = panel_h - 24.0;
-            if mode.is_creative() {
-                self.palette(ui, inner_w, inner_h)
-            } else {
-                self.crafting_list(ui, recipes, inner_w, inner_h)
-            }
-        })
-        .inner
-    }
+/// The inventory slot under `cursor`, if any.
+///
+/// Hit-tested against the same rects the painter uses, so the drop key and the
+/// tooltip can never disagree with what is drawn under the cursor. Palette
+/// entries are deliberately excluded: they are an infinite source, not slots.
+fn slot_under(l: &InventoryLayout, shift: egui::Vec2, cursor: egui::Pos2) -> Option<usize> {
+    armor_cells(l.armor.translate(shift))
+        .chain(grid_cells(l.grid.translate(shift)))
+        .find(|(_, cell)| cell.contains(cursor))
+        .map(|(index, _)| index)
+}
 
-    /// Creative palette: every item as a click-to-grab icon, wrapping to fit.
-    fn palette(&self, ui: &mut egui::Ui, width: f32, height: f32) -> Option<InvAction> {
-        egui::ScrollArea::vertical()
-            .id_salt("palette")
-            .max_height(height)
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.set_width(width);
-                ui.horizontal_wrapped(|ui| {
-                    let mut a = None;
-                    for (id, _) in self.items.iter() {
-                        let (rect, resp) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::click());
-                        let painter = ui.painter();
-                        painter.rect_filled(rect, 3.0, SLOT_BG);
-                        draw_item_icon(painter, rect.shrink(4.0), self.icon_of(id), self.tex);
-                        let resp = resp.on_hover_text(self.name_of(id));
-                        if resp.clicked() {
-                            a = a.or(Some(InvAction::Pick(id)));
-                        }
-                    }
-                    a
-                })
-                .inner
-            })
-            .inner
-    }
+/// Resolve this frame's pointer into an action, by hand.
+///
+/// Press remembers what it landed on; release decides. Anything between —
+/// dawdling, or sliding the mouse a few pixels — is ignored, which is what
+/// makes a slot feel like a slot. See [`PressTarget`].
+fn gesture(
+    ctx: &Context,
+    view: &View<'_>,
+    l: &InventoryLayout,
+    shift: egui::Vec2,
+    panel: Rect,
+    holding: bool,
+    creative: bool,
+) -> Option<InvAction> {
+    let id = egui::Id::new("inventory_press");
+    let (pressed, released, cursor) = ctx.input(|i| {
+        (
+            [i.pointer.primary_pressed(), i.pointer.secondary_pressed()],
+            [i.pointer.primary_released(), i.pointer.secondary_released()],
+            i.pointer.latest_pos(),
+        )
+    });
+    let cursor = cursor?;
 
-    /// Survival crafting list: one clickable row per recipe, greyed when the
-    /// ingredients aren't in the storage grid.
-    fn crafting_list(
-        &self,
-        ui: &mut egui::Ui,
-        recipes: &RecipeBook,
-        width: f32,
-        height: f32,
-    ) -> Option<InvAction> {
-        egui::ScrollArea::vertical()
-            .id_salt("crafting")
-            .max_height(height)
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.set_width(width);
-                let mut a = None;
-                for (index, recipe) in recipes.recipes().iter().enumerate() {
-                    let craftable = recipe.can_craft(self.inventory);
-                    a = a.or(self.recipe_row(ui, index, recipe, craftable));
-                    ui.add_space(4.0);
-                }
-                a
-            })
-            .inner
-    }
-
-    fn recipe_row(
-        &self,
-        ui: &mut egui::Ui,
-        index: usize,
-        recipe: &crate::inventory::Recipe,
-        craftable: bool,
-    ) -> Option<InvAction> {
-        let width = ui.available_width();
-        let (rect, resp) = ui.allocate_exact_size(vec2(width, 44.0), Sense::click());
-        let painter = ui.painter();
-        let bg = if !craftable {
-            DISABLED_BG
-        } else if resp.hovered() {
-            SLOT_HOVER
+    let target_at = |p: egui::Pos2| {
+        if let Some(index) = slot_under(l, shift, p) {
+            PressTarget::Slot(index)
+        } else if creative
+            && let Some((item, _)) = view
+                .palette_cells(l.palette.translate(shift))
+                .into_iter()
+                .find(|(_, cell)| cell.contains(p))
+        {
+            PressTarget::Palette(item)
+        } else if panel.contains(p) {
+            // The panel's chrome: swallowed, so a miss between slots does not
+            // read as clicking the world behind.
+            PressTarget::Slot(usize::MAX)
         } else {
-            SLOT_BG
-        };
-        painter.rect_filled(rect, 4.0, bg);
-
-        let mid = rect.center().y;
-        let icon = 30.0;
-        let mut x = rect.left() + 8.0;
-        for &(item, n) in &recipe.ingredients {
-            let r = Rect::from_min_size(pos2(x, mid - icon / 2.0), vec2(icon, icon));
-            draw_item_icon(painter, r, self.icon_of(item), self.tex);
-            painter.text(
-                r.right_bottom(),
-                Align2::RIGHT_BOTTOM,
-                format!("{n}"),
-                FontId::monospace(12.0),
-                Color32::WHITE,
-            );
-            x += icon + 12.0;
+            PressTarget::Outside
         }
-        painter.text(
-            pos2(x, mid),
-            Align2::LEFT_CENTER,
-            "→",
-            FontId::proportional(18.0),
-            TEXT,
-        );
-        x += 26.0;
-        let out = Rect::from_min_size(pos2(x, mid - icon / 2.0), vec2(icon, icon));
-        draw_item_icon(painter, out, self.icon_of(recipe.output), self.tex);
-        x += icon + 8.0;
-        let name = self.name_of(recipe.output);
-        let label = if recipe.count > 1 {
-            format!("{}× {name}", recipe.count)
-        } else {
-            name.to_string()
-        };
-        painter.text(
-            pos2(x, mid),
-            Align2::LEFT_CENTER,
-            label,
-            FontId::proportional(15.0),
-            if craftable { TEXT } else { DISABLED_TEXT },
-        );
+    };
 
-        (resp.clicked() && craftable).then_some(InvAction::Craft(index))
+    if pressed[0] || pressed[1] {
+        ctx.data_mut(|d| d.insert_temp(id, target_at(cursor)));
+        return None;
+    }
+    if !(released[0] || released[1]) {
+        return None;
+    }
+    let from: PressTarget = ctx.data_mut(|d| {
+        let target = d.get_temp::<PressTarget>(id);
+        d.remove::<PressTarget>(id);
+        target
+    })?;
+    let secondary = released[1];
+
+    match from {
+        PressTarget::Slot(usize::MAX) => None,
+        PressTarget::Slot(index) => {
+            if !panel.contains(cursor) {
+                // Carried clear of the panel: throw it.
+                Some(if secondary {
+                    InvAction::DropOne(index)
+                } else {
+                    InvAction::DropSlot(index)
+                })
+            } else if secondary {
+                Some(InvAction::Split(index))
+            } else {
+                Some(InvAction::Slot(index))
+            }
+        }
+        // The palette is an infinite source: nothing to split, nothing to throw.
+        PressTarget::Palette(item) => {
+            (!secondary && panel.contains(cursor)).then_some(InvAction::Pick(item))
+        }
+        PressTarget::Outside => {
+            (holding && !panel.contains(cursor)).then_some(InvAction::DropHeld { all: !secondary })
+        }
     }
 }
 
-/// Paint a stack count in the slot's bottom-right corner (hidden for singles).
+/// The armor column's cells, paired with the slot index each shows./// The armor column's cells, paired with the slot index each shows.
+fn armor_cells(rect: Rect) -> impl Iterator<Item = (usize, Rect)> {
+    (0..ARMOR_SIZE).map(move |i| {
+        (
+            ARMOR_START + i,
+            Rect::from_min_size(
+                rect.min + vec2(GAP, GAP + i as f32 * PITCH),
+                vec2(SIZE, SIZE),
+            ),
+        )
+    })
+}
+
+/// The grid's cells, paired with the slot index each shows.
+///
+/// Storage sits above the hotbar on screen, but the hotbar is slots `0..9` — so
+/// the last drawn row is the *first* nine indices, and the rows above it run
+/// `9..36` in order.
+fn grid_cells(rect: Rect) -> impl Iterator<Item = (usize, Rect)> {
+    (0..GRID_ROWS).flat_map(move |row| {
+        (0..GRID_COLS).map(move |col| {
+            let last = row + 1 == GRID_ROWS;
+            let index = if last {
+                col
+            } else {
+                HOTBAR_SIZE + row * GRID_COLS + col
+            };
+            // The hotbar row clears the channel, and picks up the leading
+            // padding of its own backing on the way.
+            let y = GAP + row as f32 * PITCH + if last { HOTBAR_GAP + GAP } else { 0.0 };
+            (
+                index,
+                Rect::from_min_size(
+                    rect.min + vec2(GAP + col as f32 * PITCH, y),
+                    vec2(SIZE, SIZE),
+                ),
+            )
+        })
+    })
+}
+
+fn lerp_rect(a: Rect, b: Rect, t: f32) -> Rect {
+    let lerp = |a: f32, b: f32| a + (b - a) * t;
+    Rect::from_min_max(
+        pos2(lerp(a.min.x, b.min.x), lerp(a.min.y, b.min.y)),
+        pos2(lerp(a.max.x, b.max.x), lerp(a.max.y, b.max.y)),
+    )
+}
+
+/// GLSL-style smoothstep, for fading one part in behind another.
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn tint(alpha: f32) -> Color32 {
+    Color32::from_rgba_unmultiplied(255, 255, 255, (alpha.clamp(0.0, 1.0) * 255.0) as u8)
+}
+
+/// Paint a stack count in the bottom-right of `cell`, hidden for singles.
+///
+/// The slot painter has its own copy for cells; this one is for the stack
+/// riding on the cursor, which is not in a slot.
 fn paint_count(painter: &egui::Painter, cell: Rect, count: u8) {
     if count <= 1 {
         return;
     }
     let pos = cell.right_bottom() - vec2(3.0, 2.0);
-    // A cheap drop shadow keeps the number legible over any icon.
+    let font = FontId::proportional(14.0);
     painter.text(
         pos + vec2(1.0, 1.0),
         Align2::RIGHT_BOTTOM,
         count.to_string(),
-        FontId::proportional(13.0),
+        font.clone(),
         Color32::BLACK,
     );
     painter.text(
         pos,
         Align2::RIGHT_BOTTOM,
         count.to_string(),
-        FontId::proportional(13.0),
+        font,
         Color32::WHITE,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn screen(w: f32, h: f32) -> Rect {
+        Rect::from_min_size(pos2(0.0, 0.0), vec2(w, h))
+    }
+
+    /// The animation's whole no-gap, no-double-draw guarantee: at progress 0
+    /// the panel's bottom row is the HUD hotbar, exactly. Asserted rather than
+    /// eyeballed, because the two are laid out by different functions.
+    #[test]
+    fn the_panels_bottom_row_is_the_shape_of_the_hotbar() {
+        for (w, h) in [(1920.0, 1080.0), (1280.0, 720.0), (2560.0, 1080.0)] {
+            let s = screen(w, h);
+            let l = layout(s, false);
+            let hud_rect = hud::hotbar_rect(s);
+            assert!(
+                (l.hotbar_row.width() - hud_rect.width()).abs() < 1e-3
+                    && (l.hotbar_row.height() - hud_rect.height()).abs() < 1e-3,
+                "at {w}x{h}: panel row {:?} vs hotbar {:?}",
+                l.hotbar_row.size(),
+                hud_rect.size()
+            );
+        }
+    }
+
+    /// ...and the nine cells inside it land on the hotbar's nine cells, so the
+    /// items do not jump on the frame the panel takes over from the HUD.
+    #[test]
+    fn the_bottom_rows_cells_land_on_the_hotbars() {
+        let s = screen(1920.0, 1080.0);
+        let l = layout(s, false);
+        let hud_rect = hud::hotbar_rect(s);
+        // At progress 0 the row is translated onto the hotbar.
+        let shift = hud_rect.min - l.hotbar_row.min;
+
+        let bottom: Vec<_> = grid_cells(l.grid.translate(shift))
+            .filter(|(index, _)| *index < HOTBAR_SIZE)
+            .collect();
+        assert_eq!(bottom.len(), HOTBAR_SIZE);
+        for (index, cell) in bottom {
+            let expected = hud::hotbar_cell(hud_rect, index);
+            assert!(
+                (cell.min.x - expected.min.x).abs() < 1e-3
+                    && (cell.min.y - expected.min.y).abs() < 1e-3,
+                "slot {index}: {cell:?} vs {expected:?}"
+            );
+        }
+    }
+
+    /// The camera frames the model in the space the panel leaves. If the two
+    /// disagree the model ends up behind the panel.
+    #[test]
+    fn the_panel_rests_clear_of_the_model_stage() {
+        for (w, h) in [(1920.0, 1080.0), (2560.0, 1080.0), (1440.0, 1080.0)] {
+            let s = screen(w, h);
+            let l = layout(s, false);
+            assert!(
+                l.stage_center_x * 2.0 * w <= l.panel.left() + 1e-3,
+                "at {w}x{h} the stage runs under the panel"
+            );
+            assert!(l.stage_center_x > 0.0, "at {w}x{h} there is no stage left");
+        }
+    }
+
+    /// Every storage slot is drawn exactly once, and nothing else is.
+    #[test]
+    fn the_grid_covers_every_storage_slot_once() {
+        let l = layout(screen(1920.0, 1080.0), false);
+        let mut seen: Vec<usize> = grid_cells(l.grid).map(|(i, _)| i).collect();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..INVENTORY_SIZE).collect::<Vec<_>>());
+    }
+
+    /// And every armor slot, in `ArmorSlot::ALL` order.
+    #[test]
+    fn the_armor_column_covers_every_armor_slot_once() {
+        let l = layout(screen(1920.0, 1080.0), false);
+        let seen: Vec<usize> = armor_cells(l.armor).map(|(i, _)| i).collect();
+        assert_eq!(
+            seen,
+            (ARMOR_START..ARMOR_START + ARMOR_SIZE).collect::<Vec<_>>()
+        );
+    }
+
+    /// Creative adds the palette strip; survival must not reserve space for it.
+    #[test]
+    fn the_palette_strip_is_creative_only() {
+        let s = screen(1920.0, 1080.0);
+        let survival = layout(s, false);
+        let creative = layout(s, true);
+        assert!(!survival.palette.is_positive());
+        assert!(creative.palette.is_positive());
+        assert!(
+            creative.panel.height() > survival.panel.height(),
+            "the strip has to make the panel taller"
+        );
+    }
+
+    // --- Interaction ------------------------------------------------------
+
+    use crate::inventory::ItemStack;
+
+    struct Harness {
+        ctx: Context,
+        inventory: Inventory,
+        items: ItemRegistry,
+        icons: Vec<ItemIcon>,
+        names: Vec<String>,
+        screen: Rect,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            let blocks = crate::world::block::BlockRegistry::with_builtins();
+            let items = ItemRegistry::from_blocks(&blocks);
+            let icons = vec![ItemIcon::Flat(0); items.len()];
+            let names = vec![String::new(); items.len()];
+            Self {
+                ctx: Context::default(),
+                inventory: Inventory::new(),
+                items,
+                icons,
+                names,
+                screen: screen(1920.0, 1080.0),
+            }
+        }
+
+        fn tex(&self) -> UiTextures {
+            UiTextures {
+                atlas: egui::TextureId::Managed(0),
+                model_icons: egui::TextureId::Managed(0),
+                model_count: 1,
+                gui: egui::TextureId::Managed(0),
+            }
+        }
+
+        /// Run one frame carrying `events`, and report the action it produced.
+        fn frame(&self, events: Vec<egui::Event>, held: Option<ItemStack>) -> Option<InvAction> {
+            let input = egui::RawInput {
+                screen_rect: Some(self.screen),
+                events,
+                ..Default::default()
+            };
+            let mut action = None;
+            let _ = self.ctx.clone().run(input, |ctx| {
+                action = draw_inventory(
+                    ctx,
+                    &self.inventory,
+                    &self.items,
+                    &self.icons,
+                    &self.names,
+                    held,
+                    GameMode::Survival,
+                    1.0,
+                    false,
+                    self.tex(),
+                );
+            });
+            action
+        }
+
+        /// The centre of a storage slot, in screen coordinates.
+        fn slot_centre(&self, index: usize) -> egui::Pos2 {
+            let l = layout(self.screen, false);
+            grid_cells(l.grid)
+                .chain(armor_cells(l.armor))
+                .find(|(i, _)| *i == index)
+                .expect("slot is drawn")
+                .1
+                .center()
+        }
+    }
+
+    fn press(pos: egui::Pos2, primary: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: if primary {
+                egui::PointerButton::Primary
+            } else {
+                egui::PointerButton::Secondary
+            },
+            pressed: true,
+            modifiers: Default::default(),
+        }
+    }
+
+    fn release(pos: egui::Pos2, primary: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: if primary {
+                egui::PointerButton::Primary
+            } else {
+                egui::PointerButton::Secondary
+            },
+            pressed: false,
+            modifiers: Default::default(),
+        }
+    }
+
+    /// The bug this exists for: egui only reports a click when press and
+    /// release are within 6 points and 0.8 seconds of each other. A slot has to
+    /// act on a press-and-release over itself however far the mouse slid in
+    /// between — anything else reads as the panel ignoring you at random.
+    #[test]
+    fn a_slot_still_acts_when_the_mouse_slides_during_the_click() {
+        let h = Harness::new();
+        let centre = h.slot_centre(12);
+        // Well past egui's 6-point click threshold, but still on the slot.
+        let drifted = centre + vec2(9.0, 5.0);
+
+        assert!(h.frame(vec![press(centre, true)], None).is_none());
+        assert!(
+            h.frame(vec![egui::Event::PointerMoved(drifted)], None)
+                .is_none()
+        );
+        let action = h.frame(vec![release(drifted, true)], None);
+        assert!(
+            matches!(action, Some(InvAction::Slot(12))),
+            "a drifted click on slot 12 was dropped"
+        );
+    }
+
+    /// The same for the split, which has no drag fallback of its own.
+    #[test]
+    fn a_drifted_right_click_still_splits() {
+        let h = Harness::new();
+        let centre = h.slot_centre(12);
+        let drifted = centre + vec2(-8.0, 7.0);
+
+        h.frame(vec![press(centre, false)], None);
+        h.frame(vec![egui::Event::PointerMoved(drifted)], None);
+        assert!(
+            matches!(
+                h.frame(vec![release(drifted, false)], None),
+                Some(InvAction::Split(12))
+            ),
+            "a drifted right click was dropped"
+        );
+    }
+
+    /// Press decides *what*, release decides *where*: carried clear of the
+    /// panel, the same gesture throws instead of picking up.
+    #[test]
+    fn a_press_carried_out_of_the_panel_throws_the_stack() {
+        let h = Harness::new();
+        let outside = pos2(80.0, 540.0);
+        assert!(
+            !layout(h.screen, false).panel.contains(outside),
+            "test setup: that point must be off the panel"
+        );
+
+        h.frame(vec![press(h.slot_centre(12), true)], None);
+        h.frame(vec![egui::Event::PointerMoved(outside)], None);
+        assert!(matches!(
+            h.frame(vec![release(outside, true)], None),
+            Some(InvAction::DropSlot(12))
+        ));
+    }
+
+    /// ...and a press that begins outside only throws what is on the cursor,
+    /// so clicking the world beside the panel with an empty hand does nothing.
+    #[test]
+    fn a_press_outside_the_panel_throws_only_what_is_held() {
+        let h = Harness::new();
+        let outside = pos2(80.0, 540.0);
+        let stone = h.items.find("stone").expect("stone");
+
+        h.frame(vec![press(outside, true)], None);
+        assert!(h.frame(vec![release(outside, true)], None).is_none());
+
+        let carrying = Some(ItemStack::new(stone, 4));
+        h.frame(vec![press(outside, true)], carrying);
+        assert!(matches!(
+            h.frame(vec![release(outside, true)], carrying),
+            Some(InvAction::DropHeld { all: true })
+        ));
+    }
+
+    /// A press that lands on the panel's chrome rather than a slot is
+    /// swallowed, so a miss between cells cannot read as a click on the world.
+    #[test]
+    fn a_press_on_the_panels_chrome_does_nothing() {
+        let h = Harness::new();
+        let l = layout(h.screen, false);
+        let chrome = l.panel.left_top() + vec2(3.0, 3.0);
+        assert!(l.panel.contains(chrome) && slot_under(&l, vec2(0.0, 0.0), chrome).is_none());
+
+        h.frame(vec![press(chrome, true)], None);
+        assert!(h.frame(vec![release(chrome, true)], None).is_none());
+    }
+
+    /// The camera's framing and the panel's position are two halves of one
+    /// layout, and this is the seam between them: `stage_center_x` goes to
+    /// `Shot::inspect`, comes back as a lens shift, and has to land the model
+    /// in the clear column beside the panel.
+    ///
+    /// The regression this exists for: `camera_shot` was handing `layout` a
+    /// *normalised* rect (width = the aspect ratio, about 1.8) where it wants
+    /// points. A 558-point panel does not fit in 1.8 points, so the stage
+    /// clamped to zero width and the shift went to its -1.0 extreme, pinning
+    /// the model against the left edge half off screen. Testing `Shot::inspect`
+    /// against a hardcoded fraction missed it completely — only running the
+    /// two together does.
+    #[test]
+    fn the_camera_frames_the_model_in_the_column_the_panel_leaves() {
+        use crate::entity::camera::Shot;
+        use glam::Vec3;
+
+        for (w, h) in [(1280.0, 720.0), (1920.0, 1080.0), (2560.0, 1080.0)] {
+            let s = screen(w, h);
+            let l = layout(s, false);
+            let fov_y = 70f32.to_radians();
+            let shot = Shot::inspect(fov_y, l.stage_center_x);
+
+            let eye = Vec3::new(0.0, 1.62, 0.0);
+            let camera = shot.camera(eye, 0.0, shot.distance, 70.0, w / h);
+            let chest = camera
+                .project(eye + Vec3::Y * -0.55)
+                .expect("the chest is in front of the camera");
+
+            let model_x = chest.x * w;
+            assert!(
+                model_x > 0.06 * w,
+                "at {w}x{h} the model sits at {model_x:.0}px, jammed against the left edge"
+            );
+            assert!(
+                model_x < l.panel.left(),
+                "at {w}x{h} the model sits at {model_x:.0}px, under the panel at {:.0}px",
+                l.panel.left()
+            );
+        }
+    }
+
+    /// The hotbar has to read as its own row, so there must be a real channel
+    /// of carcass between the two beds — not merely the slot padding the rows
+    /// inside each group already have.
+    #[test]
+    fn the_hotbar_row_is_set_apart_from_the_storage_rows() {
+        let l = layout(screen(1920.0, 1080.0), false);
+        assert!(
+            l.hotbar_row.top() - l.storage.bottom() >= HOTBAR_GAP - 1e-3,
+            "the two beds are only {} apart",
+            l.hotbar_row.top() - l.storage.bottom()
+        );
+
+        // And the cells either side of it are further apart than two rows
+        // within the storage block, which is what actually reads on screen.
+        let cells: Vec<_> = grid_cells(l.grid).collect();
+        let row_of = |index: usize| {
+            cells
+                .iter()
+                .find(|(i, _)| *i == index)
+                .expect("slot is drawn")
+                .1
+        };
+        let within_storage = row_of(HOTBAR_SIZE + GRID_COLS).top() - row_of(HOTBAR_SIZE).bottom();
+        let across_channel = row_of(0).top() - row_of(INVENTORY_SIZE - GRID_COLS).bottom();
+        assert!(
+            across_channel > within_storage * 2.0,
+            "the channel ({across_channel}) barely beats the row gap ({within_storage})"
+        );
+    }
+
+    /// Every cell has to sit inside the panel that frames it.
+    #[test]
+    fn every_cell_sits_inside_the_panel() {
+        let l = layout(screen(1920.0, 1080.0), true);
+        for (index, cell) in grid_cells(l.grid).chain(armor_cells(l.armor)) {
+            assert!(
+                l.panel.contains_rect(cell),
+                "slot {index} at {cell:?} escapes {:?}",
+                l.panel
+            );
+        }
+    }
 }

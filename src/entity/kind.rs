@@ -51,6 +51,17 @@ pub struct MovementParams {
     /// one-block step.
     #[serde(default = "default_min_jump_height")]
     pub min_jump_height: f32,
+    /// Rate (per second) at which a grounded entity sheds speed once it stops
+    /// asking to move. *Only* the stop ramps: accelerating and changing
+    /// direction stay instant, so this is not general ground friction and does
+    /// not make steering feel loose.
+    ///
+    /// It exists because releasing the controls has to mean "coast", not
+    /// "stop": the inventory releases them while physics keeps running, and a
+    /// player who was walking would otherwise halt in a single step in full
+    /// view of the camera that just panned onto them.
+    #[serde(default = "default_stop_rate")]
+    pub stop_rate: f32,
 }
 
 fn default_air_control() -> f32 {
@@ -59,6 +70,12 @@ fn default_air_control() -> f32 {
 
 fn default_min_jump_height() -> f32 {
     1.2
+}
+
+/// Roughly a fifth of a second to shed walking speed — long enough to read as
+/// momentum, short enough that normal play still feels like an instant stop.
+fn default_stop_rate() -> f32 {
+    18.0
 }
 
 /// Survival health/hunger model.

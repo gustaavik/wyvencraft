@@ -2,6 +2,8 @@
 name = "wyven-assets"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Asset byte sources and image decoding, independent of any GPU."
 
 [dependencies]

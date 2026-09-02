@@ -2,6 +2,8 @@
 name = "wyven-voxel"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Voxel substrate: chunk storage, background loading, meshing and raycasting."
 
 [dependencies]
