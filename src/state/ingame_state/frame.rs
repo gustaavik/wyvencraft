@@ -294,6 +294,11 @@ impl GameState<Wyvencraft> for InGameState {
     fn ui(&mut self, egui_ctx: &egui::Context, ctx: &mut StateContext) -> Transition {
         use crate::ui::inventory::InvAction;
 
+        // Carried across to the world camera, which is derived after this pass
+        // but is only given an aspect ratio. Recorded before anything else so
+        // the nameplates below see this frame's rect, not the last one's.
+        self.screen = egui_ctx.screen_rect();
+
         // Death screen takes over everything else.
         if self.dead {
             let mut respawn = false;

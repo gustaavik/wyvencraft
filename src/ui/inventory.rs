@@ -81,7 +81,11 @@ pub fn layout(screen: Rect, creative: bool) -> InventoryLayout {
         GRID_ROWS as f32 * PITCH + GAP,
     );
     let armor_size = vec2(PITCH + GAP, ARMOR_SIZE as f32 * PITCH + GAP);
-    let strip = if creative { PALETTE_H + COLUMN_GAP } else { 0.0 };
+    let strip = if creative {
+        PALETTE_H + COLUMN_GAP
+    } else {
+        0.0
+    };
 
     let body = vec2(
         armor_size.x + COLUMN_GAP + grid_size.x,
@@ -251,11 +255,8 @@ fn draw_tooltip(
     const OFFSET: egui::Vec2 = egui::vec2(18.0, 18.0);
     const PAD: f32 = 10.0;
 
-    let galley = painter.layout_no_wrap(
-        name.to_string(),
-        FontId::proportional(15.0),
-        Color32::WHITE,
-    );
+    let galley =
+        painter.layout_no_wrap(name.to_string(), FontId::proportional(15.0), Color32::WHITE);
     let size = galley.size() + vec2(2.0 * PAD, 2.0 * PAD);
 
     // Flip to the other side of the cursor rather than run off the screen.
@@ -298,7 +299,8 @@ impl View<'_> {
         cursor: egui::Pos2,
         mode: GameMode,
     ) -> Option<&str> {
-        let cells = armor_cells(l.armor.translate(shift)).chain(grid_cells(l.grid.translate(shift)));
+        let cells =
+            armor_cells(l.armor.translate(shift)).chain(grid_cells(l.grid.translate(shift)));
         for (index, cell) in cells {
             if cell.contains(cursor) {
                 return self.inventory.slot(index).map(|s| self.name_of(s.item));
@@ -641,6 +643,48 @@ mod tests {
             creative.panel.height() > survival.panel.height(),
             "the strip has to make the panel taller"
         );
+    }
+
+    /// The camera's framing and the panel's position are two halves of one
+    /// layout, and this is the seam between them: `stage_center_x` goes to
+    /// `Shot::inspect`, comes back as a lens shift, and has to land the model
+    /// in the clear column beside the panel.
+    ///
+    /// The regression this exists for: `camera_shot` was handing `layout` a
+    /// *normalised* rect (width = the aspect ratio, about 1.8) where it wants
+    /// points. A 558-point panel does not fit in 1.8 points, so the stage
+    /// clamped to zero width and the shift went to its -1.0 extreme, pinning
+    /// the model against the left edge half off screen. Testing `Shot::inspect`
+    /// against a hardcoded fraction missed it completely — only running the
+    /// two together does.
+    #[test]
+    fn the_camera_frames_the_model_in_the_column_the_panel_leaves() {
+        use crate::entity::camera::Shot;
+        use glam::Vec3;
+
+        for (w, h) in [(1280.0, 720.0), (1920.0, 1080.0), (2560.0, 1080.0)] {
+            let s = screen(w, h);
+            let l = layout(s, false);
+            let fov_y = 70f32.to_radians();
+            let shot = Shot::inspect(fov_y, l.stage_center_x);
+
+            let eye = Vec3::new(0.0, 1.62, 0.0);
+            let camera = shot.camera(eye, 0.0, shot.distance, 70.0, w / h);
+            let chest = camera
+                .project(eye + Vec3::Y * -0.55)
+                .expect("the chest is in front of the camera");
+
+            let model_x = chest.x * w;
+            assert!(
+                model_x > 0.06 * w,
+                "at {w}x{h} the model sits at {model_x:.0}px, jammed against the left edge"
+            );
+            assert!(
+                model_x < l.panel.left(),
+                "at {w}x{h} the model sits at {model_x:.0}px, under the panel at {:.0}px",
+                l.panel.left()
+            );
+        }
     }
 
     /// Every cell has to sit inside the panel that frames it.

@@ -140,6 +140,14 @@ pub struct InGameState {
     inventory_open: bool,
     /// How far through the open/close sweep the panel and camera are.
     inventory_anim: inventory::OpenAnim,
+    /// The egui screen rect, in points, as of this frame's `ui` pass.
+    ///
+    /// The camera needs it: the inventory's framing shot is derived from where
+    /// `ui::inventory::layout` puts the panel, and that reasons in points — a
+    /// fixed-size panel against the real screen. `scene_frame` is handed only an
+    /// aspect ratio, so the size has to be carried across from `ui`, which the
+    /// runner always runs first within the same frame.
+    screen: egui::Rect,
     /// The chat history this peer has seen and the line it is typing. Purely
     /// local: only the messages travel, never this.
     chat: ChatState,

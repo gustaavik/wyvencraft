@@ -369,10 +369,7 @@ mod tests {
                 (camera.position - eye).dot(facing) > 0.0,
                 "the camera must stand where the player is facing"
             );
-            assert!(
-                camera.forward.dot(facing) < 0.0,
-                "and look back at them"
-            );
+            assert!(camera.forward.dot(facing) < 0.0, "and look back at them");
         }
     }
 

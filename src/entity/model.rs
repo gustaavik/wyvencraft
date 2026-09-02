@@ -805,7 +805,11 @@ mod tests {
         armor[ArmorSlot::Helmet.index()] = items.find("copper_helmet");
         armor[ArmorSlot::Boots.index()] = items.find("copper_boots");
         let mesh = model.build_mesh_armored(Vec3::ZERO, 0.0, &Pose::default(), &armor, &items);
-        assert_eq!(mesh.vertices.len(), bare + 3 * 24, "helmet + boots = 3 boxes");
+        assert_eq!(
+            mesh.vertices.len(),
+            bare + 3 * 24,
+            "helmet + boots = 3 boxes"
+        );
 
         // An item that isn't the slot's armor is ignored.
         let mut armor = [None; ARMOR_SIZE];

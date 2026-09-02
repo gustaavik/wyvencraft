@@ -185,7 +185,10 @@ mod anim_tests {
         for _ in 0..40 {
             anim.tick(dt);
             let now = anim.progress();
-            assert!(now <= previous + 1e-6, "progress went back up: {previous} -> {now}");
+            assert!(
+                now <= previous + 1e-6,
+                "progress went back up: {previous} -> {now}"
+            );
             assert!((0.0..=1.0).contains(&now), "progress left its range: {now}");
             previous = now;
         }

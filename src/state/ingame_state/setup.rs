@@ -250,6 +250,9 @@ impl InGameState {
             day_cycle,
             inventory_open: false,
             inventory_anim: Default::default(),
+            // Replaced by the real rect on the first `ui` pass, which always
+            // precedes the first `scene_frame`.
+            screen: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1920.0, 1080.0)),
             chat: ChatState::default(),
             // A client never authorizes anything, so it never reads the file.
             ops: if session_is_authority {

@@ -149,7 +149,6 @@ pub fn draw_held_label(ctx: &Context, name: &str, alpha: f32, above_vitals: bool
         });
 }
 
-
 /// Draw a heart icon (two lobes + a point) centred at `c`, sized `s`.
 fn heart(painter: &egui::Painter, c: egui::Pos2, s: f32, color: Color32) {
     let r = s * 0.27;

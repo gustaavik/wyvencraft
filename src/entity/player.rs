@@ -59,7 +59,11 @@ impl Perspective {
         Shot {
             azimuth,
             elevation,
-            distance: if self.is_first_person() { 0.0 } else { distance },
+            distance: if self.is_first_person() {
+                0.0
+            } else {
+                distance
+            },
             aim: 0.0,
             shift: 0.0,
         }

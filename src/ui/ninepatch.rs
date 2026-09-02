@@ -87,8 +87,18 @@ pub fn push_nine(mesh: &mut Mesh, rect: Rect, patch: NinePatch, tint: Color32) {
         .max(0.0);
 
     // Screen-space column and row boundaries.
-    let xs = [rect.left(), rect.left() + border, rect.right() - border, rect.right()];
-    let ys = [rect.top(), rect.top() + border, rect.bottom() - border, rect.bottom()];
+    let xs = [
+        rect.left(),
+        rect.left() + border,
+        rect.right() - border,
+        rect.right(),
+    ];
+    let ys = [
+        rect.top(),
+        rect.top() + border,
+        rect.bottom() - border,
+        rect.bottom(),
+    ];
 
     // The matching cuts on the sheet, normalized. Half a texel is *not* inset
     // here: the interior cuts are shared edges between adjacent quads, and
@@ -111,19 +121,13 @@ pub fn push_nine(mesh: &mut Mesh, rect: Rect, patch: NinePatch, tint: Color32) {
 
     for row in 0..3 {
         for col in 0..3 {
-            let cell = Rect::from_min_max(
-                pos2(xs[col], ys[row]),
-                pos2(xs[col + 1], ys[row + 1]),
-            );
+            let cell = Rect::from_min_max(pos2(xs[col], ys[row]), pos2(xs[col + 1], ys[row + 1]));
             // A zero-width or zero-height slice contributes nothing; skipping it
             // keeps a collapsed panel from emitting degenerate triangles.
             if cell.width() <= 0.0 || cell.height() <= 0.0 {
                 continue;
             }
-            let uv = Rect::from_min_max(
-                pos2(us[col], vs[row]),
-                pos2(us[col + 1], vs[row + 1]),
-            );
+            let uv = Rect::from_min_max(pos2(us[col], vs[row]), pos2(us[col + 1], vs[row + 1]));
             quad(mesh, cell, uv, tint);
         }
     }
@@ -261,20 +265,14 @@ mod tests {
             ("tooltip", TOOLTIP),
         ];
         for (i, (name, a)) in all.iter().enumerate() {
-            let ar = Rect::from_min_size(
-                pos2(a.origin[0], a.origin[1]),
-                vec2(a.size, a.size),
-            );
+            let ar = Rect::from_min_size(pos2(a.origin[0], a.origin[1]), vec2(a.size, a.size));
             assert!(
                 ar.max.x <= SHEET && ar.max.y <= SHEET,
                 "{name} runs off the sheet"
             );
             assert!(a.inset * 2.0 <= a.size, "{name}'s corners overlap");
             for (other, b) in &all[i + 1..] {
-                let br = Rect::from_min_size(
-                    pos2(b.origin[0], b.origin[1]),
-                    vec2(b.size, b.size),
-                );
+                let br = Rect::from_min_size(pos2(b.origin[0], b.origin[1]), vec2(b.size, b.size));
                 // Positive-area overlap, not mere contact: the regions are
                 // packed edge to edge on purpose, and `Rect::intersects` counts
                 // a shared border as an intersection.

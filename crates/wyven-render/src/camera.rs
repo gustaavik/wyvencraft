@@ -203,7 +203,10 @@ mod tests {
         shifted.projection_offset = shift;
 
         let before: Vec<Vec2> = points.iter().map(|p| plain.project(*p).unwrap()).collect();
-        let after: Vec<Vec2> = points.iter().map(|p| shifted.project(*p).unwrap()).collect();
+        let after: Vec<Vec2> = points
+            .iter()
+            .map(|p| shifted.project(*p).unwrap())
+            .collect();
 
         // `project` reports in [0,1], so an NDC shift of `s` moves it by `s/2`.
         let expected = shift * 0.5;

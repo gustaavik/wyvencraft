@@ -17,7 +17,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
-use egui::{Rect, pos2, vec2};
 use glam::Vec3;
 
 use super::mobs::{RemoteMob, mob_mesh};
@@ -40,8 +39,8 @@ use crate::world::meshing::{
 use wyven_model::mesh as model_mesh;
 use wyven_model::{DisplayContext, ModelId, ModelRegistry};
 use wyven_render::{
-    Camera, CpuMesh, ForegroundFrame, GpuLines, GpuMesh, LightParams, RenderContext,
-    SceneFrame, SkyParams, Texture, TexturedMesh, TileRegistry, debug,
+    Camera, CpuMesh, ForegroundFrame, GpuLines, GpuMesh, LightParams, RenderContext, SceneFrame,
+    SkyParams, Texture, TexturedMesh, TileRegistry, debug,
 };
 use wyven_voxel::FaceTextures;
 
@@ -977,7 +976,6 @@ impl SceneCache {
                 .collect(),
         })
     }
-
 }
 
 /// Which display table places a held item that has no model file of its own.
@@ -1023,7 +1021,7 @@ impl super::InGameState {
     /// it counts an unloaded chunk as solid, so at the streaming edge the camera
     /// pulls in rather than drifting into terrain that has not arrived yet.
     pub(super) fn world_camera(&self, aspect: f32) -> Camera {
-        let shot = self.camera_shot(aspect);
+        let shot = self.camera_shot();
         let yaw = self.framing_yaw();
         let eye = self
             .player
@@ -1063,7 +1061,7 @@ impl super::InGameState {
     /// Blending happens in [`Shot`]'s polar form, so a swing from behind the
     /// player to in front of them orbits around them instead of passing through
     /// their head at the halfway point.
-    fn camera_shot(&self, aspect: f32) -> Shot {
+    fn camera_shot(&self) -> Shot {
         let gameplay = self
             .player
             .perspective
@@ -1072,13 +1070,13 @@ impl super::InGameState {
         if t <= 0.0 {
             return gameplay;
         }
-        let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(aspect, 1.0));
-        let stage = crate::ui::inventory::layout(screen, self.player.mode.is_creative())
+        // `layout` reasons in points — it subtracts a panel some hundreds of
+        // points wide from the screen — so it has to be handed the *real*
+        // screen rect. Handing it a normalised one collapses the whole stage to
+        // zero width and slams the model into the left edge.
+        let stage = crate::ui::inventory::layout(self.screen, self.player.mode.is_creative())
             .stage_center_x;
-        gameplay.blend(
-            Shot::inspect(self.view.fov_degrees.to_radians(), stage),
-            t,
-        )
+        gameplay.blend(Shot::inspect(self.view.fov_degrees.to_radians(), stage), t)
     }
 
     /// Bring every GPU resource in line with the simulation state this frame.

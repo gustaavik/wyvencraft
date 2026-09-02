@@ -120,7 +120,11 @@ fn paint_durability(
         cell.left_bottom() + vec2(ICON_INSET, -ICON_INSET - 4.0),
         vec2(width, 4.0),
     );
-    painter.rect_filled(track, 1.0, scale_alpha(Color32::from_black_alpha(190), tint));
+    painter.rect_filled(
+        track,
+        1.0,
+        scale_alpha(Color32::from_black_alpha(190), tint),
+    );
     let fill = Rect::from_min_size(track.min, vec2(width * ratio, 4.0));
     painter.rect_filled(fill, 1.0, scale_alpha(durability_color(ratio), tint));
 }
