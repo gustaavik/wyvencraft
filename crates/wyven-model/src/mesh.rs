@@ -13,6 +13,7 @@ use wyven_core::math::yaw_matrix;
 use wyven_render::mesh::CpuMesh;
 
 use super::display::ItemTransform;
+use super::rig::BonePart;
 use wyven_render::vertex::{ChunkVertex, NO_OVERLAY, NO_TINT};
 
 /// Triangle geometry in model space: Y-up, right-handed, one block = 1.0, UVs
@@ -24,6 +25,40 @@ pub struct ModelMesh {
     pub normals: Vec<Vec3>,
     pub uvs: Vec<[f32; 2]>,
     pub indices: Vec<u32>,
+}
+
+/// Where a model's `[0,1]` UV space lands inside the texture actually bound.
+///
+/// A model normally owns its texture outright and samples all of it, which is
+/// [`UvWindow::FULL`]. A model drawn against a shared sheet — an entity skin
+/// living in the block atlas — occupies one rectangle of it instead, and says
+/// so here rather than by rewriting its UVs afterwards. Folding it into the
+/// bake costs nothing: the vertices are being written anyway.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UvWindow {
+    pub offset: [f32; 2],
+    pub scale: [f32; 2],
+}
+
+impl UvWindow {
+    /// The whole texture — what every model used before there was an atlas.
+    pub const FULL: Self = Self {
+        offset: [0.0, 0.0],
+        scale: [1.0, 1.0],
+    };
+
+    pub fn apply(&self, uv: [f32; 2]) -> [f32; 2] {
+        [
+            self.offset[0] + uv[0] * self.scale[0],
+            self.offset[1] + uv[1] * self.scale[1],
+        ]
+    }
+}
+
+impl Default for UvWindow {
+    fn default() -> Self {
+        Self::FULL
+    }
 }
 
 impl ModelMesh {
@@ -101,6 +136,71 @@ impl ModelMesh {
             }
         });
         mesh.push_indexed(vertices, self.indices.iter().copied());
+        mesh
+    }
+
+    /// Bake the vertices `parts` names, each moved by its bone's matrix.
+    ///
+    /// The counterpart of [`ModelMesh::bake`] for a rigged model: `bones` is one
+    /// matrix per bone (from [`Rig::matrices`](super::rig::Rig::matrices)) and
+    /// `parts` says which vertices each owns. Passing only some of a rig's parts
+    /// is how a caller draws one limb — the first-person arm — out of a body.
+    ///
+    /// `normal_basis` is separate from `transform` for the same reason
+    /// [`CpuMesh::transformed`] splits them: geometry carried by the camera is
+    /// placed by a matrix containing the camera's own rotation, and lighting
+    /// taken from that would pulse as the player turned on the spot. Where the
+    /// two are the same thing, pass the same matrix twice.
+    pub fn bake_posed<'a>(
+        &self,
+        parts: impl IntoIterator<Item = &'a BonePart>,
+        bones: &[Mat4],
+        transform: Mat4,
+        normal_basis: Mat4,
+        uv: UvWindow,
+    ) -> CpuMesh {
+        let normal_matrix = Mat3::from_mat4(normal_basis).inverse().transpose();
+        let mut mesh = CpuMesh::new();
+        // Where each source vertex ended up, so the index walk below stays a
+        // single pass whichever subset of the parts was asked for.
+        let mut moved = vec![u32::MAX; self.positions.len()];
+        for part in parts {
+            let bone = part
+                .bone
+                .and_then(|b| bones.get(b.0 as usize).copied())
+                .unwrap_or(Mat4::IDENTITY);
+            let place = transform * bone;
+            let orient = normal_matrix * Mat3::from_mat4(bone);
+            let lo = part.start as usize;
+            let hi = (part.end as usize).min(self.positions.len());
+            for (i, slot) in (lo..hi).zip(moved[lo..hi].iter_mut()) {
+                *slot = mesh.vertices.len() as u32;
+                let normal = (orient * self.normals[i]).normalize_or_zero();
+                mesh.vertices.push(ChunkVertex {
+                    position: place.transform_point3(self.positions[i]).to_array(),
+                    normal: normal.to_array(),
+                    uv: uv.apply(self.uvs[i]),
+                    ao: shade(normal),
+                    flags: 0,
+                    layer: 0,
+                    tint: NO_TINT,
+                    overlay_layer: NO_OVERLAY,
+                    overlay_tint: NO_TINT,
+                });
+            }
+        }
+        // A triangle survives only if all three corners were baked, so asking
+        // for one limb yields that limb and no stray connecting faces.
+        for tri in self.indices.chunks_exact(3) {
+            let mapped = [
+                moved[tri[0] as usize],
+                moved[tri[1] as usize],
+                moved[tri[2] as usize],
+            ];
+            if mapped.iter().all(|&i| i != u32::MAX) {
+                mesh.indices.extend_from_slice(&mapped);
+            }
+        }
         mesh
     }
 

@@ -17,20 +17,21 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
-use glam::Vec3;
+use glam::{Mat4, Vec3};
 
 use super::mobs::{RemoteMob, mob_mesh};
 use super::{INSPECT_MODEL_FROM, OUTLINE_COLOR, REMOTE_MAX_SPEED, THIRD_PERSON_DISTANCE};
-use crate::art::cracks;
+use crate::art::{cracks, mobskin, skin};
 use crate::content::BlockAppearance;
 use crate::content::{ItemModel, ItemShape};
 use crate::core::{Aabb, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, ChunkPos, DayCycle};
 use crate::entity::camera::Shot;
+use crate::entity::kind::{EntityRegistry, VisualSpec};
 use crate::entity::viewmodel::{self, HandPose};
 use crate::entity::{
-    AnimationState, Arrow, DroppedItem, HandAnchor, HumanoidModel, Mob, Player, camera,
+    AnimationState, Arrow, Character, DroppedItem, HeadLook, HumanoidRig, Mob, Player, camera,
 };
-use crate::inventory::{ARMOR_SIZE, Inventory, ItemId, ItemRegistry};
+use crate::inventory::{Inventory, ItemId};
 use crate::net::{PlayerId, RemotePlayer};
 use crate::world::World;
 use crate::world::meshing::{
@@ -81,6 +82,19 @@ impl ModelContent<'_> {
     }
 }
 
+/// The player's rigged model as the entity data describes it, with its bones
+/// and clips resolved once.
+///
+/// Held by id rather than by reference because the registry lives behind an
+/// `Arc` on the state, and the view is handed a fresh borrow of it each frame.
+struct PlayerRig {
+    model: ModelId,
+    scale: f32,
+    /// Atlas tile origin of the 64×64 sheet the model samples.
+    sheet: [u32; 2],
+    clips: HumanoidRig,
+}
+
 /// All GPU state for the in-game scene.
 pub(super) struct SceneCache {
     /// Opaque GPU meshes for loaded chunks, keyed by chunk position.
@@ -101,8 +115,10 @@ pub(super) struct SceneCache {
     mesh_queue: VecDeque<ChunkPos>,
     queued: HashSet<ChunkPos>,
 
-    /// Local player model + its GPU mesh (only built in third person).
-    player_model: HumanoidModel,
+    /// The player's rigged model, bound the first time content is in reach —
+    /// the model registry does not exist when this cache is built.
+    player_rig: Option<PlayerRig>,
+    /// The local player's GPU mesh (only built in third person).
     player_mesh: Option<GpuMesh>,
     /// Procedural animation state for the local player's model.
     player_anim: AnimationState,
@@ -170,7 +186,7 @@ impl SceneCache {
             model_meshes: HashMap::new(),
             mesh_queue: VecDeque::new(),
             queued: HashSet::new(),
-            player_model: HumanoidModel::player(),
+            player_rig: None,
             player_mesh: None,
             player_anim: AnimationState::new(),
             remote_meshes: Vec::new(),
@@ -331,6 +347,67 @@ impl SceneCache {
         self.player_anim.trigger_swing();
     }
 
+    /// Resolve the player's rigged model, its clips and the bones that matter.
+    ///
+    /// Idempotent and cheap after the first call, which is why it can sit on the
+    /// per-frame path: content is only reachable from there, and a model that
+    /// fails to load simply leaves the player undrawn rather than the frame
+    /// panicking — the same fail-soft the rest of the model pipeline takes.
+    pub fn bind_player_rig(&mut self, entities: &EntityRegistry, models: &ModelRegistry) {
+        if self.player_rig.is_some() {
+            return;
+        }
+        let Some(kind) = entities.find("player") else {
+            return;
+        };
+        let VisualSpec::Rigged(visual) = &kind.visual else {
+            return;
+        };
+        let Some(movement) = kind.movement.as_ref() else {
+            return;
+        };
+        let Some(id) = models.find(&visual.path) else {
+            return;
+        };
+        let Some(rig) = models.get(id).and_then(|model| model.rig.as_ref()) else {
+            log::warn!(
+                "{} carries no rig; the player will not be drawn",
+                visual.path
+            );
+            return;
+        };
+        self.player_rig = Some(PlayerRig {
+            model: id,
+            scale: visual.scale,
+            sheet: visual
+                .skin
+                .as_deref()
+                .and_then(mobskin::origin_for)
+                .unwrap_or(skin::SKIN_ORIGIN),
+            clips: HumanoidRig::bind(rig, movement),
+        });
+    }
+
+    /// Drop the third-person body and whatever it was holding. One helper
+    /// because the two must always go together: a held item left behind after
+    /// the body it hung off is gone would float in the world on its own.
+    fn clear_player_meshes(&mut self) {
+        self.player_mesh = None;
+        self.held_mesh = None;
+        self.held_atlas = None;
+    }
+
+    /// The player as something drawable, or `None` before the rig is bound.
+    fn character<'a>(&'a self, models: &'a ModelRegistry) -> Option<Character<'a>> {
+        let rig = self.player_rig.as_ref()?;
+        Some(Character {
+            model: models.get(rig.model)?,
+            clips: &rig.clips,
+            scale: rig.scale,
+            sheet: rig.sheet,
+        })
+    }
+
     /// Keep the main-hand swing looping while a held action continues.
     pub fn keep_swinging(&mut self) {
         self.player_anim.keep_swinging();
@@ -351,7 +428,6 @@ impl SceneCache {
         ctx: &Arc<RenderContext>,
         player: &Player,
         inventory: &Inventory,
-        items: &ItemRegistry,
         inspect: f32,
         content: ModelContent<'_>,
     ) {
@@ -366,27 +442,36 @@ impl SceneCache {
         self.hand_mesh = None;
         self.hand_held_mesh = None;
         self.hand_held_atlas = None;
-        // Ease the head level as the camera comes round to the front, so the
-        // model meets the viewer's eye rather than holding whatever pitch the
-        // player happened to be looking at when they pressed E.
-        let pose = self
-            .player_anim
-            .pose(player.pitch * (1.0 - inspect.clamp(0.0, 1.0)));
+
         // The body is drawn at the torso yaw, which lags the look yaw the camera
-        // uses; `pose.head_yaw` is what puts the face back where the player looks.
-        // The hand anchor must take the *same* yaw, or the held item leaves the fist.
+        // uses; the head bone's own turn is what puts the face back where the
+        // player looks. The held item hangs off the hand *bone* under the same
+        // pose, so it cannot drift out of the fist however the elbow bends.
         let body_yaw = self.player_anim.body_yaw();
-        let armor = inventory.equipped_armor();
-        let mesh =
-            self.player_model
-                .build_mesh_armored(player.position, body_yaw, &pose, &armor, items);
+        let baked = {
+            let Some(character) = self.character(content.models) else {
+                self.clear_player_meshes();
+                return;
+            };
+            let look = HeadLook {
+                yaw: self.player_anim.head_offset(),
+                pitch: player.pitch,
+            };
+            character.pose(&self.player_anim, look).map(|pose| {
+                (
+                    character.bake(&pose, player.position, body_yaw),
+                    character.hand_anchor(&pose, player.position, body_yaw),
+                )
+            })
+        };
+        let Some((mesh, anchor)) = baked else {
+            self.clear_player_meshes();
+            return;
+        };
         self.player_mesh = GpuMesh::upload(&ctx.memory_allocator, &mesh).ok().flatten();
 
-        let anchor = self
-            .player_model
-            .hand_anchor(player.position, body_yaw, &pose);
-        self.held_mesh = self.bake_held(ctx, content, inventory, anchor);
-        self.held_atlas = self.bake_held_atlas(ctx, content, inventory, anchor);
+        self.held_mesh = anchor.and_then(|a| self.bake_held(ctx, content, inventory, a));
+        self.held_atlas = anchor.and_then(|a| self.bake_held_atlas(ctx, content, inventory, a));
     }
 
     /// Build the held item for something with **no model file**: the same cube
@@ -437,7 +522,7 @@ impl SceneCache {
         ctx: &Arc<RenderContext>,
         content: ModelContent<'_>,
         inventory: &Inventory,
-        anchor: HandAnchor,
+        anchor: Mat4,
     ) -> Option<(GpuMesh, bool)> {
         // A model always wins; this is only the fallback for items without one.
         if content.held(inventory).is_some() {
@@ -446,7 +531,7 @@ impl SceneCache {
         let item = inventory.selected_stack()?.item;
         let (shape, is_transparent) = (content.shape)(item);
         let local = held_placement(shape, DisplayContext::ThirdPersonRightHand).matrix();
-        let transform = model_mesh::anchor(anchor.position, anchor.yaw, anchor.pitch) * local;
+        let transform = anchor * local;
         let mesh = self.shaped_item_mesh(ctx, shape, content.tiles, transform, transform)?;
         Some((mesh, is_transparent))
     }
@@ -457,12 +542,11 @@ impl SceneCache {
         ctx: &Arc<RenderContext>,
         content: ModelContent<'_>,
         inventory: &Inventory,
-        anchor: HandAnchor,
+        anchor: Mat4,
     ) -> Option<(GpuMesh, ModelId)> {
         let held = content.held(inventory)?;
         let local = held.local(content.models, DisplayContext::ThirdPersonRightHand);
-        let transform = model_mesh::anchor(anchor.position, anchor.yaw, anchor.pitch) * local;
-        self.bake_model(ctx, content.models, held.id, transform)
+        self.bake_model(ctx, content.models, held.id, anchor * local)
     }
 
     /// Rebuild the first-person view model: the player's own arm, and whatever
@@ -488,8 +572,15 @@ impl SceneCache {
         };
         let frame = pose.frame();
 
-        let arm = viewmodel::arm_mesh(&self.player_model, frame);
-        self.hand_mesh = GpuMesh::upload(&ctx.memory_allocator, &arm).ok().flatten();
+        // The camera *is* the head in first person, so the arm takes no head
+        // look — only the gait and the swing reach it.
+        let arm = self.character(content.models).and_then(|character| {
+            character
+                .pose(&self.player_anim, HeadLook::default())
+                .map(|pose| viewmodel::arm_mesh(&character, &pose, frame))
+        });
+        self.hand_mesh =
+            arm.and_then(|arm| GpuMesh::upload(&ctx.memory_allocator, &arm).ok().flatten());
 
         let held = content.held(inventory);
         self.hand_held_mesh = held.and_then(|held| {
@@ -521,18 +612,18 @@ impl SceneCache {
         &mut self,
         ctx: &Arc<RenderContext>,
         remote_players: &HashMap<PlayerId, RemotePlayer>,
-        items: &ItemRegistry,
+        models: &ModelRegistry,
         dt: f32,
     ) {
         self.remote_meshes.clear();
-        // Snapshot the render-relevant fields first so we can mutate
-        // `remote_anims` and read `player_model` without holding a borrow.
-        type Snapshot = (PlayerId, Vec3, f32, f32, [Option<u16>; ARMOR_SIZE]);
-        let snapshots: Vec<Snapshot> = remote_players
+        // Snapshot the render-relevant fields first so `remote_anims` can be
+        // mutated without holding a borrow of the map they came from.
+        let snapshots: Vec<(PlayerId, Vec3, f32, f32)> = remote_players
             .values()
-            .map(|rp| (rp.id, rp.position(), rp.yaw, rp.pitch, rp.armor))
+            .map(|rp| (rp.id, rp.position(), rp.yaw, rp.pitch))
             .collect();
-        for (id, pos, yaw, pitch, armor_ids) in snapshots {
+        let mut baked: Vec<CpuMesh> = Vec::with_capacity(snapshots.len());
+        for (id, pos, yaw, pitch) in snapshots {
             let state = self.remote_anims.entry(id).or_insert_with(|| RemoteAnim {
                 anim: AnimationState::new(),
                 last_pos: pos,
@@ -542,15 +633,23 @@ impl SceneCache {
                 (Vec3::new(delta.x, 0.0, delta.z).length() / dt.max(1e-4)).min(REMOTE_MAX_SPEED);
             state.anim.advance(speed, yaw, dt);
             state.last_pos = pos;
-            let pose = state.anim.pose(pitch);
-            // Derived here rather than sent: only the look yaw crosses the wire, and
-            // a torso that follows it is cosmetic, so every peer can work it out.
-            let body_yaw = state.anim.body_yaw();
+            let anim = state.anim;
 
-            let armor = armor_item_ids(armor_ids, items);
-            let mesh = self
-                .player_model
-                .build_mesh_armored(pos, body_yaw, &pose, &armor, items);
+            let Some(character) = self.character(models) else {
+                break;
+            };
+            let look = HeadLook {
+                yaw: anim.head_offset(),
+                pitch,
+            };
+            // Derived here rather than sent: only the look yaw crosses the wire,
+            // and a torso that follows it is cosmetic, so every peer can work it
+            // out for itself.
+            if let Some(pose) = character.pose(&anim, look) {
+                baked.push(character.bake(&pose, pos, anim.body_yaw()));
+            }
+        }
+        for mesh in baked {
             if let Ok(Some(gpu)) = GpuMesh::upload(&ctx.memory_allocator, &mesh) {
                 self.remote_meshes.push(gpu);
             }
@@ -996,16 +1095,6 @@ fn held_placement(
     }
 }
 
-/// Resolve wire armor ids to `ItemId`s the local registry knows, dropping any
-/// out-of-range id (a peer running divergent content is already refused, but be
-/// safe: raw ids index the registry directly).
-fn armor_item_ids(
-    ids: [Option<u16>; ARMOR_SIZE],
-    items: &ItemRegistry,
-) -> [Option<ItemId>; ARMOR_SIZE] {
-    ids.map(|id| id.and_then(|raw| ((raw as usize) < items.len()).then_some(ItemId(raw))))
-}
-
 impl super::InGameState {
     /// How far the third-person camera sits from the eye this frame: the desired
     /// [`THIRD_PERSON_DISTANCE`], pulled in so nothing solid ends up between the
@@ -1160,11 +1249,13 @@ impl super::InGameState {
             ctx,
             &self.player,
             &self.inventory,
-            &self.content.items,
             self.inventory_anim.progress(),
             content,
         );
+        // Cheap after the first call, and this is the only place the entity
+        // registry and the model registry are both in reach.
+        self.view.bind_player_rig(&loaded.entities, models);
         self.view
-            .update_remote_meshes(ctx, &self.peers.players, &self.content.items, dt);
+            .update_remote_meshes(ctx, &self.peers.players, models, dt);
     }
 }

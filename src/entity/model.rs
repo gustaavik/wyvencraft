@@ -1,17 +1,21 @@
-//! A simple box-part humanoid model (head, body, arms, legs) used to render the
-//! player in third person and remote players in multiplayer.
+//! Box-part mob models: a humanoid (head, body, arms, legs) and a quadruped.
 //!
-//! Dimensions follow the classic Minecraft proportions (in pixels / 16 = blocks).
+//! Dimensions follow the classic Minecraft proportions (in pixels / 16 =
+//! blocks), and both sample a 64×64 skin sheet with Minecraft's unwrap
+//! ([`crate::art::skin`]), which is what mob art is drawn against.
+//!
+//! **The player is not built here any more.** It comes from
+//! `assets/models/entity/player/player.bbmodel` through
+//! [`crate::entity::rigged`] — a real skeleton with elbows, knees and keyframe
+//! clips, which a one-pivot-per-part box model cannot express. What is left is
+//! the mobs that are still authored as boxes.
 
 use glam::{Mat4, Vec3};
 
-use crate::art::armor::ArmorKind;
 use crate::art::skin::{self, SkinPart};
 use crate::core::Direction;
-use crate::core::math::rotate_y as rot_y;
 use crate::core::math::yaw_matrix;
 use crate::entity::kind::QuadrupedVisual;
-use crate::inventory::{ARMOR_SIZE, ArmorSlot, ItemId, ItemRegistry};
 use wyven_render::mesh::CpuMesh;
 use wyven_render::vertex::{ChunkVertex, NO_OVERLAY, NO_TINT};
 
@@ -39,15 +43,6 @@ pub struct Pose {
     pub right_arm: f32,
     pub left_leg: f32,
     pub right_leg: f32,
-}
-
-/// Where an item held in the right hand sits: the fist's world position, plus
-/// the rotations it inherits from the body turn and the arm swing.
-#[derive(Debug, Clone, Copy)]
-pub struct HandAnchor {
-    pub position: Vec3,
-    pub yaw: f32,
-    pub pitch: f32,
 }
 
 /// Static layout of the humanoid model parts.
@@ -112,13 +107,8 @@ impl HumanoidModel {
         ]
     }
 
-    /// Build a renderable mesh for this model at `position` (feet) facing `yaw`,
-    /// articulated by `pose`, sampling the player skin sheet.
-    pub fn build_mesh(&self, position: Vec3, yaw: f32, pose: &Pose) -> CpuMesh {
-        self.build_mesh_sheet(position, yaw, pose, skin::SKIN_ORIGIN)
-    }
-
-    /// Like [`HumanoidModel::build_mesh`] but sampling the 64×64 sheet at
+    /// Build a renderable mesh for this model at `position` (feet) facing
+    /// `yaw`, articulated by `pose`, sampling the 64×64 sheet at
     /// `sheet_origin` — how humanoid mobs reuse this model with their own
     /// skins ([`crate::art::mobskin`]). Each part is drawn twice: the base
     /// box sampling its base region of the sheet (see [`crate::art::skin`]),
@@ -232,121 +222,6 @@ impl HumanoidModel {
             );
         }
         mesh
-    }
-
-    /// Like [`HumanoidModel::build_mesh`], plus an inflated shell for each worn
-    /// armor piece. `armor` gives the item in each [`ArmorSlot`] (in `ALL`
-    /// order); pieces sample their own atlas sheet and their transparent pixels
-    /// are alpha-tested away, so partial coverage (boots) reads right.
-    pub fn build_mesh_armored(
-        &self,
-        position: Vec3,
-        yaw: f32,
-        pose: &Pose,
-        armor: &[Option<ItemId>; ARMOR_SIZE],
-        items: &ItemRegistry,
-    ) -> CpuMesh {
-        let mut mesh = self.build_mesh(position, yaw, pose);
-        for slot in ArmorSlot::ALL {
-            let Some(id) = armor[slot.index()] else {
-                continue;
-            };
-            // Only draw a piece that actually declares this slot.
-            if items.armor(id).map(|a| a.slot) != Some(slot) {
-                continue;
-            }
-            self.push_armor(&mut mesh, slot, position, yaw, pose);
-        }
-        mesh
-    }
-
-    /// Append one armor piece's inflated shells to `mesh`.
-    fn push_armor(
-        &self,
-        mesh: &mut CpuMesh,
-        slot: ArmorSlot,
-        position: Vec3,
-        yaw: f32,
-        pose: &Pose,
-    ) {
-        let kind = armor_kind(slot);
-        let origin = kind.origin();
-        let inflate = armor_inflation(slot) / 16.0;
-
-        for &index in armor_body_parts(slot) {
-            let (part, skin_part, pivot, rot, local_yaw) = self.articulated_part(index, pose);
-            let shell = ModelBox {
-                center: part.center,
-                size: part.size + Vec3::splat(2.0 * inflate),
-            };
-            push_box(
-                mesh, shell, skin_part, origin, position, yaw, pivot, 0.0, rot, local_yaw,
-            );
-        }
-    }
-
-    /// Where a held item sits, in world space, for a model standing at
-    /// `position` facing `yaw` in `pose`.
-    ///
-    /// The anchor is the centre of the right arm's bottom face — the fist —
-    /// carried through the same pivot-then-yaw chain [`push_box`] uses, so a
-    /// held model tracks the arm exactly as the arm swings. The returned yaw is
-    /// the model's, since the only articulation a hand inherits is the body
-    /// turn; the arm's own pitch comes back separately.
-    pub fn hand_anchor(&self, position: Vec3, yaw: f32, pose: &Pose) -> HandAnchor {
-        let arm = self.right_arm;
-        let pivot = top_pivot(arm);
-        // Fist: the far end of the arm, a little inside the cuff.
-        let fist = arm.center - Vec3::new(0.0, arm.size.y * 0.5 - 1.0 / 16.0, 0.0);
-        let local = rot_x(fist - pivot, pose.right_arm) + pivot;
-        HandAnchor {
-            position: rot_y(local, yaw) + position,
-            yaw,
-            pitch: pose.right_arm,
-        }
-    }
-
-    /// The `index`-th body part (in `ARTICULATION` order) with its base skin
-    /// unwrap, joint pivot, pitch, and head-turn (only the head turns).
-    fn articulated_part(&self, index: usize, pose: &Pose) -> (ModelBox, SkinPart, Vec3, f32, f32) {
-        match index {
-            0 => (
-                self.head,
-                skin::HEAD,
-                bottom_pivot(self.head),
-                pose.head_pitch,
-                pose.head_yaw,
-            ),
-            1 => (self.body, skin::BODY, self.body.center, 0.0, 0.0),
-            2 => (
-                self.left_arm,
-                skin::LEFT_ARM,
-                top_pivot(self.left_arm),
-                pose.left_arm,
-                0.0,
-            ),
-            3 => (
-                self.right_arm,
-                skin::RIGHT_ARM,
-                top_pivot(self.right_arm),
-                pose.right_arm,
-                0.0,
-            ),
-            4 => (
-                self.left_leg,
-                skin::LEFT_LEG,
-                top_pivot(self.left_leg),
-                pose.left_leg,
-                0.0,
-            ),
-            _ => (
-                self.right_leg,
-                skin::RIGHT_LEG,
-                top_pivot(self.right_leg),
-                pose.right_leg,
-                0.0,
-            ),
-        }
     }
 }
 
@@ -486,37 +361,6 @@ impl QuadrupedModel {
     }
 }
 
-/// Map an inventory armor slot to its render sheet.
-fn armor_kind(slot: ArmorSlot) -> ArmorKind {
-    match slot {
-        ArmorSlot::Helmet => ArmorKind::Helmet,
-        ArmorSlot::Chestplate => ArmorKind::Chestplate,
-        ArmorSlot::Leggings => ArmorKind::Leggings,
-        ArmorSlot::Boots => ArmorKind::Boots,
-    }
-}
-
-/// Which body parts (indices into [`HumanoidModel::articulated_part`]) each slot
-/// covers.
-fn armor_body_parts(slot: ArmorSlot) -> &'static [usize] {
-    match slot {
-        ArmorSlot::Helmet => &[0],
-        ArmorSlot::Chestplate => &[1, 2, 3],
-        ArmorSlot::Leggings => &[1, 4, 5],
-        ArmorSlot::Boots => &[4, 5],
-    }
-}
-
-/// Per-side shell inflation (in pixels) so overlapping pieces don't z-fight and
-/// all sit outside the skin overlay (0.25 limbs / 0.5 hat). Bigger = further out.
-fn armor_inflation(slot: ArmorSlot) -> f32 {
-    match slot {
-        ArmorSlot::Leggings => 0.75,
-        ArmorSlot::Helmet | ArmorSlot::Chestplate => 1.0,
-        ArmorSlot::Boots => 1.25,
-    }
-}
-
 /// Joint pivot at the top centre of a box (shoulder / hip).
 fn top_pivot(b: ModelBox) -> Vec3 {
     b.center + Vec3::new(0.0, b.size.y * 0.5, 0.0)
@@ -525,12 +369,6 @@ fn top_pivot(b: ModelBox) -> Vec3 {
 /// Joint pivot at the bottom centre of a box (neck).
 fn bottom_pivot(b: ModelBox) -> Vec3 {
     b.center - Vec3::new(0.0, b.size.y * 0.5, 0.0)
-}
-
-/// Rotate a point around the X axis (limb swing / head tilt).
-fn rot_x(p: Vec3, a: f32) -> Vec3 {
-    let (s, c) = a.sin_cos();
-    Vec3::new(p.x, p.y * c - p.z * s, p.y * s + p.z * c)
 }
 
 /// Baked face shade: how much a face is dimmed for the direction it points,
@@ -740,38 +578,13 @@ fn box_face_corners(dir: Direction, lo: Vec3, hi: Vec3) -> [Vec3; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::f32::consts::FRAC_PI_2;
 
-    #[test]
-    fn rot_x_rotates_up_to_back() {
-        // +Y rotated by +90° about X lands on +Z — the model's BACK (the front is
-        // -Z). A hanging limb (-Y) under a positive angle thus swings forward (-Z).
-        let r = rot_x(Vec3::Y, FRAC_PI_2);
-        assert!((r - Vec3::Z).length() < 1e-6, "got {r:?}");
-    }
-
-    /// The shoulder is the arm's pivot, so a *positive* angle carries the fist
-    /// toward the model's front (-Z). Every arm pose is written against this
-    /// sign — the walk swing, the one-shot mining swing, the zombie shamble —
-    /// so it is worth pinning where the sign is actually applied.
-    #[test]
-    fn a_positive_arm_angle_puts_the_fist_in_front() {
-        let model = HumanoidModel::player();
-        let rest = model.hand_anchor(Vec3::ZERO, 0.0, &Pose::default());
-        let raised = model.hand_anchor(
-            Vec3::ZERO,
-            0.0,
-            &Pose {
-                right_arm: 1.4,
-                ..Default::default()
-            },
-        );
-        assert!(
-            raised.position.z < rest.position.z - 0.2,
-            "a positive angle should reach forward (-Z): rest {}, raised {}",
-            rest.position.z,
-            raised.position.z
-        );
+    /// Rotate a point about the X axis — the limb swing these tests check,
+    /// spelled out here rather than reached for in the model, which composes
+    /// its rotations as matrices.
+    fn rot_x(p: Vec3, a: f32) -> Vec3 {
+        let (s, c) = a.sin_cos();
+        Vec3::new(p.x, p.y * c - p.z * s, p.y * s + p.z * c)
     }
 
     #[test]
@@ -785,43 +598,9 @@ mod tests {
     }
 
     #[test]
-    fn armor_adds_one_box_per_covered_part() {
-        let blocks = crate::world::block::BlockRegistry::with_builtins();
-        let items = crate::inventory::ItemRegistry::from_blocks(&blocks);
-        let model = HumanoidModel::player();
-        let bare = model
-            .build_mesh(Vec3::ZERO, 0.0, &Pose::default())
-            .vertices
-            .len();
-
-        // A chestplate covers body + both arms: three extra boxes, 24 verts each.
-        let mut armor = [None; ARMOR_SIZE];
-        armor[ArmorSlot::Chestplate.index()] = items.find("copper_chestplate");
-        let mesh = model.build_mesh_armored(Vec3::ZERO, 0.0, &Pose::default(), &armor, &items);
-        assert_eq!(mesh.vertices.len(), bare + 3 * 24, "chestplate = 3 boxes");
-
-        // Two pieces stack: a helmet covers the head, boots cover both legs.
-        let mut armor = [None; ARMOR_SIZE];
-        armor[ArmorSlot::Helmet.index()] = items.find("copper_helmet");
-        armor[ArmorSlot::Boots.index()] = items.find("copper_boots");
-        let mesh = model.build_mesh_armored(Vec3::ZERO, 0.0, &Pose::default(), &armor, &items);
-        assert_eq!(
-            mesh.vertices.len(),
-            bare + 3 * 24,
-            "helmet + boots = 3 boxes"
-        );
-
-        // An item that isn't the slot's armor is ignored.
-        let mut armor = [None; ARMOR_SIZE];
-        armor[ArmorSlot::Helmet.index()] = items.find("stone");
-        let mesh = model.build_mesh_armored(Vec3::ZERO, 0.0, &Pose::default(), &armor, &items);
-        assert_eq!(mesh.vertices.len(), bare, "a non-armor item equips nothing");
-    }
-
-    #[test]
     fn rest_pose_matches_static_layout() {
         let model = HumanoidModel::player();
-        let mesh = model.build_mesh(Vec3::ZERO, 0.0, &Pose::default());
+        let mesh = model.build_mesh_sheet(Vec3::ZERO, 0.0, &Pose::default(), skin::SKIN_ORIGIN);
         // 6 parts, each drawn as a base + an inflated overlay box:
         // 12 boxes × 6 faces × 4 vertices.
         assert_eq!(mesh.vertices.len(), 288);
@@ -842,7 +621,7 @@ mod tests {
     #[test]
     fn head_front_face_wears_the_face_texture() {
         let model = HumanoidModel::player();
-        let mesh = model.build_mesh(Vec3::ZERO, 0.0, &Pose::default());
+        let mesh = model.build_mesh_sheet(Vec3::ZERO, 0.0, &Pose::default(), skin::SKIN_ORIGIN);
         // The head is the first part (24 vertices); its front face (-Z, the 5th
         // in Direction::ALL order) must sample UVs inside the head's front rect
         // on the skin sheet.
@@ -1004,7 +783,8 @@ mod tests {
     #[test]
     fn humanoid_sheet_origin_shifts_the_uvs() {
         let model = HumanoidModel::player();
-        let default_sheet = model.build_mesh(Vec3::ZERO, 0.0, &Pose::default());
+        let default_sheet =
+            model.build_mesh_sheet(Vec3::ZERO, 0.0, &Pose::default(), skin::SKIN_ORIGIN);
         let mob_sheet = model.build_mesh_sheet(Vec3::ZERO, 0.0, &Pose::default(), [12, 4]);
         assert_eq!(default_sheet.vertices.len(), mob_sheet.vertices.len());
         // Identical geometry, different texture region.
@@ -1042,80 +822,21 @@ mod tests {
     }
 
     #[test]
-    fn hand_anchor_sits_at_the_end_of_the_right_arm() {
-        let model = HumanoidModel::player();
-        let at = Vec3::new(10.0, 64.0, -3.0);
-        let anchor = model.hand_anchor(at, 0.0, &Pose::default());
-
-        // On the character's right (+X at yaw 0, see `HumanoidModel::player`),
-        // and down near the cuff rather than up at the shoulder.
-        let local = anchor.position - at;
-        assert!(local.x > 0.0, "hand should be on the right, got {local}");
-        let shoulder = top_pivot(model.right_arm).y;
-        let cuff = model.right_arm.center.y - model.right_arm.size.y * 0.5;
-        assert!(
-            local.y < shoulder && local.y < cuff + 2.0 / 16.0,
-            "hand at {local} should be near the cuff ({cuff}), not the shoulder ({shoulder})"
-        );
-        assert_eq!(anchor.yaw, 0.0);
-        assert_eq!(anchor.pitch, 0.0, "rest pose has no arm swing");
-    }
-
-    #[test]
-    fn hand_anchor_follows_the_arm_swing_and_the_body_yaw() {
-        let model = HumanoidModel::player();
-        let rest = model.hand_anchor(Vec3::ZERO, 0.0, &Pose::default());
-
-        // Swinging the arm forward carries the hand with it, about the shoulder.
-        let swung = model.hand_anchor(
-            Vec3::ZERO,
-            0.0,
-            &Pose {
-                right_arm: -1.2,
-                ..Pose::default()
-            },
-        );
-        assert!(
-            (swung.position.z - rest.position.z).abs() > 0.2,
-            "hand should swing along Z, moved to {}",
-            swung.position
-        );
-        assert!(swung.position.y > rest.position.y, "and lift as it swings");
-        assert_eq!(swung.pitch, -1.2, "the held model inherits the arm pitch");
-
-        // Turning the body carries the hand around, keeping it the same
-        // distance from the model's centre line.
-        let turned = model.hand_anchor(Vec3::ZERO, std::f32::consts::FRAC_PI_2, &Pose::default());
-        assert!(
-            (turned.position.length() - rest.position.length()).abs() < 1e-5,
-            "yaw must not move the hand relative to the body"
-        );
-        assert!(
-            turned.position.z > 0.1 && turned.position.x.abs() < 1e-5,
-            "a quarter turn should send the right hand to +Z, got {}",
-            turned.position
-        );
-    }
-
-    /// The neck: `Pose::head_yaw` turns the head about the neck and leaves every
-    /// other part where it was. This is what lets a humanoid be drawn at its
-    /// *torso* yaw while still facing where it looks — see
-    /// [`crate::entity::AnimationState::body_yaw`].
-    #[test]
     fn a_head_yaw_turns_the_head_without_turning_the_body() {
         // Parts are pushed base-then-overlay in table order (head, body, ...), 24
         // vertices to a box, so the head is the first two boxes and the torso the
         // next two.
         const BOX: usize = 24;
         let model = HumanoidModel::player();
-        let rest = model.build_mesh(Vec3::ZERO, 0.0, &Pose::default());
-        let turned = model.build_mesh(
+        let rest = model.build_mesh_sheet(Vec3::ZERO, 0.0, &Pose::default(), skin::SKIN_ORIGIN);
+        let turned = model.build_mesh_sheet(
             Vec3::ZERO,
             0.0,
             &Pose {
                 head_yaw: std::f32::consts::FRAC_PI_2,
                 ..Pose::default()
             },
+            skin::SKIN_ORIGIN,
         );
         assert_eq!(rest.vertices.len(), turned.vertices.len());
 
