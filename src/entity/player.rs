@@ -6,6 +6,7 @@
 use glam::Vec3;
 
 use crate::core::{Aabb, BlockPos, FIXED_DT, GameMode};
+use crate::entity::camera::Shot;
 use crate::entity::kind::{EntityKind, MovementParams, PhysicsParams, VitalsParams};
 use crate::entity::physics::{self};
 
@@ -16,6 +17,8 @@ const MAX_PHYSICS_STEPS: u32 = 5;
 const MAX_DEFENSE: f32 = 20.0;
 /// Defense points that would absorb a hit entirely, were `MAX_DEFENSE` not lower.
 const DEFENSE_PER_FULL_ABSORB: f32 = 25.0;
+/// Horizontal speed below which a coasting entity is simply stopped.
+const STOP_EPSILON: f32 = 0.05;
 
 /// Which camera the player is using.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,17 +42,32 @@ impl Perspective {
         matches!(self, Perspective::First)
     }
 
-    /// Where the camera sits relative to the eye and which way it looks, given
-    /// the player's look direction: the unit offset *toward* the camera, then
-    /// the forward vector. `None` in first person — there the camera is the eye.
+    /// Where the camera sits relative to the eye, as a [`Shot`].
     ///
-    /// The one place that knows this, so the camera's placement and the collision
-    /// trace that decides how far along the offset it may go cannot drift apart.
-    pub fn camera_placement(self, look: Vec3) -> Option<(Vec3, Vec3)> {
-        match self {
-            Perspective::First => None,
-            Perspective::ThirdBack => Some((-look, look)),
-            Perspective::ThirdFront => Some((look, -look)),
+    /// The one place that knows this, so the camera's placement and the
+    /// collision trace that decides how far along the offset it may go cannot
+    /// drift apart.
+    ///
+    /// First person is not a special case: it is `ThirdBack` at zero distance,
+    /// which puts the camera on the eye looking along the look direction. That
+    /// is what the old `None` return and its `unwrap_or((Vec3::ZERO, look))`
+    /// spelled out longhand — and collapsing it is what lets the inventory's
+    /// framing shot be blended in from first person like any other.
+    pub fn shot(self, pitch: f32, distance: f32) -> Shot {
+        let (azimuth, elevation) = match self {
+            Perspective::First | Perspective::ThirdBack => (std::f32::consts::PI, -pitch),
+            Perspective::ThirdFront => (0.0, pitch),
+        };
+        Shot {
+            azimuth,
+            elevation,
+            distance: if self.is_first_person() {
+                0.0
+            } else {
+                distance
+            },
+            aim: 0.0,
+            shift: 0.0,
         }
     }
 }
@@ -224,10 +242,34 @@ impl Player {
         // On the ground (and in flight) steering is instant; in the air the
         // velocity eases toward the wish so a mid-flight reversal ramps instead
         // of snapping, and momentum carries through the arc.
+        //
+        // The one exception is stopping *on foot*. Asking for nothing decays the
+        // velocity over `stop_rate` rather than zeroing it, so releasing the
+        // controls means coast rather than halt — which is what lets the
+        // inventory keep stepping physics while it is open without the player
+        // stopping dead in mid-stride under the camera that just panned onto
+        // them. Only this branch ramps: starting and turning are as instant as
+        // they ever were, so ordinary movement does not feel loose.
+        //
+        // Flight is deliberately left instant. At `fly_speed` a coast of the
+        // same length would overshoot by better than half a block, and flight
+        // is the mode where the player is placing blocks precisely.
         let target = wish * speed;
-        if flying || self.on_ground {
+        let asking_to_move = wish.length_squared() > 0.0;
+        if flying || (self.on_ground && asking_to_move) {
             self.velocity.x = target.x;
             self.velocity.z = target.z;
+        } else if self.on_ground {
+            let t = (self.movement.stop_rate * dt).clamp(0.0, 1.0);
+            self.velocity.x -= self.velocity.x * t;
+            self.velocity.z -= self.velocity.z * t;
+            // An exponential decay never quite reaches zero; snap the last
+            // sliver so a released player actually comes to rest instead of
+            // creeping, which would keep the walk animation twitching.
+            if Vec3::new(self.velocity.x, 0.0, self.velocity.z).length() < STOP_EPSILON {
+                self.velocity.x = 0.0;
+                self.velocity.z = 0.0;
+            }
         } else {
             let t = (self.movement.air_control * dt).clamp(0.0, 1.0);
             self.velocity.x += (target.x - self.velocity.x) * t;
@@ -433,6 +475,78 @@ mod tests {
         }
         assert!(player.on_ground, "test setup: player should be grounded");
         player
+    }
+
+    /// Releasing the controls must mean *coast*, not *stop*.
+    ///
+    /// The inventory relies on this: opening it releases the controls but keeps
+    /// stepping physics, so a player who was walking carries through and settles
+    /// under the camera that has just panned onto them. Zeroing the velocity —
+    /// which is what the grounded branch used to do unconditionally — would
+    /// halt them in a single step, in the one view where it is most visible.
+    #[test]
+    fn releasing_the_controls_coasts_to_a_stop_rather_than_stopping_dead() {
+        let horizontal = |v: Vec3| Vec3::new(v.x, 0.0, v.z).length();
+        let mut player = settled(Vec3::new(0.5, 65.0, 0.5), flat_ground);
+        let walking = MovementInput {
+            forward: 1.0,
+            ..Default::default()
+        };
+        for _ in 0..30 {
+            player.update(walking, FIXED_DT, flat_ground);
+        }
+        let cruising = horizontal(player.velocity);
+        assert!(
+            cruising > 1.0,
+            "test setup: the player should be up to speed, got {cruising}"
+        );
+
+        // Controls released: speed has to survive the first step.
+        let released_at = player.position;
+        player.update(MovementInput::default(), FIXED_DT, flat_ground);
+        assert!(
+            horizontal(player.velocity) > cruising * 0.5,
+            "one input-free step shed most of the speed ({cruising} -> {}); \
+             the player would read as stopping dead",
+            horizontal(player.velocity)
+        );
+
+        // ...and it settles rather than sliding for ever, having covered ground.
+        for _ in 0..60 {
+            player.update(MovementInput::default(), FIXED_DT, flat_ground);
+        }
+        assert_eq!(
+            horizontal(player.velocity),
+            0.0,
+            "the coast never came to rest"
+        );
+        assert!(
+            (player.position - released_at).length() > 0.05,
+            "the player covered no ground at all while coasting"
+        );
+    }
+
+    /// The coast must not cost responsiveness. Reversing mid-stride is still
+    /// instant on the ground — only *stopping* ramps — so ordinary movement
+    /// feels exactly as it did. (`ground_movement_stays_instant` covers
+    /// starting from rest.)
+    #[test]
+    fn reversing_on_the_ground_is_still_instant() {
+        let mut player = settled(Vec3::new(0.5, 65.0, 0.5), flat_ground);
+        let walk = |forward: f32| MovementInput {
+            forward,
+            ..Default::default()
+        };
+        // Facing -Z at yaw 0, so "forward" is -Z.
+        let full = -player.movement().walk_speed;
+
+        player.update(walk(1.0), FIXED_DT, flat_ground);
+        player.update(walk(-1.0), FIXED_DT, flat_ground);
+        assert!(
+            (player.velocity.z + full).abs() < 1e-4,
+            "a reversal should be instant on the ground, got {}",
+            player.velocity.z
+        );
     }
 
     /// Regression: a player spawned flush on the ground at an integer Y (as

@@ -237,7 +237,7 @@ impl HumanoidModel {
     /// Like [`HumanoidModel::build_mesh`], plus an inflated shell for each worn
     /// armor piece. `armor` gives the item in each [`ArmorSlot`] (in `ALL`
     /// order); pieces sample their own atlas sheet and their transparent pixels
-    /// are alpha-tested away, so partial coverage (boots, gloves) reads right.
+    /// are alpha-tested away, so partial coverage (boots) reads right.
     pub fn build_mesh_armored(
         &self,
         position: Vec3,
@@ -272,28 +272,6 @@ impl HumanoidModel {
         let kind = armor_kind(slot);
         let origin = kind.origin();
         let inflate = armor_inflation(slot) / 16.0;
-
-        // The cape is a standalone box hung off the shoulders, not a body part.
-        if slot == ArmorSlot::Cape {
-            let shell = ModelBox {
-                center: cape_box().center,
-                size: cape_box().size + Vec3::splat(2.0 * inflate),
-            };
-            let pivot = top_pivot(cape_box());
-            push_box(
-                mesh,
-                shell,
-                skin::CAPE,
-                origin,
-                position,
-                yaw,
-                pivot,
-                0.0,
-                0.0,
-                0.0,
-            );
-            return;
-        }
 
         for &index in armor_body_parts(slot) {
             let (part, skin_part, pivot, rot, local_yaw) = self.articulated_part(index, pose);
@@ -508,15 +486,6 @@ impl QuadrupedModel {
     }
 }
 
-/// The cape's model box: a thin, tall slab hung off the shoulders, back face
-/// flush behind the body (which sits at `z = +2px`, since the model faces −Z).
-fn cape_box() -> ModelBox {
-    ModelBox {
-        center: Vec3::new(0.0, 16.0, 2.5) / 16.0,
-        size: Vec3::new(10.0, 16.0, 1.0) / 16.0,
-    }
-}
-
 /// Map an inventory armor slot to its render sheet.
 fn armor_kind(slot: ArmorSlot) -> ArmorKind {
     match slot {
@@ -524,21 +493,17 @@ fn armor_kind(slot: ArmorSlot) -> ArmorKind {
         ArmorSlot::Chestplate => ArmorKind::Chestplate,
         ArmorSlot::Leggings => ArmorKind::Leggings,
         ArmorSlot::Boots => ArmorKind::Boots,
-        ArmorSlot::Glove => ArmorKind::Glove,
-        ArmorSlot::Cape => ArmorKind::Cape,
     }
 }
 
 /// Which body parts (indices into [`HumanoidModel::articulated_part`]) each slot
-/// covers. The cape is handled separately (its own box).
+/// covers.
 fn armor_body_parts(slot: ArmorSlot) -> &'static [usize] {
     match slot {
         ArmorSlot::Helmet => &[0],
         ArmorSlot::Chestplate => &[1, 2, 3],
         ArmorSlot::Leggings => &[1, 4, 5],
         ArmorSlot::Boots => &[4, 5],
-        ArmorSlot::Glove => &[2, 3],
-        ArmorSlot::Cape => &[],
     }
 }
 
@@ -548,8 +513,7 @@ fn armor_inflation(slot: ArmorSlot) -> f32 {
     match slot {
         ArmorSlot::Leggings => 0.75,
         ArmorSlot::Helmet | ArmorSlot::Chestplate => 1.0,
-        ArmorSlot::Boots | ArmorSlot::Glove => 1.25,
-        ArmorSlot::Cape => 0.5,
+        ArmorSlot::Boots => 1.25,
     }
 }
 
@@ -823,17 +787,7 @@ mod tests {
     #[test]
     fn armor_adds_one_box_per_covered_part() {
         let blocks = crate::world::block::BlockRegistry::with_builtins();
-        // The cape slot renders but ships with no item to fill it, so this
-        // declares one rather than losing the standalone-box case entirely.
-        let items = crate::inventory::ItemRegistry::from_toml(
-            &format!(
-                "{}\n\n[[item]]\nid = \"cape\"\n\n\
-                 [item.armor]\nslot = \"cape\"\ndefense = 1.0\ndurability = 80\n",
-                crate::inventory::item::BUILTIN_ITEMS
-            ),
-            &blocks,
-        )
-        .expect("builtin items plus a cape");
+        let items = crate::inventory::ItemRegistry::from_blocks(&blocks);
         let model = HumanoidModel::player();
         let bare = model
             .build_mesh(Vec3::ZERO, 0.0, &Pose::default())
@@ -846,15 +800,15 @@ mod tests {
         let mesh = model.build_mesh_armored(Vec3::ZERO, 0.0, &Pose::default(), &armor, &items);
         assert_eq!(mesh.vertices.len(), bare + 3 * 24, "chestplate = 3 boxes");
 
-        // A helmet adds one box; the cape adds its own standalone box.
+        // Two pieces stack: a helmet covers the head, boots cover both legs.
         let mut armor = [None; ARMOR_SIZE];
         armor[ArmorSlot::Helmet.index()] = items.find("copper_helmet");
-        armor[ArmorSlot::Cape.index()] = items.find("cape");
+        armor[ArmorSlot::Boots.index()] = items.find("copper_boots");
         let mesh = model.build_mesh_armored(Vec3::ZERO, 0.0, &Pose::default(), &armor, &items);
         assert_eq!(
             mesh.vertices.len(),
-            bare + 2 * 24,
-            "helmet + cape = 2 boxes"
+            bare + 3 * 24,
+            "helmet + boots = 3 boxes"
         );
 
         // An item that isn't the slot's armor is ignored.

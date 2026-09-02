@@ -63,18 +63,14 @@ pub enum ArmorSlot {
     Chestplate,
     Leggings,
     Boots,
-    Glove,
-    Cape,
 }
 
 impl ArmorSlot {
-    pub const ALL: [ArmorSlot; 6] = [
+    pub const ALL: [ArmorSlot; 4] = [
         ArmorSlot::Helmet,
         ArmorSlot::Chestplate,
         ArmorSlot::Leggings,
         ArmorSlot::Boots,
-        ArmorSlot::Glove,
-        ArmorSlot::Cape,
     ];
 
     /// Offset of this slot within the inventory's armor region.
@@ -90,8 +86,6 @@ impl ArmorSlot {
             ArmorSlot::Chestplate => "Chestplate",
             ArmorSlot::Leggings => "Leggings",
             ArmorSlot::Boots => "Boots",
-            ArmorSlot::Glove => "Glove",
-            ArmorSlot::Cape => "Cape",
         }
     }
 }

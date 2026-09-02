@@ -20,11 +20,12 @@ use std::sync::Arc;
 use glam::Vec3;
 
 use super::mobs::{RemoteMob, mob_mesh};
-use super::{OUTLINE_COLOR, REMOTE_MAX_SPEED, THIRD_PERSON_DISTANCE};
+use super::{INSPECT_MODEL_FROM, OUTLINE_COLOR, REMOTE_MAX_SPEED, THIRD_PERSON_DISTANCE};
 use crate::art::cracks;
 use crate::content::BlockAppearance;
 use crate::content::{ItemModel, ItemShape};
 use crate::core::{Aabb, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, ChunkPos, DayCycle};
+use crate::entity::camera::Shot;
 use crate::entity::viewmodel::{self, HandPose};
 use crate::entity::{
     AnimationState, Arrow, DroppedItem, HandAnchor, HumanoidModel, Mob, Player, camera,
@@ -38,8 +39,8 @@ use crate::world::meshing::{
 use wyven_model::mesh as model_mesh;
 use wyven_model::{DisplayContext, ModelId, ModelRegistry};
 use wyven_render::{
-    Camera, CpuMesh, ForegroundFrame, GpuLines, GpuMesh, LightParams, PreviewFrame, RenderContext,
-    SceneFrame, SkyParams, Texture, TexturedMesh, TileRegistry, debug,
+    Camera, CpuMesh, ForegroundFrame, GpuLines, GpuMesh, LightParams, RenderContext, SceneFrame,
+    SkyParams, Texture, TexturedMesh, TileRegistry, debug,
 };
 use wyven_voxel::FaceTextures;
 
@@ -80,16 +81,6 @@ impl ModelContent<'_> {
     }
 }
 
-/// How the player model is posed for the inventory preview. Set by the UI,
-/// read when the preview mesh is rebuilt.
-#[derive(Default, Clone, Copy)]
-pub(super) struct PreviewPose {
-    /// Yaw the model is turned to by dragging.
-    pub yaw: f32,
-    /// Where the head looks — (yaw, pitch) toward the cursor. Purely cosmetic.
-    pub look: (f32, f32),
-}
-
 /// All GPU state for the in-game scene.
 pub(super) struct SceneCache {
     /// Opaque GPU meshes for loaded chunks, keyed by chunk position.
@@ -115,11 +106,6 @@ pub(super) struct SceneCache {
     player_mesh: Option<GpuMesh>,
     /// Procedural animation state for the local player's model.
     player_anim: AnimationState,
-    /// Player-model mesh for the inventory preview (built only while the
-    /// inventory is open), and how it is posed.
-    preview_mesh: Option<GpuMesh>,
-    pub preview: PreviewPose,
-
     remote_meshes: Vec<GpuMesh>,
     /// Per-remote-player animation, keyed by id.
     remote_anims: HashMap<PlayerId, RemoteAnim>,
@@ -133,20 +119,17 @@ pub(super) struct SceneCache {
     /// first person, where `player_mesh` and `held_mesh` are not.
     hand_mesh: Option<GpuMesh>,
     hand_held_mesh: Option<(GpuMesh, ModelId)>,
-    /// The same model in the inventory preview, posed for the preview camera.
-    preview_held_mesh: Option<(GpuMesh, ModelId)>,
 
     /// The held item when it has **no model file** — a block cube or a flat
     /// sprite, sampling the shared atlas rather than a texture of its own.
     ///
-    /// Three fields rather than one because the three views reach the renderer
-    /// by three different routes: the foreground's atlas list, the world's
-    /// opaque/transparent lists (hence the `bool`), and the preview pass. Each
-    /// is `Some` only when its `*_mesh` counterpart above is `None` — a model
-    /// always wins, and the two can never draw at once.
+    /// Two fields rather than one because the two views reach the renderer by
+    /// two different routes: the foreground's atlas list and the world's
+    /// opaque/transparent lists (hence the `bool`). Each is `Some` only when its
+    /// `*_mesh` counterpart above is `None` — a model always wins, and the two
+    /// can never draw at once.
     hand_held_atlas: Option<GpuMesh>,
     held_atlas: Option<(GpuMesh, bool)>,
-    preview_held_atlas: Option<GpuMesh>,
     /// Model geometry for dropped stacks, one mesh per distinct model.
     drops_model_meshes: Vec<(GpuMesh, ModelId)>,
     /// GPU textures for loaded models, indexed by [`ModelId`] and uploaded on
@@ -190,21 +173,14 @@ impl SceneCache {
             player_model: HumanoidModel::player(),
             player_mesh: None,
             player_anim: AnimationState::new(),
-            preview_mesh: None,
-            preview: PreviewPose {
-                yaw: std::f32::consts::PI,
-                look: (0.0, 0.0),
-            },
             remote_meshes: Vec::new(),
             remote_anims: HashMap::new(),
             mob_meshes: Vec::new(),
             held_mesh: None,
             hand_mesh: None,
             hand_held_mesh: None,
-            preview_held_mesh: None,
             hand_held_atlas: None,
             held_atlas: None,
-            preview_held_atlas: None,
             drops_model_meshes: Vec::new(),
             model_textures: Vec::new(),
             break_mesh: None,
@@ -362,15 +338,25 @@ impl SceneCache {
 
     /// Rebuild the player model mesh in third person, or the view model in
     /// first — never both, since in first person the body is the camera.
+    ///
+    /// `inspect` is how far through the inventory's camera pan we are. Past
+    /// [`INSPECT_MODEL_FROM`] it forces the world model on even in first
+    /// person, which would otherwise swing the camera out to frame an empty
+    /// stage, and suppresses the view-model arm at the same instant, since the
+    /// two are alternatives. It also levels the model's head: the pose inherits
+    /// the player's pitch, so a player who opened the inventory while looking
+    /// up would be shown a model staring at the ceiling.
     pub fn update_player_mesh(
         &mut self,
         ctx: &Arc<RenderContext>,
         player: &Player,
         inventory: &Inventory,
         items: &ItemRegistry,
+        inspect: f32,
         content: ModelContent<'_>,
     ) {
-        if player.perspective.is_first_person() {
+        let show_body = inspect >= INSPECT_MODEL_FROM;
+        if player.perspective.is_first_person() && !show_body {
             self.player_mesh = None;
             self.held_mesh = None;
             self.held_atlas = None;
@@ -380,7 +366,12 @@ impl SceneCache {
         self.hand_mesh = None;
         self.hand_held_mesh = None;
         self.hand_held_atlas = None;
-        let pose = self.player_anim.pose(player.pitch);
+        // Ease the head level as the camera comes round to the front, so the
+        // model meets the viewer's eye rather than holding whatever pitch the
+        // player happened to be looking at when they pressed E.
+        let pose = self
+            .player_anim
+            .pose(player.pitch * (1.0 - inspect.clamp(0.0, 1.0)));
         // The body is drawn at the torso yaw, which lags the look yaw the camera
         // uses; `pose.head_yaw` is what puts the face back where the player looks.
         // The hand anchor must take the *same* yaw, or the held item leaves the fist.
@@ -438,7 +429,7 @@ impl SceneCache {
             .flatten()
     }
 
-    /// The third-person/preview counterpart of [`SceneCache::bake_held`], for an
+    /// The third-person counterpart of [`SceneCache::bake_held`], for an
     /// item with no model. Returns the mesh and whether it belongs in the
     /// blended pass, so a held glass block reads like the block it places.
     fn bake_held_atlas(
@@ -522,51 +513,6 @@ impl SceneCache {
             }
             _ => None,
         };
-    }
-
-    /// Rebuild the inventory-preview player mesh: the model at the origin,
-    /// turned to the preview yaw, wearing the currently equipped armor. Only
-    /// built while the inventory is open; cleared otherwise so the offscreen
-    /// pass is skipped entirely.
-    pub fn update_preview_mesh(
-        &mut self,
-        ctx: &Arc<RenderContext>,
-        inventory_open: bool,
-        player: &Player,
-        inventory: &Inventory,
-        items: &ItemRegistry,
-        content: ModelContent<'_>,
-    ) {
-        if !inventory_open {
-            self.preview_mesh = None;
-            self.preview_held_mesh = None;
-            self.preview_held_atlas = None;
-            return;
-        }
-        // The preview head tracks the cursor (yaw + pitch), independent of the
-        // world player's facing; limbs still idle-animate from the anim state.
-        let mut pose = self.player_anim.pose(player.pitch);
-        pose.head_yaw = self.preview.look.0;
-        pose.head_pitch = self.preview.look.1;
-        let armor = inventory.equipped_armor();
-        let mesh = self.player_model.build_mesh_armored(
-            Vec3::ZERO,
-            self.preview.yaw,
-            &pose,
-            &armor,
-            items,
-        );
-        self.preview_mesh = GpuMesh::upload(&ctx.memory_allocator, &mesh).ok().flatten();
-
-        let anchor = self
-            .player_model
-            .hand_anchor(Vec3::ZERO, self.preview.yaw, &pose);
-        self.preview_held_mesh = self.bake_held(ctx, content, inventory, anchor);
-        // The preview is lit by its own neutral lamp, so the transparency split
-        // the world pass needs is meaningless here — take just the mesh.
-        self.preview_held_atlas = self
-            .bake_held_atlas(ctx, content, inventory, anchor)
-            .map(|(mesh, _)| mesh);
     }
 
     /// Rebuild GPU meshes for remote players, advancing each one's animation
@@ -850,33 +796,25 @@ impl SceneCache {
     /// ticks at a fixed rate, so the eye is blended between steps to stay smooth
     /// when the display runs faster than the simulation.
     ///
-    /// `distance` is how far along the perspective's offset the camera may
-    /// actually sit — resolved against the world by
-    /// [`InGameState::camera_distance`], because this cache deliberately cannot
-    /// reach one. Ignored in first person, where the camera *is* the eye.
-    pub fn camera(&self, player: &Player, aspect: f32, distance: f32) -> Camera {
-        let mut camera = Camera::new(self.fov_degrees, aspect);
-        let eye = player.interpolated_eye_position(self.render_alpha);
-        let look = player.look_direction();
-        let (offset, forward) = player
-            .perspective
-            .camera_placement(look)
-            .unwrap_or((Vec3::ZERO, look));
-        camera.position = eye + offset * distance;
-        camera.forward = forward;
-        camera
+    /// The yaw the local player's model is *drawn* at — the torso, which eases
+    /// after the look direction rather than tracking it.
+    pub fn player_body_yaw(&self) -> f32 {
+        self.player_anim.body_yaw()
     }
 
     /// Collect this frame's visible geometry: frustum-culled chunk meshes plus
     /// every entity and overlay mesh, split by render pass.
+    ///
+    /// Takes the finished camera rather than building one: it is derived once,
+    /// by [`InGameState::world_camera`], and shared with the nameplate pass so
+    /// the two cannot disagree about where the viewer is.
     pub fn scene_frame(
         &self,
         player: &Player,
         day_cycle: &DayCycle,
-        aspect: f32,
-        camera_distance: f32,
+        camera: Camera,
     ) -> SceneFrame<'_> {
-        let camera = self.camera(player, aspect, camera_distance);
+        let aspect = camera.aspect;
         let frustum = camera.frustum();
         let in_view = |pos: &ChunkPos| {
             let origin = pos.origin();
@@ -1038,33 +976,6 @@ impl SceneCache {
                 .collect(),
         })
     }
-
-    /// The offscreen player-model preview, when the inventory is open.
-    pub fn preview_frame(&self) -> Option<PreviewFrame<'_>> {
-        let model = self.preview_mesh.as_ref()?;
-        // Fixed head-height orbit looking at the model built at the origin.
-        // The preview image is 0.48:1 (see PREVIEW_SIZE in app.rs).
-        let target = Vec3::new(0.0, 1.05, 0.0);
-        let mut camera = Camera::new(32.0, 0.48);
-        camera.position = Vec3::new(0.0, 1.05, 3.9);
-        camera.forward = (target - camera.position).normalize();
-        // Neutral, mostly-ambient light so the model reads clearly against the
-        // dark preview backdrop, independent of the world's time of day.
-        Some(PreviewFrame {
-            view_proj: camera.view_projection(),
-            light: LightParams {
-                light_dir: Vec3::new(0.3, 0.8, 0.5).normalize(),
-                light_color: Vec3::splat(0.9),
-                ambient: 0.55,
-            },
-            model,
-            held: self
-                .preview_held_mesh
-                .as_ref()
-                .and_then(|(mesh, id)| self.textured_mesh(mesh, *id)),
-            held_atlas: self.preview_held_atlas.as_ref(),
-        })
-    }
 }
 
 /// Which display table places a held item that has no model file of its own.
@@ -1109,18 +1020,63 @@ impl super::InGameState {
     /// The predicate is `is_solid_for_collision`, the one player physics uses:
     /// it counts an unloaded chunk as solid, so at the streaming edge the camera
     /// pulls in rather than drifting into terrain that has not arrived yet.
-    pub(super) fn camera_distance(&self, aspect: f32) -> f32 {
-        let look = self.player.look_direction();
-        let Some((dir, _)) = self.player.perspective.camera_placement(look) else {
-            return 0.0;
-        };
-        let clearance = Camera::new(self.view.fov_degrees, aspect).near_radius();
+    pub(super) fn world_camera(&self, aspect: f32) -> Camera {
+        let shot = self.camera_shot();
+        let yaw = self.framing_yaw();
         let eye = self
             .player
             .interpolated_eye_position(self.view.render_alpha);
-        camera::clear_distance(eye, dir, THIRD_PERSON_DISTANCE, clearance, |p| {
-            self.world.is_solid_for_collision(p)
-        })
+
+        let distance = if shot.distance <= 0.0 {
+            // First person, or a sweep that has not left the eye yet: there is
+            // no gap between camera and player for anything to get into.
+            0.0
+        } else {
+            let clearance = Camera::new(self.view.fov_degrees, aspect).near_radius();
+            camera::clear_distance(eye, shot.offset(yaw), shot.distance, clearance, |p| {
+                self.world.is_solid_for_collision(p)
+            })
+        };
+
+        shot.camera(eye, yaw, distance, self.view.fov_degrees, aspect)
+    }
+
+    /// The yaw the shot is framed on.
+    ///
+    /// The *body* yaw while the inventory is up, not the look yaw: the model is
+    /// drawn at `AnimationState::body_yaw`, which lags the look yaw and can sit
+    /// a good way off it when the player is standing still. Framing on the look
+    /// yaw would show a model visibly turned away from the camera.
+    fn framing_yaw(&self) -> f32 {
+        if self.inventory_anim.active() {
+            self.view.player_body_yaw()
+        } else {
+            self.player.yaw
+        }
+    }
+
+    /// This frame's shot: the player's chosen perspective, blended toward the
+    /// inventory's framing shot by however far through the sweep we are.
+    ///
+    /// Blending happens in [`Shot`]'s polar form, so a swing from behind the
+    /// player to in front of them orbits around them instead of passing through
+    /// their head at the halfway point.
+    fn camera_shot(&self) -> Shot {
+        let gameplay = self
+            .player
+            .perspective
+            .shot(self.player.pitch, THIRD_PERSON_DISTANCE);
+        let t = self.inventory_anim.progress();
+        if t <= 0.0 {
+            return gameplay;
+        }
+        // `layout` reasons in points — it subtracts a panel some hundreds of
+        // points wide from the screen — so it has to be handed the *real*
+        // screen rect. Handing it a normalised one collapses the whole stage to
+        // zero width and slams the model into the left edge.
+        let stage = crate::ui::inventory::layout(self.screen, self.player.mode.is_creative())
+            .stage_center_x;
+        gameplay.blend(Shot::inspect(self.view.fov_degrees.to_radians(), stage), t)
     }
 
     /// Bring every GPU resource in line with the simulation state this frame.
@@ -1189,11 +1145,12 @@ impl super::InGameState {
         self.view
             .update_arrows_mesh(ctx, &self.mobs.arrows, loaded.arrow_faces);
 
-        // Animated humanoids. The local player settles to idle while the
-        // inventory is open (movement is frozen).
-        let local_speed = if self.inventory_open {
-            0.0
-        } else {
+        // Animated humanoids. The local player's legs follow their actual
+        // horizontal speed even with the inventory open: physics keeps running
+        // there, so a player who opened it mid-stride is still moving, and
+        // forcing the idle pose would have them gliding to a stop with their
+        // feet planted — in full view of the camera that just panned onto them.
+        let local_speed = {
             let v = self.player.velocity;
             Vec3::new(v.x, 0.0, v.z).length()
         };
@@ -1204,14 +1161,7 @@ impl super::InGameState {
             &self.player,
             &self.inventory,
             &self.content.items,
-            content,
-        );
-        self.view.update_preview_mesh(
-            ctx,
-            self.inventory_open,
-            &self.player,
-            &self.inventory,
-            &self.content.items,
+            self.inventory_anim.progress(),
             content,
         );
         self.view

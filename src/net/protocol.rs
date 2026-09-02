@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::core::{BlockId, BlockPos, GameMode};
+use crate::inventory::ARMOR_SIZE;
 use wyven_net::PlayerId;
 
 /// 3D vector as it appears on the wire.
@@ -168,9 +169,12 @@ pub enum ServerMessage {
     /// Sent reliably on change (and to a joining client for everyone already in),
     /// so remote player models render armor without bloating the per-tick
     /// movement snapshot.
+    ///
+    /// Sized from [`ARMOR_SIZE`] rather than spelled out, so adding or removing
+    /// a slot cannot leave the wire disagreeing with the inventory it describes.
     PlayerEquipment {
         id: PlayerId,
-        armor: [Option<u16>; 6],
+        armor: [Option<u16>; ARMOR_SIZE],
     },
     /// A mob came into existence (spawned, or replayed to a joining client).
     /// Kind travels by name (the recipe-wire precedent): unknown names are

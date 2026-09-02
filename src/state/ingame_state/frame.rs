@@ -1,26 +1,30 @@
 //! The [`GameState`] implementation: the per-frame update, the egui HUD /
-//! inventory / death UI, and the scene + preview render frames.
+//! inventory / death UI, and the scene render frame.
 
 use winit::event::MouseButton;
 
-use super::{AUTOSAVE_INTERVAL, DOUBLE_TAP_WINDOW, InGameState, PREVIEW_DRAG_SENSITIVITY};
+use super::{AUTOSAVE_INTERVAL, DOUBLE_TAP_WINDOW, InGameState};
+use crate::entity::MovementInput;
 use crate::state::{GameState, PauseMenuState, StateContext, Transition, Wyvencraft};
 use crate::ui::hud;
 use crate::ui::nameplate::{self, Nameplate};
-use wyven_render::{PreviewFrame, SceneFrame};
+use wyven_render::SceneFrame;
 
 impl InGameState {
     /// Paint every visible player's username above their model.
     ///
     /// The camera is rebuilt here rather than threaded through, and it is
-    /// bit-identical to the one the world pass will use: `update` has already
-    /// run this frame and set `render_alpha`, and `SceneCache::camera` is a pure
-    /// function of the player and that alpha.
+    /// bit-identical to the one the world pass will use: both go through
+    /// [`InGameState::world_camera`], `update` has already run this frame and
+    /// set `render_alpha`, and nothing it reads changes in between.
     ///
-    /// `aspect` comes from egui's screen rect rather than the swapchain. The
-    /// scale factor is uniform, so the ratio matches — and `ui` is not given the
-    /// physical size.
-    fn draw_nameplates(&self, egui_ctx: &egui::Context) {
+    /// `aspect` is the runner's, the same value the world pass is given —
+    /// **not** egui's screen rect. The two agree to within rounding, but
+    /// `world_camera` derives its clearance from `near_radius()`, which depends
+    /// on the aspect, so a disagreement can resolve to a different clamped
+    /// distance: a different camera *position*, not merely a different
+    /// projection, and nameplates that drift off their players.
+    fn draw_nameplates(&self, egui_ctx: &egui::Context, aspect: f32) {
         if self.peers.players.is_empty() {
             return;
         }
@@ -29,10 +33,7 @@ impl InGameState {
         if screen.height() <= 0.0 {
             return;
         }
-        let aspect = screen.width() / screen.height();
-        let camera = self
-            .view
-            .camera(&self.player, aspect, self.camera_distance(aspect));
+        let camera = self.world_camera(aspect);
 
         let alpha = self.view.render_alpha;
         let plates: Vec<Nameplate<'_>> = self
@@ -113,14 +114,26 @@ impl GameState<Wyvencraft> for InGameState {
             }
         }
 
-        if self.inventory_open || self.dead || self.chat.composer.open {
-            // Inventory screen / death screen: free cursor, freeze player control,
-            // and abandon any in-progress mining.
-            ctx.grab_cursor = false;
-            self.breaking = None;
-        } else {
-            ctx.grab_cursor = true;
+        // One tick per frame, here rather than in `ui`: `scene_frame` is `&self`
+        // and reads the same progress, so it must already be advanced by the
+        // time the world camera is derived.
+        self.inventory_anim.tick(ctx.dt);
 
+        // Whether the player is driving this frame. Keyed off the inventory's
+        // *animation*, so control comes back only once the camera is home on
+        // the eye — where there is nothing left to blend and the hand-back is
+        // seamless.
+        //
+        // This gates the input below, and deliberately **not** the physics: see
+        // the step block further down.
+        let in_control = !self.inventory_anim.active() && !self.dead && !self.chat.composer.open;
+        ctx.grab_cursor = in_control;
+        if !in_control {
+            // Whatever was being mined is abandoned — that one *is* an input.
+            self.breaking = None;
+        }
+
+        if in_control {
             if ctx.input.just_pressed(kb.toggle_perspective) {
                 self.player.toggle_perspective();
             }
@@ -171,12 +184,27 @@ impl GameState<Wyvencraft> for InGameState {
             if ctx.input.just_pressed(kb.drop_item) {
                 self.drop_selected_item();
             }
+        }
 
-            // Movement + physics. Refresh the worn defense first: `update` can
-            // raise fall damage internally, and it must be mitigated by whatever
-            // the player is wearing right now.
-            let movement = crate::config::movement(ctx.input, &kb);
-            let dt = ctx.dt.min(0.05);
+        // Physics runs whether or not the player is driving. Opening the
+        // inventory releases the *controls*, not the simulation: momentum,
+        // friction and gravity carry on, so a player who was walking when they
+        // pressed E coasts to a stop instead of stopping dead in mid-stride,
+        // and one who was falling still lands — and still takes the fall.
+        //
+        // Death is the one real freeze. There is nothing left to simulate, and
+        // a corpse sliding to a halt under the respawn dialog reads as a bug.
+        let dt = ctx.dt.min(0.05);
+        if !self.dead {
+            // No input while the controls are released — the player coasts on
+            // the velocity they already had rather than walking on for ever.
+            let movement = if in_control {
+                crate::config::movement(ctx.input, &kb)
+            } else {
+                MovementInput::default()
+            };
+            // Refresh the worn defense first: `step_fixed` can raise fall damage
+            // internally, and it must be mitigated by whatever is worn *now*.
             self.player.defense = self.inventory.total_defense(&self.content.items);
             let health_before = self.player.health;
             // Player physics is stepped at a fixed rate, not on the frame delta,
@@ -186,7 +214,7 @@ impl GameState<Wyvencraft> for InGameState {
                     .step_fixed(movement, ctx.dt, &mut self.physics_accum, |p| {
                         self.world.is_solid_for_collision(p)
                     });
-            // A health drop across `update` means fall damage landed; the health
+            // A health drop across the step means fall damage landed; the health
             // delta is the only signal that escapes it, and it's enough.
             if self.player.health < health_before {
                 self.inventory.wear_armor(1);
@@ -200,7 +228,9 @@ impl GameState<Wyvencraft> for InGameState {
                     self.breaking = None;
                 }
             }
+        }
 
+        if in_control {
             // Block interaction. The main-hand swing fires on every left click,
             // even when punching air (no block hit).
             if ctx.input.mouse_just_pressed(MouseButton::Left) {
@@ -286,6 +316,11 @@ impl GameState<Wyvencraft> for InGameState {
     fn ui(&mut self, egui_ctx: &egui::Context, ctx: &mut StateContext) -> Transition {
         use crate::ui::inventory::InvAction;
 
+        // Carried across to the world camera, which is derived after this pass
+        // but is only given an aspect ratio. Recorded before anything else so
+        // the nameplates below see this frame's rect, not the last one's.
+        self.screen = egui_ctx.screen_rect();
+
         // Death screen takes over everything else.
         if self.dead {
             let mut respawn = false;
@@ -313,29 +348,35 @@ impl GameState<Wyvencraft> for InGameState {
             return Transition::None;
         }
 
-        if self.inventory_open {
+        // The panel is drawn for the whole sweep, not just while open, because
+        // the close animation runs after `inventory_open` has already gone
+        // false. It takes over from the HUD hotbar rather than covering it: the
+        // two are the same nine slots and at progress 0 they coincide exactly,
+        // so exactly one of them is drawn and the swap is invisible.
+        if self.inventory_anim.active() {
             let out = crate::ui::inventory::draw_inventory(
                 egui_ctx,
                 &self.inventory,
                 &self.content.items,
-                &self.recipes,
                 &ctx.shared.content.item_icons,
                 &ctx.shared.content.item_display_names,
                 self.held,
                 self.player.mode,
+                self.inventory_anim.progress(),
+                // The panel has the keyboard to itself here: it holds no text
+                // field, so egui consumes nothing and the binding still lands.
+                ctx.input
+                    .just_pressed(ctx.shared.settings.controls.keybinds.drop_item),
                 ctx.shared.ui_tex,
             );
-            if let Some(look) = out.head_look {
-                self.view.preview.look = look;
-            }
-            if let Some(action) = out.action {
+            if let Some(action) = out {
                 match action {
                     InvAction::Slot(index) => self.handle_slot_click(index),
+                    InvAction::Split(index) => self.handle_slot_split(index),
                     InvAction::Pick(id) => self.held = Some(self.content.items.full_stack(id)),
-                    InvAction::Craft(index) => self.handle_craft(index),
-                    InvAction::Rotate(dx) => {
-                        self.view.preview.yaw -= dx * PREVIEW_DRAG_SENSITIVITY;
-                    }
+                    InvAction::DropSlot(index) => self.drop_slot(index),
+                    InvAction::DropHeld { all } => self.drop_held(all),
+                    InvAction::DropOne(index) => self.drop_one(index),
                 }
             }
             return Transition::None;
@@ -343,7 +384,7 @@ impl GameState<Wyvencraft> for InGameState {
 
         // Before the HUD, so a name can never sit on top of the hotbar or the
         // vitals.
-        self.draw_nameplates(egui_ctx);
+        self.draw_nameplates(egui_ctx, ctx.aspect);
 
         self.draw_chat(egui_ctx);
 
@@ -411,16 +452,10 @@ impl GameState<Wyvencraft> for InGameState {
     }
 
     fn scene_frame(&self, aspect: f32) -> Option<SceneFrame<'_>> {
-        Some(self.view.scene_frame(
-            &self.player,
-            &self.day_cycle,
-            aspect,
-            self.camera_distance(aspect),
-        ))
-    }
-
-    fn preview_frame(&self) -> Option<PreviewFrame<'_>> {
-        self.view.preview_frame()
+        Some(
+            self.view
+                .scene_frame(&self.player, &self.day_cycle, self.world_camera(aspect)),
+        )
     }
 }
 

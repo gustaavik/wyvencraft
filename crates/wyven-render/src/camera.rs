@@ -15,6 +15,25 @@ pub struct Camera {
     pub aspect: f32,
     pub near: f32,
     pub far: f32,
+    /// Lens shift: the projected image is translated by this much in NDC,
+    /// `(0, 0)` for an ordinary centred frame. Same convention
+    /// [`Camera::project`] reports in, so positive x moves the image right and
+    /// positive y moves it down.
+    ///
+    /// A *translation*, not a rotation or a sideways move of the camera. That
+    /// is the whole reason it exists: to put a subject off-centre — the
+    /// inventory frames the player on the left — without the two alternatives'
+    /// costs. Yawing the camera would push the subject toward the edge of a
+    /// 102°-wide frustum and visibly stretch it; trucking sideways would take
+    /// the camera off the ray the occlusion trace follows, so terrain would
+    /// start deciding where the subject sits in frame. A shift does neither:
+    /// whatever is on the optical axis stays there, un-sheared, and the camera
+    /// stays exactly where the collision code put it.
+    ///
+    /// It moves the *whole world*, sky included — it is a camera move, not a
+    /// per-object one — and it makes the frustum asymmetric, which is why
+    /// [`Camera::frustum`] applies it too.
+    pub projection_offset: Vec2,
 }
 
 impl Camera {
@@ -26,7 +45,21 @@ impl Camera {
             aspect,
             near: 0.1,
             far: 1000.0,
+            projection_offset: Vec2::ZERO,
         }
+    }
+
+    /// Fold [`Camera::projection_offset`] into a projection that is still in
+    /// **unflipped** clip space (+Y up), which is where both callers apply it.
+    ///
+    /// `perspective_rh` leaves `z_axis.x`/`z_axis.y` zero and sets `clip.w` to
+    /// `-view.z`, so adding `-offset` there contributes `offset * clip.w` to
+    /// `clip.xy` — exactly a constant shift after the perspective divide, at
+    /// every depth. The y term is negated because this runs before the Y flip
+    /// and the offset is quoted in screen convention.
+    fn shift(&self, proj: &mut Mat4) {
+        proj.z_axis.x -= self.projection_offset.x;
+        proj.z_axis.y += self.projection_offset.y;
     }
 
     pub fn set_aspect(&mut self, width: f32, height: f32) {
@@ -72,8 +105,13 @@ impl Camera {
     /// [`CompareOp::Greater`]: vulkano::pipeline::graphics::depth_stencil::CompareOp::Greater
     pub fn projection_matrix(&self) -> Mat4 {
         let mut proj = Mat4::perspective_rh(self.fov_y, self.aspect, self.far, self.near);
-        // Flip Y for Vulkan's clip space (origin top-left, +Y down).
-        proj.y_axis.y *= -1.0;
+        self.shift(&mut proj);
+        // Flip Y for Vulkan's clip space (origin top-left, +Y down). This
+        // negates the matrix's second *row*; with a lens shift that row has two
+        // non-zero entries rather than one, so both have to turn over — miss
+        // `z_axis.y` and a vertical shift comes out upside down.
+        proj.y_axis.y = -proj.y_axis.y;
+        proj.z_axis.y = -proj.z_axis.y;
         proj
     }
 
@@ -100,8 +138,13 @@ impl Camera {
     /// out as a second copy of the near one, silently uncapping the frustum and
     /// culling nothing at range. `near`, `far`, `fov_y` and `aspect` are shared
     /// with the drawing projection, so this still bounds exactly what gets drawn.
+    /// A lens shift makes this asymmetric — more world on the side the image
+    /// moves toward — and it has to be applied here too. Cull with the
+    /// unshifted frustum and geometry the shift has just brought on screen is
+    /// thrown away, which shows as pop-in along the edge the subject sits on.
     pub fn frustum(&self) -> Frustum {
-        let proj = Mat4::perspective_rh(self.fov_y, self.aspect, self.near, self.far);
+        let mut proj = Mat4::perspective_rh(self.fov_y, self.aspect, self.near, self.far);
+        self.shift(&mut proj);
         Frustum::from_view_proj(proj * self.view_matrix())
     }
 
@@ -141,6 +184,88 @@ mod tests {
         camera.position = Vec3::ZERO;
         camera.forward = -Vec3::Z;
         camera
+    }
+
+    /// The justification for choosing a lens shift over yawing the camera: the
+    /// image *translates*. Every point moves by the same amount and the
+    /// distances between them are untouched, so the subject keeps its shape.
+    #[test]
+    fn a_lens_shift_moves_the_image_without_reshaping_it() {
+        let points = [
+            Vec3::new(0.0, 0.0, -5.0),
+            Vec3::new(1.0, 0.5, -5.0),
+            Vec3::new(-0.7, 1.2, -9.0),
+        ];
+        let shift = Vec2::new(-0.4, 0.25);
+
+        let plain = camera();
+        let mut shifted = camera();
+        shifted.projection_offset = shift;
+
+        let before: Vec<Vec2> = points.iter().map(|p| plain.project(*p).unwrap()).collect();
+        let after: Vec<Vec2> = points
+            .iter()
+            .map(|p| shifted.project(*p).unwrap())
+            .collect();
+
+        // `project` reports in [0,1], so an NDC shift of `s` moves it by `s/2`.
+        let expected = shift * 0.5;
+        for (i, (a, b)) in before.iter().zip(&after).enumerate() {
+            assert!(
+                (*b - *a - expected).abs().max_element() < 1e-5,
+                "point {i} moved by {:?}, expected {expected:?}",
+                *b - *a
+            );
+        }
+        // ...and therefore the shape they describe is unchanged.
+        for i in 1..points.len() {
+            let plain_edge = before[i] - before[0];
+            let shifted_edge = after[i] - after[0];
+            assert!(
+                (plain_edge - shifted_edge).abs().max_element() < 1e-5,
+                "edge {i} was resized by the shift"
+            );
+        }
+    }
+
+    /// Sliding the image left brings into view what was off the *right* edge,
+    /// and the frustum has to follow. Without this the culler throws away
+    /// exactly the geometry the shift just revealed.
+    #[test]
+    fn a_lens_shift_widens_the_frustum_on_the_side_it_reveals() {
+        let mut shifted = camera();
+        shifted.projection_offset = Vec2::new(-0.6, 0.0);
+
+        // Far enough right to be off screen unshifted, on screen shifted: at
+        // z = -5 with a 70° vertical FOV at 16:9 the half-width is ~6.2.
+        let point = Vec3::new(8.0, 0.0, -5.0);
+        assert!(
+            camera().project(point).unwrap().x > 1.0,
+            "the test point must start off the right edge"
+        );
+        let p = shifted.project(point).unwrap();
+        assert!(
+            (0.0..=1.0).contains(&p.x),
+            "the shift should have brought it on screen, got {p:?}"
+        );
+
+        let aabb = wyven_core::Aabb::new(point - Vec3::splat(0.05), point + Vec3::splat(0.05));
+        assert!(
+            shifted.frustum().intersects_aabb(aabb),
+            "the frustum did not follow the shift"
+        );
+    }
+
+    /// The field is inert when unused, so nothing that does not want it pays
+    /// for it — including the sky pass and the nameplates, which both route
+    /// through `projection_matrix`.
+    #[test]
+    fn a_zero_shift_leaves_the_projection_untouched() {
+        let c = camera();
+        let plain = Mat4::perspective_rh(c.fov_y, c.aspect, c.far, c.near);
+        let mut expected = plain;
+        expected.y_axis.y *= -1.0;
+        assert_eq!(c.projection_matrix(), expected);
     }
 
     #[test]

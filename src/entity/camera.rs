@@ -21,10 +21,133 @@
 //! Boundaries: pure. The world arrives as an `is_solid` closure, so none of this
 //! needs a `World`, a GPU, or a session to test.
 
-use glam::Vec3;
+use glam::{Vec2, Vec3};
 
 use crate::core::BlockPos;
+use wyven_core::wrap_angle;
+use wyven_render::Camera;
 use wyven_voxel::{Target, raycast};
+
+/// Where a camera sits relative to its subject, in the subject's own frame.
+///
+/// Polar rather than Cartesian, because the only interesting thing to do with
+/// two of these is blend between them — and a straight lerp between "behind the
+/// player" and "in front of the player" passes through their head at the
+/// halfway point, while an azimuth lerp orbits around them.
+///
+/// Every gameplay perspective *and* the inventory's framing shot are values of
+/// this one type, so the placement and the clearance trace that limits it are
+/// still derived exactly once.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Shot {
+    /// Radians about +Y from the subject's facing: 0 is in front of them
+    /// (looking back at their face), PI is behind them.
+    pub azimuth: f32,
+    /// Radians above the horizon. Positive puts the camera up, looking down.
+    pub elevation: f32,
+    /// Desired distance from the eye, before the world is consulted.
+    pub distance: f32,
+    /// Height of the aim point relative to the eye. `0.0` looks straight back
+    /// at the eye, which is what every gameplay perspective wants.
+    pub aim: f32,
+    /// Horizontal lens shift, in NDC — see [`Camera::projection_offset`].
+    pub shift: f32,
+}
+
+/// The vertical extent, in blocks, the inspect shot frames around the player.
+const INSPECT_FRAME_HEIGHT: f32 = 2.4;
+/// The fraction of the screen's height that extent fills.
+const INSPECT_FILL: f32 = 0.66;
+/// Never closer than this, however wide the field of view.
+const INSPECT_MIN_DISTANCE: f32 = 2.0;
+/// Radians above the eye's horizon, so the shot looks very slightly down.
+const INSPECT_ELEVATION: f32 = 0.10;
+/// Aim point relative to the eye: the chest, so the feet stay in frame.
+const INSPECT_AIM: f32 = -0.55;
+
+impl Shot {
+    /// The horizontal forward and right vectors for a subject facing `yaw`.
+    fn basis(yaw: f32) -> (Vec3, Vec3) {
+        let (sy, cy) = yaw.sin_cos();
+        (Vec3::new(sy, 0.0, -cy), Vec3::new(cy, 0.0, sy))
+    }
+
+    /// Unit offset from the eye *toward* the camera, for a subject facing `yaw`.
+    pub fn offset(self, yaw: f32) -> Vec3 {
+        let (forward, right) = Self::basis(yaw);
+        let (sa, ca) = self.azimuth.sin_cos();
+        let (se, ce) = self.elevation.sin_cos();
+        ce * (ca * forward + sa * right) + se * Vec3::Y
+    }
+
+    /// Shortest-arc blend toward `other`. `t` outside `0..=1` is clamped.
+    pub fn blend(self, other: Shot, t: f32) -> Shot {
+        let t = t.clamp(0.0, 1.0);
+        let lerp = |a: f32, b: f32| a + (b - a) * t;
+        Shot {
+            // Around the short way, so a swing from behind to in front orbits
+            // rather than sweeping through whichever side the numbers happen
+            // to name.
+            azimuth: self.azimuth + wrap_angle(other.azimuth - self.azimuth) * t,
+            elevation: lerp(self.elevation, other.elevation),
+            distance: lerp(self.distance, other.distance),
+            aim: lerp(self.aim, other.aim),
+            shift: lerp(self.shift, other.shift),
+        }
+    }
+
+    /// Resolve to a camera. `distance` is what the world actually allowed —
+    /// [`clear_distance`] along [`Shot::offset`] with `self.distance` desired.
+    pub fn camera(
+        self,
+        eye: Vec3,
+        yaw: f32,
+        distance: f32,
+        fov_degrees: f32,
+        aspect: f32,
+    ) -> Camera {
+        let offset = self.offset(yaw);
+        let to_camera = offset * distance;
+        let mut camera = Camera::new(fov_degrees, aspect);
+        camera.position = eye + to_camera;
+        // Look back at the aim point. With `aim == 0` this is exactly
+        // `-offset` for any positive distance; the fallback covers first
+        // person, where the distance is zero and there is no vector to
+        // normalize, and a clamp that collapsed the camera onto the eye.
+        camera.forward = (Vec3::Y * self.aim - to_camera)
+            .try_normalize()
+            .unwrap_or(-offset);
+        camera.projection_offset = Vec2::new(self.shift, 0.0);
+        camera
+    }
+
+    /// The inventory's framing shot: dead-on the subject's front, slightly
+    /// raised, aimed at the chest, with the image slid so they sit at
+    /// `stage_center_x` (a fraction across the screen).
+    ///
+    /// Deliberately takes no pitch. [`crate::entity::Perspective::ThirdFront`]
+    /// inherits the player's, which would send this camera underground the
+    /// moment the inventory was opened while looking up.
+    ///
+    /// The distance is derived from the field of view rather than fixed,
+    /// because the field of view is a player setting: a constant tuned for 70°
+    /// renders a postage stamp at 110°. Fixing the *framing* instead is the
+    /// same reasoning [`Camera::near_radius`] uses.
+    pub fn inspect(fov_y: f32, stage_center_x: f32) -> Shot {
+        let distance = ((INSPECT_FRAME_HEIGHT / (2.0 * INSPECT_FILL)) / (fov_y * 0.5).tan())
+            .max(INSPECT_MIN_DISTANCE);
+        Shot {
+            azimuth: 0.0,
+            elevation: INSPECT_ELEVATION,
+            distance,
+            aim: INSPECT_AIM,
+            // NDC spans -1..1 across the screen, so a fraction of the width
+            // converts straight over — and stays correct at any aspect, which
+            // a tuned pixel offset would not.
+            shift: 2.0 * stage_center_x - 1.0,
+        }
+    }
+}
 
 /// The eight corners of a unit cube centred on the origin, scaled by the
 /// clearance to bracket the near plane. A cube rather than the near rectangle
@@ -170,5 +293,187 @@ mod tests {
     fn a_zero_direction_is_left_alone() {
         let d = clear_distance(Vec3::ZERO, Vec3::ZERO, DESIRED, CLEARANCE, empty);
         assert_eq!(d, DESIRED);
+    }
+
+    // --- Shot -------------------------------------------------------------
+
+    use crate::entity::Perspective;
+
+    /// The look direction the old `camera_placement` was written against.
+    fn look(yaw: f32, pitch: f32) -> Vec3 {
+        let (sy, cy) = yaw.sin_cos();
+        let (sp, cp) = pitch.sin_cos();
+        Vec3::new(cp * sy, sp, -cp * cy).normalize()
+    }
+
+    /// The refactor's load-bearing claim: the polar form reproduces what
+    /// `Perspective::camera_placement` used to return, exactly, everywhere.
+    /// `ThirdBack` was `-look` and `ThirdFront` was `+look`; the reconstruction
+    /// is trigonometric identity, not approximation, so this is tight.
+    #[test]
+    fn the_polar_shot_reproduces_every_perspective() {
+        for yaw_step in -6..=6 {
+            for pitch_step in -5..=5 {
+                let yaw = yaw_step as f32 * 0.5;
+                let pitch = pitch_step as f32 * 0.3;
+                let look = look(yaw, pitch);
+
+                let back = Perspective::ThirdBack.shot(pitch, DESIRED).offset(yaw);
+                assert!(
+                    (back + look).length() < 1e-5,
+                    "third-back at yaw {yaw} pitch {pitch}: {back:?} != {:?}",
+                    -look
+                );
+
+                let front = Perspective::ThirdFront.shot(pitch, DESIRED).offset(yaw);
+                assert!(
+                    (front - look).length() < 1e-5,
+                    "third-front at yaw {yaw} pitch {pitch}: {front:?} != {look:?}"
+                );
+            }
+        }
+    }
+
+    /// First person is `ThirdBack` at zero distance, which has to land the
+    /// camera exactly on the eye looking along the look direction — what the
+    /// old `None` + `unwrap_or((Vec3::ZERO, look))` pair did explicitly.
+    #[test]
+    fn first_person_puts_the_camera_on_the_eye() {
+        let eye = Vec3::new(3.0, 70.0, -2.0);
+        for pitch_step in -4..=4 {
+            let pitch = pitch_step as f32 * 0.35;
+            let yaw = 1.1;
+            let shot = Perspective::First.shot(pitch, DESIRED);
+            assert_eq!(shot.distance, 0.0);
+
+            let camera = shot.camera(eye, yaw, 0.0, 70.0, 16.0 / 9.0);
+            assert!((camera.position - eye).length() < 1e-5);
+            assert!(
+                (camera.forward - look(yaw, pitch)).length() < 1e-5,
+                "first person looks along the look direction"
+            );
+        }
+    }
+
+    /// The inspect shot stands in front of the player, looking back at them.
+    #[test]
+    fn the_inspect_shot_looks_at_the_players_face() {
+        let eye = Vec3::new(0.0, 1.62, 0.0);
+        for yaw_step in -4..=4 {
+            let yaw = yaw_step as f32 * 0.7;
+            let facing = look(yaw, 0.0);
+            let shot = Shot::inspect(70f32.to_radians(), 0.17);
+            let camera = shot.camera(eye, yaw, shot.distance, 70.0, 16.0 / 9.0);
+
+            assert!(
+                (camera.position - eye).dot(facing) > 0.0,
+                "the camera must stand where the player is facing"
+            );
+            assert!(camera.forward.dot(facing) < 0.0, "and look back at them");
+        }
+    }
+
+    /// It must ignore the player's pitch. `ThirdFront` inherits it, so opening
+    /// the inventory while looking up would otherwise bury the camera.
+    #[test]
+    fn the_inspect_shot_ignores_where_the_player_is_looking() {
+        let level = Shot::inspect(70f32.to_radians(), 0.17);
+        // Nothing in `inspect`'s signature can carry a pitch, which is the
+        // point — assert the resulting elevation is the authored one whatever
+        // the player is doing.
+        assert_eq!(level.elevation, INSPECT_ELEVATION);
+        assert!(level.elevation.abs() < 0.5, "and is close to level");
+    }
+
+    /// The framing, not the distance, is what is held constant: a player who
+    /// widens their field of view must still see a model of the same size.
+    #[test]
+    fn the_inspect_distance_frames_the_model_the_same_at_any_field_of_view() {
+        let subtended = |fov_degrees: f32| {
+            let fov = fov_degrees.to_radians();
+            let shot = Shot::inspect(fov, 0.17);
+            // Half-height of the view at the subject, as a fraction of the
+            // framed extent.
+            shot.distance * (fov * 0.5).tan()
+        };
+        let at_60 = subtended(60.0);
+        let at_70 = subtended(70.0);
+        assert!(
+            (at_60 - at_70).abs() < 1e-3,
+            "framing drifted: {at_60} vs {at_70}"
+        );
+        // A wide field of view would ask the camera closer than is comfortable,
+        // so the floor takes over — a deliberate trade of framing for distance,
+        // and the reason this stops being a pure inverse-tangent above ~80°.
+        for wide in [90.0, 110.0] {
+            assert_eq!(
+                Shot::inspect(f32::to_radians(wide), 0.17).distance,
+                INSPECT_MIN_DISTANCE,
+                "at {wide}° the minimum distance should bind"
+            );
+        }
+    }
+
+    /// Why the blend is polar. A Cartesian lerp from "behind the player" to
+    /// "in front of the player" passes through the player at the halfway
+    /// point; an azimuth lerp orbits around them at a steady radius.
+    #[test]
+    fn blending_from_behind_orbits_rather_than_passing_through_the_player() {
+        let yaw = 0.6;
+        let back = Perspective::ThirdBack.shot(0.0, DESIRED);
+        let inspect = Shot::inspect(70f32.to_radians(), 0.17);
+        let floor = back.distance.min(inspect.distance) * 0.99;
+
+        for step in 0..=50 {
+            let t = step as f32 / 50.0;
+            let shot = back.blend(inspect, t);
+            let radius = (shot.offset(yaw) * shot.distance).length();
+            assert!(
+                radius >= floor,
+                "at t={t} the camera closed to {radius}, inside the {floor} floor"
+            );
+        }
+    }
+
+    /// The lens shift is what puts the model on the left, and it is derived
+    /// from a screen fraction so it holds at any aspect ratio.
+    #[test]
+    fn the_inspect_shot_slides_the_subject_off_centre() {
+        let eye = Vec3::new(0.0, 1.62, 0.0);
+        let chest = eye + Vec3::Y * INSPECT_AIM;
+        for aspect in [16.0 / 9.0, 4.0 / 3.0, 21.0 / 9.0] {
+            let shot = Shot::inspect(70f32.to_radians(), 0.17);
+            let camera = shot.camera(eye, 0.0, shot.distance, 70.0, aspect);
+            let projected = camera.project(chest).expect("the chest is in front");
+            assert!(
+                (0.10..0.28).contains(&projected.x),
+                "at aspect {aspect} the model landed at {}, not in the left third",
+                projected.x
+            );
+        }
+    }
+
+    /// A wall in front of the player pulls the inspect camera in, exactly as it
+    /// does the third-person one — the shift is in the projection, so the
+    /// camera never leaves the ray this traces along.
+    #[test]
+    fn a_wall_pulls_the_inspect_camera_in() {
+        let eye = Vec3::new(0.5, 1.5, 0.5);
+        let shot = Shot::inspect(70f32.to_radians(), 0.17);
+        // Facing -Z, so the camera swings out to -Z; put a wall two cells that way.
+        let wall = BlockPos::new(0, 1, -2);
+        let d = clear_distance(
+            eye,
+            shot.offset(0.0),
+            shot.distance,
+            CLEARANCE,
+            solid(&[wall]),
+        );
+        assert!(
+            d < shot.distance,
+            "the wall should have pulled the camera in from {}",
+            shot.distance
+        );
+        assert!(d > 0.0, "but not all the way onto the eye");
     }
 }

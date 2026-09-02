@@ -127,6 +127,15 @@ impl InGameState {
         let Some(stack) = self.inventory.take_one_selected() else {
             return;
         };
+        self.throw(stack);
+    }
+
+    /// Throw `stack` out in front of the player.
+    ///
+    /// The one place that spells this, so every route an item takes out of the
+    /// inventory — the drop key, and a held stack that no longer fits when the
+    /// panel closes — lands the same way.
+    pub(super) fn throw(&mut self, stack: ItemStack) {
         self.drops.push(DroppedItem::thrown(
             stack,
             self.player.eye_position(),

@@ -18,7 +18,7 @@ use wyven_render::TileRgba;
 /// sits in the top-right corner, so the band starts below both.
 const BAND_ROW: u32 = 4;
 
-/// The six armor pieces, in [`inventory::ArmorSlot`](crate::inventory::ArmorSlot)
+/// The four armor pieces, in [`inventory::ArmorSlot`](crate::inventory::ArmorSlot)
 /// order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArmorKind {
@@ -26,17 +26,13 @@ pub enum ArmorKind {
     Chestplate,
     Leggings,
     Boots,
-    Glove,
-    Cape,
 }
 
-pub const ALL: [ArmorKind; 6] = [
+pub const ALL: [ArmorKind; 4] = [
     ArmorKind::Helmet,
     ArmorKind::Chestplate,
     ArmorKind::Leggings,
     ArmorKind::Boots,
-    ArmorKind::Glove,
-    ArmorKind::Cape,
 ];
 
 /// How many atlas rows the whole armor band takes, so the mob band below it
@@ -64,8 +60,6 @@ impl ArmorKind {
             ArmorKind::Chestplate => "chestplate",
             ArmorKind::Leggings => "leggings",
             ArmorKind::Boots => "boots",
-            ArmorKind::Glove => "glove",
-            ArmorKind::Cape => "cape",
         }
     }
 }

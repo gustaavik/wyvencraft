@@ -98,13 +98,6 @@ pub const LEFT_PANTS: SkinPart = SkinPart {
 
 const PARTS: [SkinPart; 6] = [HEAD, BODY, RIGHT_ARM, LEFT_ARM, RIGHT_LEG, LEFT_LEG];
 
-/// The cape: a thin, tall box hung off the shoulders. Not part of the standard
-/// skin unwrap — it's used only by the cape armor sheet and its own model box.
-pub const CAPE: SkinPart = SkinPart {
-    uv: [0, 0],
-    size: [10, 16, 1],
-};
-
 impl SkinPart {
     /// A part unwrap at `uv` for a box of `size` pixels (width, height,
     /// depth). Lets other sheets (mob skins) define their own layouts.
