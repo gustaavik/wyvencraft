@@ -17,7 +17,7 @@
 //! matters because the animation starts on a frame where egui has placed
 //! nothing yet.
 
-use egui::{Align2, Color32, Context, FontId, Rect, Sense, pos2, vec2};
+use egui::{Align2, Color32, Context, FontId, Rect, pos2, vec2};
 
 use crate::content::ItemIcon;
 use crate::core::GameMode;
@@ -71,29 +71,21 @@ pub enum InvAction {
     DropOne(usize),
 }
 
-/// What happened to a slot this frame.
-#[derive(Default, Clone, Copy)]
-struct SlotHit {
-    primary: bool,
-    secondary: bool,
-    /// A press that began on this slot and was released beyond the panel.
-    dragged_out: bool,
-}
-
-impl SlotHit {
-    /// The action this hit means, most specific first: leaving the panel beats
-    /// a split, which beats an ordinary move.
-    fn action(self, index: usize) -> Option<InvAction> {
-        if self.dragged_out {
-            Some(InvAction::DropSlot(index))
-        } else if self.secondary {
-            Some(InvAction::Split(index))
-        } else if self.primary {
-            Some(InvAction::Slot(index))
-        } else {
-            None
-        }
-    }
+/// What a press landed on, remembered until the button comes back up.
+///
+/// Stored in egui's temp memory rather than a `Response`, because a slot has to
+/// act on press-and-release over itself *however long it took and however much
+/// the mouse slid in between*. egui only calls that a click within 6 points and
+/// 0.8 seconds ([`egui::InputOptions`]); past either it is a drag and the click
+/// is dropped on the floor. For a button that is the right call. For an
+/// inventory slot it is the single most confusing thing the panel can do —
+/// the click visibly lands on the slot and nothing happens.
+#[derive(Clone, Copy, PartialEq)]
+enum PressTarget {
+    Slot(usize),
+    Palette(ItemId),
+    /// Pressed on the world beyond the panel.
+    Outside,
 }
 
 /// Where the panel rests and how much screen it leaves for the player model.
@@ -246,7 +238,7 @@ pub fn draw_inventory(
     // unfold, so the reveal reads as one motion rather than a wipe.
     let body = tint(smoothstep(0.10, 0.65, t));
 
-    let mut action = egui::Area::new(egui::Id::new("inventory"))
+    egui::Area::new(egui::Id::new("inventory"))
         .fixed_pos(clip.min)
         .order(egui::Order::Middle)
         .show(ctx, |ui| {
@@ -266,19 +258,29 @@ pub fn draw_inventory(
                 );
             }
 
-            let armor = l.armor.translate(shift);
-            let grid = l.grid.translate(shift);
-            let mut action = view
-                .armor_column(ui, &painter, armor, panel, body, interactive)
-                .or(view.grid(ui, &painter, grid, panel, body, interactive));
-
+            view.armor_column(&painter, l.armor.translate(shift), body);
+            view.grid(&painter, l.grid.translate(shift), body);
             if mode.is_creative() {
-                let palette = l.palette.translate(shift);
-                action = action.or(view.palette(ui, &painter, palette, body, interactive));
+                view.palette(&painter, l.palette.translate(shift), body);
             }
-            action
+        });
+
+    // Interaction is resolved from the raw pointer rather than from egui
+    // `Response`s — see `gesture` — so it is decided here rather than inside
+    // the painting closure.
+    let mut action = interactive
+        .then(|| {
+            gesture(
+                ctx,
+                &view,
+                &l,
+                shift,
+                panel,
+                held.is_some(),
+                mode.is_creative(),
+            )
         })
-        .inner;
+        .flatten();
 
     // The drop key acts on whatever the player is dealing with: the stack on
     // the cursor if they are carrying one, otherwise the slot under it. One
@@ -289,24 +291,6 @@ pub fn draw_inventory(
             (None, Some(cursor)) => slot_under(&l, shift, cursor).map(InvAction::DropOne),
             (None, None) => None,
         };
-    }
-
-    // A stack on the cursor, clicked away from the panel: throw it. This is the
-    // other half of dragging one out — the click-to-move model has no "release"
-    // of its own, so putting a stack down outside the panel is what parts with
-    // it. Right click parts with a single item, matching what it does in a slot.
-    if action.is_none()
-        && interactive
-        && held.is_some()
-        && ctx.pointer_latest_pos().is_some_and(|p| !panel.contains(p))
-    {
-        let (primary, secondary) =
-            ctx.input(|i| (i.pointer.primary_pressed(), i.pointer.secondary_pressed()));
-        if primary {
-            action = Some(InvAction::DropHeld { all: true });
-        } else if secondary {
-            action = Some(InvAction::DropHeld { all: false });
-        }
     }
 
     // The held stack and the tooltip ride above the panel on their own layer.
@@ -401,16 +385,7 @@ impl View<'_> {
 
     /// The armor column: one slot per piece, empties showing a faded ghost of
     /// what fits.
-    fn armor_column(
-        &self,
-        ui: &mut egui::Ui,
-        painter: &egui::Painter,
-        rect: Rect,
-        panel: Rect,
-        tint: Color32,
-        interactive: bool,
-    ) -> Option<InvAction> {
-        let mut action = None;
+    fn armor_column(&self, painter: &egui::Painter, rect: Rect, tint: Color32) {
         for (index, cell) in armor_cells(rect) {
             let piece = ArmorSlot::ALL[index - ARMOR_START];
             slot::paint_slot(
@@ -422,11 +397,7 @@ impl View<'_> {
                 tint,
                 self.tex,
             );
-            if interactive {
-                action = action.or(interact(ui, cell, panel).action(index));
-            }
         }
-        action
     }
 
     /// The whole 9x4 grid, one contiguous block. The bottom row is the hotbar,
@@ -437,16 +408,7 @@ impl View<'_> {
     /// where the fade has not started and the HUD's own copy is already hidden.
     /// Fading it with the rest would blink the hotbar out for the first frames
     /// of every open.
-    fn grid(
-        &self,
-        ui: &mut egui::Ui,
-        painter: &egui::Painter,
-        rect: Rect,
-        panel: Rect,
-        tint: Color32,
-        interactive: bool,
-    ) -> Option<InvAction> {
-        let mut action = None;
+    fn grid(&self, painter: &egui::Painter, rect: Rect, tint: Color32) {
         for (index, cell) in grid_cells(rect) {
             let is_hotbar = index < HOTBAR_SIZE;
             let selected = is_hotbar && index == self.inventory.selected_index();
@@ -459,25 +421,13 @@ impl View<'_> {
                 if is_hotbar { Color32::WHITE } else { tint },
                 self.tex,
             );
-            if interactive {
-                action = action.or(interact(ui, cell, panel).action(index));
-            }
         }
-        action
     }
 
     /// Creative palette: items as click-to-grab icons in the strip below the
     /// grid. The only in-UI way to get items in creative.
-    fn palette(
-        &self,
-        ui: &mut egui::Ui,
-        painter: &egui::Painter,
-        rect: Rect,
-        tint: Color32,
-        interactive: bool,
-    ) -> Option<InvAction> {
+    fn palette(&self, painter: &egui::Painter, rect: Rect, tint: Color32) {
         ninepatch::draw_nine(painter, rect, ninepatch::GRID, tint, self.tex.gui);
-        let mut action = None;
         for (id, cell) in self.palette_cells(rect) {
             slot::paint_slot(
                 painter,
@@ -492,11 +442,7 @@ impl View<'_> {
                 tint,
                 self.tex,
             );
-            if interactive && ui.allocate_rect(cell, Sense::click()).clicked() {
-                action = action.or(Some(InvAction::Pick(id)));
-            }
         }
-        action
     }
 
     /// Palette cells, wrapped left to right and clipped to the strip.
@@ -556,26 +502,90 @@ fn slot_under(l: &InventoryLayout, shift: egui::Vec2, cursor: egui::Pos2) -> Opt
         .map(|(index, _)| index)
 }
 
-/// What the player did to `cell` this frame.
+/// Resolve this frame's pointer into an action, by hand.
 ///
-/// Senses drags as well as clicks so a stack can be pulled out of the panel and
-/// thrown. A press that turns into a drag does not also report `clicked`, so
-/// the two gestures never both fire for one press.
-fn interact(ui: &mut egui::Ui, cell: Rect, panel: Rect) -> SlotHit {
-    let response = ui.allocate_rect(cell, Sense::click_and_drag());
-    let released_outside = response.drag_stopped()
-        && ui
-            .ctx()
-            .pointer_latest_pos()
-            .is_some_and(|p| !panel.contains(p));
-    SlotHit {
-        primary: response.clicked(),
-        secondary: response.secondary_clicked(),
-        dragged_out: released_outside,
+/// Press remembers what it landed on; release decides. Anything between —
+/// dawdling, or sliding the mouse a few pixels — is ignored, which is what
+/// makes a slot feel like a slot. See [`PressTarget`].
+fn gesture(
+    ctx: &Context,
+    view: &View<'_>,
+    l: &InventoryLayout,
+    shift: egui::Vec2,
+    panel: Rect,
+    holding: bool,
+    creative: bool,
+) -> Option<InvAction> {
+    let id = egui::Id::new("inventory_press");
+    let (pressed, released, cursor) = ctx.input(|i| {
+        (
+            [i.pointer.primary_pressed(), i.pointer.secondary_pressed()],
+            [i.pointer.primary_released(), i.pointer.secondary_released()],
+            i.pointer.latest_pos(),
+        )
+    });
+    let cursor = cursor?;
+
+    let target_at = |p: egui::Pos2| {
+        if let Some(index) = slot_under(l, shift, p) {
+            PressTarget::Slot(index)
+        } else if creative
+            && let Some((item, _)) = view
+                .palette_cells(l.palette.translate(shift))
+                .into_iter()
+                .find(|(_, cell)| cell.contains(p))
+        {
+            PressTarget::Palette(item)
+        } else if panel.contains(p) {
+            // The panel's chrome: swallowed, so a miss between slots does not
+            // read as clicking the world behind.
+            PressTarget::Slot(usize::MAX)
+        } else {
+            PressTarget::Outside
+        }
+    };
+
+    if pressed[0] || pressed[1] {
+        ctx.data_mut(|d| d.insert_temp(id, target_at(cursor)));
+        return None;
+    }
+    if !(released[0] || released[1]) {
+        return None;
+    }
+    let from: PressTarget = ctx.data_mut(|d| {
+        let target = d.get_temp::<PressTarget>(id);
+        d.remove::<PressTarget>(id);
+        target
+    })?;
+    let secondary = released[1];
+
+    match from {
+        PressTarget::Slot(usize::MAX) => None,
+        PressTarget::Slot(index) => {
+            if !panel.contains(cursor) {
+                // Carried clear of the panel: throw it.
+                Some(if secondary {
+                    InvAction::DropOne(index)
+                } else {
+                    InvAction::DropSlot(index)
+                })
+            } else if secondary {
+                Some(InvAction::Split(index))
+            } else {
+                Some(InvAction::Slot(index))
+            }
+        }
+        // The palette is an infinite source: nothing to split, nothing to throw.
+        PressTarget::Palette(item) => {
+            (!secondary && panel.contains(cursor)).then_some(InvAction::Pick(item))
+        }
+        PressTarget::Outside => {
+            (holding && !panel.contains(cursor)).then_some(InvAction::DropHeld { all: !secondary })
+        }
     }
 }
 
-/// The armor column's cells, paired with the slot index each shows.
+/// The armor column's cells, paired with the slot index each shows./// The armor column's cells, paired with the slot index each shows.
 fn armor_cells(rect: Rect) -> impl Iterator<Item = (usize, Rect)> {
     (0..ARMOR_SIZE).map(move |i| {
         (
@@ -758,6 +768,199 @@ mod tests {
             creative.panel.height() > survival.panel.height(),
             "the strip has to make the panel taller"
         );
+    }
+
+    // --- Interaction ------------------------------------------------------
+
+    use crate::inventory::ItemStack;
+
+    struct Harness {
+        ctx: Context,
+        inventory: Inventory,
+        items: ItemRegistry,
+        icons: Vec<ItemIcon>,
+        names: Vec<String>,
+        screen: Rect,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            let blocks = crate::world::block::BlockRegistry::with_builtins();
+            let items = ItemRegistry::from_blocks(&blocks);
+            let icons = vec![ItemIcon::Flat(0); items.len()];
+            let names = vec![String::new(); items.len()];
+            Self {
+                ctx: Context::default(),
+                inventory: Inventory::new(),
+                items,
+                icons,
+                names,
+                screen: screen(1920.0, 1080.0),
+            }
+        }
+
+        fn tex(&self) -> UiTextures {
+            UiTextures {
+                atlas: egui::TextureId::Managed(0),
+                model_icons: egui::TextureId::Managed(0),
+                model_count: 1,
+                gui: egui::TextureId::Managed(0),
+            }
+        }
+
+        /// Run one frame carrying `events`, and report the action it produced.
+        fn frame(&self, events: Vec<egui::Event>, held: Option<ItemStack>) -> Option<InvAction> {
+            let input = egui::RawInput {
+                screen_rect: Some(self.screen),
+                events,
+                ..Default::default()
+            };
+            let mut action = None;
+            let _ = self.ctx.clone().run(input, |ctx| {
+                action = draw_inventory(
+                    ctx,
+                    &self.inventory,
+                    &self.items,
+                    &self.icons,
+                    &self.names,
+                    held,
+                    GameMode::Survival,
+                    1.0,
+                    false,
+                    self.tex(),
+                );
+            });
+            action
+        }
+
+        /// The centre of a storage slot, in screen coordinates.
+        fn slot_centre(&self, index: usize) -> egui::Pos2 {
+            let l = layout(self.screen, false);
+            grid_cells(l.grid)
+                .chain(armor_cells(l.armor))
+                .find(|(i, _)| *i == index)
+                .expect("slot is drawn")
+                .1
+                .center()
+        }
+    }
+
+    fn press(pos: egui::Pos2, primary: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: if primary {
+                egui::PointerButton::Primary
+            } else {
+                egui::PointerButton::Secondary
+            },
+            pressed: true,
+            modifiers: Default::default(),
+        }
+    }
+
+    fn release(pos: egui::Pos2, primary: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: if primary {
+                egui::PointerButton::Primary
+            } else {
+                egui::PointerButton::Secondary
+            },
+            pressed: false,
+            modifiers: Default::default(),
+        }
+    }
+
+    /// The bug this exists for: egui only reports a click when press and
+    /// release are within 6 points and 0.8 seconds of each other. A slot has to
+    /// act on a press-and-release over itself however far the mouse slid in
+    /// between — anything else reads as the panel ignoring you at random.
+    #[test]
+    fn a_slot_still_acts_when_the_mouse_slides_during_the_click() {
+        let h = Harness::new();
+        let centre = h.slot_centre(12);
+        // Well past egui's 6-point click threshold, but still on the slot.
+        let drifted = centre + vec2(9.0, 5.0);
+
+        assert!(h.frame(vec![press(centre, true)], None).is_none());
+        assert!(
+            h.frame(vec![egui::Event::PointerMoved(drifted)], None)
+                .is_none()
+        );
+        let action = h.frame(vec![release(drifted, true)], None);
+        assert!(
+            matches!(action, Some(InvAction::Slot(12))),
+            "a drifted click on slot 12 was dropped"
+        );
+    }
+
+    /// The same for the split, which has no drag fallback of its own.
+    #[test]
+    fn a_drifted_right_click_still_splits() {
+        let h = Harness::new();
+        let centre = h.slot_centre(12);
+        let drifted = centre + vec2(-8.0, 7.0);
+
+        h.frame(vec![press(centre, false)], None);
+        h.frame(vec![egui::Event::PointerMoved(drifted)], None);
+        assert!(
+            matches!(
+                h.frame(vec![release(drifted, false)], None),
+                Some(InvAction::Split(12))
+            ),
+            "a drifted right click was dropped"
+        );
+    }
+
+    /// Press decides *what*, release decides *where*: carried clear of the
+    /// panel, the same gesture throws instead of picking up.
+    #[test]
+    fn a_press_carried_out_of_the_panel_throws_the_stack() {
+        let h = Harness::new();
+        let outside = pos2(80.0, 540.0);
+        assert!(
+            !layout(h.screen, false).panel.contains(outside),
+            "test setup: that point must be off the panel"
+        );
+
+        h.frame(vec![press(h.slot_centre(12), true)], None);
+        h.frame(vec![egui::Event::PointerMoved(outside)], None);
+        assert!(matches!(
+            h.frame(vec![release(outside, true)], None),
+            Some(InvAction::DropSlot(12))
+        ));
+    }
+
+    /// ...and a press that begins outside only throws what is on the cursor,
+    /// so clicking the world beside the panel with an empty hand does nothing.
+    #[test]
+    fn a_press_outside_the_panel_throws_only_what_is_held() {
+        let h = Harness::new();
+        let outside = pos2(80.0, 540.0);
+        let stone = h.items.find("stone").expect("stone");
+
+        h.frame(vec![press(outside, true)], None);
+        assert!(h.frame(vec![release(outside, true)], None).is_none());
+
+        let carrying = Some(ItemStack::new(stone, 4));
+        h.frame(vec![press(outside, true)], carrying);
+        assert!(matches!(
+            h.frame(vec![release(outside, true)], carrying),
+            Some(InvAction::DropHeld { all: true })
+        ));
+    }
+
+    /// A press that lands on the panel's chrome rather than a slot is
+    /// swallowed, so a miss between cells cannot read as a click on the world.
+    #[test]
+    fn a_press_on_the_panels_chrome_does_nothing() {
+        let h = Harness::new();
+        let l = layout(h.screen, false);
+        let chrome = l.panel.left_top() + vec2(3.0, 3.0);
+        assert!(l.panel.contains(chrome) && slot_under(&l, vec2(0.0, 0.0), chrome).is_none());
+
+        h.frame(vec![press(chrome, true)], None);
+        assert!(h.frame(vec![release(chrome, true)], None).is_none());
     }
 
     /// The camera's framing and the panel's position are two halves of one
