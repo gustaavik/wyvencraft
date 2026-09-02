@@ -269,6 +269,7 @@ pub(crate) mod fixture {
             reach: 5.0,
             air_control: 6.0,
             min_jump_height: 1.2,
+            stop_rate: 18.0,
         }
     }
 

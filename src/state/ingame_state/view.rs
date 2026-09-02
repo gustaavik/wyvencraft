@@ -82,6 +82,19 @@ impl ModelContent<'_> {
     }
 }
 
+/// The player's rigged model as the entity data describes it, with its bones
+/// and clips resolved once.
+///
+/// Held by id rather than by reference because the registry lives behind an
+/// `Arc` on the state, and the view is handed a fresh borrow of it each frame.
+struct PlayerRig {
+    model: ModelId,
+    scale: f32,
+    /// Atlas tile origin of the 64×64 sheet the model samples.
+    sheet: [u32; 2],
+    clips: HumanoidRig,
+}
+
 /// All GPU state for the in-game scene.
 pub(super) struct SceneCache {
     /// Opaque GPU meshes for loaded chunks, keyed by chunk position.
@@ -384,12 +397,6 @@ impl SceneCache {
         self.held_atlas = None;
     }
 
-    fn clear_preview_meshes(&mut self) {
-        self.preview_mesh = None;
-        self.preview_held_mesh = None;
-        self.preview_held_atlas = None;
-    }
-
     /// The player as something drawable, or `None` before the rig is bound.
     fn character<'a>(&'a self, models: &'a ModelRegistry) -> Option<Character<'a>> {
         let rig = self.player_rig.as_ref()?;
@@ -421,7 +428,6 @@ impl SceneCache {
         ctx: &Arc<RenderContext>,
         player: &Player,
         inventory: &Inventory,
-        items: &ItemRegistry,
         inspect: f32,
         content: ModelContent<'_>,
     ) {
@@ -436,12 +442,6 @@ impl SceneCache {
         self.hand_mesh = None;
         self.hand_held_mesh = None;
         self.hand_held_atlas = None;
-        // Ease the head level as the camera comes round to the front, so the
-        // model meets the viewer's eye rather than holding whatever pitch the
-        // player happened to be looking at when they pressed E.
-        let pose = self
-            .player_anim
-            .pose(player.pitch * (1.0 - inspect.clamp(0.0, 1.0)));
 
         // The body is drawn at the torso yaw, which lags the look yaw the camera
         // uses; the head bone's own turn is what puts the face back where the
@@ -1249,7 +1249,6 @@ impl super::InGameState {
             ctx,
             &self.player,
             &self.inventory,
-            &self.content.items,
             self.inventory_anim.progress(),
             content,
         );
