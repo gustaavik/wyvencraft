@@ -7,6 +7,7 @@
 //! the composer shows the whole scrollback.
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
 
 use crate::net::ChatKind;
 
@@ -21,6 +22,10 @@ pub const FADE_SECONDS: f32 = 10.0;
 pub struct ChatLine {
     pub kind: ChatKind,
     pub text: String,
+    /// A local file this line points at, drawn after `text` as a clickable
+    /// name. Purely a *view* concern — a link never travels on the wire, because
+    /// a path on one machine means nothing on another.
+    pub link: Option<PathBuf>,
     /// Seconds since this line arrived.
     pub age: f32,
 }
@@ -33,12 +38,25 @@ pub struct ChatLog {
 
 impl ChatLog {
     pub fn push(&mut self, kind: ChatKind, text: impl Into<String>) {
+        self.push_line(kind, text, None);
+    }
+
+    /// Push a line ending in a clickable path — a saved screenshot, say.
+    ///
+    /// `text` is the whole of the prose; the file's *name* is drawn from `link`,
+    /// so the two cannot disagree about which file the line is offering.
+    pub fn push_link(&mut self, kind: ChatKind, text: impl Into<String>, link: PathBuf) {
+        self.push_line(kind, text, Some(link));
+    }
+
+    fn push_line(&mut self, kind: ChatKind, text: impl Into<String>, link: Option<PathBuf>) {
         if self.lines.len() == MAX_LINES {
             self.lines.pop_front();
         }
         self.lines.push_back(ChatLine {
             kind,
             text: text.into(),
+            link,
             age: 0.0,
         });
     }
@@ -103,6 +121,26 @@ mod tests {
         assert_eq!(recent, ["new"], "only the fresh line is on the HUD");
         let all: Vec<&str> = log.lines().map(|l| l.text.as_str()).collect();
         assert_eq!(all, ["old", "new"], "both survive in the scrollback");
+    }
+
+    /// The name shown for a link comes from the path, so a line cannot offer
+    /// one file while naming another.
+    #[test]
+    fn a_linked_line_carries_the_path_and_ordinary_lines_do_not() {
+        let mut log = ChatLog::default();
+        log.push(ChatKind::System, "plain");
+        log.push_link(
+            ChatKind::System,
+            "Saved screenshot as ",
+            PathBuf::from("/tmp/shots/2026-09-06_12-00-00.png"),
+        );
+
+        let lines: Vec<_> = log.lines().collect();
+        assert_eq!(lines[0].link, None);
+        assert_eq!(
+            lines[1].link.as_deref().and_then(|p| p.file_name()),
+            Some("2026-09-06_12-00-00.png".as_ref())
+        );
     }
 
     /// Age is capped so a session left running for hours can't degrade f32

@@ -87,6 +87,8 @@ pub struct Keybinds {
     pub toggle_perspective: KeyCode,
     pub toggle_debug: KeyCode,
     pub toggle_gamemode: KeyCode,
+    /// Save a PNG of the current frame. Read on every screen, menus included.
+    pub screenshot: KeyCode,
     pub pause: KeyCode,
     /// Direct hotbar slot selection; index i selects slot i.
     pub hotbar: [KeyCode; 9],
@@ -109,6 +111,7 @@ impl Default for Keybinds {
             toggle_perspective: KeyCode::F5,
             toggle_debug: KeyCode::F3,
             toggle_gamemode: KeyCode::F4,
+            screenshot: KeyCode::F2,
             pause: KeyCode::Escape,
             hotbar: [
                 KeyCode::Digit1,

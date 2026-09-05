@@ -30,6 +30,7 @@ use crate::entity::DroppedItem;
 use crate::inventory::{ItemId, ItemRegistry, ItemStack};
 use crate::net::{Channel, ClientMessage, NetItemStack, NetVec3, PlayerId, ServerMessage};
 use crate::ui::chat::ChatAction;
+use std::path::Path;
 
 impl InGameState {
     // --- Local input ---------------------------------------------------------------
@@ -40,9 +41,15 @@ impl InGameState {
         // mutably by the text widget.
         let ChatState { log, composer } = &mut self.chat;
         let focus = composer.take_focus_request();
-        let action =
+        let outcome =
             crate::ui::chat::draw_chat(egui_ctx, log, composer.open, &mut composer.draft, focus);
-        let submitted = match action {
+        // Handled before the input action, which on this same frame is the
+        // `Cancel` that clicking away from the composer produced. Both are real:
+        // the file opens *and* the composer closes.
+        if let Some(path) = outcome.open {
+            crate::desktop::show_file(&path);
+        }
+        let submitted = match outcome.action {
             Some(ChatAction::Submit) => composer.submit(),
             Some(ChatAction::Cancel) => {
                 composer.close();
@@ -61,6 +68,18 @@ impl InGameState {
         if let Some(text) = submitted {
             self.submit_chat(text);
         }
+    }
+
+    /// Tell the player, and only the player, where a screenshot went.
+    ///
+    /// Pushed straight onto the local log rather than sent anywhere:
+    /// [`ChatState`] is per-peer and never synced, so this is invisible to
+    /// everyone else on the server by construction — and it would be meaningless
+    /// to them anyway, since the path names a file on this machine.
+    pub(super) fn note_screenshot(&mut self, path: &Path) {
+        self.chat
+            .log
+            .push_link(ChatKind::System, "Saved screenshot as ", path.to_path_buf());
     }
 
     /// Handle a line the local player submitted on the chat bar.

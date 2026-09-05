@@ -85,6 +85,7 @@ pub mod chat;
 pub mod config;
 pub mod content;
 pub mod core;
+pub mod desktop;
 pub mod entity;
 pub mod inventory;
 pub mod net;

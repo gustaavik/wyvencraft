@@ -31,8 +31,8 @@ cargo test -p wyven-voxel # one engine crate, no GPU and no game content
 as well as the workspace root, so `assets/` stays CWD-relative exactly as
 before.
 
-Runtime state — `saves/`, `profile.toml`, `ops.toml`, `authkeys.toml`,
-`servers.toml` — does not. It lives in the OS application-data directory (`~/Library/Application
+Runtime state — `saves/`, `screenshots/`, `profile.toml`, `ops.toml`,
+`authkeys.toml`, `servers.toml` — does not. It lives in the OS application-data directory (`~/Library/Application
 Support/Wyvencraft`, `%APPDATA%\Wyvencraft`, `~/.local/share/Wyvencraft`),
 resolved by `src/paths.rs`, so a launcher can replace the install directory on
 every update without taking anyone's worlds with it. `WYVEN_DATA_DIR` overrides
@@ -55,6 +55,9 @@ Run with logging: `RUST_LOG=info,wyvencraft=debug cargo run`.
   verify with).
 - `WYVEN_AUTH_URL=...` → the auth server (default `http://127.0.0.1:8080`). Bring
   one up from the sibling `wcauthserver` repo with `make up`.
+- `WYVEN_SCREENSHOT_AT=8` → save one screenshot after that many seconds of run
+  time, with no keypress. This is what makes a visual change checkable from an
+  automated run: boot in, let chunks stream, then read the PNG it leaves behind.
 - `WYVEN_DEBUG_SPAWN=cow,zombie,...` → spawn the named mobs next to the player at
   boot (singleplayer/host), without waiting on the spawner. `WYVEN_DEBUG_SPAWN="vine
   sword"` places the file-loaded model prop (it has no `spawning.toml` entry, so
@@ -141,6 +144,7 @@ inventory ← world             item/stack/inventory data model (no rendering)
 entity    ← inventory, model  player, swept-AABB physics, rigged + box models, drops, mobs
 content   ← all of it         GameContent: registries loaded from assets/*.toml
 chat      ← net               message log, commands (one per file), ops.toml authorization
+desktop   ← nothing           handing a file to the OS: reveal it, open it
 save      ← world, entity     world/player persistence (saves/ dir)
 ui        ← inventory, egui   HUD + inventory egui views
 net       ← wyven-net         the wire protocol, who may join, the saved server list and how a server is asked what it is
@@ -298,6 +302,8 @@ those systems are testable without a Vulkan device.
 | A dropped item's shape  | `GameContent::item_shape` decides, off the *icon* so the world and the inventory can never disagree: `ItemShape::Cube` for a block item (a miniature of the block, `wyven_voxel::push_item_cube`), `ItemShape::Sprite` for anything with only a flat icon — the icon itself, one texel thick, with a rim traced from its alpha (`wyven_voxel::meshing::sprite`). The traced silhouette is cached per atlas tile in `SceneCache::item_sprites`. An item with `[item.model]` is drawn as that model and reaches neither |
 | A dropped item's size   | `scale` on `[entity.visual] kind = "item_cube"` in `assets/entities.toml` — how much larger a drop is *drawn* than the `[entity.physics] width`/`height` it collides with. `DroppedItem::render_size` applies it and `render_center` lifts by the difference, so a bigger drop still rests on the ground instead of sinking into it |
 | 3D item icons           | `wyven_render::icons` (cell layout, framing transform, ortho camera) + `Renderer::draw_icons`; the sheet is rendered **once** at startup by `state::shared::build_icon_sheet`, one cell per `ModelId`. Tune presentation with `ICON_YAW`/`ICON_PITCH`/`ICON_ROLL`/`FILL` in `wyven_render::icons` — but a model declaring `display.gui` poses itself instead, through `icons::frame_authored`, and is then *not* auto-fitted to the cell. The cell index **is** the `ModelId`: `draw_icons` takes `&[Option<TexturedMesh>]` so a model that fails to upload leaves its cell empty in place rather than shifting every icon after it |
+| Screenshots             | `wyven_app::capture` (pure: swapchain bytes → `Rgba8`, the BGRA/RGBA swizzle, the timestamped name) + the copy chained into `App::frame` between the egui pass and `present`. The composited frame only ever exists as the swapchain image, which is why the capture lives in the runner and not in `wyven-render`. The engine picks neither the key nor the directory: both arrive from the game through `Game::screenshots`, which is also what opts the swapchain into `TRANSFER_SRC` — a game returning `None` never asks the driver for the flag. Key is `Keybinds::screenshot` (F2), path is `paths::screenshots_root()`, PNG encoding is `wyven_assets::encode_png` beside its `decode_png` |
+| Telling the player a screenshot was saved | `Frame::screenshot` is a **mailbox, not a pulse**: the runner puts the path there, a screen `take()`s it, and whatever is left is offered again next frame — which is what stops a capture made under the pause overlay from being lost, since the covered `InGameState` never updates. `InGameState::note_screenshot` turns it into a `ChatLog::push_link` line, local by construction (`ChatState` is per-peer and never synced, and a path means nothing on another machine). Clicking is `ui::chat`'s `ChatOutcome::open` → `desktop::show_file`, which reveals the file *and* opens it. `ChatOutcome` has two independent fields because clicking a link also unfocuses the composer: both the open and the close are real |
 | Live player preview     | There is no offscreen pass — the preview *is* the world. Opening the inventory blends the world camera to `entity::camera::Shot::inspect`, which stands in front of the player's **body** yaw and slides the image left with `Camera::projection_offset` so the model sits in the column the panel leaves clear. Camera in `InGameState::{world_camera,camera_shot}`; the body is forced on past `INSPECT_MODEL_FROM` in `SceneCache::update_player_mesh` (first person has no body mesh otherwise, and culling is off, so it cannot start at 0 or you see the inside of the head) |
 | The inventory's open/close animation | `state::ingame_state::inventory::OpenAnim` — one linear `t`, eased on read, read by *both* the camera and the panel so they cannot desynchronise. Linear-and-eased-on-read is what makes an interrupted sweep resume rather than restart; smoothstep rather than the exponential blend `entity::animation` uses, because both endpoints must be reached exactly |
 | Block drop rules        | `drops = ...` on the block in `assets/blocks.toml` (`"self"`, `"none"`, `{ requires_tool }`, `{ item, count }`) |
@@ -336,7 +342,7 @@ those systems are testable without a Vulkan device.
 | GPU meshes / camera     | `state::ingame_state::view` (`SceneCache`) — the only holder of `RenderContext`             |
 | Startup / dev env vars  | `boot::plan::BootPlan::from_env` (pure, tested); effects in `boot::start::initial_screen`, which runs `boot::start::boot_account` for **every** plan. The window/device/event-loop side is `wyven_app::run`, reached through the `Game` impl in `state::shared` |
 | Loading `assets/*.toml` | `wyven_assets::AssetSource` (Fs/Embedded/Map) + one `load_or_builtin` helper. CWD-relative: `assets/` belongs to the install, not the player |
-| Where runtime files go  | `src/paths.rs` — one memoised data root (`WYVEN_DATA_DIR`, else OS app-data, else CWD) with `saves_root`/`profile_path`/`ops_path`/`keys_path`/`servers_path` off it. Engine crates never learn it: `wyven_auth::KeyCache::at` takes the path the game resolves |
+| Where runtime files go  | `src/paths.rs` — one memoised data root (`WYVEN_DATA_DIR`, else OS app-data, else CWD) with `saves_root`/`screenshots_root`/`profile_path`/`ops_path`/`keys_path`/`servers_path` off it. Engine crates never learn it: `wyven_auth::KeyCache::at` takes the path the game resolves |
 | Shaders                 | `crates/wyven-render/shaders/*.{vert,frag}`, declared in `wyven_render::shaders` (they moved out of `assets/` with the renderer — they are compiled into the binary, so nothing reads that path at runtime). `voxel.vert` is shared by both chunk pipelines, so a new vertex attribute means editing it plus `wyven_render::vertex` and every `ChunkVertex { .. }` site |
 
 ## Conventions & gotchas
@@ -379,10 +385,16 @@ those systems are testable without a Vulkan device.
   validates state and *panics* on misuse (this is what catches bad pipelines even
   without Vulkan validation layers). A clean multi-frame run is strong evidence the
   GPU code is correct.
-- **Screenshots don't work** in headless/sandboxed shells here (`screencapture`
-  returns "could not create image from display"). Verify rendering by running the
-  app (it renders on a real display) or by trusting vulkano validation + a stable
-  run.
+- **Screenshots come from the game, not the OS.** `screencapture` fails in
+  headless/sandboxed shells here ("could not create image from display"), so the
+  game takes its own: `F2`, or `WYVEN_SCREENSHOT_AT=<seconds>` for a run nobody is
+  sitting at. Both write a PNG of the *composited* frame — world, HUD and any egui
+  panel on top of it — to `<data>/screenshots/`, and log the path at `info!`. That
+  is how a visual change gets verified by looking at it rather than by trusting
+  vulkano validation and a stable run. The player is told in chat, with the file
+  name clickable; that line is local-only and never reaches the wire. Note the
+  chat overlay is not drawn at all while the inventory is open, so a screenshot
+  taken there shows no line — the file is still written and still logged.
 - **Multiplayer testing:** launch two processes with `WYVEN_HOST=1` and
   `WYVEN_JOIN=127.0.0.1:6091`; the client logs `connected; world seed ... player id ...`
   on a successful handshake.
@@ -459,8 +471,8 @@ those systems are testable without a Vulkan device.
 ## Verifying a change
 
 1. `cargo build --workspace` / `cargo clippy --workspace --all-targets` clean.
-2. `cargo test --workspace` green (724 tests: 54 auth, 11 core, 114 model,
-   55 render, 21 voxel, 469 game). One of the game tests
+2. `cargo test --workspace` green (746 tests: 9 app, 2 assets, 54 auth, 11 core,
+   114 model, 55 render, 21 voxel, 480 game). One of the game tests
    (`a_probe_reaches_a_real_host_and_is_answered_without_joining_it`) binds a
    real loopback socket and drives the whole status/join path through it — it is
    the only test here that touches a network, and deliberately so: a probe *is* a

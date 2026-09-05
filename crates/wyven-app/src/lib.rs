@@ -10,10 +10,12 @@
 //! to do once the GPU exists, and what payload its screens carry. The runner
 //! never learns what a block or an inventory is.
 
+pub mod capture;
 pub mod screen;
 
 mod runner;
 
+pub use capture::ScreenshotConfig;
 pub use runner::{AppError, Boot, WindowConfig, run};
 pub use screen::{Frame, Screen, ScreenStack, Transition};
 
@@ -43,6 +45,17 @@ pub trait Game: Sized + 'static {
 
     /// The atlas and block-texture array the renderer is built with.
     fn textures(&self) -> RendererTextures<'_>;
+
+    /// Which key saves a screenshot, and where the files go. `None` — the
+    /// default — disables capture entirely, and with it the `TRANSFER_SRC`
+    /// swapchain usage it needs.
+    ///
+    /// The runner owns the readback; *this* is the part only the game can
+    /// answer, which is why it arrives through the trait rather than being
+    /// spelled out in [`run`].
+    fn screenshots(&self) -> Option<ScreenshotConfig> {
+        None
+    }
 
     /// Called once the window, device, renderer and egui context exist.
     ///

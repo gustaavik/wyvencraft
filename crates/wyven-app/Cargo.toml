@@ -8,6 +8,7 @@ description = "Window, Vulkan surface, egui integration and the screen stack."
 
 [dependencies]
 wyven-core.workspace = true
+wyven-assets.workspace = true
 wyven-render.workspace = true
 thiserror.workspace = true
 wyven-input.workspace = true
