@@ -6,8 +6,8 @@
 //!   It is read-only in spirit — a launcher replaces the whole of it to apply an
 //!   update, so nothing that must survive belongs there.
 //! * **The data directory** is everything the player accumulates: `saves/`,
-//!   `profile.toml`, `ops.toml`, `authkeys.toml`, `servers.toml`. It lives
-//!   outside the install
+//!   `screenshots/`, `profile.toml`, `ops.toml`, `authkeys.toml`,
+//!   `servers.toml`. It lives outside the install
 //!   so an update cannot take a world with it.
 //!
 //! Only the second is resolved here. `assets/` stays working-directory relative
@@ -52,6 +52,8 @@ pub const OPS_FILE: &str = "ops.toml";
 pub const KEYS_FILE: &str = "authkeys.toml";
 /// The player's saved multiplayer servers, as shown in the server browser.
 pub const SERVERS_FILE: &str = "servers.toml";
+/// Directory holding screenshots taken in-game.
+pub const SCREENSHOTS_DIR: &str = "screenshots";
 
 static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
@@ -83,6 +85,12 @@ pub fn keys_path() -> PathBuf {
 
 pub fn servers_path() -> PathBuf {
     data_dir().join(SERVERS_FILE)
+}
+
+/// Where screenshots are written. Created on the first capture, not at startup:
+/// a player who never presses the key never gets an empty directory for it.
+pub fn screenshots_root() -> PathBuf {
+    data_dir().join(SCREENSHOTS_DIR)
 }
 
 fn resolve_data_dir() -> PathBuf {
@@ -139,6 +147,7 @@ mod tests {
             keys_path(),
             servers_path(),
             saves_root(),
+            screenshots_root(),
         ] {
             assert_eq!(
                 path.parent(),
@@ -156,6 +165,7 @@ mod tests {
         assert_eq!(keys_path().file_name().unwrap(), KEYS_FILE);
         assert_eq!(servers_path().file_name().unwrap(), SERVERS_FILE);
         assert_eq!(saves_root().file_name().unwrap(), SAVES_DIR);
+        assert_eq!(screenshots_root().file_name().unwrap(), SCREENSHOTS_DIR);
     }
 
     /// The launcher puts `versions/` and `logs/` beside the data directory and

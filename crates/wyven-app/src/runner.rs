@@ -5,7 +5,8 @@ use std::sync::Arc;
 use egui_winit_vulkano::{Gui, GuiConfig};
 use vulkano::device::DeviceFeatures;
 use vulkano::format::Format;
-use vulkano::swapchain::PresentMode;
+use vulkano::image::ImageUsage;
+use vulkano::swapchain::{PresentMode, SwapchainCreateInfo};
 use vulkano_util::context::{VulkanoConfig, VulkanoContext};
 use vulkano_util::window::{VulkanoWindows, WindowDescriptor, WindowMode};
 use winit::application::ApplicationHandler;
@@ -17,6 +18,7 @@ use wyven_core::Clock;
 use wyven_input::InputState;
 use wyven_render::{RenderContext, Renderer};
 
+use crate::capture::{self, ScreenshotConfig};
 use crate::screen::{Frame, ScreenStack};
 use crate::{Game, RendererTextures};
 
@@ -89,6 +91,10 @@ struct App<G: Game> {
     /// Tracks the applied cursor-grab state, so the window is only told on
     /// change.
     cursor_grabbed: bool,
+    /// What the game asked for in [`Game::screenshots`]; `None` disables capture.
+    screenshots: Option<ScreenshotConfig>,
+    /// Whether the automatic one-shot capture has already gone off.
+    auto_captured: bool,
 }
 
 impl<G: Game> App<G> {
@@ -117,6 +123,7 @@ impl<G: Game> App<G> {
         log::info!("Vulkan device: {}", context.device_name());
         let render_context = RenderContext::from_vulkano(&context);
         let window = game.window();
+        let screenshots = game.screenshots();
 
         Self {
             context,
@@ -129,6 +136,31 @@ impl<G: Game> App<G> {
             input: InputState::new(),
             clock: Clock::new(),
             cursor_grabbed: false,
+            screenshots,
+            auto_captured: false,
+        }
+    }
+
+    /// Whether this frame should be saved: the screenshot key went down, or the
+    /// automatic capture's moment has just passed.
+    ///
+    /// Must be asked *before* `InputState::end_frame`, which clears the
+    /// edge-triggered set well before the frame is rendered.
+    fn wants_capture(&mut self, elapsed: f32, dt: f32) -> bool {
+        let Some(config) = self.screenshots.as_ref() else {
+            return false;
+        };
+        if self.input.just_pressed(config.key) {
+            return true;
+        }
+        // Crossed this frame, once. Comparing against `elapsed - dt` is what
+        // stops a long hitch from stepping over the moment entirely.
+        match config.auto_at {
+            Some(at) if !self.auto_captured && elapsed >= at && elapsed - dt < at => {
+                self.auto_captured = true;
+                true
+            }
+            _ => false,
         }
     }
 
@@ -212,6 +244,7 @@ impl<G: Game> App<G> {
         }
 
         self.apply_cursor_grab(grab);
+        let capture = self.wants_capture(elapsed, dt);
         self.input.end_frame();
 
         // --- Render: offscreen preview → world pass (clears) → egui → present ---
@@ -243,12 +276,45 @@ impl<G: Game> App<G> {
         drop(scene);
 
         let after = match self.gui.as_mut() {
-            Some(gui) => gui.draw_on_image(after_scene, image),
+            Some(gui) => gui.draw_on_image(after_scene, image.clone()),
             None => after_scene,
         };
 
+        // The finished frame exists only here, as the swapchain image: the world
+        // pass drew into it and egui composited on top of it. Copying it now is
+        // what makes a screenshot show the HUD as well as the world.
+        let (after, pending) = if capture {
+            capture::download(&self.render_context, after, &image)
+        } else {
+            (after, None)
+        };
+
         if let Some(renderer) = self.windows.get_primary_renderer_mut() {
+            // `true` waits on the whole submitted chain, the copy included, so
+            // the buffer is finished and safe to read the moment this returns.
             renderer.present(after, true);
+        }
+
+        if let Some(pending) = pending {
+            self.save_capture(&pending);
+        }
+    }
+
+    /// Write a completed readback out, reporting either way.
+    ///
+    /// The success line is deliberately `info!`: an automated run has no window
+    /// to look at, and the log is how it learns where the file landed.
+    fn save_capture(&self, pending: &capture::Pending) {
+        let Some(config) = self.screenshots.as_ref() else {
+            return;
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        match capture::save(pending, &config.dir, now) {
+            Ok(path) => log::info!("screenshot saved: {}", path.display()),
+            Err(err) => log::error!("screenshot failed: {err}"),
         }
     }
 
@@ -291,8 +357,17 @@ impl<G: Game> ApplicationHandler for App<G> {
             mode: WindowMode::Windowed,
             ..Default::default()
         };
+        // vulkano-util creates the swapchain COLOR_ATTACHMENT-only, which
+        // cannot be copied from. Both arms are non-capturing, so they coerce to
+        // the `fn` pointer `create_window` takes; the flag survives every resize
+        // because recreation reuses the original create-info.
+        let modify: fn(&mut SwapchainCreateInfo) = if self.screenshots.is_some() {
+            |info| info.image_usage |= ImageUsage::TRANSFER_SRC
+        } else {
+            |_| {}
+        };
         self.windows
-            .create_window(event_loop, &self.context, &descriptor, |_| {});
+            .create_window(event_loop, &self.context, &descriptor, modify);
 
         let window_renderer = self.windows.get_primary_renderer().unwrap();
         let color_format = window_renderer.swapchain_format();

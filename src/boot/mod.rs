@@ -8,5 +8,5 @@
 pub mod plan;
 pub mod start;
 
-pub use plan::{BootPlan, Environment, MapEnv, SystemEnv, WorldChoice};
+pub use plan::{BootPlan, Environment, MapEnv, SystemEnv, WorldChoice, screenshot_at};
 pub use start::initial_screen;

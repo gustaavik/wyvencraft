@@ -130,9 +130,50 @@ impl BootPlan {
     }
 }
 
+/// When `WYVEN_SCREENSHOT_AT` asks for an automatic screenshot, in seconds of
+/// elapsed run time.
+///
+/// Deliberately *not* a [`BootPlan`] field: that type decides which screen opens,
+/// and this decides nothing about screens at all. It exists because the F2 key
+/// needs a human at the keyboard — this is what lets an automated run boot into a
+/// world, wait for chunks to stream in, and leave a frame behind to look at.
+///
+/// A value that is not a positive, finite number is ignored with a warning rather
+/// than refused: a bad screenshot variable must never cost you the session.
+pub fn screenshot_at(env: &dyn Environment) -> Option<f32> {
+    let raw = env.get("WYVEN_SCREENSHOT_AT")?;
+    match raw.trim().parse::<f32>() {
+        Ok(secs) if secs.is_finite() && secs >= 0.0 => Some(secs),
+        _ => {
+            log::warn!("WYVEN_SCREENSHOT_AT '{raw}' is not a number of seconds; ignoring");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_screenshot_variable_means_no_automatic_capture() {
+        assert_eq!(screenshot_at(&MapEnv::new()), None);
+    }
+
+    #[test]
+    fn a_screenshot_delay_is_read_in_seconds() {
+        let env = MapEnv::new().with("WYVEN_SCREENSHOT_AT", "8.5");
+        assert_eq!(screenshot_at(&env), Some(8.5));
+    }
+
+    /// A typo in a debug variable must not be worse than not setting it.
+    #[test]
+    fn an_unparseable_screenshot_delay_is_ignored_rather_than_fatal() {
+        let env = MapEnv::new().with("WYVEN_SCREENSHOT_AT", "soon");
+        assert_eq!(screenshot_at(&env), None);
+        let negative = MapEnv::new().with("WYVEN_SCREENSHOT_AT", "-3");
+        assert_eq!(screenshot_at(&negative), None);
+    }
 
     #[test]
     fn a_bare_environment_shows_the_menu() {

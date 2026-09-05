@@ -103,6 +103,7 @@ Skip the menus with environment variables:
 | `E`             | Open/close inventory                  |
 | `F5`            | Toggle perspective (1st / 3rd person) |
 | `F3`            | Toggle debug overlay                  |
+| `F2`            | Save a screenshot                     |
 | `Esc`           | Pause (or close inventory)            |
 
 ## Multiplayer

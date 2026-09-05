@@ -4305,6 +4305,7 @@ dependencies = [
  "vulkano",
  "vulkano-util",
  "winit",
+ "wyven-assets",
  "wyven-core",
  "wyven-input",
  "wyven-render",

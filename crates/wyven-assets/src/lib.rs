@@ -7,5 +7,5 @@
 pub mod image;
 pub mod source;
 
-pub use image::{Rgba8, decode_png};
+pub use image::{Rgba8, decode_png, encode_png};
 pub use source::{AssetSource, EmbeddedSource, FsSource, MapSource, load_or_builtin};

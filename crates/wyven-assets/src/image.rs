@@ -56,3 +56,70 @@ pub fn decode_png(bytes: &[u8]) -> Result<Rgba8, String> {
         size: [info.width, info.height],
     })
 }
+
+/// Encode an RGBA8 image to PNG bytes.
+///
+/// The inverse of [`decode_png`], and its round-trip partner: everything this
+/// crate hands out is RGBA8, so there is exactly one flavour to write back.
+///
+/// Fails rather than truncating if `pixels` does not hold `width * height * 4`
+/// bytes — a short buffer here means the caller mis-sized a readback, and a PNG
+/// with a torn last row is a far worse thing to debug than an error.
+pub fn encode_png(image: &Rgba8) -> Result<Vec<u8>, String> {
+    let [width, height] = image.size;
+    let expected = (width as usize) * (height as usize) * 4;
+    if image.pixels.len() != expected {
+        return Err(format!(
+            "expected {expected} bytes for {width}x{height} RGBA8, got {}",
+            image.pixels.len()
+        ));
+    }
+
+    let mut out = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut out, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
+        writer
+            .write_image_data(&image.pixels)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The two halves of this module are each other's inverse. A screenshot is
+    /// written by `encode_png` and read back by `decode_png` in the tests that
+    /// check it, so a drift between them would show up as a passing test over a
+    /// broken file.
+    #[test]
+    fn encoding_then_decoding_returns_the_original_image() {
+        let image = Rgba8 {
+            pixels: vec![
+                255, 0, 0, 255, // red
+                0, 255, 0, 128, // half-transparent green
+                0, 0, 255, 255, // blue
+                9, 9, 9, 0, // fully transparent
+            ],
+            size: [2, 2],
+        };
+
+        let bytes = encode_png(&image).expect("encode");
+        let back = decode_png(&bytes).expect("decode");
+
+        assert_eq!(back, image);
+    }
+
+    #[test]
+    fn a_pixel_buffer_that_does_not_match_the_size_is_rejected() {
+        let image = Rgba8 {
+            pixels: vec![255; 4 * 3],
+            size: [2, 2],
+        };
+        assert!(encode_png(&image).is_err());
+    }
+}

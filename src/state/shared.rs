@@ -14,12 +14,12 @@ use vulkano::image::view::ImageView;
 use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
 use vulkano::memory::allocator::AllocationCreateInfo;
 use vulkano::sync::GpuFuture;
-use wyven_app::{Boot, Game, RendererTextures, Screen, WindowConfig};
+use wyven_app::{Boot, Game, RendererTextures, Screen, ScreenshotConfig, WindowConfig};
 use wyven_assets::decode_png;
 use wyven_model::{DisplayContext, ModelRegistry};
 use wyven_render::{GpuMesh, RenderContext, Renderer, Texture, TexturedMesh, icons};
 
-use crate::boot::{BootPlan, SystemEnv};
+use crate::boot::{BootPlan, SystemEnv, screenshot_at};
 use crate::config::Settings;
 use crate::content::GameContent;
 
@@ -97,6 +97,18 @@ impl Game for Wyvencraft {
             title: self.settings.window.title.clone(),
             vsync: self.settings.window.vsync,
         }
+    }
+
+    /// F2 by default, into `<data>/screenshots/`.
+    ///
+    /// Always `Some`: the capture path is what makes a visual change checkable
+    /// at all, and returning `None` here is what would switch it off.
+    fn screenshots(&self) -> Option<ScreenshotConfig> {
+        Some(ScreenshotConfig {
+            key: self.settings.controls.keybinds.screenshot,
+            dir: crate::paths::screenshots_root(),
+            auto_at: screenshot_at(&SystemEnv),
+        })
     }
 
     fn textures(&self) -> RendererTextures<'_> {
