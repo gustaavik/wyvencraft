@@ -616,6 +616,99 @@ mod tests {
         );
     }
 
+    /// Driven by stride, a locomotion clip plays its *keyframed* span rather
+    /// than its declared length, so a half-authored cycle silently loops on one
+    /// step instead of two.
+    #[test]
+    fn the_run_cycle_is_keyframed_all_the_way_to_its_declared_length() {
+        let model = load(RIGGED);
+        let rig = model.rig.expect("the player is rigged");
+        let run = rig.clip("run").expect("a run clip");
+
+        assert_eq!(run.length, 3.0);
+        assert!(
+            (run.end() - run.length).abs() < 1e-6,
+            "run declares {}s but its last keyframe is at {}s",
+            run.length,
+            run.end()
+        );
+    }
+
+    /// A run cycle's second half is its first with the limbs swapped, which is
+    /// why the reference sheet only draws seven poses. Comparing the halves bone
+    /// for bone catches both a cycle that was never finished and one whose
+    /// halves have drifted apart.
+    #[test]
+    fn the_run_cycle_mirrors_at_the_half_and_closes_at_the_end() {
+        let model = load(RIGGED);
+        let rig = model.rig.as_ref().expect("the player is rigged");
+        let run = rig.clip("run").expect("a run clip");
+        let half = run.length / 2.0;
+
+        let pose_at = |time: f32| {
+            let mut pose = rig::Pose::rest(rig);
+            run.sample(time, &mut pose);
+            pose
+        };
+
+        for step in 0..=6 {
+            let time = step as f32 * 0.25;
+            let (early, late) = (pose_at(time), pose_at(time + half));
+            for index in 0..rig.bone_count() {
+                let bone = rig::BoneId(index as u16);
+                let name = rig.name(bone);
+                // `root`, `torso` and `head` sit on the centreline and mirror
+                // onto themselves.
+                let opposite = match name.strip_suffix("_r") {
+                    Some(stem) => format!("{stem}_l"),
+                    None => match name.strip_suffix("_l") {
+                        Some(stem) => format!("{stem}_r"),
+                        None => name.to_string(),
+                    },
+                };
+                let partner = rig.bone(&opposite).expect("every side has a partner");
+                assert_eq!(
+                    late.get(bone),
+                    early.get(partner),
+                    "at t={time} {name} should hold what {opposite} held half a cycle earlier"
+                );
+            }
+        }
+
+        assert_eq!(
+            pose_at(run.length),
+            pose_at(0.0),
+            "the cycle must close on the pose it opened with"
+        );
+    }
+
+    /// The two gaits are crossfaded at the same normalized phase, so they have
+    /// to agree on which foot leads. Blending a left-foot contact into a
+    /// right-foot one flattens the legs toward neutral halfway through.
+    #[test]
+    fn the_walk_and_run_cycles_lead_with_the_same_foot() {
+        let model = load(RIGGED);
+        let rig = model.rig.as_ref().expect("the player is rigged");
+        let leg = rig.bone("leg_r").expect("leg_r");
+
+        let lead = |name: &str| {
+            let mut pose = rig::Pose::rest(rig);
+            rig.clip(name)
+                .expect("a locomotion clip")
+                .sample(0.0, &mut pose);
+            pose.get(leg).rotation.x
+        };
+
+        let (walk, run) = (lead("walk"), lead("run"));
+        assert_eq!(
+            walk.signum(),
+            run.signum(),
+            "walk opens with leg_r at {}°, run at {}° — the gaits are antiphase",
+            walk.to_degrees(),
+            run.to_degrees()
+        );
+    }
+
     /// Keyframe values arrive as JSON *strings*, in degrees. A plain `f32`
     /// deserialize would reject the file; forgetting the conversion would swing
     /// a leg by 37 radians.
