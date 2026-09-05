@@ -449,6 +449,13 @@ impl SceneCache {
         // player looks. The held item hangs off the hand *bone* under the same
         // pose, so it cannot drift out of the fist however the elbow bends.
         let body_yaw = self.player_anim.body_yaw();
+        // Drawn at the interpolated position, not the raw one: physics steps at
+        // a fixed rate while this runs every frame, and the camera is built from
+        // the *same* interpolation. Baking the body at `player.position` instead
+        // makes it lurch one tick's worth against a camera that glides — which
+        // reads as the whole player juddering, most of all in a jump, where a
+        // tick is 0.15 blocks straight up.
+        let render_position = player.interpolated_position(self.render_alpha);
         let baked = {
             let Some(character) = self.character(content.models) else {
                 self.clear_player_meshes();
@@ -460,8 +467,8 @@ impl SceneCache {
             };
             character.pose(&self.player_anim, look).map(|pose| {
                 (
-                    character.bake(&pose, player.position, body_yaw),
-                    character.hand_anchor(&pose, player.position, body_yaw),
+                    character.bake(&pose, render_position, body_yaw),
+                    character.hand_anchor(&pose, render_position, body_yaw),
                 )
             })
         };
@@ -617,9 +624,24 @@ impl SceneCache {
         self.remote_meshes.clear();
         // Snapshot the render-relevant fields first so `remote_anims` can be
         // mutated without holding a borrow of the map they came from.
+        //
+        // Interpolated, for the same reason the local body is: snapshots land at
+        // the host's tick rate, and their nameplates are already drawn at the
+        // interpolated position — a raw body here would step underneath a plate
+        // that glides. It also steadies `Motion::observed`, which reads a peer's
+        // vertical speed off this delta: on the raw position that is zero on
+        // every frame without a packet and a spike on the frame one lands, so a
+        // remote jump flickers across the airborne threshold instead of holding.
         let snapshots: Vec<(PlayerId, Vec3, f32, f32)> = remote_players
             .values()
-            .map(|rp| (rp.id, rp.position(), rp.yaw, rp.pitch))
+            .map(|rp| {
+                (
+                    rp.id,
+                    rp.interpolated_position(self.render_alpha),
+                    rp.yaw,
+                    rp.pitch,
+                )
+            })
             .collect();
         let mut baked: Vec<CpuMesh> = Vec::with_capacity(snapshots.len());
         for (id, pos, yaw, pitch) in snapshots {
