@@ -10,7 +10,7 @@
 use glam::Vec3;
 
 use crate::core::{Aabb, BlockPos};
-use crate::entity::animation::AnimationState;
+use crate::entity::animation::{AnimationState, Motion};
 use crate::entity::brain::{Gait, Intent, MobBrain, Perception};
 use crate::entity::kind::{EntityKind, MobParams, PhysicsParams, VisualSpec};
 use crate::entity::physics;
@@ -202,7 +202,8 @@ impl Mob {
 
         let horizontal = Vec3::new(self.velocity.x, 0.0, self.velocity.z).length();
         // `self.yaw` is where the mob *looks* (and walks); the torso follows it.
-        self.anim.advance(horizontal, self.yaw, dt);
+        let motion = Motion::new(horizontal, self.velocity.y, !self.on_ground);
+        self.anim.advance(motion, self.yaw, dt);
 
         self.resolve_attack(intent, &perception)
     }

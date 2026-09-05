@@ -17,6 +17,12 @@
 //! corner order or UV-rotation direction will not fail a test. Re-adding a
 //! second export of one model, and a test that the two loaders agree on it, is
 //! the way to get that guarantee back.
+//!
+//! The walk over the outliner also *keeps* what it discovers — which joint owns
+//! which vertices, and where it pivots — as a [`Rig`](super::rig::Rig), and reads
+//! the file's `animations` into [`Clip`]s. Both are optional: a file with no
+//! groups and no animations loads exactly as it always did, and the rest-pose
+//! bake of a rigged model is vertex-for-vertex the flat mesh below.
 
 use std::collections::HashMap;
 
@@ -27,8 +33,10 @@ use wyven_assets::AssetSource as ContentSource;
 use wyven_assets::decode_png;
 use wyven_core::Direction;
 
+use super::clip::{Channel, Clip, Interpolation, Keyframe, LoopMode, Track};
 use super::datauri::{self, Uri};
 use super::mesh::ModelMesh;
+use super::rig::{BoneId, RigBuilder};
 use super::{Model, ModelLoader, resolve_sibling};
 
 /// Blockbench authors in sixteenths of a block.
@@ -51,12 +59,23 @@ impl ModelLoader for BbmodelLoader {
             .filter(|e| e.kind == "cube")
             .map(|e| (e.uuid.as_str(), e))
             .collect();
+        // Blockbench 5.0 moved group definitions out of the outliner into a
+        // table of their own, leaving the node with nothing but a uuid.
+        let group_defs: HashMap<&str, &GroupDef> =
+            doc.groups.iter().map(|g| (g.uuid.as_str(), g)).collect();
         let resolution = doc.resolution.unwrap_or(Resolution {
             width: PIXELS_PER_BLOCK,
             height: PIXELS_PER_BLOCK,
         });
 
         let mut mesh = ModelMesh::default();
+        let mut walk = Walk {
+            by_uuid: &by_uuid,
+            group_defs: &group_defs,
+            resolution,
+            rig: RigBuilder::new(),
+            bones: HashMap::new(),
+        };
         if doc.outliner.is_empty() {
             // No hierarchy declared: every element is a root.
             for element in doc.elements.iter().filter(|e| e.kind == "cube") {
@@ -64,20 +83,16 @@ impl ModelLoader for BbmodelLoader {
             }
         } else {
             for node in &doc.outliner {
-                walk(
-                    node,
-                    &by_uuid,
-                    resolution,
-                    Transform::IDENTITY,
-                    0,
-                    &mut mesh,
-                )?;
+                walk.visit(node, Transform::IDENTITY, None, 0, &mut mesh)?;
             }
         }
         mesh.validate()?;
 
+        let Walk { rig, bones, .. } = walk;
+        let rig = (!rig.is_empty()).then(|| rig.build(doc.clips(&bones)));
+
         let texture = doc.resolve_texture(dir, source)?;
-        Model::new(mesh, texture)
+        Model::new(mesh, texture).map(|model| model.with_rig(rig))
     }
 }
 
@@ -90,8 +105,14 @@ struct Document {
     elements: Vec<Element>,
     #[serde(default)]
     outliner: Vec<OutlinerNode>,
+    /// Blockbench 5.0's group table, keyed by uuid. Empty in older files, which
+    /// inline the same fields on the outliner node instead.
+    #[serde(default)]
+    groups: Vec<GroupDef>,
     #[serde(default)]
     textures: Vec<TextureEntry>,
+    #[serde(default)]
+    animations: Vec<AnimationDef>,
 }
 
 #[derive(Deserialize, Clone, Copy)]
@@ -143,14 +164,133 @@ enum OutlinerNode {
     Group(Group),
 }
 
+/// A group as the outliner spells it.
+///
+/// Every identifying field is optional because two Blockbench layouts have to
+/// work: up to 4.x the node carries `name`/`origin`/`rotation` itself, and from
+/// 5.0 it carries only `uuid` and the rest lives in the document's `groups`
+/// table. Reading them as `Option` rather than `#[serde(default)]` is what
+/// distinguishes "authored as zero" from "not here, look it up" — the older code
+/// could not, so every 5.0 file loaded with all its pivots silently at the
+/// origin.
 #[derive(Deserialize)]
 struct Group {
     #[serde(default)]
-    origin: [f32; 3],
+    uuid: String,
     #[serde(default)]
-    rotation: [f32; 3],
+    name: Option<String>,
+    #[serde(default)]
+    origin: Option<[f32; 3]>,
+    #[serde(default)]
+    rotation: Option<[f32; 3]>,
     #[serde(default)]
     children: Vec<OutlinerNode>,
+}
+
+/// A group as the 5.0 `groups` table spells it.
+#[derive(Deserialize)]
+struct GroupDef {
+    #[serde(default)]
+    uuid: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    origin: Option<[f32; 3]>,
+    #[serde(default)]
+    rotation: Option<[f32; 3]>,
+}
+
+impl Group {
+    /// This group's name, pivot and rest rotation: whatever the node declares,
+    /// then whatever the `groups` table says, then nothing.
+    fn resolve(&self, defs: &HashMap<&str, &GroupDef>) -> (String, [f32; 3], [f32; 3]) {
+        let def = defs.get(self.uuid.as_str());
+        let name = self
+            .name
+            .clone()
+            .or_else(|| def.and_then(|d| d.name.clone()))
+            .unwrap_or_default();
+        let origin = self
+            .origin
+            .or_else(|| def.and_then(|d| d.origin))
+            .unwrap_or([0.0; 3]);
+        let rotation = self
+            .rotation
+            .or_else(|| def.and_then(|d| d.rotation))
+            .unwrap_or([0.0; 3]);
+        (name, origin, rotation)
+    }
+}
+
+// --- Animation schema -------------------------------------------------------
+
+#[derive(Deserialize)]
+struct AnimationDef {
+    #[serde(default)]
+    name: String,
+    /// `"loop"`, `"hold"` or `"once"`.
+    #[serde(default, rename = "loop")]
+    loop_mode: Option<String>,
+    #[serde(default)]
+    length: f32,
+    /// Keyed by the uuid of the group each one drives.
+    #[serde(default)]
+    animators: HashMap<String, AnimatorDef>,
+}
+
+#[derive(Deserialize)]
+struct AnimatorDef {
+    #[serde(rename = "type", default)]
+    kind: Option<String>,
+    #[serde(default)]
+    keyframes: Vec<KeyframeDef>,
+}
+
+#[derive(Deserialize)]
+struct KeyframeDef {
+    #[serde(default)]
+    channel: String,
+    #[serde(default)]
+    time: f32,
+    #[serde(default)]
+    interpolation: Option<String>,
+    #[serde(default)]
+    data_points: Vec<DataPoint>,
+}
+
+/// One keyframe's value. Blockbench stores each component as a **string**,
+/// because any of them may be a molang expression rather than a number — so
+/// these are `Value` and parsed, not deserialized as `f32`.
+#[derive(Deserialize, Default)]
+struct DataPoint {
+    #[serde(default)]
+    x: serde_json::Value,
+    #[serde(default)]
+    y: serde_json::Value,
+    #[serde(default)]
+    z: serde_json::Value,
+}
+
+impl DataPoint {
+    fn vec3(&self) -> Vec3 {
+        Vec3::new(number(&self.x), number(&self.y), number(&self.z))
+    }
+}
+
+/// A keyframe component, whether the file wrote it as a number or a string.
+/// An expression this cannot evaluate contributes nothing rather than refusing
+/// the whole file — one warning, and the rest of the animation still plays.
+fn number(value: &serde_json::Value) -> f32 {
+    match value {
+        serde_json::Value::Number(n) => n.as_f64().unwrap_or(0.0) as f32,
+        serde_json::Value::String(s) => s.trim().parse().unwrap_or_else(|_| {
+            if !s.trim().is_empty() {
+                log::warn!("bbmodel keyframe value {s:?} is not a number; using 0");
+            }
+            0.0
+        }),
+        _ => 0.0,
+    }
 }
 
 #[derive(Deserialize)]
@@ -200,34 +340,153 @@ impl Transform {
     }
 }
 
-fn walk(
-    node: &OutlinerNode,
-    by_uuid: &HashMap<&str, &Element>,
+/// One pass over the outliner, accumulating both the flat mesh and the rig.
+///
+/// A struct rather than a pile of parameters because the walk now carries two
+/// results and three lookups; the recursion itself is unchanged.
+struct Walk<'a> {
+    by_uuid: &'a HashMap<&'a str, &'a Element>,
+    group_defs: &'a HashMap<&'a str, &'a GroupDef>,
     resolution: Resolution,
-    parent: Transform,
-    depth: usize,
-    out: &mut ModelMesh,
-) -> Result<(), String> {
-    const MAX_DEPTH: usize = 64;
-    if depth > MAX_DEPTH {
-        return Err(format!("outliner nested deeper than {MAX_DEPTH} levels"));
-    }
-    match node {
-        OutlinerNode::Element(uuid) => {
-            // A UUID with no matching cube is normal — meshes, locators and
-            // nulls all live in the outliner and none of them are geometry.
-            if let Some(element) = by_uuid.get(uuid.as_str()) {
-                out.merge(element.build(resolution, parent));
+    rig: RigBuilder,
+    /// Group uuid → bone, so an animator can find the bone it drives.
+    bones: HashMap<String, BoneId>,
+}
+
+impl Walk<'_> {
+    fn visit(
+        &mut self,
+        node: &OutlinerNode,
+        parent: Transform,
+        parent_bone: Option<BoneId>,
+        depth: usize,
+        out: &mut ModelMesh,
+    ) -> Result<(), String> {
+        const MAX_DEPTH: usize = 64;
+        if depth > MAX_DEPTH {
+            return Err(format!("outliner nested deeper than {MAX_DEPTH} levels"));
+        }
+        match node {
+            OutlinerNode::Element(uuid) => {
+                // A UUID with no matching cube is normal — meshes, locators and
+                // nulls all live in the outliner and none of them are geometry.
+                if let Some(element) = self.by_uuid.get(uuid.as_str()) {
+                    let start = out.positions.len() as u32;
+                    out.merge(element.build(self.resolution, parent));
+                    self.rig
+                        .attach(parent_bone, start, out.positions.len() as u32);
+                }
+            }
+            OutlinerNode::Group(group) => {
+                let (name, origin, rotation) = group.resolve(self.group_defs);
+                // The pivot is stored *after* the ancestors' rest rotations, in
+                // blocks, because that is the space the baked vertices are in —
+                // which is what makes an unanimated bone exactly the identity.
+                let pivot = parent.apply(Vec3::from(origin)) / PIXELS_PER_BLOCK;
+                let bone = self.rig.push_bone(&name, parent_bone, pivot);
+                self.bones.insert(group.uuid.clone(), bone);
+
+                let transform = parent.then(rotation, origin);
+                for child in &group.children {
+                    self.visit(child, transform, Some(bone), depth + 1, out)?;
+                }
             }
         }
-        OutlinerNode::Group(group) => {
-            let transform = parent.then(group.rotation, group.origin);
-            for child in &group.children {
-                walk(child, by_uuid, resolution, transform, depth + 1, out)?;
-            }
+        Ok(())
+    }
+}
+
+impl Document {
+    /// Read `animations` into clips over the bones the walk found.
+    ///
+    /// Units are converted here, at the edge: degrees become radians and
+    /// Blockbench pixels become blocks, so nothing downstream carries a
+    /// Blockbench convention.
+    fn clips(&self, bones: &HashMap<String, BoneId>) -> Vec<Clip> {
+        self.animations
+            .iter()
+            .filter_map(|animation| {
+                let tracks: Vec<Track> = animation
+                    .animators
+                    .iter()
+                    .filter(|(_, a)| a.kind.as_deref().unwrap_or("bone") == "bone")
+                    .filter_map(|(uuid, animator)| Some((*bones.get(uuid)?, animator)))
+                    .flat_map(|(bone, animator)| tracks_for(bone, animator))
+                    .collect();
+                if tracks.is_empty() {
+                    // An animation naming only bones this file has no geometry
+                    // for would otherwise sit in the registry doing nothing.
+                    log::warn!(
+                        "bbmodel animation {:?} drives no known bone; ignoring it",
+                        animation.name
+                    );
+                    return None;
+                }
+                Some(Clip::new(
+                    animation.name.clone(),
+                    animation.length,
+                    loop_mode(animation.loop_mode.as_deref()),
+                    tracks,
+                ))
+            })
+            .collect()
+    }
+}
+
+/// One track per channel this animator actually keyframes.
+fn tracks_for(bone: BoneId, animator: &AnimatorDef) -> Vec<Track> {
+    [
+        (Channel::Rotation, "rotation"),
+        (Channel::Position, "position"),
+    ]
+    .into_iter()
+    .filter_map(|(channel, name)| {
+        let keys: Vec<Keyframe> = animator
+            .keyframes
+            .iter()
+            .filter(|k| k.channel == name)
+            .filter_map(|k| {
+                let point = k.data_points.first()?;
+                let value = match channel {
+                    // Degrees on the wire, radians everywhere after.
+                    Channel::Rotation => Vec3::from(point.vec3().to_array().map(f32::to_radians)),
+                    Channel::Position => point.vec3() / PIXELS_PER_BLOCK,
+                };
+                Some(Keyframe {
+                    time: k.time,
+                    value,
+                    interpolation: interpolation(k.interpolation.as_deref()),
+                })
+            })
+            .collect();
+        (!keys.is_empty()).then(|| Track::new(bone, channel, keys))
+    })
+    .collect()
+}
+
+/// Blockbench's spelling of a loop mode. Anything unknown loops, which is what
+/// an ambient animation almost always wants.
+fn loop_mode(name: Option<&str>) -> LoopMode {
+    match name {
+        Some("once") => LoopMode::Once,
+        Some("hold") => LoopMode::Hold,
+        _ => LoopMode::Loop,
+    }
+}
+
+/// Blockbench's spelling of an interpolation. `bezier` and anything else this
+/// does not implement degrade to linear with a warning rather than refusing the
+/// file — a clip playing slightly stiffly beats a model that will not load.
+fn interpolation(name: Option<&str>) -> Interpolation {
+    match name {
+        None | Some("linear") => Interpolation::Linear,
+        Some("catmullrom") | Some("smooth") => Interpolation::CatmullRom,
+        Some("step") => Interpolation::Step,
+        Some(other) => {
+            log::warn!("bbmodel interpolation {other:?} is not supported; using linear");
+            Interpolation::Linear
         }
     }
-    Ok(())
 }
 
 impl Element {

@@ -24,6 +24,11 @@ const IDLE_AMP: f32 = 0.06;
 const IDLE_FREQ: f32 = 1.6;
 /// Exponential blend rate for `walk_amount` (per second); frame-rate independent.
 const BLEND_RATE: f32 = 10.0;
+/// Exponential blend rate for `air_amount` (per second). Faster than
+/// [`BLEND_RATE`] because leaving the ground is an event rather than a ramp: a
+/// jump lasts a fraction of a second, and a gait-speed fade would still be
+/// easing in as the character lands.
+const AIR_BLEND_RATE: f32 = 14.0;
 /// Duration of a one-shot arm swing (seconds).
 const SWING_DURATION: f32 = 0.25;
 /// Peak forward rotation of the arm during a one-shot swing (radians).
@@ -44,6 +49,67 @@ const BODY_FOLLOW_RATE: f32 = 8.0;
 /// body that stayed twisted would read as sliding sideways.
 const BODY_WALK_RATE: f32 = 12.0;
 
+/// What a body is doing this frame.
+///
+/// Grouped rather than passed as loose arguments because callers know different
+/// halves of it: everything that draws a humanoid can measure horizontal speed,
+/// but only a caller that owns a physics body knows whether the ground is still
+/// under it. The constructors are how a call site says which of those it is.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Motion {
+    /// Blocks per second over the ground.
+    pub horizontal_speed: f32,
+    /// Blocks per second up (positive) or down (negative).
+    pub vertical_speed: f32,
+    /// Whether the body is off the ground.
+    pub airborne: bool,
+}
+
+impl Motion {
+    /// Standing still on the ground.
+    pub fn still() -> Self {
+        Self::default()
+    }
+
+    /// Moving over the ground at `speed`, feet planted.
+    pub fn walking(speed: f32) -> Self {
+        Self {
+            horizontal_speed: speed,
+            ..Self::default()
+        }
+    }
+
+    /// The full picture, from a caller that owns a physics body.
+    pub fn new(horizontal_speed: f32, vertical_speed: f32, airborne: bool) -> Self {
+        Self {
+            horizontal_speed,
+            vertical_speed,
+            airborne,
+        }
+    }
+
+    /// Infer the vertical half from how far a body rose or fell over `dt`.
+    ///
+    /// For remote players and mobs, whose grounded flag never crosses the wire:
+    /// only a body actually moving vertically is treated as airborne, so a peer
+    /// walking on flat ground stays planted. A step up or down registers as a
+    /// brief hop, which is what the smoothing in [`AnimationState::advance`] is
+    /// there to absorb.
+    pub fn observed(horizontal_speed: f32, rise: f32, dt: f32) -> Self {
+        let vertical_speed = rise / dt.max(1e-4);
+        Self {
+            horizontal_speed,
+            vertical_speed,
+            airborne: vertical_speed.abs() > OBSERVED_AIR_SPEED,
+        }
+    }
+}
+
+/// Vertical speed (blocks/s) above which an observed body is taken to be
+/// airborne. Comfortably above the pace a slope or a stair climb produces, and
+/// well below a jump's launch or a fall.
+const OBSERVED_AIR_SPEED: f32 = 2.5;
+
 /// Accumulated animation state for one humanoid. `Default` is the rest pose.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AnimationState {
@@ -51,6 +117,12 @@ pub struct AnimationState {
     walk_phase: f32,
     /// Smoothed locomotion magnitude in `[0,1]` (idle↔walk blend).
     walk_amount: f32,
+    /// Smoothed horizontal speed (blocks/s), on the same blend as
+    /// `walk_amount`. Kept separately because `walk_amount` saturates at
+    /// [`REFERENCE_SPEED`] and so cannot tell a walk from a sprint — which is
+    /// exactly the choice a model with both a `walk` and a `run` clip has to
+    /// make.
+    speed: f32,
     /// Idle sway phase (radians), advanced by wall-clock time.
     idle_phase: f32,
     /// Remaining time of a one-shot arm swing (seconds); `0` = not swinging.
@@ -61,6 +133,13 @@ pub struct AnimationState {
     /// The look yaw last handed to [`Self::advance`], so [`Self::pose`] can give
     /// the head its offset from the torso.
     look_yaw: f32,
+    /// Smoothed airborne blend in `[0,1]` — how much of the jump clip is showing.
+    air_amount: f32,
+    /// Vertical speed (blocks/s) as last reported *while airborne*, unsmoothed.
+    /// The jump pose is chosen by where in the arc the body is, and smoothing
+    /// that would lag the apex behind the actual one. Held rather than cleared
+    /// on landing — see [`AnimationState::advance`].
+    vertical_speed: f32,
 }
 
 impl AnimationState {
@@ -68,15 +147,15 @@ impl AnimationState {
         Self::default()
     }
 
-    /// Advance by `dt` seconds given the entity's current horizontal speed and the
+    /// Advance by `dt` seconds given the entity's current [`Motion`] and the
     /// direction it is *looking* (its head yaw — the camera for a player, the
     /// brain's chosen facing for a mob).
     ///
     /// The look yaw is what drives [`Self::body_yaw`]: the torso is a follower, so
     /// callers keep steering with their own yaw and only *draw* with this one.
-    pub fn advance(&mut self, horizontal_speed: f32, look_yaw: f32, dt: f32) {
+    pub fn advance(&mut self, motion: Motion, look_yaw: f32, dt: f32) {
         let dt = dt.max(0.0);
-        let speed = horizontal_speed.max(0.0);
+        let speed = motion.horizontal_speed.max(0.0);
 
         // Phase tracks distance so a faster gait swings faster; keep it bounded to
         // preserve float precision over long sessions.
@@ -86,6 +165,22 @@ impl AnimationState {
         let target = (speed / REFERENCE_SPEED).clamp(0.0, 1.0);
         let blend = 1.0 - (-dt * BLEND_RATE).exp();
         self.walk_amount += (target - self.walk_amount) * blend;
+        self.speed += (speed - self.speed) * blend;
+
+        // The gait keeps running underneath while airborne rather than being
+        // frozen: a running jump still has to land back into the stride it left,
+        // and `walk_phase` is the only thing that remembers where that was.
+        let airborne = if motion.airborne { 1.0 } else { 0.0 };
+        self.air_amount += (airborne - self.air_amount) * (1.0 - (-dt * AIR_BLEND_RATE).exp());
+        // Only sampled while airborne. Landing plants the feet and zeroes the
+        // physics velocity in the *same* frame, and zero maps to the middle of
+        // the jump clip — so reading it on touchdown would throw the body back
+        // through the apex tuck it had already left, and the blend-out would
+        // play that backwards as a fast little replay. Holding the speed it
+        // arrived at means the fade starts from the pose it actually landed in.
+        if motion.airborne {
+            self.vertical_speed = motion.vertical_speed;
+        }
 
         self.turn_body(look_yaw, dt);
 
@@ -175,6 +270,39 @@ impl AnimationState {
         self.walk_amount
     }
 
+    /// Smoothed horizontal speed in blocks/s — which *gait* is being used, as
+    /// opposed to [`Self::walk_amount`]'s how much of one.
+    pub fn speed(&self) -> f32 {
+        self.speed
+    }
+
+    /// Smoothed airborne blend in `[0,1]` — how much of the jump reads on the
+    /// body. Smoothed for the same reason [`Self::walk_amount`] is: landing is
+    /// instant in the physics and must not be instant in the pose.
+    pub fn air_amount(&self) -> f32 {
+        self.air_amount
+    }
+
+    /// Vertical speed (blocks/s) as last reported while airborne — positive up.
+    ///
+    /// Deliberately *not* smoothed: this picks which pose of the jump to show,
+    /// and a lagged value would put the tuck somewhere other than the apex. It
+    /// holds its last airborne value once the feet are down, so the landing
+    /// fades out of the pose it landed in rather than snapping back mid-clip.
+    pub fn vertical_speed(&self) -> f32 {
+        self.vertical_speed
+    }
+
+    /// How far the head is turned off the torso (radians).
+    ///
+    /// The mesh is drawn at [`Self::body_yaw`], which lags the look direction;
+    /// this is what puts the face back where the entity is actually looking.
+    /// Exposed as well as folded into [`Self::pose`] because a rigged model
+    /// applies it to a *bone* rather than reading it off a box pose.
+    pub fn head_offset(&self) -> f32 {
+        wrap_angle(self.look_yaw - self.body_yaw())
+    }
+
     /// Sample the current articulation into a [`Pose`]. `head_pitch` orients the head.
     pub fn pose(&self, head_pitch: f32) -> Pose {
         let swing = self.walk_phase.sin() * SWING_MAX * self.walk_amount;
@@ -192,10 +320,8 @@ impl AnimationState {
 
         Pose {
             head_pitch,
-            // How far the head is turned off the torso. The mesh is built at
-            // `body_yaw`, so this puts the face back where the entity is looking.
-            // The inventory preview overrides it to track the cursor instead.
-            head_yaw: wrap_angle(self.look_yaw - self.body_yaw()),
+            // The inventory preview overrides this to track the cursor instead.
+            head_yaw: self.head_offset(),
             // Arms swing opposite the legs (diagonal gait); idle sway mirrors between
             // the arms; the one-shot swing rides on top of the right arm.
             left_arm: swing + idle,
@@ -212,10 +338,103 @@ mod tests {
 
     const DT: f32 = 1.0 / 60.0;
 
+    /// Landing is instant in the physics and must not be instant in the pose,
+    /// so the airborne blend ramps both ways rather than switching.
+    #[test]
+    fn leaving_the_ground_blends_in_and_landing_blends_out() {
+        let mut anim = AnimationState::new();
+        assert_eq!(anim.air_amount(), 0.0, "starts planted");
+
+        for _ in 0..30 {
+            anim.advance(Motion::new(0.0, 6.0, true), 0.0, DT);
+        }
+        let airborne = anim.air_amount();
+        assert!(
+            airborne > 0.9,
+            "half a second of air should read as air: {airborne}"
+        );
+
+        for _ in 0..30 {
+            anim.advance(Motion::still(), 0.0, DT);
+        }
+        assert!(
+            anim.air_amount() < 0.1,
+            "landing should settle: {}",
+            anim.air_amount()
+        );
+    }
+
+    /// The jump pose is picked by where in the arc the body is, so the vertical
+    /// speed it is picked from must not be smoothed — a lagged value would put
+    /// the tuck somewhere other than the apex.
+    #[test]
+    fn vertical_speed_is_reported_unsmoothed() {
+        let mut anim = AnimationState::new();
+        anim.advance(Motion::new(0.0, 9.0, true), 0.0, DT);
+        assert_eq!(anim.vertical_speed(), 9.0);
+        anim.advance(Motion::new(0.0, -4.5, true), 0.0, DT);
+        assert_eq!(anim.vertical_speed(), -4.5, "no easing between frames");
+    }
+
+    /// Landing zeroes the physics velocity in the same frame it plants the
+    /// feet, and zero is the *middle* of the jump clip. Reading it on touchdown
+    /// threw the body back through the apex tuck and played the blend-out
+    /// backwards — a fast little replay right as the player landed.
+    #[test]
+    fn landing_holds_the_speed_it_arrived_at_rather_than_snapping_to_zero() {
+        let mut anim = AnimationState::new();
+        for _ in 0..30 {
+            anim.advance(Motion::new(0.0, -9.0, true), 0.0, DT);
+        }
+        assert_eq!(anim.vertical_speed(), -9.0, "falling");
+
+        // Touchdown: on_ground and velocity.y = 0 arrive together.
+        anim.advance(Motion::still(), 0.0, DT);
+        assert_eq!(
+            anim.vertical_speed(),
+            -9.0,
+            "the fade must start from the pose it landed in"
+        );
+        assert!(
+            anim.air_amount() < 1.0,
+            "and the blend must be on its way out"
+        );
+
+        // A fresh jump takes over immediately.
+        anim.advance(Motion::new(0.0, 9.0, true), 0.0, DT);
+        assert_eq!(anim.vertical_speed(), 9.0);
+    }
+
+    /// A peer's grounded flag never crosses the wire, so it is inferred from the
+    /// movement — but walking up a slope must not read as a jump.
+    #[test]
+    fn observed_motion_tells_a_jump_from_a_step_up() {
+        let stepping = Motion::observed(4.3, 0.6 * DT, DT);
+        assert!(!stepping.airborne, "a slope is not a jump");
+
+        let jumping = Motion::observed(4.3, 9.0 * DT, DT);
+        assert!(jumping.airborne);
+        assert!((jumping.vertical_speed - 9.0).abs() < 1e-3);
+
+        let falling = Motion::observed(0.0, -9.0 * DT, DT);
+        assert!(falling.airborne && falling.vertical_speed < 0.0);
+    }
+
+    /// The gait keeps accruing in mid-air: a running jump has to land back into
+    /// the stride it left, and `walk_phase` is what remembers where that was.
+    #[test]
+    fn the_gait_keeps_running_while_airborne() {
+        let mut anim = AnimationState::new();
+        anim.advance(Motion::new(REFERENCE_SPEED, 6.0, true), 0.0, DT);
+        let before = anim.walk_phase();
+        anim.advance(Motion::new(REFERENCE_SPEED, 5.0, true), 0.0, DT);
+        assert!(anim.walk_phase() > before, "the stride did not freeze");
+    }
+
     #[test]
     fn idle_leaves_limbs_at_rest() {
         let mut anim = AnimationState::new();
-        anim.advance(0.0, 0.0, 0.1);
+        anim.advance(Motion::still(), 0.0, 0.1);
         let p = anim.pose(0.0);
         assert_eq!(p.left_leg, 0.0);
         assert_eq!(p.right_leg, 0.0);
@@ -224,11 +443,11 @@ mod tests {
     #[test]
     fn walk_phase_advances_only_when_moving() {
         let mut idle = AnimationState::new();
-        idle.advance(0.0, 0.0, 0.5);
+        idle.advance(Motion::still(), 0.0, 0.5);
         assert_eq!(idle.walk_phase, 0.0);
 
         let mut moving = AnimationState::new();
-        moving.advance(REFERENCE_SPEED, 0.0, 0.5);
+        moving.advance(Motion::walking(REFERENCE_SPEED), 0.0, 0.5);
         assert!(moving.walk_phase > 0.0, "walk_phase={}", moving.walk_phase);
     }
 
@@ -236,11 +455,11 @@ mod tests {
     fn walk_amount_rises_toward_one_then_decays() {
         let mut anim = AnimationState::new();
         for _ in 0..60 {
-            anim.advance(REFERENCE_SPEED, 0.0, DT);
+            anim.advance(Motion::walking(REFERENCE_SPEED), 0.0, DT);
         }
         assert!(anim.walk_amount > 0.9, "rose to {}", anim.walk_amount);
         for _ in 0..60 {
-            anim.advance(0.0, 0.0, DT);
+            anim.advance(Motion::still(), 0.0, DT);
         }
         assert!(anim.walk_amount < 0.1, "decayed to {}", anim.walk_amount);
     }
@@ -249,7 +468,7 @@ mod tests {
     fn walk_pose_legs_and_arms_are_anti_phase() {
         let mut anim = AnimationState::new();
         for _ in 0..20 {
-            anim.advance(REFERENCE_SPEED, 0.0, DT);
+            anim.advance(Motion::walking(REFERENCE_SPEED), 0.0, DT);
         }
         let p = anim.pose(0.0);
         // Limbs are actually swinging.
@@ -265,12 +484,12 @@ mod tests {
         let baseline = anim.pose(0.0).right_arm;
 
         anim.trigger_swing();
-        anim.advance(0.0, 0.0, SWING_DURATION / 2.0); // mid-swing → near peak reach
+        anim.advance(Motion::still(), 0.0, SWING_DURATION / 2.0); // mid-swing → near peak reach
         let mid = anim.pose(0.0).right_arm;
         // Positive = toward the model's front (-Z), i.e. the punch swings forward.
         assert!(mid > baseline + 1.0, "mid={mid}, baseline={baseline}");
 
-        anim.advance(0.0, 0.0, SWING_DURATION); // exhaust the swing window
+        anim.advance(Motion::still(), 0.0, SWING_DURATION); // exhaust the swing window
         let after = anim.pose(0.0).right_arm;
         assert!(
             (after - baseline).abs() < 0.2,
@@ -303,7 +522,7 @@ mod tests {
                 blows += 1;
             }
             anim.keep_swinging();
-            anim.advance(0.0, 0.0, dt);
+            anim.advance(Motion::still(), 0.0, dt);
             deepest = deepest.max(anim.swing_progress());
         }
         // Three frames to a swing, so twelve frames of holding is four blows.
@@ -319,7 +538,7 @@ mod tests {
     fn a_held_swing_ends_when_the_button_does() {
         let mut anim = AnimationState::new();
         anim.keep_swinging();
-        anim.advance(0.0, 0.0, SWING_DURATION);
+        anim.advance(Motion::still(), 0.0, SWING_DURATION);
         assert_eq!(anim.swing_progress(), 0.0);
     }
 
@@ -328,7 +547,7 @@ mod tests {
     fn keeping_a_swing_alive_does_not_restart_it() {
         let mut anim = AnimationState::new();
         anim.trigger_swing();
-        anim.advance(0.0, 0.0, SWING_DURATION / 2.0);
+        anim.advance(Motion::still(), 0.0, SWING_DURATION / 2.0);
         let midway = anim.swing_progress();
         anim.keep_swinging();
         assert_eq!(anim.swing_progress(), midway);
@@ -339,9 +558,9 @@ mod tests {
         let mut anim = AnimationState::new();
         // Square up first, then turn the head — otherwise the first frame adopts
         // the new yaw wholesale and there is nothing to follow.
-        anim.advance(0.0, 0.0, DT);
+        anim.advance(Motion::still(), 0.0, DT);
         for _ in 0..60 {
-            anim.advance(0.0, look_yaw, DT);
+            anim.advance(Motion::still(), look_yaw, DT);
         }
         anim
     }
@@ -352,7 +571,7 @@ mod tests {
     #[test]
     fn the_first_frame_squares_the_body_to_the_look() {
         let mut anim = AnimationState::new();
-        anim.advance(0.0, 2.0, DT);
+        anim.advance(Motion::still(), 2.0, DT);
         assert!(
             (anim.body_yaw() - 2.0).abs() < 1e-4,
             "body at {}",
@@ -406,10 +625,10 @@ mod tests {
     #[test]
     fn the_neck_never_twists_past_the_cap() {
         let mut anim = AnimationState::new();
-        anim.advance(0.0, 0.0, DT);
+        anim.advance(Motion::still(), 0.0, DT);
         for look in [PI, -PI, 2.5, -2.5] {
             let mut flicked = anim;
-            flicked.advance(0.0, look, DT);
+            flicked.advance(Motion::still(), look, DT);
             let offset = flicked.pose(0.0).head_yaw;
             assert!(
                 offset.abs() <= MAX_HEAD_TURN + 1e-4,
@@ -424,9 +643,9 @@ mod tests {
     fn walking_squares_the_body_up_under_the_look() {
         let look = 40.0 * PI / 180.0;
         let mut anim = AnimationState::new();
-        anim.advance(0.0, 0.0, DT);
+        anim.advance(Motion::still(), 0.0, DT);
         for _ in 0..60 {
-            anim.advance(REFERENCE_SPEED, look, DT);
+            anim.advance(Motion::walking(REFERENCE_SPEED), look, DT);
         }
         let offset = anim.pose(0.0).head_yaw;
         assert!(
@@ -441,10 +660,10 @@ mod tests {
     #[test]
     fn body_yaw_follows_across_the_wrap_seam() {
         let mut anim = AnimationState::new();
-        anim.advance(0.0, PI - 0.05, DT);
+        anim.advance(Motion::still(), PI - 0.05, DT);
         // Step just past the seam: a hair's turn, not a near-full one.
         for _ in 0..60 {
-            anim.advance(REFERENCE_SPEED, -PI + 0.05, DT);
+            anim.advance(Motion::walking(REFERENCE_SPEED), -PI + 0.05, DT);
         }
         assert!(
             anim.body_yaw().abs() > PI - 0.2,
@@ -456,7 +675,7 @@ mod tests {
         // A look yaw wound many turns round must not carry the torso out of range.
         let mut wound = AnimationState::new();
         for _ in 0..120 {
-            wound.advance(REFERENCE_SPEED, 0.4 + 40.0 * TAU, DT);
+            wound.advance(Motion::walking(REFERENCE_SPEED), 0.4 + 40.0 * TAU, DT);
         }
         assert!(
             wound.body_yaw().abs() <= PI,

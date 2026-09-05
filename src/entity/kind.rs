@@ -303,6 +303,27 @@ fn leg_uv() -> [u32; 2] {
     [0, 16]
 }
 
+/// A rigged model: geometry, bones and keyframe clips from one file, drawn
+/// against a shared atlas sheet rather than a texture of its own.
+///
+/// Distinct from [`VisualSpec::Model`] in the two things a *character* needs and
+/// a prop does not: a skeleton to pose, and a skin that the game owns and can
+/// swap. The skin is why this is a game-side spec rather than a field on
+/// `ModelSpec` — the engine has no idea what an atlas sheet is.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RiggedVisual {
+    /// `assets/`-relative path to a `.bbmodel` carrying a rig.
+    pub path: String,
+    /// Uniform scale applied to the model's own units, which is how an authored
+    /// figure is fitted to the collision box its entity declares.
+    #[serde(default = "one")]
+    pub scale: f32,
+    /// Named mob skin sheet (`art::mobskin`); `None` = the player skin block.
+    #[serde(default)]
+    pub skin: Option<String>,
+}
+
 /// How the entity is drawn.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -316,6 +337,21 @@ pub enum VisualSpec {
     /// Geometry loaded from a model file ([`wyven_model`]), with its own
     /// texture rather than a slot in the block atlas.
     Model(ModelSpec),
+    /// A bone-animated model file drawn against an atlas skin sheet.
+    Rigged(RiggedVisual),
+}
+
+impl VisualSpec {
+    /// The model file this visual needs loaded, if any. One place rather than a
+    /// `match` at every call site, so a new file-backed visual is a variant here
+    /// and nothing else.
+    pub fn model_path(&self) -> Option<&str> {
+        match self {
+            VisualSpec::Model(spec) => Some(&spec.path),
+            VisualSpec::Rigged(visual) => Some(&visual.path),
+            VisualSpec::Humanoid(_) | VisualSpec::ItemCube(_) | VisualSpec::Quadruped(_) => None,
+        }
+    }
 }
 
 /// One entity type: a name plus the components it carries.
@@ -446,11 +482,13 @@ mod tests {
         assert_eq!(vitals.regen_hunger_threshold, 18.0);
         assert_eq!((vitals.regen_rate, vitals.starve_rate), (1.0, 1.0));
         match &player.visual {
-            VisualSpec::Humanoid(v) => {
-                assert_eq!(v.skin, None, "player uses the player skin");
-                assert!(!v.arms_forward);
+            VisualSpec::Rigged(v) => {
+                assert_eq!(v.path, "assets/models/entity/player/player.bbmodel");
+                assert_eq!(v.skin, None, "player uses the player skin block");
+                // Stands the 1.096875-block model up in its 1.8-block box.
+                assert!((v.scale - 1.8 / 1.096_875).abs() < 1e-4, "{}", v.scale);
             }
-            other => panic!("player should be humanoid, got {other:?}"),
+            other => panic!("player should be rigged, got {other:?}"),
         }
 
         let drop = reg.dropped_item();
