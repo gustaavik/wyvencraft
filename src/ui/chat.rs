@@ -5,7 +5,9 @@
 //! state. The one exception is `draft`, which a `TextEdit` has to own; the
 //! caller reads it back when the returned action says to.
 
-use egui::{Align2, Color32, Context, Key, RichText};
+use std::path::PathBuf;
+
+use egui::{Align2, Color32, Context, CursorIcon, Key, RichText, Sense};
 
 use crate::chat::{ChatLog, log::FADE_SECONDS};
 use crate::net::ChatKind;
@@ -20,6 +22,23 @@ const HUD_LINES: usize = 10;
 const OPEN_LINES: usize = 20;
 /// Fraction of [`FADE_SECONDS`] a line stays fully opaque before fading out.
 const OPAQUE_FRACTION: f32 = 0.75;
+
+/// Colour of a clickable file name. Distinct from every [`ChatKind`] colour so
+/// a link never reads as an ordinary word in a system message.
+const LINK_COLOR: Color32 = Color32::from_rgb(120, 190, 255);
+
+/// Everything the chat overlay reports back after a frame.
+///
+/// Two independent fields rather than one enum, because both can happen at once:
+/// clicking a link also takes focus off the composer, which closes it. Folding
+/// them together would make one of the two silently lose.
+#[derive(Default)]
+pub struct ChatOutcome {
+    /// What the player did on the input line, if anything.
+    pub action: Option<ChatAction>,
+    /// A line's file name was clicked; the caller shows this file.
+    pub open: Option<PathBuf>,
+}
 
 /// What the player did on the chat line this frame.
 pub enum ChatAction {
@@ -44,27 +63,31 @@ pub fn draw_chat(
     open: bool,
     draft: &mut String,
     focus: bool,
-) -> Option<ChatAction> {
-    let mut action = None;
+) -> ChatOutcome {
+    let mut outcome = ChatOutcome::default();
 
     egui::Area::new(egui::Id::new("chat"))
         .anchor(Align2::LEFT_BOTTOM, egui::vec2(8.0, -BOTTOM_MARGIN))
         .show(ctx, |ui| {
             ui.set_width(WIDTH);
             ui.vertical(|ui| {
-                draw_log(ui, log, open);
+                outcome.open = draw_log(ui, log, open);
                 if open {
-                    action = draw_input(ui, draft, focus);
+                    outcome.action = draw_input(ui, draft, focus);
                 }
             });
         });
 
-    action
+    outcome
 }
 
 /// The message list. Closed, it shows only lines still inside the fade window;
 /// open, it shows the recent scrollback at full opacity so you can read back.
-fn draw_log(ui: &mut egui::Ui, log: &ChatLog, open: bool) {
+///
+/// Returns the path of a file name that was clicked, if any. Clicking is only
+/// reachable with the composer open — the cursor is grabbed for mouse-look the
+/// rest of the time — which is the same bargain Minecraft makes with its links.
+fn draw_log(ui: &mut egui::Ui, log: &ChatLog, open: bool) -> Option<PathBuf> {
     // Collect from the back so the newest `n` are kept, then draw oldest-first.
     let mut lines: Vec<_> = if open {
         log.lines().rev().take(OPEN_LINES).collect()
@@ -73,15 +96,44 @@ fn draw_log(ui: &mut egui::Ui, log: &ChatLog, open: bool) {
     };
     lines.reverse();
 
+    let mut clicked = None;
     for line in lines {
         let alpha = if open { 1.0 } else { fade_alpha(line.age) };
-        ui.label(
-            RichText::new(&line.text)
+        let body = |text: &str, color: Color32| {
+            RichText::new(text)
                 .monospace()
-                .color(with_alpha(kind_color(line.kind), alpha))
-                .background_color(Color32::from_black_alpha((140.0 * alpha) as u8)),
-        );
+                .color(with_alpha(color, alpha))
+                .background_color(Color32::from_black_alpha((140.0 * alpha) as u8))
+        };
+
+        let Some(path) = line.link.as_ref() else {
+            ui.label(body(&line.text, kind_color(line.kind)));
+            continue;
+        };
+
+        // The name is read off the path, never stored twice, so the label and
+        // the file it opens cannot drift apart.
+        let name = path
+            .file_name()
+            .unwrap_or(path.as_os_str())
+            .to_string_lossy()
+            .into_owned();
+
+        ui.horizontal(|ui| {
+            // The prose and the name are one continuous band; default spacing
+            // would cut a gap in the background between them.
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.label(body(&line.text, kind_color(line.kind)));
+            let response = ui
+                .add(egui::Label::new(body(&name, LINK_COLOR).underline()).sense(Sense::click()))
+                .on_hover_cursor(CursorIcon::PointingHand)
+                .on_hover_text(path.display().to_string());
+            if response.clicked() {
+                clicked = Some(path.clone());
+            }
+        });
     }
+    clicked
 }
 
 /// The input line. Returns the action the player took on it.

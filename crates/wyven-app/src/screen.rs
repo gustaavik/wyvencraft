@@ -8,6 +8,8 @@
 //! two games' screens cannot be pushed onto the same stack, and each game gets
 //! its own `Shared` payload without the engine knowing a field of it.
 
+use std::path::PathBuf;
+
 use wyven_input::InputState;
 use wyven_render::SceneFrame;
 
@@ -31,6 +33,14 @@ pub struct Frame<'a, G: Game> {
     /// Set by a screen to ask that the OS cursor be locked and hidden
     /// (gameplay) or freed (menus).
     pub grab_cursor: bool,
+    /// A screenshot saved since the last frame, for a screen to tell the player
+    /// about.
+    ///
+    /// A mailbox, not a pulse: `take()` it to mark it delivered, and whatever is
+    /// left here is offered again next frame. That is what lets a capture made
+    /// while the pause overlay is up still reach the world screen underneath it,
+    /// which never updates while it is covered. Only the newest is held.
+    pub screenshot: Option<PathBuf>,
     /// Whatever this game hands its screens.
     pub shared: &'a mut G::Shared,
 }

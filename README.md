@@ -91,20 +91,20 @@ Skip the menus with environment variables:
 
 ## Controls
 
-| Input           | Action                                |
-| --------------- | ------------------------------------- |
-| `W` `A` `S` `D` | Move                                  |
-| Mouse           | Look                                  |
-| `Space`         | Jump                                  |
-| Left click      | Break block                           |
-| Right click     | Place selected block                  |
-| Scroll wheel    | Select hotbar slot                    |
-| `Q`             | Drop one item from the selected slot  |
-| `E`             | Open/close inventory                  |
-| `F5`            | Toggle perspective (1st / 3rd person) |
-| `F3`            | Toggle debug overlay                  |
-| `F2`            | Save a screenshot                     |
-| `Esc`           | Pause (or close inventory)            |
+| Input           | Action                                        |
+| --------------- | --------------------------------------------- |
+| `W` `A` `S` `D` | Move                                          |
+| Mouse           | Look                                          |
+| `Space`         | Jump                                          |
+| Left click      | Break block                                   |
+| Right click     | Place selected block                          |
+| Scroll wheel    | Select hotbar slot                            |
+| `Q`             | Drop one item from the selected slot          |
+| `E`             | Open/close inventory                          |
+| `F5`            | Toggle perspective (1st / 3rd person)         |
+| `F3`            | Toggle debug overlay                          |
+| `F2`            | Save a screenshot (its name in chat opens it) |
+| `Esc`           | Pause (or close inventory)                    |
 
 ## Multiplayer
 

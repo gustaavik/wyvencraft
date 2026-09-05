@@ -1,5 +1,6 @@
 //! The winit application: window, device, event loop and frame pump.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use egui_winit_vulkano::{Gui, GuiConfig};
@@ -95,6 +96,8 @@ struct App<G: Game> {
     screenshots: Option<ScreenshotConfig>,
     /// Whether the automatic one-shot capture has already gone off.
     auto_captured: bool,
+    /// A saved screenshot no screen has been told about yet.
+    pending_screenshot: Option<PathBuf>,
 }
 
 impl<G: Game> App<G> {
@@ -138,6 +141,7 @@ impl<G: Game> App<G> {
             cursor_grabbed: false,
             screenshots,
             auto_captured: false,
+            pending_screenshot: None,
         }
     }
 
@@ -196,6 +200,7 @@ impl<G: Game> App<G> {
             .unwrap_or(1.0);
 
         let mut grab = self.cursor_grabbed;
+        let mut screenshot = self.pending_screenshot.take();
         let egui_ctx = self.gui.as_ref().map(|g| g.context());
 
         // --- Update the active screen ---
@@ -209,10 +214,12 @@ impl<G: Game> App<G> {
                 elapsed,
                 aspect,
                 grab_cursor: grab,
+                screenshot,
                 shared,
             };
             let alive = stack.update(&mut frame);
             grab = frame.grab_cursor;
+            screenshot = frame.screenshot;
             if !alive {
                 event_loop.exit();
                 return;
@@ -233,10 +240,12 @@ impl<G: Game> App<G> {
                 elapsed,
                 aspect,
                 grab_cursor: grab,
+                screenshot,
                 shared,
             };
             let alive = stack.ui(&egui_ctx, &mut frame);
             grab = frame.grab_cursor;
+            screenshot = frame.screenshot;
             if !alive {
                 event_loop.exit();
                 return;
@@ -244,6 +253,8 @@ impl<G: Game> App<G> {
         }
 
         self.apply_cursor_grab(grab);
+        // Undelivered notices go back in the box rather than being dropped.
+        self.pending_screenshot = screenshot;
         let capture = self.wants_capture(elapsed, dt);
         self.input.end_frame();
 
@@ -304,7 +315,7 @@ impl<G: Game> App<G> {
     ///
     /// The success line is deliberately `info!`: an automated run has no window
     /// to look at, and the log is how it learns where the file landed.
-    fn save_capture(&self, pending: &capture::Pending) {
+    fn save_capture(&mut self, pending: &capture::Pending) {
         let Some(config) = self.screenshots.as_ref() else {
             return;
         };
@@ -313,7 +324,10 @@ impl<G: Game> App<G> {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         match capture::save(pending, &config.dir, now) {
-            Ok(path) => log::info!("screenshot saved: {}", path.display()),
+            Ok(path) => {
+                log::info!("screenshot saved: {}", path.display());
+                self.pending_screenshot = Some(path);
+            }
             Err(err) => log::error!("screenshot failed: {err}"),
         }
     }
@@ -331,6 +345,7 @@ impl<G: Game> App<G> {
                 elapsed,
                 aspect: 1.0,
                 grab_cursor: false,
+                screenshot: None,
                 shared,
             };
             stack.shutdown(&mut frame);

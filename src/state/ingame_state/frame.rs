@@ -89,6 +89,13 @@ impl GameState<Wyvencraft> for InGameState {
 
     fn update(&mut self, ctx: &mut StateContext) -> Transition {
         let kb = ctx.shared.settings.controls.keybinds.clone();
+
+        // Ungated on purpose: a screenshot taken while dead, typing, or with the
+        // inventory up still deserves its line. Taking it from the mailbox is
+        // what marks it delivered.
+        if let Some(path) = ctx.screenshot.take() {
+            self.note_screenshot(&path);
+        }
         // While the chat bar is open, egui owns the keyboard and gameplay keys
         // never reach `InputState` at all. These guards cover the one frame
         // between opening the bar and the widget taking focus.
