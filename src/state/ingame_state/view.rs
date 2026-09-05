@@ -573,13 +573,11 @@ impl SceneCache {
         };
         let frame = pose.frame();
 
-        // The camera *is* the head in first person, so the arm takes no head
-        // look — only the gait and the swing reach it.
-        let arm = self.character(content.models).and_then(|character| {
-            character
-                .pose(&self.player_anim, HeadLook::default())
-                .map(|pose| viewmodel::arm_mesh(&character, &pose, frame))
-        });
+        // The arm is posed entirely by `frame` — bob and swing — and takes
+        // nothing from the body's clips or its head look. See `arm_mesh`.
+        let arm = self
+            .character(content.models)
+            .map(|character| viewmodel::arm_mesh(&character, frame));
         self.hand_mesh =
             arm.and_then(|arm| GpuMesh::upload(&ctx.memory_allocator, &arm).ok().flatten());
 

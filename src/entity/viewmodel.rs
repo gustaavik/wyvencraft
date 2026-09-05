@@ -25,7 +25,6 @@ use glam::{Mat4, Vec3};
 use crate::entity::rigged::Character;
 use wyven_model::display::{DisplayContext, ItemTransform};
 use wyven_model::mesh as model_mesh;
-use wyven_model::rig::Pose;
 use wyven_render::mesh::CpuMesh;
 
 /// Where the main hand sits in camera space: right, a little below the eye, and
@@ -166,23 +165,32 @@ pub fn block_placement(context: DisplayContext) -> ItemTransform {
 /// Build the player's right arm — the shoulder, elbow and hand of the rigged
 /// model — in world space, hanging off `frame`.
 ///
-/// Only that limb is baked, out of the same rig and the same pose the whole body
-/// is drawn from in third person, so the two views can never disagree about
-/// where an elbow is. The arm is shifted so its **fist** — not its shoulder —
-/// sits at the frame's origin, which is where the held item is too: that is what
-/// keeps an item in the hand while the arm swings.
+/// Only that limb is baked, and deliberately at the rig's **rest** pose rather
+/// than the pose the body is drawn from: in first person the camera *is* the
+/// head, and a gait authored to read on a whole third-person body throws the
+/// elbow across the entire screen when it is the only thing on it. Everything
+/// the hand should actually do — the walk bob and the attack swing — already
+/// lives in [`HandPose::frame`], so taking the clip as well applied both of them
+/// twice. Taking no pose at all is what stops that coming back.
+///
+/// The arm is shifted so its **fist** — not its shoulder — sits at the frame's
+/// origin, which is where the held item is too: that is what keeps an item in
+/// the hand while the arm swings.
 ///
 /// Lit as though it were fixed in front of the eye rather than turning with it:
 /// without that the hand would pulse between bright and dim as the player spun
 /// on the spot, which reads as a rendering fault.
-pub fn arm_mesh(character: &Character<'_>, pose: &Pose, frame: Mat4) -> CpuMesh {
+pub fn arm_mesh(character: &Character<'_>, frame: Mat4) -> CpuMesh {
+    let Some(pose) = character.rest_pose() else {
+        return CpuMesh::new();
+    };
     let Some(arm) = character.clips.right_arm() else {
         return CpuMesh::new();
     };
     let Some(hand) = character.clips.right_hand() else {
         return CpuMesh::new();
     };
-    let Some(fist) = character.joint(pose, hand) else {
+    let Some(fist) = character.joint(&pose, hand) else {
         return CpuMesh::new();
     };
 
@@ -192,7 +200,7 @@ pub fn arm_mesh(character: &Character<'_>, pose: &Pose, frame: Mat4) -> CpuMesh 
     // model's own units — so the fist has to be scaled the same way before it
     // can be subtracted off.
     let transform = frame * orientation * Mat4::from_translation(-fist * character.scale) * scale;
-    character.bake_selected(pose, transform, orientation, character.subtree_filter(arm))
+    character.bake_selected(&pose, transform, orientation, character.subtree_filter(arm))
 }
 
 #[cfg(test)]
@@ -202,12 +210,8 @@ mod tests {
     use crate::entity::rigged::fixture::{Player, walking};
 
     /// The arm as it is drawn standing still.
-    fn rested(player: &Player) -> (Character<'_>, Pose) {
-        let character = player.character();
-        let pose = character
-            .pose(&walking(0.0), crate::entity::HeadLook::default())
-            .expect("a rest pose");
-        (character, pose)
+    fn rested(player: &Player) -> Character<'_> {
+        player.character()
     }
 
     fn pose(yaw: f32, pitch: f32) -> HandPose {
@@ -227,8 +231,8 @@ mod tests {
     #[test]
     fn the_arm_is_the_three_bones_of_one_limb() {
         let player = Player::load();
-        let (character, arm_pose) = rested(&player);
-        let mesh = arm_mesh(&character, &arm_pose, pose(0.0, 0.0).frame());
+        let character = rested(&player);
+        let mesh = arm_mesh(&character, pose(0.0, 0.0).frame());
         assert_eq!(mesh.vertices.len(), 3 * 6 * 4);
     }
 
@@ -238,7 +242,7 @@ mod tests {
     #[test]
     fn the_arm_sits_in_front_of_the_eye_and_to_the_right() {
         let player = Player::load();
-        let (character, arm_pose) = rested(&player);
+        let character = rested(&player);
         for &(yaw, pitch) in &[(0.0, 0.0), (1.7, 0.0), (-2.4, 0.6), (3.0, -0.9), (5.5, 0.2)] {
             let pose = pose(yaw, pitch);
             // `Player::look_direction` for this yaw/pitch, spelled out so the
@@ -247,7 +251,7 @@ mod tests {
             let (sp, cp) = pitch.sin_cos();
             let look = Vec3::new(cp * sy, sp, -cp * cy).normalize();
             let right = Vec3::new(yaw.cos(), 0.0, yaw.sin());
-            let mesh = arm_mesh(&character, &arm_pose, pose.frame());
+            let mesh = arm_mesh(&character, pose.frame());
             for vertex in &mesh.vertices {
                 let offset = Vec3::from(vertex.position) - pose.eye;
                 assert!(
@@ -277,9 +281,10 @@ mod tests {
             let mut anim = walking(0.0);
             anim.trigger_swing();
             anim.advance(Motion::still(), 0.0, swing * 0.25);
-            let arm_pose = character
-                .pose(&anim, crate::entity::HeadLook::default())
-                .expect("a pose");
+            // The swing now reaches the hand only through `frame`, so that is
+            // the one thing varying across this loop; the arm itself is the
+            // rest limb every time.
+            let arm_pose = character.rest_pose().expect("a rest pose");
 
             let hand_pose = HandPose {
                 swing: anim.swing_progress(),
@@ -288,8 +293,8 @@ mod tests {
             let frame = hand_pose.frame();
 
             // Where the hand's own geometry ended up...
-            let mesh = arm_mesh(&character, &arm_pose, frame);
-            let all = arm_mesh(&character, &arm_pose, frame).vertices.len();
+            let mesh = arm_mesh(&character, frame);
+            let all = mesh.vertices.len();
             let hand_only = {
                 let orientation = arm_orientation();
                 let fist = character.joint(&arm_pose, hand).expect("a joint");
@@ -379,9 +384,9 @@ mod tests {
     #[test]
     fn turning_does_not_change_the_arms_lighting() {
         let player = Player::load();
-        let (character, arm_pose) = rested(&player);
-        let a = arm_mesh(&character, &arm_pose, pose(0.0, 0.0).frame());
-        let b = arm_mesh(&character, &arm_pose, pose(2.9, 0.4).frame());
+        let character = rested(&player);
+        let a = arm_mesh(&character, pose(0.0, 0.0).frame());
+        let b = arm_mesh(&character, pose(2.9, 0.4).frame());
         for (x, y) in a.vertices.iter().zip(&b.vertices) {
             assert_eq!(x.normal, y.normal);
             assert_eq!(x.ao, y.ao);
