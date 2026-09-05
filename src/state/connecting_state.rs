@@ -9,11 +9,18 @@
 //! *text*: a saved server is a hostname the player typed, and resolving it on
 //! the frame that drew the Join button would freeze the menu for as long as the
 //! resolver takes to give up.
+//!
+//! Every one of those waits is a wait the player did not ask for, so the screen
+//! is escapable at any point in it: [`ConnectingState::cancel`] says goodbye if
+//! we got as far as speaking to a host, abandons the worker, and drops back to
+//! the server list.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::time::Duration;
+
+use winit::keyboard::KeyCode;
 
 use super::{GameState, InGameState, MultiplayerMenuState, StateContext, Transition, Wyvencraft};
 use crate::net::{Client, ServerMessage, address};
@@ -159,6 +166,35 @@ impl ConnectingState {
         }
         Transition::None
     }
+
+    /// Give up on this connection: stop everything in flight, and tell a host
+    /// we may already be speaking to.
+    ///
+    /// Dropping the client alone would only close its socket, which a host
+    /// cannot tell apart from a crashed peer — it would hold the slot for the
+    /// whole of the connection timeout. The worker cannot be interrupted, but
+    /// dropping the receiver makes its `send` fail, so it finishes and exits on
+    /// its own instead of being waited on here.
+    fn abandon(&mut self) {
+        if let Some(mut client) = self.client.take() {
+            client.disconnect();
+        }
+        self.pending = None;
+    }
+
+    /// What the player asked to leave. Also the timeout's own way out, which is
+    /// the same act with nobody pressing anything.
+    fn cancel(&mut self, ctx: &mut StateContext) -> Transition {
+        self.abandon();
+        Transition::Replace(Box::new(MultiplayerMenuState::new(ctx)))
+    }
+
+    /// The button under the status line. Once there is nothing left to wait
+    /// for, cancelling is just going back, and saying so avoids implying the
+    /// attempt is still running.
+    fn dismiss_label(&self) -> &'static str {
+        if self.failed { "Back" } else { "Cancel" }
+    }
 }
 
 fn unix_now() -> u64 {
@@ -176,6 +212,13 @@ impl GameState<Wyvencraft> for ConnectingState {
     fn update(&mut self, ctx: &mut StateContext) -> Transition {
         ctx.grab_cursor = false;
         self.elapsed += ctx.dt;
+
+        // Checked before anything else, including the failure hold below: Esc
+        // means leave *now*, whatever this screen is currently waiting on.
+        if ctx.input.just_pressed(KeyCode::Escape) {
+            log::info!("connection to {} cancelled", self.target);
+            return self.cancel(ctx);
+        }
 
         // Long enough to read why, short enough not to feel stuck.
         if self.failed {
@@ -201,7 +244,7 @@ impl GameState<Wyvencraft> for ConnectingState {
 
         if let Err(err) = client.pump(Duration::from_secs_f32(ctx.dt.max(1.0e-4))) {
             log::warn!("connection error: {err}");
-            return Transition::Replace(Box::new(MultiplayerMenuState::new(ctx)));
+            return self.cancel(ctx);
         }
 
         // Wait for the Welcome message carrying the world seed + our id + mode
@@ -268,19 +311,101 @@ impl GameState<Wyvencraft> for ConnectingState {
 
         if self.elapsed > TIMEOUT_SECS {
             self.status = "Timed out".to_string();
-            return Transition::Replace(Box::new(MultiplayerMenuState::new(ctx)));
+            return self.cancel(ctx);
         }
         Transition::None
     }
 
-    fn ui(&mut self, egui_ctx: &egui::Context, _ctx: &mut StateContext) -> Transition {
+    fn ui(&mut self, egui_ctx: &egui::Context, ctx: &mut StateContext) -> Transition {
+        // Collected rather than acted on inside the closure: `cancel` needs
+        // `&mut self`, which the panel is still holding for the status text.
+        let mut dismissed = false;
         egui::CentralPanel::default().show(egui_ctx, |ui| {
             ui.vertical_centered(|ui| {
                 ui.add_space(120.0);
                 ui.heading(&self.status);
-                ui.spinner();
+                // Nothing is in flight once we have failed, and a spinner that
+                // keeps turning under an error reads as one.
+                if !self.failed {
+                    ui.spinner();
+                }
+                ui.add_space(24.0);
+                dismissed = ui
+                    .add_sized([160.0, 32.0], egui::Button::new(self.dismiss_label()))
+                    .clicked();
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("or press Esc").weak().small());
             });
         });
+
+        if dismissed {
+            log::info!("connection to {} cancelled", self.target);
+            return self.cancel(ctx);
+        }
         Transition::None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wyven_auth::FakeAuthClient;
+
+    fn signed_in(auth: &FakeAuthClient) -> AccountState {
+        let account = AccountState::new();
+        account.sign_in(auth.login("gustav", "hunter2").expect("signs in"));
+        account
+    }
+
+    /// The whole point of the button: pressing it while the ticket is still in
+    /// flight must leave nothing that can quietly finish the job afterwards.
+    /// The worker cannot be stopped, so what is asserted is that its answer can
+    /// no longer be collected — a cancelled screen never opens a socket.
+    #[test]
+    fn cancelling_mid_flight_leaves_nothing_that_could_still_connect() {
+        let auth = FakeAuthClient::new().with_account("gustav", "hunter2");
+        let account = signed_in(&auth);
+        let mut state = ConnectingState::with_client("127.0.0.1:6091", &account, Arc::new(auth));
+        assert!(state.pending.is_some(), "the worker is in flight");
+
+        state.abandon();
+
+        assert!(
+            state.pending.is_none(),
+            "the worker's answer is unreachable"
+        );
+        assert!(state.client.is_none());
+        // Even once the worker has answered, there is nothing left to answer to.
+        assert!(matches!(state.poll_prep(), Transition::None));
+        assert!(state.client.is_none(), "a cancelled screen never connects");
+    }
+
+    /// Nothing is being waited on once the attempt has failed, so the button
+    /// stops offering to stop it.
+    #[test]
+    fn the_button_says_back_once_there_is_nothing_left_to_wait_for() {
+        let auth = FakeAuthClient::new().with_account("gustav", "hunter2");
+        let account = signed_in(&auth);
+        let mut state = ConnectingState::with_client("127.0.0.1:6091", &account, Arc::new(auth));
+        assert_eq!(state.dismiss_label(), "Cancel");
+
+        state.failed = true;
+        assert_eq!(state.dismiss_label(), "Back");
+    }
+
+    /// A screen that never started a worker still tears down cleanly — the
+    /// signed-out path builds one of these, and its button is a plain Back.
+    #[test]
+    fn a_screen_that_never_started_still_cancels() {
+        let auth = FakeAuthClient::new();
+        let mut state =
+            ConnectingState::with_client("127.0.0.1:6091", &AccountState::new(), Arc::new(auth));
+        assert!(state.failed, "signed out cannot join");
+        assert_eq!(state.dismiss_label(), "Back");
+
+        state.abandon();
+
+        assert!(state.pending.is_none());
+        assert!(state.client.is_none());
     }
 }
