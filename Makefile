@@ -3,13 +3,13 @@
 # directory. Without it the game writes to the OS application-data directory,
 # which is right for a player and surprising for a checkout.
 run:
-	WYVEN_DATA_DIR=. WYVEN_BOOT_INGAME=1 WYVEN_WORLD=test cargo run
+	WYVEN_DATA_DIR=./data WYVEN_BOOT_INGAME=1 WYVEN_WORLD=test cargo run
 
 build:
 	WYVEN_AUTH_URL=https://auth.wyvencraft.com cargo build --release
 
 run-release:
-	WYVEN_DATA_DIR=. ./target/release/wyvencraft
+	WYVEN_DATA_DIR=./data ./target/release/wyvencraft
 
 # What the launcher does: state in the application-data directory, assets from
 # the working directory. Use this to check the shipped layout by hand.
