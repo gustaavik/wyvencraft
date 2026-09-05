@@ -160,13 +160,26 @@ impl Player {
         self.position + Vec3::new(0.0, self.movement.eye_height, 0.0)
     }
 
-    /// Eye position blended `alpha` of the way from the previous fixed step to
-    /// the current one. Physics ticks at a fixed rate, so rendering above that
-    /// rate must interpolate or the camera visibly steps.
-    pub fn interpolated_eye_position(&self, alpha: f32) -> Vec3 {
+    /// Feet position blended `alpha` of the way from the previous fixed step to
+    /// the current one — the render-time counterpart of [`Player::position`].
+    ///
+    /// Physics ticks at a fixed rate, so anything drawn above that rate must
+    /// interpolate or it visibly steps. During a jump one tick is `jump_speed /
+    /// TICKS_PER_SECOND` of vertical travel, which is a pop you cannot miss.
+    pub fn interpolated_position(&self, alpha: f32) -> Vec3 {
         self.prev_position
             .lerp(self.position, alpha.clamp(0.0, 1.0))
-            + Vec3::new(0.0, self.movement.eye_height, 0.0)
+    }
+
+    /// Eye position blended the same way, for the camera and everything hung
+    /// off it.
+    ///
+    /// Defined in terms of [`Player::interpolated_position`] rather than
+    /// repeating the lerp: the body mesh is drawn at that position and the
+    /// camera at this one, and the two drifting apart *is* the jitter this
+    /// interpolation exists to remove.
+    pub fn interpolated_eye_position(&self, alpha: f32) -> Vec3 {
+        self.interpolated_position(alpha) + Vec3::new(0.0, self.movement.eye_height, 0.0)
     }
 
     /// Collision box in world space.
@@ -726,6 +739,99 @@ mod tests {
             "apex differed with framerate: {slow} at 30 fps vs {fast} at 144 fps"
         );
         assert!(slow > 66.0, "the jump should clear a block; peak = {slow}");
+    }
+
+    /// The two ends of the render interpolation are the two ends of the step.
+    #[test]
+    fn interpolated_position_spans_the_fixed_step() {
+        let mut player = settled(Vec3::new(0.5, 65.0, 0.5), flat_ground);
+        let before = player.position;
+        player.update(holding_jump(), FIXED_DT, flat_ground);
+        let after = player.position;
+
+        assert!(
+            after.y > before.y,
+            "test setup: the jump tick should have lifted the player"
+        );
+        assert_eq!(player.interpolated_position(0.0), before);
+        assert_eq!(player.interpolated_position(1.0), after);
+        // Out-of-range alphas clamp rather than extrapolating off the arc.
+        assert_eq!(player.interpolated_position(-1.0), before);
+        assert_eq!(player.interpolated_position(2.0), after);
+    }
+
+    /// The camera and the third-person body must be placed by the *same*
+    /// interpolation. When they disagree the body lurches a tick's worth against
+    /// a camera that glides, which is exactly what jumping looked like before
+    /// the body was interpolated at all.
+    #[test]
+    fn the_eye_and_the_body_interpolate_together() {
+        let mut player = settled(Vec3::new(0.5, 65.0, 0.5), flat_ground);
+        let eye_height = player.movement.eye_height;
+
+        // Sample across the whole arc, not just one tick: launch, ascent, apex.
+        for tick in 0..30 {
+            let input = if tick == 0 {
+                holding_jump()
+            } else {
+                MovementInput::default()
+            };
+            player.update(input, FIXED_DT, flat_ground);
+
+            for step in 0..=4 {
+                let alpha = step as f32 / 4.0;
+                let body = player.interpolated_position(alpha);
+                let eye = player.interpolated_eye_position(alpha);
+                assert_eq!(
+                    eye,
+                    body + Vec3::new(0.0, eye_height, 0.0),
+                    "eye and body disagreed at tick {tick}, alpha {alpha}"
+                );
+            }
+        }
+    }
+
+    /// Rendering faster than the tick rate must move the body on *every* frame.
+    ///
+    /// Monotonicity alone would not catch the bug this guards: the raw
+    /// post-step position rises monotonically too. What it does instead is hold
+    /// perfectly still for two frames and then jump a whole tick — and it is
+    /// that stall-and-pop, against a camera built from the interpolated
+    /// position, that reads as the player juddering through a jump.
+    #[test]
+    fn the_body_advances_on_every_frame_of_a_rise() {
+        let mut player = settled(Vec3::new(0.5, 65.0, 0.5), flat_ground);
+        let mut accum = 0.0;
+        // 144 fps against a 60 Hz tick: most frames run no step at all.
+        let frame_dt = 1.0 / 144.0;
+
+        let mut previous = player.interpolated_position(0.0).y;
+        let mut ascending = 0;
+        for frame in 0..40 {
+            // Held until the launch actually lands in a step: at 144 fps most
+            // frames run none at all, so a single frame of Space can fall
+            // between two ticks and never be simulated.
+            let input = if player.on_ground {
+                holding_jump()
+            } else {
+                MovementInput::default()
+            };
+            let alpha = player.step_fixed(input, frame_dt, &mut accum, flat_ground);
+            let y = player.interpolated_position(alpha).y;
+
+            if player.velocity.y > 0.0 {
+                assert!(
+                    y > previous,
+                    "the body stalled mid-ascent at frame {frame}: {previous} -> {y}"
+                );
+                ascending += 1;
+            }
+            previous = y;
+        }
+        assert!(
+            ascending > 20,
+            "test setup: expected to spend most of these frames rising, got {ascending}"
+        );
     }
 
     /// The variable-height jump is floored: even the shortest possible tap must
