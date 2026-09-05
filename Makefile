@@ -6,7 +6,7 @@ run:
 	WYVEN_DATA_DIR=./data WYVEN_BOOT_INGAME=1 WYVEN_WORLD=test cargo run
 
 build:
-	WYVEN_AUTH_URL=https://auth.wyvencraft.com cargo build --release
+	WYVEN_AUTH_URL=https://auth.wyvencraft.com cargo build --release --locked
 
 run-release:
 	WYVEN_DATA_DIR=./data ./target/release/wyvencraft
