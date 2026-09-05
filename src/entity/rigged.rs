@@ -410,6 +410,43 @@ mod tests {
         assert_eq!(fall, plummet, "terminal velocity is still the falling pose");
     }
 
+    /// The visible symptom of not holding the landing speed: the knee snapping
+    /// back up into the tuck at the moment the feet touch down.
+    #[test]
+    fn touching_down_keeps_the_pose_it_landed_in() {
+        let player = Player::load();
+        let character = player.character();
+        let rig = character.rig().expect("rigged");
+        let bound = character.clips;
+        let knee = rig.bone("knee_r").expect("knee_r");
+
+        let mut anim = fixture::airborne(-9.0);
+        let falling = bound.pose(rig, &anim, HeadLook::default());
+
+        // One frame of contact: grounded, and the physics has zeroed velocity.y.
+        anim.advance(Motion::still(), 0.0, 1.0 / 60.0);
+        let landed = bound.pose(rig, &anim, HeadLook::default());
+
+        let bend = |pose: &Pose| pose.get(knee).rotation.x.to_degrees();
+        let apex = bound.pose(rig, &fixture::airborne(0.0), HeadLook::default());
+
+        // The knee must relax *out* of the landing pose toward rest, not bend
+        // further into the tuck. That sign is the whole bug: reading the zeroed
+        // velocity on touchdown sent it the other way.
+        assert!(
+            bend(&landed) > bend(&falling),
+            "the knee should straighten on landing, not tuck: landed {} vs falling {}",
+            bend(&landed),
+            bend(&falling)
+        );
+        assert!(
+            bend(&landed) > bend(&apex) + 50.0,
+            "landed {} is nowhere near the apex tuck {}",
+            bend(&landed),
+            bend(&apex)
+        );
+    }
+
     /// The jump replaces the gait rather than riding on it, but only once the
     /// body is actually off the ground.
     #[test]

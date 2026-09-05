@@ -135,9 +135,10 @@ pub struct AnimationState {
     look_yaw: f32,
     /// Smoothed airborne blend in `[0,1]` — how much of the jump clip is showing.
     air_amount: f32,
-    /// Vertical speed (blocks/s) as last reported, unsmoothed. The jump pose is
-    /// chosen by where in the arc the body is, and smoothing that would lag the
-    /// apex behind the actual one.
+    /// Vertical speed (blocks/s) as last reported *while airborne*, unsmoothed.
+    /// The jump pose is chosen by where in the arc the body is, and smoothing
+    /// that would lag the apex behind the actual one. Held rather than cleared
+    /// on landing — see [`AnimationState::advance`].
     vertical_speed: f32,
 }
 
@@ -171,7 +172,15 @@ impl AnimationState {
         // and `walk_phase` is the only thing that remembers where that was.
         let airborne = if motion.airborne { 1.0 } else { 0.0 };
         self.air_amount += (airborne - self.air_amount) * (1.0 - (-dt * AIR_BLEND_RATE).exp());
-        self.vertical_speed = motion.vertical_speed;
+        // Only sampled while airborne. Landing plants the feet and zeroes the
+        // physics velocity in the *same* frame, and zero maps to the middle of
+        // the jump clip — so reading it on touchdown would throw the body back
+        // through the apex tuck it had already left, and the blend-out would
+        // play that backwards as a fast little replay. Holding the speed it
+        // arrived at means the fade starts from the pose it actually landed in.
+        if motion.airborne {
+            self.vertical_speed = motion.vertical_speed;
+        }
 
         self.turn_body(look_yaw, dt);
 
@@ -274,10 +283,12 @@ impl AnimationState {
         self.air_amount
     }
 
-    /// Vertical speed (blocks/s) as last reported — positive up.
+    /// Vertical speed (blocks/s) as last reported while airborne — positive up.
     ///
     /// Deliberately *not* smoothed: this picks which pose of the jump to show,
-    /// and a lagged value would put the tuck somewhere other than the apex.
+    /// and a lagged value would put the tuck somewhere other than the apex. It
+    /// holds its last airborne value once the feet are down, so the landing
+    /// fades out of the pose it landed in rather than snapping back mid-clip.
     pub fn vertical_speed(&self) -> f32 {
         self.vertical_speed
     }
@@ -363,6 +374,35 @@ mod tests {
         assert_eq!(anim.vertical_speed(), 9.0);
         anim.advance(Motion::new(0.0, -4.5, true), 0.0, DT);
         assert_eq!(anim.vertical_speed(), -4.5, "no easing between frames");
+    }
+
+    /// Landing zeroes the physics velocity in the same frame it plants the
+    /// feet, and zero is the *middle* of the jump clip. Reading it on touchdown
+    /// threw the body back through the apex tuck and played the blend-out
+    /// backwards — a fast little replay right as the player landed.
+    #[test]
+    fn landing_holds_the_speed_it_arrived_at_rather_than_snapping_to_zero() {
+        let mut anim = AnimationState::new();
+        for _ in 0..30 {
+            anim.advance(Motion::new(0.0, -9.0, true), 0.0, DT);
+        }
+        assert_eq!(anim.vertical_speed(), -9.0, "falling");
+
+        // Touchdown: on_ground and velocity.y = 0 arrive together.
+        anim.advance(Motion::still(), 0.0, DT);
+        assert_eq!(
+            anim.vertical_speed(),
+            -9.0,
+            "the fade must start from the pose it landed in"
+        );
+        assert!(
+            anim.air_amount() < 1.0,
+            "and the blend must be on its way out"
+        );
+
+        // A fresh jump takes over immediately.
+        anim.advance(Motion::new(0.0, 9.0, true), 0.0, DT);
+        assert_eq!(anim.vertical_speed(), 9.0);
     }
 
     /// A peer's grounded flag never crosses the wire, so it is inferred from the
