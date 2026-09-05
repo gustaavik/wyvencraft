@@ -38,6 +38,9 @@ const HANDS: [&str; 2] = ["hand_l", "hand_r"];
 const IDLE: &str = "idle";
 const WALK: &str = "walk";
 const RUN: &str = "run";
+/// Optional, like `idle`: a model with no jump clip simply keeps its gait in
+/// mid-air, which is what every model here did before one existed.
+const JUMP: &str = "jump";
 
 /// Peak forward rotation of the arm during a one-shot attack swing (radians).
 /// The same value [`AnimationState`] uses for the box model, so the two read
@@ -74,10 +77,16 @@ pub struct HumanoidRig {
     idle: Option<usize>,
     walk: Option<Gait>,
     run: Option<Gait>,
+    /// Sampled by vertical velocity rather than by a clock — see
+    /// [`HumanoidRig::airborne`].
+    jump: Option<Gait>,
     /// Speeds the two gaits are authored for, from the entity's own movement
     /// data rather than repeated as constants here.
     walk_speed: f32,
     run_speed: f32,
+    /// The launch speed of this entity's own jump, which is what the jump clip's
+    /// two ends are calibrated against.
+    jump_speed: f32,
 }
 
 impl HumanoidRig {
@@ -89,10 +98,12 @@ impl HumanoidRig {
             idle: rig.clip_index(IDLE),
             walk: gait(rig, WALK),
             run: gait(rig, RUN),
+            jump: gait(rig, JUMP),
             walk_speed: movement.walk_speed.max(0.01),
             run_speed: movement.sprint_speed.max(movement.walk_speed + 0.01),
+            jump_speed: movement.jump_speed.max(0.01),
         };
-        for (name, gait) in [(WALK, bound.walk), (RUN, bound.run)] {
+        for (name, gait) in [(WALK, bound.walk), (RUN, bound.run), (JUMP, bound.jump)] {
             let Some(gait) = gait else { continue };
             let Some(clip) = rig.clip_at(gait.clip) else {
                 continue;
@@ -100,7 +111,7 @@ impl HumanoidRig {
             if clip.end() + 1e-3 < clip.length {
                 log::warn!(
                     "clip {name:?} is {:.2}s long but its last keyframe is at {:.2}s; \
-                     driven by stride it plays the keyframed span, so the tail is ignored",
+                     driven by movement it plays the keyframed span, so the tail is ignored",
                     clip.length,
                     clip.end()
                 );
@@ -124,6 +135,17 @@ impl HumanoidRig {
     /// attack swing layered on top.
     pub fn pose(&self, rig: &Rig, anim: &AnimationState, look: HeadLook) -> Pose {
         let mut pose = self.locomotion(rig, anim);
+
+        // Leaving the ground replaces the gait rather than riding on it: a jump
+        // is a whole-body shape, and half a stride mixed into it reads as a
+        // stumble. The gait keeps running underneath so the landing rejoins the
+        // stride it left.
+        let air = anim.air_amount().clamp(0.0, 1.0);
+        if air > 0.0
+            && let Some(jump) = self.airborne(rig, anim)
+        {
+            pose.blend(&jump, air);
+        }
 
         if let Some(head) = self.head {
             // `yaw_matrix` (and so every yaw in this game) turns the opposite
@@ -177,8 +199,26 @@ impl HumanoidRig {
         pose
     }
 
-    /// One gait clip sampled at `phase` strides, or `None` if the rig has no
-    /// such clip.
+    /// The jump clip sampled at wherever in the arc the body actually is.
+    ///
+    /// Vertical velocity is the clock, exactly as distance is the clock for the
+    /// gait: the clip runs from launch at `+jump_speed`, through the apex where
+    /// the body hangs at zero, to the fall at `-jump_speed`. Driving it this way
+    /// rather than off a timer means the tuck lands at the real apex however
+    /// high the jump was, a jump cut short by a ceiling reverses instead of
+    /// playing on, and stepping off a ledge starts partway in — already falling,
+    /// which is what a fall is.
+    ///
+    /// The downward end is calibrated to `jump_speed` rather than to terminal
+    /// velocity so that a plain jump uses the whole clip; a longer drop simply
+    /// holds the falling pose.
+    fn airborne(&self, rig: &Rig, anim: &AnimationState) -> Option<Pose> {
+        let rise = (anim.vertical_speed() / self.jump_speed).clamp(-1.0, 1.0);
+        self.sample(rig, self.jump, (1.0 - rise) * 0.5)
+    }
+
+    /// One clip sampled at `phase` of its keyframed span, or `None` if the rig
+    /// has no such clip.
     fn sample(&self, rig: &Rig, gait: Option<Gait>, phase: f32) -> Option<Pose> {
         let gait = gait?;
         let clip = rig.clip_at(gait.clip)?;
@@ -217,6 +257,8 @@ fn right_of(rig: &Rig, names: &[&str]) -> Option<BoneId> {
 /// hand-built stub would defeat the point.
 #[cfg(test)]
 pub(crate) mod fixture {
+    use crate::entity::Motion;
+
     use super::*;
     use wyven_assets::FsSource;
     use wyven_model::{ModelId, ModelRegistry};
@@ -277,7 +319,16 @@ pub(crate) mod fixture {
     pub fn walking(speed: f32) -> AnimationState {
         let mut anim = AnimationState::new();
         for _ in 0..200 {
-            anim.advance(speed, 0.0, 1.0 / 60.0);
+            anim.advance(Motion::walking(speed), 0.0, 1.0 / 60.0);
+        }
+        anim
+    }
+
+    /// An animation state fully in the air, rising (or falling) at `vertical`.
+    pub fn airborne(vertical: f32) -> AnimationState {
+        let mut anim = AnimationState::new();
+        for _ in 0..200 {
+            anim.advance(Motion::new(0.0, vertical, true), 0.0, 1.0 / 60.0);
         }
         anim
     }
@@ -286,6 +337,7 @@ pub(crate) mod fixture {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entity::Motion;
     use fixture::{Player, walking};
 
     #[test]
@@ -314,6 +366,67 @@ mod tests {
 
         let pose = bound.pose(rig, &walking(0.0), HeadLook::default());
         assert_eq!(pose, Pose::rest(rig), "no clip, no drift");
+    }
+
+    /// Rising, hanging and falling have to be three different shapes, or the
+    /// jump reads as one held pose for its whole flight.
+    #[test]
+    fn the_jump_clip_reads_the_arc_from_vertical_speed() {
+        let player = Player::load();
+        let character = player.character();
+        let rig = character.rig().expect("rigged");
+        let bound = character.clips;
+        let knee = rig.bone("knee_r").expect("knee_r");
+
+        // `jump_speed` for this fixture is 9.0: the clip's two ends.
+        let launch = bound.pose(rig, &fixture::airborne(9.0), HeadLook::default());
+        let apex = bound.pose(rig, &fixture::airborne(0.0), HeadLook::default());
+        let fall = bound.pose(rig, &fixture::airborne(-9.0), HeadLook::default());
+
+        let bend = |pose: &Pose| pose.get(knee).rotation.x.to_degrees();
+        // Authored: -12 pushing off, -65 tucked at the apex, -22 reaching down.
+        assert!(
+            bend(&apex) < bend(&launch),
+            "the knee should tuck at the apex"
+        );
+        assert!(bend(&apex) < bend(&fall), "and come back down to land");
+        assert!(
+            bend(&launch) < 0.0 && bend(&fall) < 0.0,
+            "a knee only bends one way"
+        );
+    }
+
+    /// Past the ends of the arc the pose holds rather than wrapping — a long
+    /// fall must not loop back round to the launch.
+    #[test]
+    fn falling_faster_than_a_jump_holds_the_falling_pose() {
+        let player = Player::load();
+        let character = player.character();
+        let rig = character.rig().expect("rigged");
+        let bound = character.clips;
+
+        let fall = bound.pose(rig, &fixture::airborne(-9.0), HeadLook::default());
+        let plummet = bound.pose(rig, &fixture::airborne(-40.0), HeadLook::default());
+        assert_eq!(fall, plummet, "terminal velocity is still the falling pose");
+    }
+
+    /// The jump replaces the gait rather than riding on it, but only once the
+    /// body is actually off the ground.
+    #[test]
+    fn a_grounded_character_shows_no_trace_of_the_jump() {
+        let player = Player::load();
+        let character = player.character();
+        let rig = character.rig().expect("rigged");
+        let bound = character.clips;
+
+        let walked = bound.pose(rig, &walking(4.3), HeadLook::default());
+        // Same gait, but airborne: the pose has to change.
+        let mut anim = walking(4.3);
+        for _ in 0..30 {
+            anim.advance(Motion::new(4.3, 6.0, true), 0.0, 1.0 / 60.0);
+        }
+        let jumped = bound.pose(rig, &anim, HeadLook::default());
+        assert_ne!(walked, jumped, "leaving the ground should change the pose");
     }
 
     #[test]
@@ -354,7 +467,7 @@ mod tests {
         // so compare the phase rather than the blended pose.
         let phase = anim.walk_phase();
         for _ in 0..60 {
-            anim.advance(0.0, 0.0, 1.0 / 60.0);
+            anim.advance(Motion::still(), 0.0, 1.0 / 60.0);
         }
         assert_eq!(anim.walk_phase(), phase, "a still character takes no steps");
         assert!(before.rotation.x.abs() > 0.0);
@@ -473,7 +586,7 @@ mod tests {
         let mut anim = walking(4.3);
         let resting = bound.pose(rig, &anim, HeadLook::default()).get(arm);
         anim.trigger_swing();
-        anim.advance(4.3, 0.0, 0.125);
+        anim.advance(Motion::walking(4.3), 0.0, 0.125);
         let swinging = bound.pose(rig, &anim, HeadLook::default()).get(arm);
 
         assert!(

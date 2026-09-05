@@ -16,7 +16,7 @@ pub mod rigged;
 pub mod spawning;
 pub mod viewmodel;
 
-pub use animation::AnimationState;
+pub use animation::{AnimationState, Motion};
 pub use brain::{Perception, PlayerSighting};
 pub use dropped_item::DroppedItem;
 pub use kind::{EntityKind, EntityRegistry};

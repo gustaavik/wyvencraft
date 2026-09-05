@@ -198,6 +198,7 @@ pub fn arm_mesh(character: &Character<'_>, pose: &Pose, frame: Mat4) -> CpuMesh 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entity::Motion;
     use crate::entity::rigged::fixture::{Player, walking};
 
     /// The arm as it is drawn standing still.
@@ -275,7 +276,7 @@ mod tests {
         for swing in [0.0, 0.25, 0.5, 0.9] {
             let mut anim = walking(0.0);
             anim.trigger_swing();
-            anim.advance(0.0, 0.0, swing * 0.25);
+            anim.advance(Motion::still(), 0.0, swing * 0.25);
             let arm_pose = character
                 .pose(&anim, crate::entity::HeadLook::default())
                 .expect("a pose");

@@ -29,7 +29,8 @@ use crate::entity::camera::Shot;
 use crate::entity::kind::{EntityRegistry, VisualSpec};
 use crate::entity::viewmodel::{self, HandPose};
 use crate::entity::{
-    AnimationState, Arrow, Character, DroppedItem, HeadLook, HumanoidRig, Mob, Player, camera,
+    AnimationState, Arrow, Character, DroppedItem, HeadLook, HumanoidRig, Mob, Motion, Player,
+    camera,
 };
 use crate::inventory::{Inventory, ItemId};
 use crate::net::{PlayerId, RemotePlayer};
@@ -338,8 +339,8 @@ impl SceneCache {
     // --- Animated models ------------------------------------------------------------
 
     /// Advance the local player's animation clock.
-    pub fn advance_player_anim(&mut self, speed: f32, look_yaw: f32, dt: f32) {
-        self.player_anim.advance(speed, look_yaw, dt);
+    pub fn advance_player_anim(&mut self, motion: Motion, look_yaw: f32, dt: f32) {
+        self.player_anim.advance(motion, look_yaw, dt);
     }
 
     /// Trigger the main-hand swing on the local player's model.
@@ -631,7 +632,12 @@ impl SceneCache {
             let delta = pos - state.last_pos;
             let speed =
                 (Vec3::new(delta.x, 0.0, delta.z).length() / dt.max(1e-4)).min(REMOTE_MAX_SPEED);
-            state.anim.advance(speed, yaw, dt);
+            // Only the look yaw and position cross the wire, so — like the torso
+            // that follows that yaw — whether a peer is airborne is worked out
+            // from what it is seen doing rather than being sent.
+            state
+                .anim
+                .advance(Motion::observed(speed, delta.y, dt), yaw, dt);
             state.last_pos = pos;
             let anim = state.anim;
 
@@ -1239,12 +1245,16 @@ impl super::InGameState {
         // there, so a player who opened it mid-stride is still moving, and
         // forcing the idle pose would have them gliding to a stop with their
         // feet planted — in full view of the camera that just panned onto them.
-        let local_speed = {
+        let local_motion = {
             let v = self.player.velocity;
-            Vec3::new(v.x, 0.0, v.z).length()
+            Motion::new(
+                Vec3::new(v.x, 0.0, v.z).length(),
+                v.y,
+                !self.player.on_ground,
+            )
         };
         self.view
-            .advance_player_anim(local_speed, self.player.yaw, dt);
+            .advance_player_anim(local_motion, self.player.yaw, dt);
         self.view.update_player_mesh(
             ctx,
             &self.player,

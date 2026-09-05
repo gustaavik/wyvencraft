@@ -13,8 +13,8 @@ use crate::core::{Aabb, BlockPos, Rng64};
 use crate::entity::kind::VisualSpec;
 use crate::entity::rigged;
 use crate::entity::{
-    AnimationState, Arrow, HumanoidModel, Mob, MobAction, MobId, Perception, PlayerSighting,
-    QuadrupedModel,
+    AnimationState, Arrow, HumanoidModel, Mob, MobAction, MobId, Motion, Perception,
+    PlayerSighting, QuadrupedModel,
 };
 use crate::inventory::ItemStack;
 use crate::net::{Channel, ClientMessage, PlayerId, ServerMessage};
@@ -94,7 +94,10 @@ impl RemoteMob {
         } else {
             0.0
         };
-        self.anim.advance(speed, self.yaw, dt);
+        // A snapshot carries no grounded flag, so the vertical half is read off
+        // the movement itself — the same way the horizontal half already is.
+        let motion = Motion::observed(speed, self.position.y - self.last_pos.y, dt);
+        self.anim.advance(motion, self.yaw, dt);
         self.last_pos = self.position;
         // Drawn at the torso yaw, which follows the snapshot yaw the head keeps.
         (

@@ -602,7 +602,7 @@ mod tests {
     fn the_players_clips_are_read_with_their_loop_and_length() {
         let model = load(RIGGED);
         let rig = model.rig.expect("the player is rigged");
-        assert_eq!(rig.clips().len(), 2);
+        assert_eq!(rig.clips().len(), 3);
 
         let walk = rig.clip("walk").expect("a walk clip");
         assert_eq!(walk.length, 1.0);
@@ -610,6 +610,14 @@ mod tests {
         assert!(!walk.is_empty());
 
         assert!(rig.clip("run").is_some());
+
+        // A jump is played once through and clamped at both ends rather than
+        // wrapped: sampling past the end must hold the falling pose, not snap
+        // back to the launch.
+        let jump = rig.clip("jump").expect("a jump clip");
+        assert_eq!(jump.length, 1.0);
+        assert_eq!(jump.loop_mode, clip::LoopMode::Hold);
+        assert!(!jump.is_empty());
         assert!(
             rig.clip("moonwalk").is_none(),
             "clips are found by name, not guessed"
