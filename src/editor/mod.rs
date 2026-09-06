@@ -209,11 +209,61 @@ mod tests {
         }
     }
 
-    /// The shipped file has to say what the compiled-in fallback says, or
-    /// deleting it would visibly move every held block.
+    /// The shipped file has to *place* both hands, not match any particular
+    /// numbers — those are the developer's, and moving them is the whole point
+    /// of the editor. What must hold is that neither hand is left to the
+    /// fallback, so the file is the single answer to where a held block sits.
     #[test]
-    fn the_shipped_block_model_matches_the_builtin_placement() {
+    fn the_shipped_block_model_places_both_hands() {
         let content = shipped();
+        for context in [
+            DisplayContext::FirstPersonRightHand,
+            DisplayContext::ThirdPersonRightHand,
+        ] {
+            assert!(
+                content.block_item_display.get(context).is_some(),
+                "{} declares no {context:?}",
+                crate::content::BLOCK_ITEM_MODEL
+            );
+        }
+    }
+
+    /// A block item has no `[item.model]` spec to fall back to, so an entry
+    /// deleted from that file must cost *that entry* and not leave the block
+    /// you are holding at the origin at full size.
+    #[test]
+    fn a_missing_entry_falls_back_per_context_rather_than_wholesale() {
+        use crate::content::{BLOCK_ITEM_MODEL, GameContent, MapSource};
+
+        let builtin = crate::entity::viewmodel::default_block_display();
+        let only_first = r#"{ "display": { "firstperson_righthand": { "scale": [2, 2, 2] } } }"#;
+        let content = GameContent::from_source(
+            &MapSource::new().with_bytes(BLOCK_ITEM_MODEL, only_first.as_bytes().to_vec()),
+        );
+
+        assert_eq!(
+            content
+                .block_item_display
+                .get(DisplayContext::FirstPersonRightHand)
+                .map(|t| t.scale),
+            Some([2.0; 3]),
+            "the declared hand is the file's"
+        );
+        assert_eq!(
+            content
+                .block_item_display
+                .get(DisplayContext::ThirdPersonRightHand),
+            builtin.get(DisplayContext::ThirdPersonRightHand),
+            "and the one it left out keeps the builtin, not the identity"
+        );
+    }
+
+    /// A file that cannot be read at all still leaves blocks holdable.
+    #[test]
+    fn no_file_at_all_is_the_builtin_placement() {
+        use crate::content::GameContent;
+
+        let content = GameContent::from_source(&crate::content::MapSource::new());
         assert_eq!(
             content.block_item_display,
             crate::entity::viewmodel::default_block_display()

@@ -759,20 +759,32 @@ fn load_block_item_display(source: &dyn ContentSource) -> DisplayTransforms {
         display: DisplayTransforms,
     }
 
+    let builtin = crate::entity::viewmodel::default_block_display();
     let Ok(text) = source.read(BLOCK_ITEM_MODEL) else {
         log::info!("no {BLOCK_ITEM_MODEL}; using the builtin block-item placement");
-        return crate::entity::viewmodel::default_block_display();
+        return builtin;
     };
-    match serde_json::from_str::<Document>(&text) {
-        Ok(document) if !document.display.is_empty() => document.display,
-        Ok(_) => {
-            log::warn!("{BLOCK_ITEM_MODEL} declares no display block; using the builtin placement");
-            crate::entity::viewmodel::default_block_display()
-        }
+    let declared = match serde_json::from_str::<Document>(&text) {
+        Ok(document) => document.display,
         Err(err) => {
             log::warn!("could not parse {BLOCK_ITEM_MODEL} ({err}); using the builtin placement");
-            crate::entity::viewmodel::default_block_display()
+            return builtin;
         }
+    };
+
+    // Merged per context, not taken whole. A model's own `display` may leave a
+    // context out because the `[item.model]` spec will place it — but a block
+    // item has no spec to fall back to, so an absent entry would resolve to the
+    // identity and drop the block you are holding to the origin at full size.
+    // Deleting one entry from this file should cost you that one entry.
+    DisplayTransforms {
+        firstperson_righthand: declared
+            .firstperson_righthand
+            .or(builtin.firstperson_righthand),
+        thirdperson_righthand: declared
+            .thirdperson_righthand
+            .or(builtin.thirdperson_righthand),
+        ..declared
     }
 }
 

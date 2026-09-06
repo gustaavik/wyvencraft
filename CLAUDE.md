@@ -487,8 +487,8 @@ those systems are testable without a Vulkan device.
 ## Verifying a change
 
 1. `cargo build --workspace` / `cargo clippy --workspace --all-targets` clean.
-2. `cargo test --workspace` green (837 tests: 9 app, 2 assets, 54 auth, 11 core,
-   116 model, 55 render, 21 voxel, 569 game). One of the game tests
+2. `cargo test --workspace` green (839 tests: 9 app, 2 assets, 54 auth, 11 core,
+   116 model, 55 render, 21 voxel, 571 game). One of the game tests
    (`a_probe_reaches_a_real_host_and_is_answered_without_joining_it`) binds a
    real loopback socket and drives the whole status/join path through it — it is
    the only test here that touches a network, and deliberately so: a probe *is* a
