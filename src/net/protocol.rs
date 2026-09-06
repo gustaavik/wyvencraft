@@ -110,6 +110,23 @@ pub enum ClientMessage {
     RequestStatus,
 }
 
+/// Everything a remote player's body is drawn with, as one value.
+///
+/// One struct rather than a field per thing, so the host's "only re-send on
+/// change" check covers all of it by construction: something new that a remote
+/// body draws cannot be added and then left stale on every other client.
+///
+/// `armor` is sized from [`ARMOR_SIZE`] rather than spelled out, so adding or
+/// removing a slot cannot leave the wire disagreeing with the inventory it
+/// describes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Equipment {
+    /// One item id per armor slot, in `ArmorSlot::ALL` order (`None` = empty).
+    pub armor: [Option<u16>; ARMOR_SIZE],
+    /// The item in the main hand — what the fist is drawn holding.
+    pub held: Option<u16>,
+}
+
 /// Messages the host sends to clients.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ServerMessage {
@@ -165,16 +182,12 @@ pub enum ServerMessage {
         hunger: f32,
         mode: GameMode,
     },
-    /// A player's equipped armor, one item id per armor slot (`None` = empty).
-    /// Sent reliably on change (and to a joining client for everyone already in),
-    /// so remote player models render armor without bloating the per-tick
-    /// movement snapshot.
-    ///
-    /// Sized from [`ARMOR_SIZE`] rather than spelled out, so adding or removing
-    /// a slot cannot leave the wire disagreeing with the inventory it describes.
+    /// What a player is wearing and holding. Sent reliably on change (and to a
+    /// joining client for everyone already in), so remote player models render
+    /// equipment without bloating the per-tick movement snapshot.
     PlayerEquipment {
         id: PlayerId,
-        armor: [Option<u16>; ARMOR_SIZE],
+        equipment: Equipment,
     },
     /// A mob came into existence (spawned, or replayed to a joining client).
     /// Kind travels by name (the recipe-wire precedent): unknown names are
@@ -612,6 +625,49 @@ mod tests {
         match back {
             ServerMessage::Welcome { restored, .. } => assert_eq!(restored, Some(restore)),
             _ => panic!("expected Welcome"),
+        }
+    }
+
+    /// Both halves of what a remote body is drawn with survive the wire. `held`
+    /// travels beside the armor deliberately: they change at the same moments
+    /// and are drawn by the same pass, so one message covers both and the
+    /// host's change check cannot go stale on one of them.
+    #[test]
+    fn equipment_carries_both_the_armor_and_the_hand() {
+        let mut equipment = Equipment {
+            armor: [None; ARMOR_SIZE],
+            held: Some(12),
+        };
+        equipment.armor[0] = Some(3);
+        let msg = ServerMessage::PlayerEquipment {
+            id: PlayerId(2),
+            equipment,
+        };
+        let back: ServerMessage = decode(&encode(&msg)).unwrap();
+        match back {
+            ServerMessage::PlayerEquipment { id, equipment: got } => {
+                assert_eq!(id, PlayerId(2));
+                assert_eq!(got, equipment);
+            }
+            other => panic!("expected PlayerEquipment, got {other:?}"),
+        }
+    }
+
+    /// An empty fist is a real state, not an absent field: a player who puts
+    /// their pickaxe away must stop being drawn holding it.
+    #[test]
+    fn an_empty_hand_round_trips_as_empty() {
+        let msg = ServerMessage::PlayerEquipment {
+            id: PlayerId(1),
+            equipment: Equipment::default(),
+        };
+        let back: ServerMessage = decode(&encode(&msg)).unwrap();
+        match back {
+            ServerMessage::PlayerEquipment { equipment, .. } => {
+                assert_eq!(equipment.held, None);
+                assert_eq!(equipment.armor, [None; ARMOR_SIZE]);
+            }
+            other => panic!("expected PlayerEquipment, got {other:?}"),
         }
     }
 }

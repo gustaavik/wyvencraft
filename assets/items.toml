@@ -82,7 +82,7 @@ durability = 60
 harvests = ["stone"]
 
 [item.model]
-path = "assets/models/items/wooden_pickaxe.bbmodel"
+path = "assets/models/items/wooden_pickaxe.json"
 scale = 0.55
 offset = [-0.5, 0.0, -0.5]
 rotation = [0.0, 90.0, 0.0]
@@ -98,7 +98,7 @@ harvests = ["wood"]
 damage = 3.0
 
 [item.model]
-path = "assets/models/items/wooden_axe.bbmodel"
+path = "assets/models/items/wooden_axe.json"
 scale = 0.55
 offset = [-0.5, 0.0, -0.5]
 rotation = [0.0, 90.0, 0.0]
@@ -113,7 +113,7 @@ durability = 60
 harvests = ["dirt", "sand"]
 
 [item.model]
-path = "assets/models/items/wooden_shovel.bbmodel"
+path = "assets/models/items/wooden_shovel.json"
 scale = 0.5
 offset = [-0.5, 0.0, -0.5]
 rotation = [0.0, 90.0, 0.0]
@@ -137,10 +137,11 @@ durability = 200
 harvests = ["plant"]
 damage = 4.0
 
-# Drawn from a model file rather than as a textured cube. The offset drops the
-# grip (the model runs from y = -0.889 up to y = 1.471) onto the fist.
+# Authored as a Java Block/Item model, so its `display` block places it in each
+# hand, on the ground and in the inventory slot separately. The scale/offset
+# below only reach a context that block does not name.
 [item.model]
-path = "assets/models/items/vine_sword.bbmodel"
+path = "assets/models/items/vine_sword.json"
 scale = 0.35
 offset = [-0.5, 0.75, -0.5]
 

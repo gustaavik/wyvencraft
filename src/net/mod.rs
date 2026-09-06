@@ -25,7 +25,8 @@ pub mod ticket;
 
 pub use join::{MAX_CLIENTS, PROTOCOL_ID, TicketJoin, WyvenProtocol, host_config};
 pub use protocol::{
-    ChatKind, ClientMessage, NetItemStack, NetVec3, PlayerRestore, RecipeData, ServerMessage,
+    ChatKind, ClientMessage, Equipment, NetItemStack, NetVec3, PlayerRestore, RecipeData,
+    ServerMessage,
 };
 pub use serverlist::{FileServerStore, ServerEntry, ServerList, ServerStore};
 pub use status::{NetStatusProbe, ServerStatus, StatusOutcome, StatusProbe};

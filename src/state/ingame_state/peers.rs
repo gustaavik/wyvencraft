@@ -11,8 +11,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::inventory::{ARMOR_SIZE, Inventory};
-use crate::net::{NetItemStack, PlayerId, RemotePlayer, ServerMessage};
+use crate::inventory::Inventory;
+use crate::net::{Equipment, NetItemStack, PlayerId, RemotePlayer, ServerMessage};
 
 /// Everything the session knows about the other peers.
 #[derive(Default)]
@@ -33,7 +33,7 @@ pub(super) struct Peers {
     pub inventories: HashMap<PlayerId, (Vec<Option<NetItemStack>>, u32)>,
     /// Host: last equipment broadcast for each player, so `PlayerEquipment` is
     /// only re-sent on change and a joiner can be brought up to date.
-    pub equipment: HashMap<PlayerId, [Option<u16>; ARMOR_SIZE]>,
+    pub equipment: HashMap<PlayerId, Equipment>,
     /// Host: peers that have identified themselves as players by asking for the
     /// world.
     ///

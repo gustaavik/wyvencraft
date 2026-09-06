@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use crate::core::GameMode;
+use crate::entity::Perspective;
 use crate::net::DEFAULT_PORT;
 
 /// Read-only view of the process environment.
@@ -151,9 +152,64 @@ pub fn screenshot_at(env: &dyn Environment) -> Option<f32> {
     }
 }
 
+/// Which camera `WYVEN_PERSPECTIVE` asks a boot world to open in.
+///
+/// Deliberately *not* a [`BootPlan`] field, for the same reason
+/// [`screenshot_at`] is not: it decides nothing about which screen opens, only
+/// how the one that does is posed. It exists because F5 needs a human at the
+/// keyboard, and everything drawn on the player's own body — the model, its
+/// armor, what it holds — is invisible from inside its head. Paired with
+/// `WYVEN_SCREENSHOT_AT`, this is what makes those changes checkable from an
+/// automated run.
+///
+/// An unrecognised value is ignored with a warning rather than refused, matching
+/// [`screenshot_at`]: a bad dev variable must never cost you the session.
+pub fn boot_perspective(env: &dyn Environment) -> Option<Perspective> {
+    let raw = env.get("WYVEN_PERSPECTIVE")?;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "first" | "first_person" => Some(Perspective::First),
+        "third" | "back" | "third_back" => Some(Perspective::ThirdBack),
+        "front" | "third_front" => Some(Perspective::ThirdFront),
+        _ => {
+            log::warn!("WYVEN_PERSPECTIVE '{raw}' is not one of first/third/front; ignoring");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_perspective_variable_leaves_the_camera_alone() {
+        assert_eq!(boot_perspective(&MapEnv::new()), None);
+    }
+
+    /// The spellings a dev types, including the one this exists for.
+    #[test]
+    fn a_perspective_is_named_by_where_the_camera_sits() {
+        for (raw, expected) in [
+            ("third", Perspective::ThirdBack),
+            ("THIRD", Perspective::ThirdBack),
+            ("third_back", Perspective::ThirdBack),
+            (" back ", Perspective::ThirdBack),
+            ("front", Perspective::ThirdFront),
+            ("third_front", Perspective::ThirdFront),
+            ("first", Perspective::First),
+        ] {
+            let env = MapEnv::new().with("WYVEN_PERSPECTIVE", raw);
+            assert_eq!(boot_perspective(&env), Some(expected), "{raw}");
+        }
+    }
+
+    /// Fail-soft like every other dev variable: a typo costs you the camera, not
+    /// the run.
+    #[test]
+    fn an_unrecognised_perspective_is_ignored() {
+        let env = MapEnv::new().with("WYVEN_PERSPECTIVE", "sideways");
+        assert_eq!(boot_perspective(&env), None);
+    }
 
     #[test]
     fn no_screenshot_variable_means_no_automatic_capture() {

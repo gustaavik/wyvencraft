@@ -842,7 +842,11 @@ mod tests {
             .models
             .get(model.id)
             .expect("model is in the registry");
-        assert_eq!(loaded.triangle_count(), 252);
+        // The Java export, not the `.bbmodel` beside it: only that one carries a
+        // `display` block, which is what places the sword in each hand. It has
+        // fewer triangles because a Java export writes only the faces the author
+        // actually textured.
+        assert_eq!(loaded.triangle_count(), 204);
 
         // `item_models` is indexed by `ItemId`, so it must cover every item even
         // though almost none of them declare a model.

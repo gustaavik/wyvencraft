@@ -11,7 +11,7 @@
 //! offset from the torso, and the one-shot attack swing — and those are composed
 //! on top of whatever the clip produced.
 
-use std::f32::consts::{PI, TAU};
+use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
 use glam::{Mat4, Quat, Vec3};
 
@@ -340,6 +340,96 @@ mod tests {
     use crate::entity::Motion;
     use fixture::{Player, walking};
 
+    /// The frame `hand_anchor` hands an item, for a player standing still.
+    fn resting_anchor(player: &Player, position: Vec3, yaw: f32) -> Mat4 {
+        let character = player.character();
+        let pose = character
+            .rest_pose()
+            .expect("the shipped player model is rigged");
+        character
+            .hand_anchor(&pose, position, yaw)
+            .expect("it has a right hand")
+    }
+
+    fn approx(a: Vec3, b: Vec3) -> bool {
+        (a - b).abs().max_element() < 1e-4
+    }
+
+    /// The whole of the third-person placement bug, as one assertion.
+    ///
+    /// An authored `thirdperson_righthand` entry is measured against Minecraft's
+    /// hand space — **+X right, +Y forward, +Z up** — and not against the body's
+    /// own axes, which are +X right, +Y *up*, −Z forward. Before `hand_space`
+    /// the two were the same matrix, so every sword came out a quarter turn
+    /// wrong and every `translation` pushed the item up instead of out.
+    #[test]
+    fn the_hand_frame_is_minecrafts_and_not_the_bodys() {
+        let player = Player::load();
+        let anchor = resting_anchor(&player, Vec3::ZERO, 0.0);
+
+        // At yaw 0 a character faces −Z, so "forward" is −Z and "right" is +X.
+        assert!(
+            approx(anchor.transform_vector3(Vec3::X), Vec3::X),
+            "+X is the character's right"
+        );
+        assert!(
+            approx(anchor.transform_vector3(Vec3::Y), -Vec3::Z),
+            "+Y is the direction the character faces"
+        );
+        assert!(
+            approx(anchor.transform_vector3(Vec3::Z), Vec3::Y),
+            "+Z is up"
+        );
+    }
+
+    /// The frame turns with the body, so an item cannot swing out of the fist.
+    #[test]
+    fn the_hand_frame_follows_the_body_round() {
+        let player = Player::load();
+        let anchor = resting_anchor(&player, Vec3::ZERO, FRAC_PI_2);
+
+        // A quarter turn from facing −Z is facing +X — the sign `Player::yaw`
+        // and `yaw_matrix` agree on.
+        assert!(
+            approx(anchor.transform_vector3(Vec3::Y), Vec3::X),
+            "forward turned with the body"
+        );
+        assert!(
+            approx(anchor.transform_vector3(Vec3::Z), Vec3::Y),
+            "up is still up"
+        );
+    }
+
+    /// The item is placed at the fist, not at the player's feet.
+    #[test]
+    fn the_hand_frame_sits_on_the_hand_joint() {
+        let player = Player::load();
+        let character = player.character();
+        let pose = character.rest_pose().expect("rigged");
+        let hand = character.clips.right_hand().expect("a hand");
+        let position = Vec3::new(10.0, 70.0, -4.0);
+
+        let joint = character.joint(&pose, hand).expect("a joint");
+        let fist = character.placement(position, 0.0).transform_point3(joint);
+        let origin = resting_anchor(&player, position, 0.0).transform_point3(Vec3::ZERO);
+
+        assert!(approx(origin, fist), "{origin} is not the fist at {fist}");
+    }
+
+    /// A 1.64× player does not swing a 1.64× pickaxe: the character's scale
+    /// carries the *joint* out into the world and is then left behind, so an
+    /// item is sized only by its own `display` entry.
+    #[test]
+    fn the_hand_frame_carries_no_scale() {
+        let player = Player::load();
+        let anchor = resting_anchor(&player, Vec3::ZERO, 0.7);
+
+        for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+            let length = anchor.transform_vector3(axis).length();
+            assert!((length - 1.0).abs() < 1e-4, "{axis} was scaled to {length}");
+        }
+    }
+
     #[test]
     fn the_right_hand_is_chosen_by_where_it_sits_not_what_it_is_called() {
         let player = Player::load();
@@ -637,6 +727,35 @@ mod tests {
 
 // --- Drawing -----------------------------------------------------------------
 
+/// How far the grip sits from the hand bone's own pivot, in [`hand_space`]'s
+/// axes: right, forward, up.
+///
+/// Minecraft's counterpart runs from the *shoulder* pivot — it has to travel the
+/// length of the arm before it reaches the fist. We anchor on the hand bone, so
+/// that distance is already spent and only the residual belongs here. Unlike
+/// [`hand_space`] this **is** a tuning knob, in the same sense
+/// `viewmodel::ARM_PITCH` is: it places our own rig's fist, which no authored
+/// `display` entry says anything about.
+const GRIP: Vec3 = Vec3::ZERO;
+
+/// Model space → the frame an authored `thirdperson_righthand` entry is measured
+/// against: **+X right, +Y forward, +Z up**.
+///
+/// This is *not* a tuning knob. Minecraft reaches that frame by applying
+/// `Rx(-90°)·Ry(180°)` after moving to the arm bone, inside an entity space its
+/// renderer has already flipped with `scale(-1, -1, 1)`; our rig needs no flip,
+/// because a model here is authored Y-up facing −Z, so the whole composite
+/// collapses to the quarter turn below. Every `display` number under `assets/`
+/// was dragged into place against this frame, so changing it silently
+/// invalidates all of them — retune [`GRIP`], or the model.
+///
+/// Without it the frame is simply the body's own axes, which is what put a
+/// sword's `[-83.4, 87.78, 95.45]` a quarter turn out and lifted it instead of
+/// pushing it forward out of the fist.
+fn hand_space() -> Mat4 {
+    Mat4::from_rotation_x(-FRAC_PI_2) * Mat4::from_translation(GRIP)
+}
+
 /// Everything needed to draw one rigged character: the parsed model, the bones
 /// and clips bound to it, and how the entity data says to size and texture it.
 ///
@@ -718,9 +837,16 @@ impl<'a> Character<'a> {
     /// Where an item held in the right hand goes, ready for the item model's
     /// own `display` transform to be applied on top.
     ///
-    /// The bone matrix carries the character's scale, which an item must not
-    /// inherit — a 1.64× player would otherwise swing a 1.64× pickaxe. Only the
-    /// hand's position and turn survive.
+    /// Deliberately scale-free. `Character::placement` is used only to carry the
+    /// joint out into world space; the matrix returned is built fresh, because
+    /// a 1.64× player must not swing a 1.64× pickaxe. (The bone matrices
+    /// themselves carry no scale at all — see `wyven_model::rig`, where a bone
+    /// holds only the animation's delta from a rest pose already baked into the
+    /// vertices.)
+    ///
+    /// The frame this hands back is [`HAND_SPACE`]'s, which is what lets an
+    /// authored `thirdperson_righthand` entry mean the same thing here as it did
+    /// in the editor it was dragged into place in.
     pub fn hand_anchor(&self, pose: &Pose, position: Vec3, yaw: f32) -> Option<Mat4> {
         let rig = self.rig()?;
         let hand = self.clips.right_hand()?;
@@ -734,7 +860,8 @@ impl<'a> Character<'a> {
         Some(
             Mat4::from_translation(fist)
                 * model_mesh::anchor(Vec3::ZERO, yaw, 0.0)
-                * Mat4::from_quat(turn),
+                * Mat4::from_quat(turn)
+                * hand_space(),
         )
     }
 }
