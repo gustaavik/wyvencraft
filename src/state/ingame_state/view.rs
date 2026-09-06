@@ -25,7 +25,7 @@ use crate::art::{cracks, mobskin, skin};
 use crate::content::BlockAppearance;
 use crate::content::{ItemModel, ItemShape};
 use crate::core::{Aabb, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, ChunkPos, DayCycle};
-use crate::editor::PlacementSource;
+use crate::editor::{PlacementKey, PlacementSource};
 use crate::entity::camera::Shot;
 use crate::entity::kind::{EntityRegistry, VisualSpec};
 use crate::entity::viewmodel::{self, HandPose};
@@ -75,6 +75,9 @@ pub(super) struct ModelContent<'a> {
     /// moving a value, this is how it reaches the screen. Deliberately a port:
     /// none of the five seams below learns that an editor exists.
     pub placement: &'a dyn PlacementSource,
+    /// Where a held block sits — one value shared by every block item, loaded
+    /// from `assets/models/items/block.json`.
+    pub block_display: &'a wyven_model::DisplayTransforms,
 }
 
 impl ModelContent<'_> {
@@ -91,16 +94,24 @@ impl ModelContent<'_> {
     /// Where a model-backed item sits in this context.
     fn local(&self, item: ItemId, model: ItemModel, context: DisplayContext) -> Mat4 {
         self.placement
-            .local(item, context)
+            .local(PlacementKey::Item(item), context)
             .unwrap_or_else(|| model.local(self.models, context))
     }
 
     /// The same for an item with no model file, which is placed as the cube or
     /// sprite it falls back to.
+    ///
+    /// A cube is keyed by [`PlacementKey::BlockItem`], not by the item: every
+    /// block item is the same cube and shares one placement, so an edit to it
+    /// has to reach all of them at once.
     fn atlas_local(&self, item: ItemId, shape: ItemShape, context: DisplayContext) -> Mat4 {
+        let key = match shape {
+            ItemShape::Cube(_) => PlacementKey::BlockItem,
+            ItemShape::Sprite(_) => PlacementKey::Item(item),
+        };
         self.placement
-            .local(item, context)
-            .unwrap_or_else(|| held_placement(shape, context).matrix())
+            .local(key, context)
+            .unwrap_or_else(|| held_placement(shape, context, self.block_display).matrix())
     }
 }
 
@@ -1172,9 +1183,10 @@ impl SceneCache {
 fn held_placement(
     shape: ItemShape,
     context: DisplayContext,
+    block_display: &wyven_model::DisplayTransforms,
 ) -> wyven_model::display::ItemTransform {
     match shape {
-        ItemShape::Cube(_) => viewmodel::block_placement(context),
+        ItemShape::Cube(_) => block_display.get(context).unwrap_or_default(),
         ItemShape::Sprite(_) => wyven_model::generated::default_display()
             .get(context)
             .unwrap_or_default(),
@@ -1314,6 +1326,7 @@ impl super::InGameState {
             tiles: &loaded.tiles,
             shape: &shape,
             placement: &self.editor,
+            block_display: &loaded.block_item_display,
         };
         // The editor's ground preview, when it has one, rides along with the
         // real drops so it is drawn by exactly the same code.

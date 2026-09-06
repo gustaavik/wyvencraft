@@ -20,9 +20,9 @@ use std::collections::{HashMap, HashSet};
 use glam::Mat4;
 use wyven_model::display::DisplayContext;
 
-use crate::inventory::ItemId;
-
-use super::placement::{Placement, PlacementKind, PlacementOverrides, PlacementSource};
+use super::placement::{
+    Placement, PlacementKey, PlacementKind, PlacementOverrides, PlacementSource,
+};
 use super::store::{PlacementStore, Target};
 use super::watch::{DEFAULT_INTERVAL, FileWatcher, Stamps};
 
@@ -37,17 +37,26 @@ pub const CONTEXTS: [DisplayContext; 4] = [
 /// How many edits can be walked back.
 const UNDO_DEPTH: usize = 64;
 
-/// One item the editor can move.
+/// One thing the editor can move.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EditorTarget {
-    pub item: ItemId,
+    /// What this placement belongs to. Every block item shares one key, because
+    /// every block item is the same cube.
+    pub key: PlacementKey,
     /// The item's id, as `assets/items.toml` keys it.
     pub id: String,
     /// What the player reads.
     pub name: String,
     /// The model file, `assets/`-relative.
     pub model: String,
-    /// Contexts the model file places itself in. Everything else falls to the
+    /// Contexts this target is *drawn* in, and so the tabs the panel offers.
+    ///
+    /// Usually all four. A block item has only the two hands: its inventory icon
+    /// is painted by `ui::icon` and the block lying on the ground is sized by
+    /// its own drop entity, and neither goes anywhere near a `display` entry —
+    /// so offering those tabs would be offering numbers that do nothing.
+    pub offers: Vec<DisplayContext>,
+    /// Which of `offers` the model file places itself in. The rest fall to the
     /// `[item.model]` spec — which is exactly what `local_transform` does.
     pub declared: Vec<DisplayContext>,
 }
@@ -58,6 +67,10 @@ impl EditorTarget {
             true => PlacementKind::Display,
             false => PlacementKind::Spec,
         }
+    }
+
+    pub fn offers(&self, context: DisplayContext) -> bool {
+        self.offers.contains(&context)
     }
 }
 
@@ -190,7 +203,7 @@ impl EditorSession {
     /// The value the panel shows and edits.
     pub fn value(&self) -> Option<Placement> {
         self.overrides
-            .get(self.current()?.item, self.context)
+            .get(self.current()?.key, self.context)
             .or_else(|| {
                 self.disk
                     .get(&self.slot(self.selected, self.context)?)
@@ -227,17 +240,43 @@ impl EditorSession {
         }
     }
 
+    /// Whether the current target is drawn in this context at all.
+    pub fn offers(&self, context: DisplayContext) -> bool {
+        self.current().is_some_and(|target| target.offers(context))
+    }
+
+    /// The contexts the panel should show tabs for.
+    pub fn contexts(&self) -> &[DisplayContext] {
+        self.current()
+            .map_or(&CONTEXTS[..0], |target| &target.offers)
+    }
+
+    /// Move off a tab the newly selected target does not have.
+    fn settle_context(&mut self) {
+        if self.offers(self.context) {
+            return;
+        }
+        if let Some(&first) = self.contexts().first() {
+            self.context = first;
+        }
+    }
+
     /// Select whatever is in the hand, when the panel is following it.
-    pub fn follow(&mut self, held: Option<ItemId>, stamps: &dyn Stamps) {
+    ///
+    /// Takes a resolved [`PlacementKey`] rather than an [`ItemId`] because only
+    /// the state layer can tell a block item — which shares one placement with
+    /// every other block item — from an item with a model of its own.
+    pub fn follow(&mut self, held: Option<PlacementKey>, stamps: &dyn Stamps) {
         if !self.open || !self.follow_held {
             return;
         }
         let Some(held) = held else { return };
-        let Some(index) = self.targets.iter().position(|t| t.item == held) else {
+        let Some(index) = self.targets.iter().position(|target| target.key == held) else {
             return;
         };
         if index != self.selected {
             self.selected = index;
+            self.settle_context();
             self.seed(stamps);
         }
     }
@@ -257,13 +296,17 @@ impl EditorSession {
             EditorAction::Select(index) if index < self.targets.len() => {
                 self.selected = index;
                 self.follow_held = false;
+                self.settle_context();
                 self.seed(stamps);
             }
             EditorAction::Select(_) => {}
-            EditorAction::Context(context) => {
+            // A tab the target does not offer is not a tab at all — a block item
+            // has no `gui` placement to move.
+            EditorAction::Context(context) if self.offers(context) => {
                 self.context = context;
                 self.seed(stamps);
             }
+            EditorAction::Context(_) => {}
             EditorAction::Edit(value) => self.edit(value),
             EditorAction::Save => self.save(stamps),
             EditorAction::Reload => self.reload_selection(),
@@ -280,7 +323,7 @@ impl EditorSession {
     fn begin_watching(&mut self, stamps: &dyn Stamps) {
         self.watcher.forget_all();
         for index in 0..self.targets.len() {
-            for context in CONTEXTS {
+            for context in self.targets[index].offers.clone() {
                 if let Some(target) = self.target_at(index, context) {
                     let path = self.store.file(&target);
                     if !self.watcher.is_watching(&path) {
@@ -333,7 +376,7 @@ impl EditorSession {
                 self.undo.remove(0);
             }
         }
-        self.overrides.set(target.item, self.context, value);
+        self.overrides.set(target.key, self.context, value);
     }
 
     fn save(&mut self, stamps: &dyn Stamps) {
@@ -371,8 +414,8 @@ impl EditorSession {
                 self.stale.remove(&slot);
                 // Take the file's value, not the one the game booted with: an
                 // external edit may have moved it since.
-                if let Some(item) = self.targets.get(self.selected).map(|t| t.item) {
-                    self.overrides.set(item, self.context, value);
+                if let Some(key) = self.targets.get(self.selected).map(|target| target.key) {
+                    self.overrides.set(key, self.context, value);
                 }
                 self.status = format!("reloaded {}", self.store.file(&target));
             }
@@ -388,7 +431,13 @@ impl EditorSession {
     /// this tool could do.
     fn reload_file(&mut self, path: &str) {
         let slots: Vec<(usize, DisplayContext)> = (0..self.targets.len())
-            .flat_map(|index| CONTEXTS.map(move |context| (index, context)))
+            .flat_map(|index| {
+                self.targets[index]
+                    .offers
+                    .clone()
+                    .into_iter()
+                    .map(move |context| (index, context))
+            })
             .collect();
 
         // Deliberately *not* limited to values the panel has already opened: a
@@ -418,7 +467,7 @@ impl EditorSession {
             match self.store.read(&target) {
                 Ok(value) => {
                     self.disk.insert(slot, value);
-                    self.overrides.set(self.targets[index].item, context, value);
+                    self.overrides.set(self.targets[index].key, context, value);
                     reloaded += 1;
                 }
                 Err(err) => self.status = err,
@@ -444,7 +493,7 @@ impl EditorSession {
         let Some(target) = self.targets.get(index) else {
             return;
         };
-        self.overrides.set(target.item, context, value);
+        self.overrides.set(target.key, context, value);
         self.selected = index;
         self.context = context;
     }
@@ -455,7 +504,7 @@ impl EditorSession {
             return false;
         };
         match (
-            self.overrides.get(target.item, context),
+            self.overrides.get(target.key, context),
             self.disk.get(&slot),
         ) {
             (Some(current), Some(saved)) => current != *saved,
@@ -484,8 +533,8 @@ impl EditorSession {
 impl PlacementSource for EditorSession {
     /// Applied whether or not the panel is open: closing it must not make the
     /// item jump back to a value the developer has not saved yet.
-    fn local(&self, item: ItemId, context: DisplayContext) -> Option<Mat4> {
-        self.overrides.local(item, context)
+    fn local(&self, key: PlacementKey, context: DisplayContext) -> Option<Mat4> {
+        self.overrides.local(key, context)
     }
 }
 
@@ -498,6 +547,7 @@ mod tests {
     use super::super::placement::SpecPlacement;
     use super::super::store::InMemoryStore;
     use super::*;
+    use crate::inventory::ItemId;
 
     /// Nothing here polls a real file, so the stamps never move.
     struct NoStamps;
@@ -522,8 +572,8 @@ mod tests {
         }
     }
 
-    const SWORD: ItemId = ItemId(3);
-    const PLANT: ItemId = ItemId(9);
+    const SWORD: PlacementKey = PlacementKey::Item(ItemId(3));
+    const PLANT: PlacementKey = PlacementKey::Item(ItemId(9));
     const FIRST: DisplayContext = DisplayContext::FirstPersonRightHand;
     const THIRD: DisplayContext = DisplayContext::ThirdPersonRightHand;
 
@@ -538,17 +588,19 @@ mod tests {
     fn targets() -> Vec<EditorTarget> {
         vec![
             EditorTarget {
-                item: SWORD,
+                key: SWORD,
                 id: "wooden_sword".to_string(),
                 name: "Wooden Sword".to_string(),
                 model: "assets/models/items/wooden_sword.json".to_string(),
+                offers: CONTEXTS.to_vec(),
                 declared: CONTEXTS.to_vec(),
             },
             EditorTarget {
-                item: PLANT,
+                key: PLANT,
                 id: "blue_bells".to_string(),
                 name: "Blue Bells".to_string(),
                 model: "assets/models/blocks/plant1.bbmodel".to_string(),
+                offers: CONTEXTS.to_vec(),
                 declared: Vec::new(),
             },
         ]
@@ -932,6 +984,71 @@ mod tests {
             session.status(),
             "watching 2 files",
             "status is from opening"
+        );
+    }
+
+    /// Selecting the block cube while sitting on a tab it does not have must
+    /// land somewhere real, not leave the panel showing nothing.
+    #[test]
+    fn selecting_a_target_without_the_current_tab_moves_to_one_it_has() {
+        let store =
+            InMemoryStore::default().with("block", FIRST, Placement::Display(transform(45.0)));
+        let mut session = EditorSession::new(true, Box::new(store));
+        let hands = vec![FIRST, THIRD];
+        session.set_targets(vec![
+            targets()[0].clone(),
+            EditorTarget {
+                key: PlacementKey::BlockItem,
+                id: "block".to_string(),
+                name: "Block items".to_string(),
+                model: "assets/models/items/block.json".to_string(),
+                offers: hands.clone(),
+                declared: hands,
+            },
+        ]);
+        session.toggle(&NoStamps);
+
+        session.apply(EditorAction::Context(DisplayContext::Gui), &NoStamps);
+        assert_eq!(session.context(), DisplayContext::Gui);
+
+        session.apply(EditorAction::Select(1), &NoStamps);
+        assert_eq!(session.context(), FIRST, "moved onto a tab the cube has");
+        assert_eq!(session.contexts(), [FIRST, THIRD]);
+        assert_eq!(session.value(), Some(Placement::Display(transform(45.0))));
+
+        // And a tab it does not have cannot be selected while it is up.
+        session.apply(EditorAction::Context(DisplayContext::Ground), &NoStamps);
+        assert_eq!(session.context(), FIRST);
+    }
+
+    /// One value, every block: editing the cube has to move the dirt in your
+    /// hand and the stone in the next slot alike.
+    #[test]
+    fn the_block_cube_override_reaches_every_block_item() {
+        let hands = vec![FIRST, THIRD];
+        let store =
+            InMemoryStore::default().with("block", FIRST, Placement::Display(transform(0.0)));
+        let mut session = EditorSession::new(true, Box::new(store));
+        session.set_targets(vec![EditorTarget {
+            key: PlacementKey::BlockItem,
+            id: "block".to_string(),
+            name: "Block items".to_string(),
+            model: "assets/models/items/block.json".to_string(),
+            offers: hands.clone(),
+            declared: hands,
+        }]);
+        session.toggle(&NoStamps);
+
+        let moved = transform(33.0);
+        session.apply(EditorAction::Edit(Placement::Display(moved)), &NoStamps);
+        assert_eq!(
+            session.local(PlacementKey::BlockItem, FIRST),
+            Some(moved.matrix())
+        );
+        assert_eq!(
+            session.local(PlacementKey::Item(ItemId(3)), FIRST),
+            None,
+            "and leaves an item with a model of its own alone"
         );
     }
 

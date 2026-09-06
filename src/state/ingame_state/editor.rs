@@ -8,7 +8,8 @@
 use glam::Vec3;
 
 use super::InGameState;
-use crate::editor::{EditorAction, FsStamps};
+use crate::content::ItemShape;
+use crate::editor::{EditorAction, FsStamps, PlacementKey};
 use crate::entity::{DroppedItem, Perspective};
 use crate::net::ChatKind;
 use wyven_model::display::DisplayContext;
@@ -38,8 +39,23 @@ impl InGameState {
             return;
         }
         self.editor.tick(dt, &FsStamps);
-        let held = self.inventory.selected_stack().map(|stack| stack.item);
-        self.editor.follow(held, &FsStamps);
+        self.editor.follow(self.held_placement_key(), &FsStamps);
+    }
+
+    /// What the selected hotbar slot's placement belongs to.
+    ///
+    /// Only the state layer can answer this: a block item is drawn as a plain
+    /// cube and shares one placement with every other block item, and telling
+    /// that from an item with a model of its own needs the content registries.
+    fn held_placement_key(&self) -> Option<PlacementKey> {
+        let item = self.inventory.selected_stack()?.item;
+        Some(match self.content.item_models.get(item.0 as usize) {
+            Some(Some(_)) => PlacementKey::Item(item),
+            _ => match self.content.item_shape(item) {
+                ItemShape::Cube(_) => PlacementKey::BlockItem,
+                ItemShape::Sprite(_) => PlacementKey::Item(item),
+            },
+        })
     }
 
     pub(super) fn draw_editor_panel(&mut self, egui_ctx: &egui::Context) {
@@ -61,13 +77,17 @@ impl InGameState {
         if !self.editor.is_open() || self.editor.context() != DisplayContext::Ground {
             return None;
         }
-        let target = self.editor.current()?;
+        // A block item has no ground placement to preview — the block lying on
+        // the floor is sized by its drop entity, not by a `display` entry.
+        let PlacementKey::Item(item) = self.editor.current()?.key else {
+            return None;
+        };
         let eye = self.player.eye_position();
         let look = self.player.look_direction();
         let at = eye + Vec3::new(look.x, 0.0, look.z).normalize_or_zero() * PREVIEW_DISTANCE
             - Vec3::Y * PREVIEW_DROP;
         Some(DroppedItem::preview(
-            self.content.items.full_stack(target.item),
+            self.content.items.full_stack(item),
             at,
             self.content.entities.dropped_item(),
         ))

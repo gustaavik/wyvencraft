@@ -8,9 +8,7 @@
 use egui::{Context, RichText};
 use wyven_model::display::{DisplayContext, ItemTransform};
 
-use crate::editor::{
-    CONTEXTS, EditorAction, EditorSession, Placement, PlacementKind, SpecPlacement,
-};
+use crate::editor::{EditorAction, EditorSession, Placement, PlacementKind, SpecPlacement};
 
 /// Wide enough for three labelled number fields on one row.
 const FIELD: f32 = 68.0;
@@ -86,7 +84,11 @@ fn draw_picker(ui: &mut egui::Ui, session: &EditorSession, action: &mut Option<E
 fn draw_contexts(ui: &mut egui::Ui, session: &EditorSession, action: &mut Option<EditorAction>) {
     let shared = session.current_kind() == Some(PlacementKind::Spec);
     ui.horizontal(|ui| {
-        for context in CONTEXTS {
+        // Only the contexts this target is actually drawn in. A block item has
+        // no `gui` or `ground` placement — its icon is painted by `ui::icon` and
+        // the block on the floor is sized by its drop entity — and a tab that
+        // moved nothing would be worse than no tab.
+        for &context in session.contexts() {
             let selected = context == session.context();
             if ui
                 .selectable_label(selected, context_label(context))
@@ -290,8 +292,8 @@ fn context_label(context: DisplayContext) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::editor::EditorTarget;
     use crate::editor::store::InMemoryStore;
+    use crate::editor::{CONTEXTS, EditorTarget};
     use crate::inventory::ItemId;
 
     struct NoStamps;
@@ -333,10 +335,11 @@ mod tests {
         );
         let mut session = EditorSession::new(true, Box::new(store));
         session.set_targets(vec![EditorTarget {
-            item: ItemId(3),
+            key: crate::editor::PlacementKey::Item(ItemId(3)),
             id: "wooden_sword".to_string(),
             name: "Wooden Sword".to_string(),
             model: "assets/models/items/wooden_sword.json".to_string(),
+            offers: CONTEXTS.to_vec(),
             declared,
         }]);
         session.toggle(&NoStamps);

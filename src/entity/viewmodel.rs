@@ -23,7 +23,7 @@ use std::f32::consts::{PI, TAU};
 use glam::{Mat4, Vec3};
 
 use crate::entity::rigged::Character;
-use wyven_model::display::{DisplayContext, ItemTransform};
+use wyven_model::display::{DisplayContext, DisplayTransforms, ItemTransform};
 use wyven_model::mesh as model_mesh;
 use wyven_render::mesh::CpuMesh;
 
@@ -140,7 +140,16 @@ pub fn item_anchor(frame: Mat4) -> Mat4 {
 /// The cube this places is built in `0..1` model space, the same space a
 /// Blockbench export occupies, so [`ItemTransform::matrix`] positions it by
 /// exactly the path an authored model takes — including its `-0.5` recentring.
-pub fn block_placement(context: DisplayContext) -> ItemTransform {
+pub fn default_block_display() -> DisplayTransforms {
+    DisplayTransforms {
+        firstperson_righthand: Some(block_placement(DisplayContext::FirstPersonRightHand)),
+        thirdperson_righthand: Some(block_placement(DisplayContext::ThirdPersonRightHand)),
+        ..DisplayTransforms::default()
+    }
+}
+
+/// One context of [`default_block_display`].
+fn block_placement(context: DisplayContext) -> ItemTransform {
     match context {
         // Turned a corner toward the camera so three faces are visible, rather
         // than one flat square filling the fist.

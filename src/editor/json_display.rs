@@ -350,10 +350,13 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/assets/models/items/wooden_sword.json"
     );
-    const APPLE: &str = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/assets/models/items/apple.json"
-    );
+    /// A bare `item/generated` stub, inline rather than read from `assets/`.
+    ///
+    /// The shipped stubs are exactly what this editor exists to fill in, so a
+    /// test that used one as its "declares nothing" fixture would start failing
+    /// the first time somebody used the tool on it.
+    const STUB: &str = "{\n\t\"parent\": \"item/generated\",\n\t\"textures\": \
+                        { \"layer0\": \"../../textures/items/apple\" }\n}\n";
 
     fn shipped(path: &str) -> String {
         std::fs::read_to_string(path).expect("a shipped model file")
@@ -372,8 +375,7 @@ mod tests {
     /// panel has to open showing — the identity would be a lie.
     #[test]
     fn a_generated_stub_reads_as_its_defaults() {
-        let apple = shipped(APPLE);
-        let first = read_display(&apple, DisplayContext::FirstPersonRightHand).expect("reads");
+        let first = read_display(STUB, DisplayContext::FirstPersonRightHand).expect("reads");
         assert_eq!(
             Some(first),
             generated::default_display().get(DisplayContext::FirstPersonRightHand)
@@ -465,14 +467,13 @@ mod tests {
     /// its inventory icon.
     #[test]
     fn writing_into_a_generated_stub_keeps_its_other_contexts() {
-        let apple = shipped(APPLE);
         let value = ItemTransform {
             rotation: [0.0, -45.0, 0.0],
             translation: [1.0, 3.0, 1.0],
             scale: [0.7; 3],
         };
         let written =
-            write_display(&apple, DisplayContext::FirstPersonRightHand, &value).expect("writes");
+            write_display(STUB, DisplayContext::FirstPersonRightHand, &value).expect("writes");
 
         assert_eq!(
             read_display(&written, DisplayContext::FirstPersonRightHand),

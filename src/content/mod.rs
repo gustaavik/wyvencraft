@@ -30,7 +30,7 @@ use wyven_voxel::{BlockModel, FaceTextures};
 
 use wyven_assets::decode_png;
 use wyven_model::mesh as model_mesh;
-use wyven_model::{DisplayContext, ModelId, ModelRegistry, blockjson};
+use wyven_model::{DisplayContext, DisplayTransforms, ModelId, ModelRegistry, blockjson};
 use wyven_render::TileRegistry;
 use wyven_render::block_textures::{self, AnimatedLayers, BlockTextureSet, Strip};
 
@@ -168,6 +168,10 @@ pub struct GameContent {
     /// mismatches refuse to join instead. Texture pixels are excluded
     /// (visual-only divergence is harmless).
     pub hash: u64,
+    /// Where a held block sits, from [`BLOCK_ITEM_MODEL`]. Visual only, like
+    /// every model: it must stay off `hash`, or two peers whose held dirt is
+    /// tilted differently could not share a world.
+    pub block_item_display: DisplayTransforms,
 }
 
 /// The item a fired arrow borrows its art from.
@@ -178,6 +182,15 @@ const ITEMS_PATH: &str = "assets/items.toml";
 const ENTITIES_PATH: &str = "assets/entities.toml";
 const WORLDGEN_PATH: &str = "assets/worldgen.toml";
 const SPAWNING_PATH: &str = "assets/spawning.toml";
+
+/// Where every block item is placed from.
+///
+/// A display-only model, the way Minecraft's `block/block` is a display-only
+/// parent: a block item has no geometry file of its own — it is drawn as a cube
+/// built from the block's own faces — so all this holds is where that cube sits
+/// in a fist. Shared by every block item, which are all the same cube. Missing
+/// or malformed, it falls back to [`viewmodel::default_block_display`].
+pub const BLOCK_ITEM_MODEL: &str = "assets/models/items/block.json";
 
 impl GameContent {
     /// Load content from `assets/` (CWD-relative, like recipes and saves),
@@ -416,6 +429,7 @@ impl GameContent {
             block_display_names,
             item_display_names,
             hash,
+            block_item_display: load_block_item_display(source),
         })
     }
 
@@ -732,6 +746,36 @@ fn build_item_icons(
 /// representations cover every gameplay-affecting field deterministically
 /// (all collections are ordered `Vec`s), which is exactly the fidelity the
 /// mismatch check needs.
+/// Read [`BLOCK_ITEM_MODEL`]'s `display` block.
+///
+/// Fail-soft like every other content loader: no file, or one that does not
+/// parse, logs and falls back to the numbers compiled in — so a developer who
+/// deletes it gets the shipped placement back rather than a block flat in their
+/// face.
+fn load_block_item_display(source: &dyn ContentSource) -> DisplayTransforms {
+    #[derive(serde::Deserialize, Default)]
+    #[serde(default)]
+    struct Document {
+        display: DisplayTransforms,
+    }
+
+    let Ok(text) = source.read(BLOCK_ITEM_MODEL) else {
+        log::info!("no {BLOCK_ITEM_MODEL}; using the builtin block-item placement");
+        return crate::entity::viewmodel::default_block_display();
+    };
+    match serde_json::from_str::<Document>(&text) {
+        Ok(document) if !document.display.is_empty() => document.display,
+        Ok(_) => {
+            log::warn!("{BLOCK_ITEM_MODEL} declares no display block; using the builtin placement");
+            crate::entity::viewmodel::default_block_display()
+        }
+        Err(err) => {
+            log::warn!("could not parse {BLOCK_ITEM_MODEL} ({err}); using the builtin placement");
+            crate::entity::viewmodel::default_block_display()
+        }
+    }
+}
+
 fn content_hash(
     blocks: &BlockRegistry,
     items: &ItemRegistry,

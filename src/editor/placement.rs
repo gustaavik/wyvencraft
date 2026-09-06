@@ -18,6 +18,21 @@ use wyven_model::mesh as model_mesh;
 
 use crate::inventory::ItemId;
 
+/// What a placement belongs to.
+///
+/// Not simply an [`ItemId`], because a block item has no model of its own: every
+/// one of them is drawn as the same cube, placed by the same numbers, the way
+/// Minecraft shares one `block/block` display across every block it draws in a
+/// fist. Giving each of the forty its own entry would be forty copies of one
+/// value and forty identical rows in the panel's dropdown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PlacementKey {
+    /// An item with a model file of its own.
+    Item(ItemId),
+    /// Every item that places a block and is drawn as a plain cube.
+    BlockItem,
+}
+
 /// Where a held item's placement comes from for one draw.
 ///
 /// `None` means "the shipped value" — the caller falls back to
@@ -25,7 +40,7 @@ use crate::inventory::ItemId;
 /// existed. An override is therefore never able to *break* a placement it does
 /// not mention.
 pub trait PlacementSource {
-    fn local(&self, item: ItemId, context: DisplayContext) -> Option<Mat4>;
+    fn local(&self, key: PlacementKey, context: DisplayContext) -> Option<Mat4>;
 }
 
 /// The shipped placement, unmodified. What runs when no editor is open.
@@ -33,7 +48,7 @@ pub trait PlacementSource {
 pub struct ShippedPlacements;
 
 impl PlacementSource for ShippedPlacements {
-    fn local(&self, _item: ItemId, _context: DisplayContext) -> Option<Mat4> {
+    fn local(&self, _key: PlacementKey, _context: DisplayContext) -> Option<Mat4> {
         None
     }
 }
@@ -137,7 +152,7 @@ impl Placement {
 /// unconditionally and cost one hash lookup per seam when it is closed.
 #[derive(Debug, Default, Clone)]
 pub struct PlacementOverrides {
-    entries: HashMap<ItemId, ItemOverride>,
+    entries: HashMap<PlacementKey, ItemOverride>,
 }
 
 /// One item's overrides. A model has display entries or a spec, never both —
@@ -156,8 +171,8 @@ impl PlacementOverrides {
 
     /// Record an edit. A [`Placement::Spec`] ignores `context` — one spec is
     /// all the file can hold.
-    pub fn set(&mut self, item: ItemId, context: DisplayContext, value: Placement) {
-        let entry = self.entries.entry(item).or_default();
+    pub fn set(&mut self, key: PlacementKey, context: DisplayContext, value: Placement) {
+        let entry = self.entries.entry(key).or_default();
         match value {
             Placement::Display(transform) => {
                 entry.display.insert(context, transform);
@@ -167,8 +182,8 @@ impl PlacementOverrides {
     }
 
     /// The override in force for this item and context, if any.
-    pub fn get(&self, item: ItemId, context: DisplayContext) -> Option<Placement> {
-        let entry = self.entries.get(&item)?;
+    pub fn get(&self, key: PlacementKey, context: DisplayContext) -> Option<Placement> {
+        let entry = self.entries.get(&key)?;
         if let Some(transform) = entry.display.get(&context) {
             return Some(Placement::Display(*transform));
         }
@@ -176,21 +191,21 @@ impl PlacementOverrides {
     }
 
     /// Drop one override, so the item falls back to what shipped.
-    pub fn clear(&mut self, item: ItemId, context: DisplayContext) {
-        let Some(entry) = self.entries.get_mut(&item) else {
+    pub fn clear(&mut self, key: PlacementKey, context: DisplayContext) {
+        let Some(entry) = self.entries.get_mut(&key) else {
             return;
         };
         entry.display.remove(&context);
         entry.spec = None;
         if entry.display.is_empty() && entry.spec.is_none() {
-            self.entries.remove(&item);
+            self.entries.remove(&key);
         }
     }
 }
 
 impl PlacementSource for PlacementOverrides {
-    fn local(&self, item: ItemId, context: DisplayContext) -> Option<Mat4> {
-        self.get(item, context).map(|p| p.matrix())
+    fn local(&self, key: PlacementKey, context: DisplayContext) -> Option<Mat4> {
+        self.get(key, context).map(|p| p.matrix())
     }
 }
 
@@ -198,8 +213,8 @@ impl PlacementSource for PlacementOverrides {
 mod tests {
     use super::*;
 
-    const SWORD: ItemId = ItemId(3);
-    const PICKAXE: ItemId = ItemId(4);
+    const SWORD: PlacementKey = PlacementKey::Item(ItemId(3));
+    const PICKAXE: PlacementKey = PlacementKey::Item(ItemId(4));
 
     fn transform(rotation_x: f32) -> ItemTransform {
         ItemTransform {
@@ -306,6 +321,32 @@ mod tests {
 
         assert_eq!(overrides.local(SWORD, DisplayContext::Ground), None);
         assert!(overrides.is_empty(), "the item's entry is gone with it");
+    }
+
+    /// Every block item is the same cube, so one override has to reach all of
+    /// them — and must not leak onto an item that has a model of its own.
+    #[test]
+    fn the_block_item_key_is_shared_by_every_block() {
+        let mut overrides = PlacementOverrides::default();
+        let t = transform(30.0);
+        overrides.set(
+            PlacementKey::BlockItem,
+            DisplayContext::FirstPersonRightHand,
+            Placement::Display(t),
+        );
+
+        assert_eq!(
+            overrides.local(
+                PlacementKey::BlockItem,
+                DisplayContext::FirstPersonRightHand
+            ),
+            Some(t.matrix())
+        );
+        assert_eq!(
+            overrides.local(SWORD, DisplayContext::FirstPersonRightHand),
+            None,
+            "an item with a model of its own is untouched"
+        );
     }
 
     #[test]

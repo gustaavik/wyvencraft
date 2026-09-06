@@ -31,6 +31,8 @@
 //! Drawing lives in [`crate::ui::editor`], which touches no files and owns no
 //! game state.
 
+use wyven_model::display::DisplayContext;
+
 pub mod json_display;
 pub mod placement;
 pub mod session;
@@ -39,7 +41,8 @@ pub mod toml_spec;
 pub mod watch;
 
 pub use placement::{
-    Placement, PlacementKind, PlacementOverrides, PlacementSource, ShippedPlacements, SpecPlacement,
+    Placement, PlacementKey, PlacementKind, PlacementOverrides, PlacementSource, ShippedPlacements,
+    SpecPlacement,
 };
 pub use session::{CONTEXTS, EditorAction, EditorSession, EditorTarget};
 pub use store::{FileStore, PlacementStore, Target};
@@ -61,10 +64,11 @@ pub fn targets_from(content: &crate::content::GameContent) -> Vec<EditorTarget> 
             let item = crate::inventory::ItemId(u16::try_from(index).ok()?);
             let loaded = content.models.get(model.id)?;
             Some(EditorTarget {
-                item,
+                key: PlacementKey::Item(item),
                 id: content.items.get(item).id.clone(),
                 name: content.item_display_name(item).to_string(),
                 model: content.models.path_of(model.id)?.to_string(),
+                offers: CONTEXTS.to_vec(),
                 declared: CONTEXTS
                     .into_iter()
                     .filter(|context| loaded.placement_for(*context).is_some())
@@ -73,7 +77,35 @@ pub fn targets_from(content: &crate::content::GameContent) -> Vec<EditorTarget> 
         })
         .collect();
     targets.sort_by(|a, b| a.name.cmp(&b.name));
+    // First in the list rather than sorted in among the items, because it is not
+    // one of them: it is the cube every block is held as.
+    targets.insert(0, block_item_target());
     targets
+}
+
+/// The one placement every block item shares.
+///
+/// A block item has no model file — it is drawn as a cube built from the block's
+/// own faces — so there is nothing per-block to move, and forty identical rows
+/// in the dropdown would be forty ways to edit one number. Minecraft shares a
+/// single `block/block` display for exactly the same reason.
+///
+/// Only the two hand contexts: the inventory icon is painted by
+/// [`crate::ui::icon`] and a block lying on the ground is sized by its drop
+/// entity, and neither passes through a `display` entry at all.
+fn block_item_target() -> EditorTarget {
+    let hands = vec![
+        DisplayContext::FirstPersonRightHand,
+        DisplayContext::ThirdPersonRightHand,
+    ];
+    EditorTarget {
+        key: PlacementKey::BlockItem,
+        id: "block".to_string(),
+        name: "▣ Block items (all)".to_string(),
+        model: crate::content::BLOCK_ITEM_MODEL.to_string(),
+        offers: hands.clone(),
+        declared: hands,
+    }
 }
 
 #[cfg(test)]
@@ -97,11 +129,22 @@ mod tests {
         let targets = targets_from(&content);
 
         let with_models = content.item_models.iter().flatten().count();
-        assert_eq!(targets.len(), with_models);
-        assert!(targets.len() >= 38, "{} targets", targets.len());
+        assert_eq!(
+            targets.len(),
+            with_models + 1,
+            "every modelled item, plus the shared block-item cube"
+        );
+        assert!(targets.len() >= 39, "{} targets", targets.len());
+        assert_eq!(
+            targets[0].key,
+            PlacementKey::BlockItem,
+            "the shared cube leads, rather than sorting in among the items"
+        );
         assert!(
-            targets.windows(2).all(|pair| pair[0].name <= pair[1].name),
-            "sorted so the dropdown reads alphabetically"
+            targets[1..]
+                .windows(2)
+                .all(|pair| pair[0].name <= pair[1].name),
+            "and the items after it read alphabetically"
         );
     }
 
@@ -131,6 +174,50 @@ mod tests {
             .expect("a .bbmodel item");
         assert!(plant.model.ends_with(".bbmodel"));
         assert_eq!(plant.kind(CONTEXTS[0]), PlacementKind::Spec);
+    }
+
+    /// The fix for "I can't reposition blocks": every block item is the same
+    /// cube, so it is one entry backed by one file, offering only the two
+    /// contexts a cube is actually placed by a `display` entry in.
+    #[test]
+    fn block_items_are_one_shared_target_with_only_the_hand_contexts() {
+        let block = &targets_from(&shipped())[0];
+        assert_eq!(block.key, PlacementKey::BlockItem);
+        assert_eq!(block.model, crate::content::BLOCK_ITEM_MODEL);
+
+        assert!(block.offers(DisplayContext::FirstPersonRightHand));
+        assert!(block.offers(DisplayContext::ThirdPersonRightHand));
+        assert!(
+            !block.offers(DisplayContext::Gui),
+            "the inventory icon is painted, not placed by a display entry"
+        );
+        assert!(
+            !block.offers(DisplayContext::Ground),
+            "and a block on the floor is sized by its drop entity"
+        );
+
+        for context in [
+            DisplayContext::FirstPersonRightHand,
+            DisplayContext::ThirdPersonRightHand,
+        ] {
+            assert_eq!(
+                block.kind(context),
+                PlacementKind::Display,
+                "saved into {}, not items.toml",
+                crate::content::BLOCK_ITEM_MODEL
+            );
+        }
+    }
+
+    /// The shipped file has to say what the compiled-in fallback says, or
+    /// deleting it would visibly move every held block.
+    #[test]
+    fn the_shipped_block_model_matches_the_builtin_placement() {
+        let content = shipped();
+        assert_eq!(
+            content.block_item_display,
+            crate::entity::viewmodel::default_block_display()
+        );
     }
 
     /// A flat item is a three-line stub, and the panel still has to open on the
