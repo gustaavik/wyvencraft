@@ -74,6 +74,17 @@ impl DroppedItem {
         )
     }
 
+    /// A drop that only exists to be looked at: still, unspinning, and never
+    /// collectable.
+    ///
+    /// The item placement editor uses it to show what a `ground` placement looks
+    /// like without the developer having to toss the item, chase it and pick it
+    /// up again. Age stays at zero, which also stops the spin and the bob — a
+    /// value is far easier to judge on something holding still.
+    pub fn preview(stack: ItemStack, position: Vec3, kind: &EntityKind) -> Self {
+        Self::spawn(stack, position, Vec3::ZERO, f32::INFINITY, kind)
+    }
+
     /// An item tossed by the player: launched from just below the eye along the
     /// look direction.
     pub fn thrown(stack: ItemStack, eye: Vec3, look: Vec3, kind: &EntityKind) -> Self {

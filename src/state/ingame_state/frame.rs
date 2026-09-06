@@ -109,12 +109,23 @@ impl GameState<Wyvencraft> for InGameState {
             }
         }
 
-        if !typing && !self.dead && ctx.input.just_pressed(kb.inventory) {
+        // Not while the editor is up: its third-person view and the inventory's
+        // camera sweep would fight each other for the same camera.
+        if !typing && !self.dead && !self.editor_open() && ctx.input.just_pressed(kb.inventory) {
             self.toggle_inventory();
         }
+        // Outside the `in_control` block below, unlike the other function keys:
+        // the editor takes the controls itself, so a toggle gated on having them
+        // could open the panel and never close it.
+        if !typing && !self.dead && ctx.input.just_pressed(kb.toggle_editor) {
+            self.toggle_editor();
+        }
+        self.update_editor(ctx.dt);
         // Esc closes the inventory if open, otherwise opens the pause overlay.
         if !typing && ctx.input.just_pressed(kb.pause) {
-            if self.inventory_open {
+            if self.editor_open() {
+                self.toggle_editor();
+            } else if self.inventory_open {
                 self.toggle_inventory();
             } else {
                 return Transition::Push(Box::new(PauseMenuState::new()));
@@ -133,7 +144,12 @@ impl GameState<Wyvencraft> for InGameState {
         //
         // This gates the input below, and deliberately **not** the physics: see
         // the step block further down.
-        let in_control = !self.inventory_anim.active() && !self.dead && !self.chat.composer.open;
+        // The editor is the fourth thing that takes the controls away. Its panel
+        // needs a cursor, and mouse-look would fight every drag.
+        let in_control = !self.inventory_anim.active()
+            && !self.dead
+            && !self.chat.composer.open
+            && !self.editor_open();
         ctx.grab_cursor = in_control;
         if !in_control {
             // Whatever was being mined is abandoned — that one *is* an input.
@@ -354,6 +370,11 @@ impl GameState<Wyvencraft> for InGameState {
             }
             return Transition::None;
         }
+
+        // Before the inventory's early return, though the two can never both be
+        // up: the editor is a window of its own and belongs on top of whatever
+        // the frame is showing.
+        self.draw_editor_panel(egui_ctx);
 
         // The panel is drawn for the whole sweep, not just while open, because
         // the close animation runs after `inventory_open` has already gone

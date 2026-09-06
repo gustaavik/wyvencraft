@@ -177,9 +177,72 @@ pub fn boot_perspective(env: &dyn Environment) -> Option<Perspective> {
     }
 }
 
+/// Whether `WYVEN_EDITOR` asks for the in-game item placement editor.
+///
+/// Not a [`BootPlan`] field for the same reason [`boot_perspective`] is not: it
+/// decides nothing about which screen opens. It is a gate rather than a mere
+/// convenience — the editor writes into `assets/`, which belongs to the install
+/// and is read-only in spirit, so a player must not be able to reach it by
+/// pressing a function key.
+///
+/// Presence is enough (`WYVEN_EDITOR=1`, or any value), matching every other
+/// flag here; an explicit `0` or `false` turns it off, because a developer who
+/// spells that out means it.
+pub fn editor_enabled(env: &dyn Environment) -> bool {
+    match env.get("WYVEN_EDITOR") {
+        Some(value) => !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "" | "0" | "false"
+        ),
+        None => false,
+    }
+}
+
+/// Whether `WYVEN_EDITOR=open` asks for the panel to be up already.
+///
+/// F6 needs a human at the keyboard, exactly as F5 does — so without this the
+/// one thing that cannot be checked from an automated run is the editor itself.
+/// Paired with `WYVEN_SCREENSHOT_AT`, this is what leaves a frame of the panel
+/// behind to look at.
+pub fn editor_opens_at_boot(env: &dyn Environment) -> bool {
+    env.get("WYVEN_EDITOR")
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("open"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The gate: a player's build must not have an asset editor in it.
+    #[test]
+    fn the_editor_is_off_unless_it_is_asked_for() {
+        assert!(!editor_enabled(&MapEnv::new()));
+        for off in ["0", "false", "", " "] {
+            let env = MapEnv::new().with("WYVEN_EDITOR", off);
+            assert!(!editor_enabled(&env), "{off:?} should not open it");
+        }
+        for on in ["1", "true", "yes"] {
+            let env = MapEnv::new().with("WYVEN_EDITOR", on);
+            assert!(editor_enabled(&env), "{on:?} should open it");
+        }
+    }
+
+    /// F6 needs a keyboard, so `open` is what makes the panel checkable from a
+    /// run nobody is sitting at.
+    #[test]
+    fn the_panel_can_be_asked_to_open_at_boot() {
+        let env = MapEnv::new().with("WYVEN_EDITOR", "open");
+        assert!(editor_enabled(&env));
+        assert!(editor_opens_at_boot(&env));
+
+        let plain = MapEnv::new().with("WYVEN_EDITOR", "1");
+        assert!(editor_enabled(&plain));
+        assert!(
+            !editor_opens_at_boot(&plain),
+            "1 enables it, it does not open it"
+        );
+        assert!(!editor_opens_at_boot(&MapEnv::new()));
+    }
 
     #[test]
     fn no_perspective_variable_leaves_the_camera_alone() {
