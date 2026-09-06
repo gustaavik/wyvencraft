@@ -15,6 +15,7 @@
 //! - [`frame`] — the [`GameState`] impl (update/ui/scene_frame).
 
 mod chat;
+mod editor;
 mod frame;
 mod interaction;
 mod inventory;
@@ -34,6 +35,7 @@ use glam::Vec3;
 use crate::chat::{ChatState, OpsList};
 use crate::content::GameContent;
 use crate::core::{BlockPos, DayCycle};
+use crate::editor::EditorSession;
 use crate::entity::{Arrow, DroppedItem, Mob, Player, Spawner};
 use crate::inventory::{HeldLabel, Inventory, ItemStack, RecipeBook};
 use crate::state::session::Session;
@@ -128,6 +130,10 @@ pub struct InGameState {
     /// Crafting recipes, loaded from `assets/recipes.toml` at world start.
     pub recipes: RecipeBook,
     pub show_debug: bool,
+    /// The item placement editor. Inert unless `WYVEN_EDITOR=1` asked for it,
+    /// and even then it costs one hash lookup per held item per frame until
+    /// something is actually moved.
+    editor: EditorSession,
     /// Every GPU resource this session has uploaded, plus the camera
     /// parameters and animation clocks that feed them.
     view: SceneCache,

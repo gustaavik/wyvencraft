@@ -25,6 +25,7 @@ use crate::art::{cracks, mobskin, skin};
 use crate::content::BlockAppearance;
 use crate::content::{ItemModel, ItemShape};
 use crate::core::{Aabb, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, ChunkPos, DayCycle};
+use crate::editor::PlacementSource;
 use crate::entity::camera::Shot;
 use crate::entity::kind::{EntityRegistry, VisualSpec};
 use crate::entity::viewmodel::{self, HandPose};
@@ -69,6 +70,11 @@ pub(super) struct ModelContent<'a> {
     /// blended pass. A closure because the answer needs the block registry,
     /// which the view deliberately cannot reach.
     pub shape: &'a dyn Fn(ItemId) -> (ItemShape, bool),
+    /// Where a held item sits, when something wants to say. Normally nothing
+    /// does and every placement is the shipped one; while the in-game editor is
+    /// moving a value, this is how it reaches the screen. Deliberately a port:
+    /// none of the five seams below learns that an editor exists.
+    pub placement: &'a dyn PlacementSource,
 }
 
 impl ModelContent<'_> {
@@ -80,6 +86,21 @@ impl ModelContent<'_> {
     /// The model an item is drawn as, if it declares one.
     fn of(&self, item: ItemId) -> Option<ItemModel> {
         *self.item_models.get(item.0 as usize)?
+    }
+
+    /// Where a model-backed item sits in this context.
+    fn local(&self, item: ItemId, model: ItemModel, context: DisplayContext) -> Mat4 {
+        self.placement
+            .local(item, context)
+            .unwrap_or_else(|| model.local(self.models, context))
+    }
+
+    /// The same for an item with no model file, which is placed as the cube or
+    /// sprite it falls back to.
+    fn atlas_local(&self, item: ItemId, shape: ItemShape, context: DisplayContext) -> Mat4 {
+        self.placement
+            .local(item, context)
+            .unwrap_or_else(|| held_placement(shape, context).matrix())
     }
 }
 
@@ -545,7 +566,7 @@ impl SceneCache {
             return None;
         }
         let (shape, is_transparent) = (content.shape)(item);
-        let local = held_placement(shape, DisplayContext::ThirdPersonRightHand).matrix();
+        let local = content.atlas_local(item, shape, DisplayContext::ThirdPersonRightHand);
         let transform = anchor * local;
         let mesh = self.shaped_item_mesh(ctx, shape, content.tiles, transform, transform)?;
         Some((mesh, is_transparent))
@@ -559,8 +580,9 @@ impl SceneCache {
         item: Option<ItemId>,
         anchor: Mat4,
     ) -> Option<(GpuMesh, ModelId)> {
-        let held = content.of(item?)?;
-        let local = held.local(content.models, DisplayContext::ThirdPersonRightHand);
+        let item = item?;
+        let held = content.of(item)?;
+        let local = content.local(item, held, DisplayContext::ThirdPersonRightHand);
         self.bake_model(ctx, content.models, held.id, anchor * local)
     }
 
@@ -595,9 +617,10 @@ impl SceneCache {
         self.hand_mesh =
             arm.and_then(|arm| GpuMesh::upload(&ctx.memory_allocator, &arm).ok().flatten());
 
+        let selected = inventory.selected_stack().map(|stack| stack.item);
         let held = content.held(inventory);
-        self.hand_held_mesh = held.and_then(|held| {
-            let local = held.local(content.models, DisplayContext::FirstPersonRightHand);
+        self.hand_held_mesh = held.zip(selected).and_then(|(held, item)| {
+            let local = content.local(item, held, DisplayContext::FirstPersonRightHand);
             let transform = viewmodel::item_anchor(frame) * local;
             self.bake_model(ctx, content.models, held.id, transform)
         });
@@ -609,7 +632,8 @@ impl SceneCache {
         self.hand_held_atlas = match (held, inventory.selected_stack()) {
             (None, Some(stack)) => {
                 let (shape, _) = (content.shape)(stack.item);
-                let local = held_placement(shape, DisplayContext::FirstPersonRightHand).matrix();
+                let local =
+                    content.atlas_local(stack.item, shape, DisplayContext::FirstPersonRightHand);
                 let transform = viewmodel::item_anchor(frame) * local;
                 // Lit by the placement alone: `transform` carries the camera's
                 // rotation, and using it would make the block pulse as you spin.
@@ -826,10 +850,15 @@ impl SceneCache {
 
     /// Rebuild the combined drop meshes (opaque + transparent passes). Drops are
     /// few and tiny, so a per-frame rebuild stays cheap, like remote players.
-    pub fn update_drops_mesh(
+    ///
+    /// Takes an iterator rather than a slice so the item placement editor can
+    /// chain a still preview drop onto the real ones without cloning them — and
+    /// so that preview goes down this exact path rather than an approximation of
+    /// it.
+    pub fn update_drops_mesh<'a>(
         &mut self,
         ctx: &Arc<RenderContext>,
-        drops: &[DroppedItem],
+        drops: impl IntoIterator<Item = &'a DroppedItem>,
         content: ModelContent<'_>,
     ) {
         let (shape, tiles) = (content.shape, content.tiles);
@@ -845,7 +874,7 @@ impl SceneCache {
                 && let Some(loaded) = content.models.get(model.id)
             {
                 let transform = model_mesh::anchor(item.render_center(), item.spin_yaw(), 0.0)
-                    * model.local(content.models, DisplayContext::Ground);
+                    * content.local(item.stack.item, model, DisplayContext::Ground);
                 let mesh = loaded.mesh.bake(transform);
                 let entry = by_model.entry(model.id).or_default();
                 entry.push_indexed(mesh.vertices, mesh.indices);
@@ -1284,8 +1313,13 @@ impl super::InGameState {
             item_models: &loaded.item_models,
             tiles: &loaded.tiles,
             shape: &shape,
+            placement: &self.editor,
         };
-        self.view.update_drops_mesh(ctx, &self.drops, content);
+        // The editor's ground preview, when it has one, rides along with the
+        // real drops so it is drawn by exactly the same code.
+        let preview = self.editor_ground_preview();
+        self.view
+            .update_drops_mesh(ctx, self.drops.iter().chain(preview.iter()), content);
         self.view
             .update_mob_meshes(ctx, &self.mobs.live, &mut self.mobs.remote, models, dt);
         self.view

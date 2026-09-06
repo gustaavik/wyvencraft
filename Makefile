@@ -3,7 +3,7 @@
 # directory. Without it the game writes to the OS application-data directory,
 # which is right for a player and surprising for a checkout.
 run:
-	WYVEN_DATA_DIR=./data WYVEN_BOOT_INGAME=1 WYVEN_WORLD=test cargo run
+	WYVEN_EDITOR=1 WYVEN_DATA_DIR=./data WYVEN_BOOT_INGAME=1 WYVEN_WORLD=test cargo run
 
 build:
 	WYVEN_AUTH_URL=https://auth.wyvencraft.com cargo build --release --locked

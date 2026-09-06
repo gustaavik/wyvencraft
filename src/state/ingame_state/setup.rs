@@ -15,6 +15,7 @@ use crate::boot;
 use crate::chat::{ChatState, OpsList};
 use crate::content::GameContent;
 use crate::core::{BlockPos, CHUNK_HEIGHT, ChunkPos, DayCycle, GameMode};
+use crate::editor::EditorSession;
 use crate::entity::Player;
 use crate::inventory::{HeldLabel, Inventory, RecipeBook};
 use crate::net::{Client, Host, NetVec3, PlayerId, PlayerRestore, RecipeData};
@@ -246,6 +247,7 @@ impl InGameState {
             held_label: HeldLabel::default(),
             recipes,
             show_debug: false,
+            editor: EditorSession::disabled(),
             view: SceneCache::new(),
             loader,
             day_cycle,
@@ -286,6 +288,22 @@ impl InGameState {
         if let Some(perspective) = boot::plan::boot_perspective(&boot::plan::SystemEnv) {
             log::info!("WYVEN_PERSPECTIVE: opening in {perspective:?}");
             state.player.perspective = perspective;
+        }
+        // The editor writes into `assets/`, so it is off unless a developer
+        // asked for it. Built here rather than in `boot::start` for the same
+        // reason the perspective is: a client's state is put together behind
+        // `ConnectingState`, which that function never sees.
+        if boot::plan::editor_enabled(&boot::plan::SystemEnv) {
+            let targets = crate::editor::targets_from(&state.content);
+            log::info!(
+                "WYVEN_EDITOR: item placement editor on ({} items)",
+                targets.len()
+            );
+            state.editor = EditorSession::new(true, Box::new(crate::editor::FileStore));
+            state.editor.set_targets(targets);
+            if boot::plan::editor_opens_at_boot(&boot::plan::SystemEnv) {
+                state.toggle_editor();
+            }
         }
         state
     }

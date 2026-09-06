@@ -28,7 +28,7 @@ const PIXELS_PER_BLOCK: f32 = 16.0;
 ///
 /// The defaults are the identity, so a partial entry — `{"scale": [0,0,0]}`,
 /// which is how an author hides a model in one context — reads correctly.
-#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct ItemTransform {
     /// Degrees about the model's own X, Y and Z, applied in that order.

@@ -192,6 +192,10 @@ pub trait ModelLoader {
 #[derive(Default)]
 pub struct ModelRegistry {
     models: Vec<Model>,
+    /// The file each [`ModelId`] was parsed from, parallel to `models`. Kept
+    /// beside them rather than recovered by scanning `by_path` so a tool that
+    /// wants to write back to the file a model came from can ask directly.
+    paths: Vec<String>,
     by_path: HashMap<String, Option<ModelId>>,
 }
 
@@ -221,6 +225,14 @@ impl ModelRegistry {
         self.by_path.get(path).copied().flatten()
     }
 
+    /// The file `id` was parsed from — [`find`](Self::find) run backwards.
+    ///
+    /// A model carries no memory of where it came from otherwise, and an author
+    /// tool that edits a model's placement has to write back to that exact file.
+    pub fn path_of(&self, id: ModelId) -> Option<&str> {
+        self.paths.get(id.0 as usize).map(String::as_str)
+    }
+
     /// Load `path`, or return the id it already has.
     ///
     /// Fail-soft, like every other content loader: a missing file, an unknown
@@ -244,6 +256,7 @@ impl ModelRegistry {
                 );
                 let id = ModelId(self.models.len() as u32);
                 self.models.push(model);
+                self.paths.push(path.to_string());
                 Some(id)
             }
             Err(err) => {
@@ -492,6 +505,32 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(registry.len(), 1, "the file should be parsed once");
         assert!(registry.find(BBMODEL).is_some());
+    }
+
+    /// `path_of` is `find` run backwards, and a tool that writes a model's
+    /// placement back to disk needs it to name the *same* file the id came from.
+    #[test]
+    fn an_id_names_the_file_it_was_parsed_from() {
+        let mut registry = ModelRegistry::new();
+        let id = registry.load(BBMODEL, &assets()).expect("loads");
+        assert_eq!(registry.path_of(id), Some(BBMODEL));
+        assert_eq!(registry.find(BBMODEL), Some(id));
+        assert_eq!(registry.path_of(ModelId(7)), None, "no such model");
+    }
+
+    /// A failed load must not push a path, or every id after it would name the
+    /// wrong file.
+    #[test]
+    fn a_failed_load_leaves_the_path_list_aligned() {
+        let mut registry = ModelRegistry::new();
+        assert!(
+            registry
+                .load("assets/models/gone.gltf", &MapSource::new())
+                .is_none()
+        );
+        let id = registry.load(BBMODEL, &assets()).expect("loads");
+        assert_eq!(id, ModelId(0));
+        assert_eq!(registry.path_of(id), Some(BBMODEL));
     }
 
     #[test]
