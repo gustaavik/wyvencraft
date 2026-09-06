@@ -124,6 +124,10 @@ pub(super) struct SceneCache {
     /// Procedural animation state for the local player's model.
     player_anim: AnimationState,
     remote_meshes: Vec<GpuMesh>,
+    /// What each remote player is holding, in the same two flavours the local
+    /// body's hand takes: a model file, or the cube/sprite fallback.
+    remote_held: Vec<(GpuMesh, ModelId)>,
+    remote_held_atlas: Vec<(GpuMesh, bool)>,
     /// Per-remote-player animation, keyed by id.
     remote_anims: HashMap<PlayerId, RemoteAnim>,
     /// One GPU mesh per visible mob, rebuilt each frame like remote players.
@@ -191,6 +195,8 @@ impl SceneCache {
             player_mesh: None,
             player_anim: AnimationState::new(),
             remote_meshes: Vec::new(),
+            remote_held: Vec::new(),
+            remote_held_atlas: Vec::new(),
             remote_anims: HashMap::new(),
             mob_meshes: Vec::new(),
             held_mesh: None,
@@ -478,8 +484,9 @@ impl SceneCache {
         };
         self.player_mesh = GpuMesh::upload(&ctx.memory_allocator, &mesh).ok().flatten();
 
-        self.held_mesh = anchor.and_then(|a| self.bake_held(ctx, content, inventory, a));
-        self.held_atlas = anchor.and_then(|a| self.bake_held_atlas(ctx, content, inventory, a));
+        let held = inventory.selected_stack().map(|stack| stack.item);
+        self.held_mesh = anchor.and_then(|a| self.bake_held(ctx, content, held, a));
+        self.held_atlas = anchor.and_then(|a| self.bake_held_atlas(ctx, content, held, a));
     }
 
     /// Build the held item for something with **no model file**: the same cube
@@ -529,14 +536,14 @@ impl SceneCache {
         &mut self,
         ctx: &Arc<RenderContext>,
         content: ModelContent<'_>,
-        inventory: &Inventory,
+        item: Option<ItemId>,
         anchor: Mat4,
     ) -> Option<(GpuMesh, bool)> {
+        let item = item?;
         // A model always wins; this is only the fallback for items without one.
-        if content.held(inventory).is_some() {
+        if content.of(item).is_some() {
             return None;
         }
-        let item = inventory.selected_stack()?.item;
         let (shape, is_transparent) = (content.shape)(item);
         let local = held_placement(shape, DisplayContext::ThirdPersonRightHand).matrix();
         let transform = anchor * local;
@@ -549,10 +556,10 @@ impl SceneCache {
         &mut self,
         ctx: &Arc<RenderContext>,
         content: ModelContent<'_>,
-        inventory: &Inventory,
+        item: Option<ItemId>,
         anchor: Mat4,
     ) -> Option<(GpuMesh, ModelId)> {
-        let held = content.held(inventory)?;
+        let held = content.of(item?)?;
         let local = held.local(content.models, DisplayContext::ThirdPersonRightHand);
         self.bake_model(ctx, content.models, held.id, anchor * local)
     }
@@ -618,10 +625,12 @@ impl SceneCache {
         &mut self,
         ctx: &Arc<RenderContext>,
         remote_players: &HashMap<PlayerId, RemotePlayer>,
-        models: &ModelRegistry,
+        content: ModelContent<'_>,
         dt: f32,
     ) {
         self.remote_meshes.clear();
+        self.remote_held.clear();
+        self.remote_held_atlas.clear();
         // Snapshot the render-relevant fields first so `remote_anims` can be
         // mutated without holding a borrow of the map they came from.
         //
@@ -632,7 +641,7 @@ impl SceneCache {
         // vertical speed off this delta: on the raw position that is zero on
         // every frame without a packet and a spike on the frame one lands, so a
         // remote jump flickers across the airborne threshold instead of holding.
-        let snapshots: Vec<(PlayerId, Vec3, f32, f32)> = remote_players
+        let snapshots: Vec<(PlayerId, Vec3, f32, f32, Option<ItemId>)> = remote_players
             .values()
             .map(|rp| {
                 (
@@ -640,11 +649,16 @@ impl SceneCache {
                     rp.interpolated_position(self.render_alpha),
                     rp.yaw,
                     rp.pitch,
+                    rp.equipment.held.map(ItemId),
                 )
             })
             .collect();
         let mut baked: Vec<CpuMesh> = Vec::with_capacity(snapshots.len());
-        for (id, pos, yaw, pitch) in snapshots {
+        // The fist and what is in it, gathered here and baked below: `character`
+        // borrows `self` for as long as the pose does, and baking an item needs
+        // `self` mutably for the sprite cache.
+        let mut hands: Vec<(Mat4, Option<ItemId>)> = Vec::with_capacity(snapshots.len());
+        for (id, pos, yaw, pitch, held) in snapshots {
             let state = self.remote_anims.entry(id).or_insert_with(|| RemoteAnim {
                 anim: AnimationState::new(),
                 last_pos: pos,
@@ -661,7 +675,7 @@ impl SceneCache {
             state.last_pos = pos;
             let anim = state.anim;
 
-            let Some(character) = self.character(models) else {
+            let Some(character) = self.character(content.models) else {
                 break;
             };
             let look = HeadLook {
@@ -672,12 +686,26 @@ impl SceneCache {
             // and a torso that follows it is cosmetic, so every peer can work it
             // out for itself.
             if let Some(pose) = character.pose(&anim, look) {
-                baked.push(character.bake(&pose, pos, anim.body_yaw()));
+                let body_yaw = anim.body_yaw();
+                baked.push(character.bake(&pose, pos, body_yaw));
+                // The same pose and yaw the body was baked at, so a peer's item
+                // rides its fist exactly the way the local player's does.
+                if let Some(anchor) = character.hand_anchor(&pose, pos, body_yaw) {
+                    hands.push((anchor, held));
+                }
             }
         }
         for mesh in baked {
             if let Ok(Some(gpu)) = GpuMesh::upload(&ctx.memory_allocator, &mesh) {
                 self.remote_meshes.push(gpu);
+            }
+        }
+        for (anchor, held) in hands {
+            if let Some(mesh) = self.bake_held(ctx, content, held, anchor) {
+                self.remote_held.push(mesh);
+            }
+            if let Some(mesh) = self.bake_held_atlas(ctx, content, held, anchor) {
+                self.remote_held_atlas.push(mesh);
             }
         }
         // Drop animation state for players that have left.
@@ -1006,7 +1034,9 @@ impl SceneCache {
 
         // A held item with no model of its own, split by pass for the same
         // reason drops are: a glass block in the fist must blend like glass.
-        if let Some((mesh, is_transparent)) = &self.held_atlas {
+        // Every fist in the world, not just this one's — a peer holding glass
+        // has to blend too.
+        for (mesh, is_transparent) in self.held_atlas.iter().chain(&self.remote_held_atlas) {
             if *is_transparent {
                 transparent.push(mesh);
             } else {
@@ -1035,6 +1065,7 @@ impl SceneCache {
             .chain(
                 self.held_mesh
                     .iter()
+                    .chain(&self.remote_held)
                     .filter_map(|(mesh, id)| self.textured_mesh(mesh, *id)),
             )
             // Model-backed blocks, culled by the same chunk column AABB as the
@@ -1286,6 +1317,6 @@ impl super::InGameState {
         // registry and the model registry are both in reach.
         self.view.bind_player_rig(&loaded.entities, models);
         self.view
-            .update_remote_meshes(ctx, &self.peers.players, models, dt);
+            .update_remote_meshes(ctx, &self.peers.players, content, dt);
     }
 }

@@ -11,6 +11,7 @@ use super::peers::Peers;
 use super::persistence::Persistence;
 use super::view::SceneCache;
 use super::{DOUBLE_TAP_WINDOW, InGameState, SPAWN_RADIUS};
+use crate::boot;
 use crate::chat::{ChatState, OpsList};
 use crate::content::GameContent;
 use crate::core::{BlockPos, CHUNK_HEIGHT, ChunkPos, DayCycle, GameMode};
@@ -276,6 +277,15 @@ impl InGameState {
         };
         if state.session.is_authority() {
             state.debug_spawn_from_env();
+        }
+        // Every session, a joining client included: verifying anything drawn on
+        // the player's own body needs *both* ends of a two-process run to be
+        // outside their own head. Read here rather than in `boot::start` for
+        // exactly that reason — a client's state is built behind
+        // `ConnectingState`, which that function never sees.
+        if let Some(perspective) = boot::plan::boot_perspective(&boot::plan::SystemEnv) {
+            log::info!("WYVEN_PERSPECTIVE: opening in {perspective:?}");
+            state.player.perspective = perspective;
         }
         state
     }

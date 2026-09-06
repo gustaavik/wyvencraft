@@ -22,10 +22,10 @@ use super::{
 };
 use crate::core::{BlockId, BlockPos};
 use crate::entity::Arrow;
-use crate::inventory::{ARMOR_SIZE, ARMOR_START, Inventory, ItemId, ItemRegistry, RecipeBook};
+use crate::inventory::{ARMOR_START, Inventory, ItemId, ItemRegistry, RecipeBook};
 use crate::net::{
-    Channel, ClientMessage, NetItemStack, PlayerId, PlayerRestore, RecipeData, RemotePlayer,
-    ServerMessage,
+    Channel, ClientMessage, Equipment, NetItemStack, PlayerId, PlayerRestore, RecipeData,
+    RemotePlayer, ServerMessage,
 };
 use crate::save::{ItemStackData, PlayerData, PlayerRecords};
 use crate::state::session::Inbound;
@@ -149,16 +149,16 @@ impl InGameState {
             Channel::Reliable,
         );
 
-        let equipment: Vec<(PlayerId, [Option<u16>; ARMOR_SIZE])> = self
+        let equipment: Vec<(PlayerId, Equipment)> = self
             .peers
             .equipment
             .iter()
-            .map(|(&id, &armor)| (id, armor))
+            .map(|(&id, &equipment)| (id, equipment))
             .collect();
-        for (id, armor) in equipment {
+        for (id, equipment) in equipment {
             self.session.send_to(
                 pid,
-                &ServerMessage::PlayerEquipment { id, armor },
+                &ServerMessage::PlayerEquipment { id, equipment },
                 Channel::Reliable,
             );
         }
@@ -245,7 +245,7 @@ impl InGameState {
             }
             ClientMessage::SyncInventory { slots, selected } => {
                 if let Some(rp) = self.peers.players.get_mut(&pid) {
-                    rp.armor = armor_from_slots(&slots);
+                    rp.equipment = equipment_from_slots(&slots, selected);
                 }
                 self.peers.inventories.insert(pid, (slots, selected));
             }
@@ -397,8 +397,8 @@ impl InGameState {
                     .entry(id, Vec3::ZERO)
                     .set_stats(health, hunger, mode);
             }
-            ServerMessage::PlayerEquipment { id, armor } if id != local_id => {
-                self.peers.entry(id, Vec3::ZERO).armor = armor;
+            ServerMessage::PlayerEquipment { id, equipment } if id != local_id => {
+                self.peers.entry(id, Vec3::ZERO).equipment = equipment;
             }
             ServerMessage::MobSpawned { id, kind, position } => {
                 match self.content.entities.find(&kind) {
@@ -521,16 +521,21 @@ impl InGameState {
             }
         }
 
-        // Armor, only when it changes (the host's own from its inventory, each
-        // remote's from its last inventory sync).
-        let mut equip: Vec<(PlayerId, [Option<u16>; ARMOR_SIZE])> =
-            vec![(HOST_PLAYER_ID, armor_ids(&self.inventory))];
-        equip.extend(self.peers.players.iter().map(|(pid, rp)| (*pid, rp.armor)));
-        for (id, armor) in equip {
-            if self.peers.equipment.get(&id) != Some(&armor) {
-                self.peers.equipment.insert(id, armor);
+        // What everyone is wearing and holding, only when it changes (the host's
+        // own from its inventory, each remote's from its last inventory sync).
+        let mut equip: Vec<(PlayerId, Equipment)> =
+            vec![(HOST_PLAYER_ID, equipment_of(&self.inventory))];
+        equip.extend(
+            self.peers
+                .players
+                .iter()
+                .map(|(pid, rp)| (*pid, rp.equipment)),
+        );
+        for (id, equipment) in equip {
+            if self.peers.equipment.get(&id) != Some(&equipment) {
+                self.peers.equipment.insert(id, equipment);
                 self.session.broadcast(
-                    &ServerMessage::PlayerEquipment { id, armor },
+                    &ServerMessage::PlayerEquipment { id, equipment },
                     Channel::Reliable,
                 );
             }
@@ -690,18 +695,28 @@ pub(super) fn record_remote(
     );
 }
 
-/// Worn armor item ids for the wire, from an inventory's armor slots.
-fn armor_ids(inventory: &Inventory) -> [Option<u16>; ARMOR_SIZE] {
-    inventory.equipped_armor().map(|slot| slot.map(|id| id.0))
+/// What an inventory is wearing and holding, for the wire.
+fn equipment_of(inventory: &Inventory) -> Equipment {
+    Equipment {
+        armor: inventory.equipped_armor().map(|slot| slot.map(|id| id.0)),
+        held: inventory.selected_stack().map(|stack| stack.item.0),
+    }
 }
 
-/// Worn armor item ids from a wire inventory snapshot's armor slots.
-fn armor_from_slots(slots: &[Option<NetItemStack>]) -> [Option<u16>; ARMOR_SIZE] {
-    std::array::from_fn(|i| {
-        slots
-            .get(ARMOR_START + i)
-            .and_then(|slot| slot.map(|s| s.item))
-    })
+/// The same, read out of a wire inventory snapshot: a client reports its slots
+/// and which one it has selected, so the host never has to be told separately
+/// what that client is holding.
+fn equipment_from_slots(slots: &[Option<NetItemStack>], selected: u32) -> Equipment {
+    Equipment {
+        armor: std::array::from_fn(|i| {
+            slots
+                .get(ARMOR_START + i)
+                .and_then(|slot| slot.map(|s| s.item))
+        }),
+        held: slots
+            .get(selected as usize)
+            .and_then(|slot| slot.map(|s| s.item)),
+    }
 }
 
 /// Serialize the recipe book back to item ids for the `Welcome` message.
@@ -806,10 +821,111 @@ mod tests {
     use super::*;
     use crate::content::GameContent;
     use crate::core::GameMode;
+    use crate::inventory::ARMOR_SIZE;
     use crate::net::status::{NetStatusProbe, StatusOutcome, StatusProbe};
     use crate::net::{Client, Host, TicketJoin, host_config};
     use crate::state::session::{FakeHandle, FakeSession};
     use crate::world::block::blocks;
+
+    /// A client reports its slots and which one it has selected, and that is
+    /// enough — the host is never told separately what a client is holding, so
+    /// the two can never disagree.
+    #[test]
+    fn a_clients_hand_is_read_out_of_the_inventory_it_reported() {
+        let stack = |item| {
+            Some(NetItemStack {
+                item,
+                count: 1,
+                durability: None,
+            })
+        };
+        let mut slots = vec![None; ARMOR_START + ARMOR_SIZE];
+        slots[0] = stack(7);
+        slots[2] = stack(9);
+        slots[ARMOR_START] = stack(4);
+
+        let equipment = equipment_from_slots(&slots, 2);
+        assert_eq!(equipment.held, Some(9), "the selected slot, not the first");
+        assert_eq!(equipment.armor[0], Some(4));
+    }
+
+    /// Selecting an empty slot empties the fist rather than leaving the last
+    /// item in it, and a selection past the end cannot panic.
+    #[test]
+    fn an_empty_or_missing_selection_empties_the_hand() {
+        let slots = vec![
+            Some(NetItemStack {
+                item: 7,
+                count: 1,
+                durability: None,
+            }),
+            None,
+        ];
+        assert_eq!(equipment_from_slots(&slots, 1).held, None);
+        assert_eq!(equipment_from_slots(&slots, 99).held, None);
+    }
+
+    /// The whole path a peer's held item takes: a client reports its inventory,
+    /// the host works out what that client is holding, broadcasts it, and a
+    /// receiving client stores it on the body it draws.
+    ///
+    /// Nothing new crosses the wire to make this work — `SyncInventory` was
+    /// already being sent for the save and for melee damage, so a peer's fist
+    /// costs one extra field on a message that was already there.
+    #[test]
+    fn a_clients_held_item_reaches_the_peers_that_draw_it() {
+        let (mut state, handle) = host_session();
+        let pid = PlayerId(1);
+        handle.deliver(Inbound::Joined {
+            player: pid,
+            identity: 42,
+            account: None,
+        });
+        state.pump_network(1.0 / 60.0);
+
+        let sword = state.content.items.find("iron_sword").expect("iron_sword");
+        let mut slots = vec![None; 3];
+        slots[2] = Some(NetItemStack {
+            item: sword.0,
+            count: 1,
+            durability: None,
+        });
+        handle.deliver(Inbound::Request {
+            player: pid,
+            msg: ClientMessage::SyncInventory { slots, selected: 2 },
+        });
+        state.pump_network(1.0 / 60.0);
+
+        let held = handle
+            .lock()
+            .broadcasts()
+            .iter()
+            .filter_map(|msg| match msg {
+                ServerMessage::PlayerEquipment { id, equipment } if *id == pid => {
+                    Some(equipment.held)
+                }
+                _ => None,
+            })
+            .next_back()
+            .expect("the host broadcast what the client is holding");
+        assert_eq!(held, Some(sword.0));
+
+        // And the receiving end puts it on the body it will draw.
+        let (mut peer, peer_handle) = client_session(PlayerId(2));
+        peer_handle.deliver(Inbound::Update(ServerMessage::PlayerEquipment {
+            id: pid,
+            equipment: Equipment {
+                armor: [None; ARMOR_SIZE],
+                held: Some(sword.0),
+            },
+        }));
+        peer.pump_network(1.0 / 60.0);
+        assert_eq!(
+            peer.peers.players.get(&pid).map(|rp| rp.equipment.held),
+            Some(Some(sword.0)),
+            "the peer's body knows what it is holding"
+        );
+    }
 
     /// An in-game state driven by a fake session, plus the handle to script it.
     fn host_session() -> (InGameState, FakeHandle) {

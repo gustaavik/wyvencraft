@@ -149,10 +149,12 @@ pub fn block_placement(context: DisplayContext) -> ItemTransform {
             translation: [0.0, 0.0, 0.0],
             scale: [0.40; 3],
         },
-        // Smaller and lifted, because in third person it hangs off a fist that
-        // is itself already out at the end of an arm.
+        // Smaller and pushed out along the fist, because in third person it
+        // hangs off a hand that is itself already at the end of an arm. The 75°
+        // is what stands the cube up: hand space has +Z up, not +Y, so a corner
+        // presented to the camera needs the tip as well as the turn.
         DisplayContext::ThirdPersonRightHand => ItemTransform {
-            rotation: [0.0, 0.0, 0.0],
+            rotation: [75.0, 45.0, 0.0],
             translation: [0.0, 2.5, 0.0],
             scale: [0.375; 3],
         },
