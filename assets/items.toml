@@ -4,7 +4,7 @@
 # by the CAPABILITIES it declares rather than by what kind of thing it is. Each
 # `[item.<capability>]` table below adds one; gameplay asks an item for the
 # capability it needs and gets nothing if the item has not got it, so an item
-# may carry any combination (shears are a tool *and* shearable).
+# may carry any combination.
 #
 # A placeable item is auto-generated for every visible, non-fluid-flow block
 # (same id as the block, stacks to 64, places itself). Entries here either
@@ -33,9 +33,15 @@
 #       block       id of the block it places (block items get theirs
 #                   automatically, and keep it through an override)
 #   [item.tool] makes the item dig, and maybe fight:
-#       dig_speed   mining-speed multiplier when the tool matches (hand = 1.0)
+#       kind        what shape of tool this is: pickaxe, axe, shovel, sword,
+#                   shears. A tool declares only what it IS — which blocks it
+#                   is good at is the block's business, named in
+#                   `[block.harvest] tool` over in blocks.toml. So adding a
+#                   block never means editing a tool, and the shape set is pure
+#                   data: a new one is a kind here and a block that wants it.
+#       dig_speed   mining-speed multiplier on a block that wants this kind
+#                   (hand = 1.0)
 #       durability  uses before the tool breaks
-#       harvests    block materials this tool mines at full speed
 #       damage      melee damage per swing; omit for a tool that hits no harder
 #                   than a bare fist (pickaxes, shovels)
 #   [item.consumable] makes the item edible: hunger + saturation restored
@@ -44,10 +50,6 @@
 #                   boots. A piece only goes in its own slot.
 #       defense     defense points, summed across worn pieces
 #       durability  hits taken before the piece breaks
-#   [item.shearable] makes the item shear. A marker with no fields: a block
-#               whose drops say { requires = "shearable" } yields its item only
-#               for an item carrying this.
-#
 #   [item.model] draws the item as a 3D model instead of the default cube,
 #                both in the holder's hand and where it lies in the world:
 #       path        a .gltf, .bbmodel or Java Block/Item .json under
@@ -71,15 +73,17 @@
 
 # Tools come in three tiers. A tier is expressed purely as dig_speed +
 # durability (+ damage on the shapes that fight) — there is deliberately no
-# harvest-level gate, so every block stays mineable by hand and a better
-# pickaxe only means a faster one:
+# harvest-level gate, so a better pickaxe only means a faster one. Whether a
+# block can be mined by hand at all is the *block's* call (`required` in its
+# `[block.harvest]`), and only oak leaves say no:
 #
 #   wooden  dig_speed 2.0   durability  60
 #   stone   dig_speed 4.0   durability 132
 #   iron    dig_speed 6.0   durability 250
 #
-# Swords are the exception: they only harvest plants, so their tier gradient
-# lives in `damage` and `durability` and their dig_speed stays flat.
+# Swords are the exception: the only blocks that ask for one are plants, so
+# their tier gradient lives in `damage` and `durability` and dig_speed stays
+# flat.
 #
 # The tool models are all flat in the XY plane, so they carry
 # rotation = [0, 90, 0] to sit broadside in the fist the way vine_sword does.
@@ -90,9 +94,9 @@
 id = "wooden_pickaxe"
 
 [item.tool]
+kind = "pickaxe"
 dig_speed = 2.0
 durability = 60
-harvests = ["stone"]
 
 [item.model]
 path = "assets/models/items/wooden_pickaxe.json"
@@ -104,9 +108,9 @@ rotation = [0.0, 90.0, 0.0]
 id = "wooden_axe"
 
 [item.tool]
+kind = "axe"
 dig_speed = 2.0
 durability = 60
-harvests = ["wood"]
 damage = 3.0
 
 [item.model]
@@ -119,9 +123,9 @@ rotation = [0.0, 90.0, 0.0]
 id = "wooden_shovel"
 
 [item.tool]
+kind = "shovel"
 dig_speed = 2.0
 durability = 60
-harvests = ["dirt", "sand"]
 
 [item.model]
 path = "assets/models/items/wooden_shovel.json"
@@ -133,22 +137,17 @@ rotation = [0.0, 90.0, 0.0]
 id = "shears"
 
 [item.tool]
+kind = "shears"
 dig_speed = 5.0
 durability = 120
-harvests = ["plant"]
-
-# The only item that shears. Oak leaves ask for this capability by name
-# (`drops = { requires = "shearable" }` in blocks.toml), so a second pair of
-# shears gates them by declaring it rather than by being called "shears".
-[item.shearable]
 
 [[item]]
 id = "vine_sword"
 
 [item.tool]
+kind = "sword"
 dig_speed = 1.5
 durability = 200
-harvests = ["plant"]
 damage = 4.0
 
 # Authored as a Java Block/Item model, so its `display` block places it in each
@@ -163,9 +162,9 @@ offset = [-0.5, 0.75, -0.5]
 id = "wooden_sword"
 
 [item.tool]
+kind = "sword"
 dig_speed = 1.5
 durability = 60
-harvests = ["plant"]
 damage = 4.0
 
 # Authored as a Java Block/Item model, so its `display` block places it in the
@@ -181,9 +180,9 @@ rotation = [0.0, 90.0, 0.0]
 id = "stone_pickaxe"
 
 [item.tool]
+kind = "pickaxe"
 dig_speed = 4.0
 durability = 132
-harvests = ["stone"]
 
 [item.model]
 path = "assets/models/items/stone_pickaxe.json"
@@ -195,9 +194,9 @@ rotation = [0.0, 90.0, 0.0]
 id = "stone_axe"
 
 [item.tool]
+kind = "axe"
 dig_speed = 4.0
 durability = 132
-harvests = ["wood"]
 damage = 4.0
 
 [item.model]
@@ -210,9 +209,9 @@ rotation = [0.0, 90.0, 0.0]
 id = "stone_shovel"
 
 [item.tool]
+kind = "shovel"
 dig_speed = 4.0
 durability = 132
-harvests = ["dirt", "sand"]
 
 [item.model]
 path = "assets/models/items/stone_shovel.json"
@@ -224,9 +223,9 @@ rotation = [0.0, 90.0, 0.0]
 id = "stone_sword"
 
 [item.tool]
+kind = "sword"
 dig_speed = 1.5
 durability = 132
-harvests = ["plant"]
 damage = 5.0
 
 [item.model]
@@ -239,9 +238,9 @@ rotation = [0.0, 90.0, 0.0]
 id = "iron_pickaxe"
 
 [item.tool]
+kind = "pickaxe"
 dig_speed = 6.0
 durability = 250
-harvests = ["stone"]
 
 [item.model]
 path = "assets/models/items/iron_pickaxe.json"
@@ -253,9 +252,9 @@ rotation = [0.0, 90.0, 0.0]
 id = "iron_axe"
 
 [item.tool]
+kind = "axe"
 dig_speed = 6.0
 durability = 250
-harvests = ["wood"]
 damage = 5.0
 
 [item.model]
@@ -268,9 +267,9 @@ rotation = [0.0, 90.0, 0.0]
 id = "iron_shovel"
 
 [item.tool]
+kind = "shovel"
 dig_speed = 6.0
 durability = 250
-harvests = ["dirt", "sand"]
 
 [item.model]
 path = "assets/models/items/iron_shovel.json"
@@ -282,9 +281,9 @@ rotation = [0.0, 90.0, 0.0]
 id = "iron_sword"
 
 [item.tool]
+kind = "sword"
 dig_speed = 1.5
 durability = 250
-harvests = ["plant"]
 damage = 6.0
 
 [item.model]

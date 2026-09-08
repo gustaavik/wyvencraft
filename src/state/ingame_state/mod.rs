@@ -344,13 +344,13 @@ mod tests {
         );
     }
 
-    /// End-to-end for the capability drop gate: oak leaves say
-    /// `drops = { requires = "shearable" }`, so they yield their block only for
-    /// an item that declares `[item.shearable]`. What matters is that the gate
-    /// reads a *capability* — an axe is a perfectly good tool and still gets
-    /// nothing, and shears would still work if they were renamed tomorrow.
+    /// End-to-end for the block's own tool gate: oak leaves declare
+    /// `[block.harvest] tool = "shears", required = true`, so they yield their
+    /// block only for a shears-shaped tool. The rule lives entirely in
+    /// `blocks.toml` — an axe is a perfectly good tool and still gets nothing,
+    /// and no item anywhere had to be told that leaves exist.
     #[test]
-    fn oak_leaves_drop_only_for_an_item_that_can_shear() {
+    fn oak_leaves_drop_only_for_the_tool_they_ask_for() {
         use crate::world::block::blocks;
 
         let leaves_dropped = |held: Option<&str>| {
@@ -383,8 +383,12 @@ mod tests {
                 .sum::<u32>()
         };
 
-        assert_eq!(leaves_dropped(Some("shears")), 1, "shears can shear");
-        assert_eq!(leaves_dropped(Some("iron_axe")), 0, "a tool is not enough");
+        assert_eq!(leaves_dropped(Some("shears")), 1, "the tool it asks for");
+        assert_eq!(
+            leaves_dropped(Some("iron_axe")),
+            0,
+            "any tool is not enough"
+        );
         assert_eq!(leaves_dropped(None), 0, "a bare hand gets nothing");
     }
 

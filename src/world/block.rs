@@ -21,18 +21,33 @@ use wyven_voxel::{BlockProperties, FluidInfo, RenderType};
 /// `assets/blocks.toml` is missing or invalid (the assets dir is CWD-relative).
 pub const BUILTIN_BLOCKS: &str = include_str!("../../assets/blocks.toml");
 
-/// What a block is made of — selects which tool mines it fastest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum BlockMaterial {
-    Stone,
-    Dirt,
-    Sand,
-    Wood,
-    Plant,
-    Glass,
-    /// No preferred tool (bedrock, misc).
-    Other,
+/// Which tool a block wants, and whether it insists on one
+/// (`[block.harvest]` in `assets/blocks.toml`).
+///
+/// The requirement lives **here**, on the block, rather than on the tools. A
+/// tool declares only what shape it is (`[item.tool] kind`); the block declares
+/// what shape it wants. That way adding a block is one file, not a block entry
+/// plus an edit to every tool that should be good at it — and a tool never has
+/// to enumerate the world.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Harvest {
+    /// Tool kinds that mine this block at full speed, by `[item.tool] kind`.
+    /// Never empty — a `[block.harvest]` naming nothing is rejected.
+    pub tools: Vec<String>,
+    /// Whether breaking it with something else yields nothing at all.
+    ///
+    /// `false` — the default — is the rule the game is built on: a better
+    /// pickaxe only means a *faster* one, and every block stays mineable by
+    /// hand. Set it where the tool is the whole point (leaves and shears).
+    pub required: bool,
+}
+
+impl Harvest {
+    /// Whether a tool of `kind` mines this block at full speed.
+    #[inline]
+    pub fn accepts(&self, kind: &str) -> bool {
+        self.tools.iter().any(|tool| tool == kind)
+    }
 }
 
 /// What breaking a block yields (the `drops` field in `assets/blocks.toml`).
@@ -42,15 +57,6 @@ pub enum Drops {
     SelfItem,
     /// Nothing.
     None,
-    /// The block's own item, but only when the held item carries the named
-    /// **capability** (e.g. leaves require `shearable`).
-    ///
-    /// A capability rather than a tool kind, so the gate asks what the held
-    /// item can *do* instead of comparing two free-form strings. `world` sits
-    /// below `inventory` and cannot name the capability set, so the string is
-    /// checked against `inventory::component::COMPONENTS` by `content` once
-    /// both registries exist.
-    RequiresCapability { capability: String },
     /// A different item, by id (resolved against the item registry at use).
     Item { id: String, count: u8 },
 }
@@ -152,8 +158,9 @@ pub struct Block {
     pub solid: bool,
     /// Relative mining time; `f32::INFINITY` means unbreakable (e.g. bedrock).
     pub hardness: f32,
-    /// What the block is made of, for tool matching.
-    pub material: BlockMaterial,
+    /// Which tool mines it, and whether one is required. `None` for a block
+    /// no tool is better at (glass, bedrock).
+    pub harvest: Option<Harvest>,
     /// What breaking it yields.
     pub drops: Drops,
     /// Set when the block is part of a fluid (source or flowing).
@@ -274,7 +281,8 @@ struct BlockDef {
     render: RenderType,
     solid: bool,
     hardness: f32,
-    material: BlockMaterial,
+    /// `[block.harvest]` — which tool this block wants.
+    harvest: Option<HarvestDef>,
     /// Optional for a block whose geometry brings its own texture and never
     /// samples the atlas — either a `[block.model]` or a `block_model`.
     textures: Option<TexturesDef>,
@@ -314,14 +322,60 @@ enum TexturesDef {
     },
 }
 
-/// `drops = "self" | "none" | { requires = "..." } | { item = "...", count = N }`.
+/// `[block.harvest]` with `tool = "pickaxe"` or `tool = ["shears", "sword"]`,
+/// plus an optional `required = true`.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HarvestDef {
+    tool: ToolsDef,
+    #[serde(default)]
+    required: bool,
+}
+
+/// `tool = "pickaxe"`, or `tool = ["shears", "sword"]` when more than one shape
+/// is good at it.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum ToolsDef {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl HarvestDef {
+    fn resolve(self, block: &str) -> Result<Harvest, String> {
+        let tools = match self.tool {
+            ToolsDef::One(kind) => vec![kind],
+            ToolsDef::Many(kinds) => kinds,
+        };
+        // An empty list would silently mean "no tool is good at this", which is
+        // what leaving the whole table out already says — and with
+        // `required = true` it would mean "nothing can ever harvest this",
+        // which is certainly not what anyone typed on purpose.
+        if tools.is_empty() {
+            return Err(format!(
+                "block {block:?}: [block.harvest] names no tool; omit the table instead"
+            ));
+        }
+        for kind in &tools {
+            if !is_valid_id(kind) {
+                return Err(format!(
+                    "block {block:?}: tool kind {kind:?} must be lowercase letters, digits \
+                     and underscores"
+                ));
+            }
+        }
+        Ok(Harvest {
+            tools,
+            required: self.required,
+        })
+    }
+}
+
+/// `drops = "self" | "none" | { item = "...", count = N }`.
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
 enum DropsDef {
     Keyword(String),
-    Requires {
-        requires: String,
-    },
     OtherItem {
         item: String,
         #[serde(default = "default_drop_count")]
@@ -391,9 +445,6 @@ impl DropsDef {
                 "none" => Ok(Drops::None),
                 other => Err(format!("unknown drops keyword {other:?}")),
             },
-            Self::Requires { requires } => Ok(Drops::RequiresCapability {
-                capability: requires.clone(),
-            }),
             Self::OtherItem { item, count } => Ok(Drops::Item {
                 id: item.clone(),
                 count: *count,
@@ -467,7 +518,7 @@ impl BlockRegistry {
             render: RenderType::Invisible,
             solid: false,
             hardness: 0.0,
-            material: BlockMaterial::Other,
+            harvest: None,
             drops: Drops::None,
             fluid: None,
         });
@@ -500,6 +551,7 @@ impl BlockRegistry {
                     .map_err(|e| format!("block {:?}: {e}", def.id))?,
                 None => Drops::SelfItem,
             };
+            let harvest = def.harvest.map(|h| h.resolve(&def.id)).transpose()?;
             let mut fluid_texture = None;
             let fluid = match &def.fluid {
                 Some(f) => {
@@ -595,7 +647,7 @@ impl BlockRegistry {
                 render: def.render,
                 solid: def.solid,
                 hardness: def.hardness,
-                material: def.material,
+                harvest,
                 drops,
                 fluid,
             });
@@ -627,7 +679,7 @@ impl BlockRegistry {
                         render: source.render,
                         solid: source.solid,
                         hardness: source.hardness,
-                        material: source.material,
+                        harvest: source.harvest.clone(),
                         drops: Drops::None,
                         fluid: Some(FluidInfo {
                             group: group as u16,
@@ -749,50 +801,163 @@ mod tests {
     /// used in chunk storage and on the wire.
     #[test]
     fn builtin_blocks_golden() {
-        use BlockMaterial as M;
         use RenderType as R;
         const INF: f32 = f32::INFINITY;
-        let expected: [(&str, R, bool, f32, M); 29] = [
-            ("air", R::Invisible, false, 0.0, M::Other),
-            ("stone", R::Opaque, true, 1.5, M::Stone),
-            ("dirt", R::Opaque, true, 0.5, M::Dirt),
-            ("grass", R::Opaque, true, 0.6, M::Dirt),
-            ("sand", R::Opaque, true, 0.5, M::Sand),
-            ("water", R::Transparent, false, INF, M::Other),
-            ("oak_log", R::Opaque, true, 2.0, M::Wood),
-            ("oak_leaves", R::Cutout, true, 0.2, M::Plant),
-            ("glass", R::Transparent, true, 0.3, M::Glass),
-            ("bedrock", R::Opaque, true, INF, M::Other),
-            ("snow", R::Opaque, true, 0.2, M::Dirt),
-            ("gravel", R::Opaque, true, 0.6, M::Dirt),
-            ("clay", R::Opaque, true, 0.6, M::Dirt),
-            ("coal_ore", R::Opaque, true, 3.0, M::Stone),
-            ("iron_ore", R::Opaque, true, 3.0, M::Stone),
-            ("copper_ore", R::Opaque, true, 3.0, M::Stone),
-            ("cobblestone", R::Opaque, true, 2.0, M::Stone),
-            ("blue_bells", R::Cutout, false, 0.0, M::Plant),
-            ("red_flower", R::Cutout, false, 0.0, M::Plant),
-            ("red_mushroom", R::Cutout, false, 0.0, M::Plant),
-            ("brown_mushroom", R::Cutout, false, 0.0, M::Plant),
-            ("cornflower", R::Cutout, false, 0.0, M::Plant),
-            ("water_flow_1", R::Transparent, false, INF, M::Other),
-            ("water_flow_2", R::Transparent, false, INF, M::Other),
-            ("water_flow_3", R::Transparent, false, INF, M::Other),
-            ("water_flow_4", R::Transparent, false, INF, M::Other),
-            ("water_flow_5", R::Transparent, false, INF, M::Other),
-            ("water_flow_6", R::Transparent, false, INF, M::Other),
-            ("water_flow_7", R::Transparent, false, INF, M::Other),
+        const NONE: &[&str] = &[];
+        const PICK: &[&str] = &["pickaxe"];
+        const AXE: &[&str] = &["axe"];
+        const SHOVEL: &[&str] = &["shovel"];
+        const SHEARS: &[&str] = &["shears"];
+        const CUTTERS: &[&str] = &["shears", "sword"];
+        /// id, render, solid, hardness, the tools it asks for, whether it insists.
+        type BlockRow = (&'static str, R, bool, f32, &'static [&'static str], bool);
+        let expected: [BlockRow; 29] = [
+            ("air", R::Invisible, false, 0.0, NONE, false),
+            ("stone", R::Opaque, true, 1.5, PICK, false),
+            ("dirt", R::Opaque, true, 0.5, SHOVEL, false),
+            ("grass", R::Opaque, true, 0.6, SHOVEL, false),
+            ("sand", R::Opaque, true, 0.5, SHOVEL, false),
+            ("water", R::Transparent, false, INF, NONE, false),
+            ("oak_log", R::Opaque, true, 2.0, AXE, false),
+            ("oak_leaves", R::Cutout, true, 0.2, SHEARS, true),
+            ("glass", R::Transparent, true, 0.3, NONE, false),
+            ("bedrock", R::Opaque, true, INF, NONE, false),
+            ("snow", R::Opaque, true, 0.2, SHOVEL, false),
+            ("gravel", R::Opaque, true, 0.6, SHOVEL, false),
+            ("clay", R::Opaque, true, 0.6, SHOVEL, false),
+            ("coal_ore", R::Opaque, true, 3.0, PICK, false),
+            ("iron_ore", R::Opaque, true, 3.0, PICK, false),
+            ("copper_ore", R::Opaque, true, 3.0, PICK, false),
+            ("cobblestone", R::Opaque, true, 2.0, PICK, false),
+            ("blue_bells", R::Cutout, false, 0.0, CUTTERS, false),
+            ("red_flower", R::Cutout, false, 0.0, CUTTERS, false),
+            ("red_mushroom", R::Cutout, false, 0.0, CUTTERS, false),
+            ("brown_mushroom", R::Cutout, false, 0.0, CUTTERS, false),
+            ("cornflower", R::Cutout, false, 0.0, CUTTERS, false),
+            // A flowing block inherits its source's harvest rule, which for
+            // water is "nothing is good at it".
+            ("water_flow_1", R::Transparent, false, INF, NONE, false),
+            ("water_flow_2", R::Transparent, false, INF, NONE, false),
+            ("water_flow_3", R::Transparent, false, INF, NONE, false),
+            ("water_flow_4", R::Transparent, false, INF, NONE, false),
+            ("water_flow_5", R::Transparent, false, INF, NONE, false),
+            ("water_flow_6", R::Transparent, false, INF, NONE, false),
+            ("water_flow_7", R::Transparent, false, INF, NONE, false),
         ];
         let reg = BlockRegistry::with_builtins();
         assert_eq!(reg.len(), expected.len(), "block count changed");
-        for (i, &(id, render, solid, hardness, material)) in expected.iter().enumerate() {
+        for (i, &(id, render, solid, hardness, tools, required)) in expected.iter().enumerate() {
             let block = reg.get(BlockId(i as u16));
             assert_eq!(block.id, id, "block {i}: id");
             assert_eq!(block.render, render, "{id}: render");
             assert_eq!(block.solid, solid, "{id}: solid");
             assert_eq!(block.hardness, hardness, "{id}: hardness");
-            assert_eq!(block.material, material, "{id}: material");
+            match &block.harvest {
+                Some(harvest) => {
+                    assert_eq!(harvest.tools, tools, "{id}: harvest tools");
+                    assert_eq!(harvest.required, required, "{id}: harvest required");
+                }
+                None => assert!(tools.is_empty(), "{id}: expected a harvest table"),
+            }
         }
+    }
+
+    /// A block names one tool or several; both spellings land in the same
+    /// `Vec`, so nothing downstream has to know which was written.
+    #[test]
+    fn a_harvest_table_accepts_one_tool_or_a_list() {
+        let one = parse(
+            r#"
+            [[block]]
+            id = "rock"
+            render = "opaque"
+            solid = true
+            hardness = 1.0
+            textures = "stone"
+            [block.harvest]
+            tool = "pickaxe"
+        "#,
+        )
+        .expect("valid file");
+        let harvest = one.get(BlockId(1)).harvest.as_ref().expect("harvest");
+        assert_eq!(harvest.tools, ["pickaxe"]);
+        assert!(!harvest.required, "a gate is opt-in");
+
+        let many = parse(
+            r#"
+            [[block]]
+            id = "weed"
+            render = "cutout"
+            solid = false
+            hardness = 0.0
+            textures = "stone"
+            [block.harvest]
+            tool = ["shears", "sword"]
+            required = true
+        "#,
+        )
+        .expect("valid file");
+        let harvest = many.get(BlockId(1)).harvest.as_ref().expect("harvest");
+        assert_eq!(harvest.tools, ["shears", "sword"]);
+        assert!(harvest.accepts("sword") && !harvest.accepts("axe"));
+        assert!(harvest.required);
+    }
+
+    /// `[block.harvest]` with nothing in it is either a half-finished edit or,
+    /// with `required`, a block nothing in the game could ever harvest. Both
+    /// are worth failing the file over — omitting the table already says "no
+    /// tool is good at this".
+    #[test]
+    fn a_harvest_table_naming_no_tool_is_rejected() {
+        let err = parse(
+            r#"
+            [[block]]
+            id = "rock"
+            render = "opaque"
+            solid = true
+            hardness = 1.0
+            textures = "stone"
+            [block.harvest]
+            tool = []
+        "#,
+        )
+        .expect_err("an empty tool list says nothing");
+        assert!(err.contains("rock"), "unhelpful error {err:?}");
+    }
+
+    /// A tool kind is matched against `[item.tool] kind` by exact string, so a
+    /// spelling no item could write is a fault rather than a silent mismatch.
+    #[test]
+    fn a_malformed_tool_kind_is_rejected() {
+        assert!(
+            parse(
+                r#"
+            [[block]]
+            id = "rock"
+            render = "opaque"
+            solid = true
+            hardness = 1.0
+            textures = "stone"
+            [block.harvest]
+            tool = "Pick Axe"
+        "#,
+            )
+            .is_err()
+        );
+    }
+
+    /// The rule the whole game is built on, pinned where the block table can
+    /// see it: naming a tool makes a block *faster* to mine, never gated. Only
+    /// a block that says `required` withholds its drop.
+    #[test]
+    fn naming_a_tool_does_not_by_itself_gate_the_drop() {
+        let reg = BlockRegistry::with_builtins();
+        let gated: Vec<&str> = reg
+            .iter()
+            .filter(|(_, b)| b.harvest.as_ref().is_some_and(|h| h.required))
+            .map(|(_, b)| b.id.as_str())
+            .collect();
+        assert_eq!(gated, ["oak_leaves"], "only leaves insist on their tool");
     }
 
     /// Every shipped id is well formed. The loader enforces this, but asserting
@@ -830,12 +995,18 @@ mod tests {
     #[test]
     fn blocks_toml_components_parse() {
         let reg = BlockRegistry::with_builtins();
-        assert_eq!(
-            reg.get(blocks::OAK_LEAVES).drops,
-            Drops::RequiresCapability {
-                capability: "shearable".into()
-            }
-        );
+        // Leaves drop themselves, but only for shears — and that gate is the
+        // block's `[block.harvest]`, not a shape of drop rule, so it composes
+        // with any of them.
+        assert_eq!(reg.get(blocks::OAK_LEAVES).drops, Drops::SelfItem);
+        let leaves = reg
+            .get(blocks::OAK_LEAVES)
+            .harvest
+            .as_ref()
+            .expect("harvest");
+        assert!(leaves.required, "leaves insist on their tool");
+        assert!(leaves.accepts("shears"));
+        assert!(!leaves.accepts("axe"));
         // Mining stone yields cobblestone, exactly as the recipes assume.
         assert_eq!(
             reg.get(blocks::STONE).drops,
@@ -869,7 +1040,6 @@ mod tests {
             render = "opaque"
             solid = true
             hardness = 1.0
-            material = "other"
             textures = "stone"
         "#;
         assert!(parse(air).is_err());
@@ -879,7 +1049,6 @@ mod tests {
             render = "opaque"
             solid = true
             hardness = 1.0
-            material = "stone"
             textures = "stone"
 
             [[block]]
@@ -887,7 +1056,6 @@ mod tests {
             render = "opaque"
             solid = true
             hardness = 1.0
-            material = "stone"
             textures = "stone"
         "#;
         assert!(parse(dup).is_err());
@@ -900,7 +1068,6 @@ mod tests {
             render = "opaque"
             solid = true
             hardness = 0.5
-            material = "dirt"
             textures = "dirt"
         "#,
         )
@@ -921,7 +1088,6 @@ mod tests {
                 render = "opaque"
                 solid = true
                 hardness = 0.5
-                material = "dirt"
                 textures = "dirt"
 
                 [[block]]
@@ -929,7 +1095,6 @@ mod tests {
                 render = "opaque"
                 solid = true
                 hardness = 2.0
-                material = "wood"
                 textures = "wood_bark"
             "#
             );
@@ -952,7 +1117,6 @@ mod tests {
             render = "opaque"
             solid = true
             hardness = 0.5
-            material = "dirt"
             textures = "dirt"
 
             [[block]]
@@ -961,7 +1125,6 @@ mod tests {
             render = "opaque"
             solid = true
             hardness = 0.5
-            material = "other"
             textures = "stone"
         "#,
             &mut visuals,

@@ -9,7 +9,7 @@ pub mod inventory;
 pub mod item;
 pub mod mining;
 
-pub use component::{ArmorSlot, Consumable, Equippable, ItemComponent, Placeable, Shearable, Tool};
+pub use component::{ArmorSlot, Consumable, Equippable, ItemComponent, Placeable, Tool};
 pub use crafting::{Recipe, RecipeBook};
 pub use held_label::HeldLabel;
 pub use inventory::{ARMOR_SIZE, ARMOR_START, HOTBAR_SIZE, INVENTORY_SIZE, Inventory, TOTAL_SLOTS};

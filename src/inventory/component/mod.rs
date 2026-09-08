@@ -2,7 +2,7 @@
 //!
 //! An item is not a fixed set of fields with three behaviours bolted on: it is
 //! an id, a stack size, and a set of **typed capability components**. Placing a
-//! block, digging, eating, wearing and shearing are each one [`ItemComponent`]
+//! block, digging, eating and wearing are each one [`ItemComponent`]
 //! declared as its own `[item.<key>]` table in `assets/items.toml`, parsed by
 //! the one [`ComponentParser`] in [`COMPONENTS`] that claims that key.
 //!
@@ -26,19 +26,16 @@ use crate::world::block::BlockRegistry;
 mod consumable;
 mod equippable;
 mod placeable;
-mod shearable;
 mod tool;
 
 pub use consumable::Consumable;
 pub use equippable::{ArmorSlot, Equippable};
 pub use placeable::Placeable;
-pub use shearable::Shearable;
 pub use tool::Tool;
 
 use consumable::ConsumableParser;
 use equippable::EquippableParser;
 use placeable::PlaceableParser;
-use shearable::ShearableParser;
 use tool::ToolParser;
 
 /// One typed behaviour an item carries, parsed from its `[item.<key>]` table.
@@ -115,19 +112,12 @@ pub const COMPONENTS: &[&dyn ComponentParser] = &[
     &ConsumableParser,
     &EquippableParser,
     &PlaceableParser,
-    &ShearableParser,
     &ToolParser,
 ];
 
 /// The parser claiming `key`, if any.
 pub fn parser_for(key: &str) -> Option<&'static dyn ComponentParser> {
     COMPONENTS.iter().copied().find(|p| p.key() == key)
-}
-
-/// Whether any parser claims `key` — how `content` checks that a block's
-/// `drops = { requires = "..." }` names a capability that exists.
-pub fn is_capability(key: &str) -> bool {
-    parser_for(key).is_some()
 }
 
 /// Downcast a stored component back to its concrete type.
@@ -160,10 +150,9 @@ mod tests {
                 "slot = \"helmet\"\ndefense = 1.0\ndurability = 1\n",
             ),
             ("placeable", "block = \"stone\"\n"),
-            ("shearable", ""),
             (
                 "tool",
-                "dig_speed = 1.0\ndurability = 1\nharvests = [\"stone\"]\n",
+                "kind = \"pickaxe\"\ndig_speed = 1.0\ndurability = 1\n",
             ),
         ];
         assert_eq!(
@@ -200,18 +189,5 @@ mod tests {
         let mut sorted = keys.clone();
         sorted.sort_unstable();
         assert_eq!(keys, sorted);
-    }
-
-    /// A capability name is what `blocks.toml` spells in `drops = { requires =
-    /// ... }`, so the predicate must answer for exactly the registered set.
-    #[test]
-    fn is_capability_answers_for_the_registered_set() {
-        assert!(is_capability("shearable"));
-        assert!(is_capability("tool"));
-        assert!(
-            !is_capability("shears"),
-            "the old tool kind is not a capability"
-        );
-        assert!(!is_capability(""));
     }
 }

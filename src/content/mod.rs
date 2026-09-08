@@ -17,11 +17,10 @@ use std::sync::Arc;
 use crate::core::Direction;
 use crate::core::ident::title_case;
 use crate::entity::{EntityRegistry, SpawnConfig};
-use crate::inventory::component;
 use crate::inventory::item::ItemVisuals;
-use crate::inventory::{ItemId, ItemRegistry, Placeable};
+use crate::inventory::{ItemId, ItemRegistry, Placeable, Tool};
 use crate::world::block::{
-    BUILTIN_BLOCKS, BlockJsonSpec, BlockModelSpec, BlockRegistry, BlockVisuals, Drops, FluidVisual,
+    BUILTIN_BLOCKS, BlockJsonSpec, BlockModelSpec, BlockRegistry, BlockVisuals, FluidVisual,
 };
 use crate::world::blockmodel::BakedBlockModel;
 use crate::world::generation::WorldGenConfig;
@@ -258,13 +257,12 @@ impl GameContent {
             models: mut item_model_specs,
             display_names: item_labels,
         } = item_visuals;
-        // A drop rule naming a capability no item can carry would silently make
-        // the block undroppable. `world` sits below `inventory` and cannot check
-        // this at parse time; here is the first place that sees both.
-        for id in unsatisfiable_drops(&blocks) {
-            log::warn!(
-                "block {id:?}: its drops require a capability no item can carry;                  it will never drop"
-            );
+        // A block asking for a tool kind nothing is would be slow for everyone,
+        // and — if it insists on one — undroppable forever. `world` sits below
+        // `inventory` and cannot see the tools; here is the first place that
+        // sees both.
+        for (block, kind) in unknown_harvest_tools(&blocks, &items) {
+            log::warn!("block {block:?}: wants tool kind {kind:?}, which no item declares");
         }
         let block_display_names = resolve_block_display_names(&blocks, block_labels);
         let item_display_names =
@@ -793,22 +791,35 @@ fn load_block_item_display(source: &dyn ContentSource) -> DisplayTransforms {
     }
 }
 
-/// Blocks whose `drops = { requires = "..." }` names something that is not an
-/// item capability, by id.
+/// Blocks whose `[block.harvest] tool` names a kind no item declares, as
+/// `(block id, unknown kind)` pairs.
 ///
-/// Separated from the logging so it can be asserted: the shipped data must
-/// report none, which is the check that catches a capability rename that
-/// forgot `blocks.toml`.
-fn unsatisfiable_drops(blocks: &BlockRegistry) -> Vec<&str> {
-    blocks
+/// The one cross-registry check the tool inversion needs: a block names the
+/// tool it wants, so nothing in `blocks.toml` can tell on its own whether that
+/// tool exists. Separated from the logging so it can be asserted — the shipped
+/// data must report none, which is what catches a tool kind renamed on one side
+/// only.
+fn unknown_harvest_tools<'a>(
+    blocks: &'a BlockRegistry,
+    items: &ItemRegistry,
+) -> Vec<(&'a str, &'a str)> {
+    let declared: std::collections::HashSet<&str> = items
         .iter()
-        .filter_map(|(_, block)| match &block.drops {
-            Drops::RequiresCapability { capability } if !component::is_capability(capability) => {
-                Some(block.id.as_str())
+        .filter_map(|(_, item)| item.get::<Tool>())
+        .map(|tool| tool.kind.as_str())
+        .collect();
+    let mut unknown = Vec::new();
+    for (_, block) in blocks.iter() {
+        let Some(harvest) = &block.harvest else {
+            continue;
+        };
+        for kind in &harvest.tools {
+            if !declared.contains(kind.as_str()) {
+                unknown.push((block.id.as_str(), kind.as_str()));
             }
-            _ => None,
-        })
-        .collect()
+        }
+    }
+    unknown
 }
 
 /// FNV-1a over a canonical rendering of the definitions. The `Debug`
@@ -1043,7 +1054,6 @@ mod tests {
             render = "opaque"
             solid = true
             hardness = 1.0
-            material = "stone"
         "#;
         let err = BlockRegistry::from_toml(bad).expect_err("must not parse");
         assert!(err.contains("ghost"), "{err}");
@@ -1403,7 +1413,6 @@ mod tests {
              render = \"opaque\"\n\
              solid = true\n\
              hardness = 1.0\n\
-             material = \"stone\"\n\
              textures = \"stone\"\n"
         );
         let content = GameContent::from_source(&MapSource::new().with(BLOCKS_PATH, blocks));
@@ -1458,7 +1467,6 @@ mod tests {
              render = \"opaque\"\n\
              solid = true\n\
              hardness = 1.0\n\
-             material = \"stone\"\n\
              textures = \"stone\"\n"
         );
         let content = GameContent::from_source(&MapSource::new().with(BLOCKS_PATH, blocks));
@@ -1518,30 +1526,32 @@ mod tests {
         );
     }
 
-    /// A block gating its drop on a capability that does not exist can never
-    /// drop, and nothing else would say so — `world` cannot see the capability
-    /// set and `inventory` never reads block drops.
+    /// Now that a block names the tool it wants, nothing in `blocks.toml` can
+    /// tell on its own whether that tool exists — a typo would leave the block
+    /// slow for everyone, and if it insisted, undroppable forever.
     #[test]
-    fn the_shipped_drop_rules_all_name_real_capabilities() {
+    fn every_shipped_block_asks_for_a_tool_some_item_is() {
         let blocks = BlockRegistry::with_builtins();
+        let items = ItemRegistry::from_blocks(&blocks);
         assert_eq!(
-            unsatisfiable_drops(&blocks),
-            Vec::<&str>::new(),
-            "a drop rule names a capability no item can carry"
+            unknown_harvest_tools(&blocks, &items),
+            Vec::new(),
+            "a block wants a tool kind no item declares"
         );
     }
 
     /// The other half of the same rule: a bad reference *is* reported, so the
     /// check above is not passing vacuously.
     #[test]
-    fn a_drop_requiring_an_unknown_capability_is_reported() {
-        let text = BUILTIN_BLOCKS.replace(
-            r#"drops = { requires = "shearable" }"#,
-            r#"drops = { requires = "snippable" }"#,
-        );
+    fn a_block_wanting_an_unknown_tool_is_reported() {
+        let text = BUILTIN_BLOCKS.replace(r#"tool = "shears""#, r#"tool = "snippers""#);
         assert!(text != BUILTIN_BLOCKS, "the fixture substitution missed");
         let blocks = BlockRegistry::from_toml(&text).expect("still a valid file");
-        assert_eq!(unsatisfiable_drops(&blocks), ["oak_leaves"]);
+        let items = ItemRegistry::from_blocks(&blocks);
+        assert_eq!(
+            unknown_harvest_tools(&blocks, &items),
+            [("oak_leaves", "snippers")]
+        );
     }
 
     /// The content hash is stable across loads of identical definitions (it

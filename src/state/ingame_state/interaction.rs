@@ -93,26 +93,44 @@ impl InGameState {
         true
     }
 
+    /// The `kind` of the tool in the selected hotbar slot, if it is a tool.
+    fn held_tool(&self) -> Option<&Tool> {
+        let id = self.inventory.item_in_selected()?;
+        self.content.items.component::<Tool>(id)
+    }
+
+    /// Whether what the player is holding satisfies the block's
+    /// `[block.harvest] required`. Blocks that require nothing — nearly all of
+    /// them — are harvestable bare-handed, which is the rule the game is built
+    /// on: a better tool means a faster one, not the only one.
+    fn can_harvest(&self, block: BlockId) -> bool {
+        let Some(harvest) = &self.content.blocks.get(block).harvest else {
+            return true;
+        };
+        !harvest.required
+            || self
+                .held_tool()
+                .is_some_and(|tool| harvest.accepts(&tool.kind))
+    }
+
     /// What breaking a block of type `block` yields, per its `drops` component
-    /// (`assets/blocks.toml`) and the held tool. `None` when nothing drops.
+    /// and its `[block.harvest]` requirement (`assets/blocks.toml`). `None` when
+    /// nothing drops.
     fn block_drop_stack(&self, block: BlockId) -> Option<ItemStack> {
-        let self_item = || {
-            self.content
+        // The tool gate is the block's, and it comes first: it decides whether
+        // there is a drop at all, whatever the drop happens to be. That is what
+        // lets `drops = { item = "cobblestone" }` and "needs a pickaxe" be
+        // written independently instead of one having to know about the other.
+        if !self.can_harvest(block) {
+            return None;
+        }
+        match &self.content.blocks.get(block).drops {
+            Drops::SelfItem => self
+                .content
                 .items
                 .item_for_block(block)
-                .map(ItemStack::single)
-        };
-        match &self.content.blocks.get(block).drops {
-            Drops::SelfItem => self_item(),
+                .map(ItemStack::single),
             Drops::None => None,
-            Drops::RequiresCapability { capability } => {
-                // What the held item can *do*, not what it is called.
-                let capable = self
-                    .inventory
-                    .item_in_selected()
-                    .is_some_and(|id| self.content.items.has(id, capability));
-                capable.then(self_item)?
-            }
             Drops::Item { id: drop, count } => {
                 let id = self.content.items.find(drop)?;
                 Some(ItemStack::new(
@@ -193,12 +211,10 @@ impl InGameState {
         // next begins; the blow that finally breaks the block is covered by the
         // same loop, so it needs no trigger of its own.
         self.view.keep_swinging();
-        // Effective tool: the held item, if it's a tool.
-        let tool = self
-            .inventory
-            .item_in_selected()
-            .and_then(|id| self.content.items.component::<Tool>(id));
-        let seconds = crate::inventory::break_seconds(block.hardness, block.material, tool);
+        // Effective tool: the held item, if it's a tool. Whether it is the
+        // *right* one is the block's call, not the tool's.
+        let tool = self.held_tool();
+        let seconds = crate::inventory::break_seconds(block.hardness, block.harvest.as_ref(), tool);
 
         // Reset progress when the targeted block changes.
         let prior = match &self.breaking {

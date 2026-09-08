@@ -496,8 +496,7 @@ impl ItemRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inventory::component::{ArmorSlot, Consumable, Equippable, Shearable, Tool};
-    use crate::world::block::BlockMaterial;
+    use crate::inventory::component::{ArmorSlot, Consumable, Equippable, Tool};
 
     /// Golden snapshot of the shipped item set. The data-driven loader must
     /// reproduce this exactly: names are the save format and registration
@@ -531,33 +530,23 @@ mod tests {
             "brown_mushroom",
             "cornflower",
         ];
-        const STONE: &[BlockMaterial] = &[BlockMaterial::Stone];
-        const WOOD: &[BlockMaterial] = &[BlockMaterial::Wood];
-        const PLANT: &[BlockMaterial] = &[BlockMaterial::Plant];
-        const DIGGABLE: &[BlockMaterial] = &[BlockMaterial::Dirt, BlockMaterial::Sand];
-        /// One expected tool: name, dig_speed, durability, harvests, damage.
-        type ToolRow = (
-            &'static str,
-            f32,
-            u16,
-            &'static [BlockMaterial],
-            Option<f32>,
-        );
+        /// One expected tool: name, kind, dig_speed, durability, damage.
+        type ToolRow = (&'static str, &'static str, f32, u16, Option<f32>);
         let tools: [ToolRow; 14] = [
-            ("wooden_pickaxe", 2.0, 60, STONE, None),
-            ("wooden_axe", 2.0, 60, WOOD, Some(3.0)),
-            ("wooden_shovel", 2.0, 60, DIGGABLE, None),
-            ("shears", 5.0, 120, PLANT, None),
-            ("vine_sword", 1.5, 200, PLANT, Some(4.0)),
-            ("wooden_sword", 1.5, 60, PLANT, Some(4.0)),
-            ("stone_pickaxe", 4.0, 132, STONE, None),
-            ("stone_axe", 4.0, 132, WOOD, Some(4.0)),
-            ("stone_shovel", 4.0, 132, DIGGABLE, None),
-            ("stone_sword", 1.5, 132, PLANT, Some(5.0)),
-            ("iron_pickaxe", 6.0, 250, STONE, None),
-            ("iron_axe", 6.0, 250, WOOD, Some(5.0)),
-            ("iron_shovel", 6.0, 250, DIGGABLE, None),
-            ("iron_sword", 1.5, 250, PLANT, Some(6.0)),
+            ("wooden_pickaxe", "pickaxe", 2.0, 60, None),
+            ("wooden_axe", "axe", 2.0, 60, Some(3.0)),
+            ("wooden_shovel", "shovel", 2.0, 60, None),
+            ("shears", "shears", 5.0, 120, None),
+            ("vine_sword", "sword", 1.5, 200, Some(4.0)),
+            ("wooden_sword", "sword", 1.5, 60, Some(4.0)),
+            ("stone_pickaxe", "pickaxe", 4.0, 132, None),
+            ("stone_axe", "axe", 4.0, 132, Some(4.0)),
+            ("stone_shovel", "shovel", 4.0, 132, None),
+            ("stone_sword", "sword", 1.5, 132, Some(5.0)),
+            ("iron_pickaxe", "pickaxe", 6.0, 250, None),
+            ("iron_axe", "axe", 6.0, 250, Some(5.0)),
+            ("iron_shovel", "shovel", 6.0, 250, None),
+            ("iron_sword", "sword", 1.5, 250, Some(6.0)),
         ];
         // (name, hunger, saturation)
         let foods = [
@@ -628,27 +617,27 @@ mod tests {
             );
         }
 
-        for (offset, &(name, dig_speed, durability, harvests, damage)) in tools.iter().enumerate() {
+        for (offset, &(name, kind, dig_speed, durability, damage)) in tools.iter().enumerate() {
             let id = ItemId((block_items.len() + offset) as u16);
             let item = items.get(id);
             assert_eq!(item.id, name, "tool: name");
             assert_eq!(item.max_stack, 1, "{name}: max_stack");
             let tool = item.get::<Tool>().expect("tool capability");
+            assert_eq!(tool.kind, kind, "{name}: kind");
             assert_eq!(tool.dig_speed, dig_speed, "{name}: dig_speed");
             assert_eq!(tool.durability, durability, "{name}: durability");
-            assert_eq!(tool.harvests, harvests, "{name}: harvests");
             assert_eq!(tool.damage, damage, "{name}: damage");
             assert_eq!(items.find(name), Some(id), "{name}: find");
         }
 
-        // Shearing is a capability of its own, not a tool kind — it is what
-        // oak leaves ask for, and only this one item answers.
+        // A tool says only what shape it is. Nothing here lists a block, and
+        // nothing in this file needs touching when a block is added.
         let shearers: Vec<&str> = items
             .iter()
-            .filter(|(_, item)| item.get::<Shearable>().is_some())
+            .filter(|(_, item)| item.get::<Tool>().is_some_and(|t| t.kind == "shears"))
             .map(|(_, item)| item.id.as_str())
             .collect();
-        assert_eq!(shearers, ["shears"], "only shears shear");
+        assert_eq!(shearers, ["shears"], "one item is shears-shaped");
 
         for (offset, &(name, hunger, saturation)) in foods.iter().enumerate() {
             let id = ItemId((block_items.len() + tools.len() + offset) as u16);
@@ -785,10 +774,12 @@ mod tests {
     #[test]
     fn capability_order_in_the_file_does_not_change_the_item() {
         let blocks = BlockRegistry::with_builtins();
-        let one = "[[item]]\nid = \"cleaver\"\n\n[item.shearable]\n\n[item.tool]\n\
-                   dig_speed = 1.0\ndurability = 5\nharvests = [\"plant\"]\n";
+        let one = "[[item]]\nid = \"cleaver\"\n\n[item.consumable]\n\
+                   hunger = 1.0\nsaturation = 1.0\n\n[item.tool]\n\
+                   kind = \"sword\"\ndig_speed = 1.0\ndurability = 5\n";
         let other = "[[item]]\nid = \"cleaver\"\n\n[item.tool]\n\
-                     dig_speed = 1.0\ndurability = 5\nharvests = [\"plant\"]\n\n[item.shearable]\n";
+                     kind = \"sword\"\ndig_speed = 1.0\ndurability = 5\n\n\
+                     [item.consumable]\nhunger = 1.0\nsaturation = 1.0\n";
         let render = |text: &str| {
             let items = ItemRegistry::from_toml(text, &blocks).expect("valid file");
             let id = items.find("cleaver").expect("declared");
@@ -805,11 +796,11 @@ mod tests {
         let items = ItemRegistry::from_toml(
             "[[item]]\nid = \"plain\"\n\n\
              [[item]]\nid = \"digger\"\n[item.tool]\n\
-             dig_speed = 1.0\ndurability = 5\nharvests = []\n\n\
+             kind = \"pickaxe\"\ndig_speed = 1.0\ndurability = 5\n\n\
              [[item]]\nid = \"hat\"\n[item.equippable]\n\
              slot = \"helmet\"\ndefense = 1.0\ndurability = 5\n\n\
              [[item]]\nid = \"oddity\"\nmax_stack = 16\n[item.tool]\n\
-             dig_speed = 1.0\ndurability = 5\nharvests = []\n",
+             kind = \"pickaxe\"\ndig_speed = 1.0\ndurability = 5\n",
             &blocks,
         )
         .expect("valid file");
@@ -853,9 +844,9 @@ mod tests {
         let items = ItemRegistry::from_blocks(&blocks);
         let stick = items.find("stick").expect("stick");
         assert!(items.component::<Tool>(stick).is_none());
-        assert!(items.component::<Shearable>(stick).is_none());
-        assert!(!items.has(stick, "shearable"));
-        assert!(items.has(items.find("shears").expect("shears"), "shearable"));
+        assert!(items.component::<Consumable>(stick).is_none());
+        assert!(!items.has(stick, "tool"));
+        assert!(items.has(items.find("shears").expect("shears"), "tool"));
     }
 
     /// Every shipped id is well formed — the loader enforces it, but asserting
@@ -1002,8 +993,8 @@ mod tests {
                 assert!(hi.dig_speed > lo.dig_speed, "{shape}: dig_speed");
                 assert!(hi.durability > lo.durability, "{shape}: durability");
                 assert_eq!(
-                    hi.harvests, lo.harvests,
-                    "{shape}: harvests are the tier-independent part"
+                    hi.kind, lo.kind,
+                    "{shape}: kind is the tier-independent part"
                 );
             }
         }
