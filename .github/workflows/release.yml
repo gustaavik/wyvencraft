@@ -307,13 +307,56 @@ jobs:
 
       - name: Verify from the public URL
         run: |
-          set -euo pipefail
+          set -uo pipefail
           # Through the CDN and unauthenticated, exactly as a launcher sees it.
           # A publish the public URL cannot confirm is a failed publish.
-          curl -fsS "${PUBLIC_URL}/index.json" \
-            | jq -e --arg t "$TAG" '.releases[] | select(.tag == $t) | .assets | length > 0' > /dev/null
-          curl -fsS -o /dev/null "${PUBLIC_URL}/${TAG}/notes.md"
+          #
+          # Two different things can refuse here and they need opposite fixes,
+          # so the failure path identifies which. SeaweedFS stamps every reply
+          # with x-amz-request-id; Cloudflare, refusing before the request ever
+          # reaches the origin, does not.
+          public_get() {
+            local url="$1" out="$2" attempt=1
+            while [ "$attempt" -le 4 ]; do
+              if curl -fsS --max-time 30 -A "wyvencraft-release/${TAG}" \
+                   -D headers.txt -o "$out" "$url"; then
+                return 0
+              fi
+              echo "attempt ${attempt} for ${url}: $(head -n1 headers.txt 2>/dev/null | tr -d '\r')"
+              sleep $(( attempt * 5 ))
+              attempt=$(( attempt + 1 ))
+            done
+
+            echo "::error::${url} is not readable from the public URL"
+            curl -sS -D headers.txt -o body.txt -A "wyvencraft-release/${TAG}" "$url" || true
+            sed -n '1,15p' headers.txt | tr -d '\r'
+            head -c 400 body.txt; echo
+            if grep -qi '^x-amz-request-id:' headers.txt; then
+              echo "::error::SeaweedFS refused it — anonymous read is not granted on the '${BUCKET}' bucket."
+              echo "::error::In weed shell: s3.configure -user anonymous -buckets ${BUCKET} -actions Read -apply"
+            else
+              echo "::error::Nothing from SeaweedFS reached us, so Cloudflare refused it first —"
+              echo "::error::bot protection or a WAF rule blocking this runner. Add a skip rule for s3.wyvencraft.com."
+            fi
+            return 1
+          }
+
+          public_get "${PUBLIC_URL}/index.json" index-public.json || exit 1
+          jq -e --arg t "$TAG" \
+            '.releases[] | select(.tag == $t) | .assets | length > 0' index-public.json > /dev/null
+
+          public_get "${PUBLIC_URL}/${TAG}/notes.md" /dev/null || exit 1
+
           # Listing must stay closed: it would expose every object key,
-          # including any build staged but not yet announced.
-          test "$(curl -s -o /dev/null -w '%{http_code}' \
-                    "https://s3.wyvencraft.com/${BUCKET}?list-type=2")" = "403"
+          # including any build staged but not yet announced. Checked against
+          # the origin's own answer, so a Cloudflare 403 cannot pass for one.
+          listing=$(curl -s -D listing-headers.txt -o /dev/null -w '%{http_code}' \
+                      "https://s3.wyvencraft.com/${BUCKET}?list-type=2")
+          if [ "$listing" != "403" ]; then
+            echo "::error::listing ${BUCKET} anonymously answered ${listing}, want 403"
+            exit 1
+          fi
+          grep -qi '^x-amz-request-id:' listing-headers.txt || {
+            echo "::error::the listing 403 came from Cloudflare, not SeaweedFS — the bucket policy is unverified"
+            exit 1
+          }
