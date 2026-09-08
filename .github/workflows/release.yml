@@ -334,9 +334,14 @@ jobs:
             if grep -qi '^x-amz-request-id:' headers.txt; then
               echo "::error::SeaweedFS refused it — anonymous read is not granted on the '${BUCKET}' bucket."
               echo "::error::In weed shell: s3.configure -user anonymous -buckets ${BUCKET} -actions Read -apply"
+            elif grep -qi '^cf-mitigated:' headers.txt; then
+              echo "::error::Cloudflare served a bot challenge instead — the request never reached SeaweedFS."
+              echo "::error::A challenge cannot be solved by any non-browser client, so this also breaks the"
+              echo "::error::launcher for any player Cloudflare decides to challenge, not just this runner."
+              echo "::error::Fix: Cloudflare > Security > Bots, turn Bot Fight Mode off for s3.wyvencraft.com,"
+              echo "::error::or add a WAF custom rule on (http.host eq \"s3.wyvencraft.com\") with action Skip."
             else
-              echo "::error::Nothing from SeaweedFS reached us, so Cloudflare refused it first —"
-              echo "::error::bot protection or a WAF rule blocking this runner. Add a skip rule for s3.wyvencraft.com."
+              echo "::error::Nothing identifiable from SeaweedFS reached us — something in front of it refused."
             fi
             return 1
           }
