@@ -148,3 +148,172 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "$TAG" "$ASSET" "$ASSET.sha256" --clobber
+
+  # Publishing is a job of its own rather than a step in each matrix leg: the
+  # credentials live in one place, `index.json` is written exactly once per run,
+  # and this runs on Ubuntu, where the AWS CLI is preinstalled.
+  #
+  # `!cancelled()` rather than `success()`, to match `fail-fast: false` above —
+  # one target failing to build must still publish the ones that did, which is
+  # the same tolerance the release page has always had.
+  publish:
+    name: Publish to s3.wyvencraft.com
+    needs: build
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.WC_S3_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.WC_S3_SECRET_ACCESS_KEY }}
+      # SeaweedFS ignores the region; the CLI refuses to sign without one.
+      AWS_REGION: us-east-1
+      AWS_ENDPOINT_URL: https://s3.wyvencraft.com
+      # aws-cli v2 sends x-amz-checksum-* headers by default, which several
+      # S3-compatible gateways reject outright. Ask for them only where the API
+      # requires them. If uploads ever start failing with SignatureDoesNotMatch,
+      # this is the first thing to check and a Cloudflare header-rewriting rule
+      # is the second.
+      AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+      AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+      BUCKET: releases
+      PREFIX: game
+      # What the launcher reads. Kept here so the two halves of the contract are
+      # visible in one file; internal/catalog holds the other half.
+      PUBLIC_URL: https://s3.wyvencraft.com/releases/game
+
+    steps:
+      - name: Resolve the release tag
+        run: echo "TAG=${{ github.event.release.tag_name || inputs.tag }}" >> "$GITHUB_ENV"
+
+      # Whatever the matrix produced. merge-multiple flattens the per-target
+      # artifacts into one directory, and a target that failed simply is not
+      # there — which is what makes a partial matrix a partial publish rather
+      # than a failed one.
+      - uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Collect the release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Through gh for both triggers rather than reading
+          # github.event.release.body: workflow_dispatch has no event body, and
+          # one code path means re-running after editing the notes republishes
+          # the corrected text.
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body > notes.md
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --json tagName,name,publishedAt,isPrerelease > meta.json
+
+      - name: Describe this release
+        run: |
+          set -euo pipefail
+          # A target that failed to build leaves no archive, and there is no
+          # .zip target at all today, so an unmatched glob must vanish rather
+          # than survive as a literal.
+          shopt -s nullglob
+          # Built from the files that actually arrived, so release.json can
+          # never advertise an archive that was not published. The checksum is
+          # read from the sibling the build job wrote, rather than recomputed,
+          # so a corrupted transfer through the artifact store is caught here.
+          assets=$(
+            for archive in dist/*.tar.gz dist/*.zip; do
+              name=$(basename "$archive")
+              sha=$(cut -d' ' -f1 < "${archive}.sha256")
+              jq -n --arg name "$name" \
+                    --arg path "${PREFIX}/${TAG}/${name}" \
+                    --argjson size "$(stat -c%s "$archive")" \
+                    --arg sha256 "$sha" \
+                    '{name: $name, path: $path, size: $size, sha256: $sha256}'
+            done | jq -s '.'
+          )
+          test "$(jq 'length' <<<"$assets")" -gt 0 || {
+            echo "::error::no archives to publish for $TAG"; exit 1; }
+
+          jq -n --slurpfile meta meta.json \
+                --rawfile notes notes.md \
+                --argjson assets "$assets" \
+                '{tag: $meta[0].tagName,
+                  name: ($meta[0].name // $meta[0].tagName),
+                  publishedAt: $meta[0].publishedAt,
+                  prerelease: $meta[0].isPrerelease,
+                  notes: $notes,
+                  assets: $assets}' > release.json
+          jq -e '.tag != null and (.assets | length) > 0' release.json > /dev/null
+
+      - name: Upload the build
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          KEY="s3://${BUCKET}/${PREFIX}/${TAG}"
+          # Immutable: a tag's bytes never change, so an edge that caches them
+          # forever is exactly what we want. aws s3 cp switches to multipart
+          # above 8 MB, which also keeps every request under Cloudflare's 100 MB
+          # proxied-body cap — do not "optimise" that by raising the threshold.
+          for archive in dist/*.tar.gz dist/*.zip; do
+            case "$archive" in *.zip) type=application/zip;; *) type=application/gzip;; esac
+            aws s3 cp "$archive" "${KEY}/$(basename "$archive")" \
+              --content-type "$type" \
+              --cache-control "public, max-age=31536000, immutable"
+            aws s3 cp "${archive}.sha256" "${KEY}/$(basename "$archive").sha256" \
+              --content-type "text/plain; charset=utf-8" \
+              --cache-control "public, max-age=31536000, immutable"
+          done
+
+          aws s3 cp notes.md "${KEY}/notes.md" \
+            --content-type "text/markdown; charset=utf-8" \
+            --cache-control "public, max-age=300"
+          aws s3 cp release.json "${KEY}/release.json" \
+            --content-type "application/json" \
+            --cache-control "public, max-age=300"
+
+      - name: Rebuild the catalogue
+        run: |
+          set -euo pipefail
+          # Rebuilt from the bucket rather than from the GitHub releases list.
+          # Listing is denied to anonymous readers but not to this identity, so
+          # the index describes what is actually downloadable — a release page
+          # entry whose objects were never uploaded would be a lie the launcher
+          # has no way to detect. It also makes the step idempotent: re-running
+          # for any tag reconstructs the whole index.
+          tags=$(aws s3api list-objects-v2 --bucket "$BUCKET" \
+                   --prefix "${PREFIX}/" --delimiter / \
+                   --query 'CommonPrefixes[].Prefix' --output text)
+
+          mkdir -p catalogue
+          for prefix in $tags; do
+            tag=$(basename "$prefix")
+            aws s3 cp "s3://${BUCKET}/${prefix}release.json" "catalogue/${tag}.json" \
+              --quiet || echo "::warning::${tag} has no release.json; skipping"
+          done
+
+          # Newest first, which is the order every consumer wants: the picker
+          # lists recent builds first and Latest takes the first non-prerelease.
+          jq -s --arg generated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{schemaVersion: 1,
+              generatedAt: $generated,
+              releases: (sort_by(.publishedAt) | reverse)}' \
+            catalogue/*.json > index.json
+          jq -e '.releases | length > 0' index.json > /dev/null
+
+          # Last, and with a short TTL. Publishing the index before its objects
+          # would advertise a download that 404s; a long TTL would hide a
+          # release behind the edge for as long as it held it.
+          aws s3 cp index.json "s3://${BUCKET}/${PREFIX}/index.json" \
+            --content-type "application/json" \
+            --cache-control "public, max-age=60, must-revalidate"
+
+      - name: Verify from the public URL
+        run: |
+          set -euo pipefail
+          # Through the CDN and unauthenticated, exactly as a launcher sees it.
+          # A publish the public URL cannot confirm is a failed publish.
+          curl -fsS "${PUBLIC_URL}/index.json" \
+            | jq -e --arg t "$TAG" '.releases[] | select(.tag == $t) | .assets | length > 0' > /dev/null
+          curl -fsS -o /dev/null "${PUBLIC_URL}/${TAG}/notes.md"
+          # Listing must stay closed: it would expose every object key,
+          # including any build staged but not yet announced.
+          test "$(curl -s -o /dev/null -w '%{http_code}' \
+                    "https://s3.wyvencraft.com/${BUCKET}?list-type=2")" = "403"
