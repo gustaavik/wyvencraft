@@ -42,7 +42,7 @@
 //! core      ← wyven-core + GameMode and DayCycle (rules, not primitives)
 //! art       ← render        PNG tiles; atlas layout for skin, armor, mob and crack sheets
 //! world     ← voxel         block table, worldgen, fluid rules
-//! inventory ← world         items, stacks, crafting, mining
+//! inventory ← world         the one item registry and its capabilities, stacks, crafting
 //! entity    ← inventory     player, physics, mobs, brains, projectiles
 //! content   ← all of it     registries loaded from assets/*.toml
 //! chat      ← net           message log, commands, the ops list

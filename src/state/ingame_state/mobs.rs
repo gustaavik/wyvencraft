@@ -16,7 +16,7 @@ use crate::entity::{
     AnimationState, Arrow, HumanoidModel, Mob, MobAction, MobId, Motion, Perception,
     PlayerSighting, QuadrupedModel,
 };
-use crate::inventory::ItemStack;
+use crate::inventory::{ItemStack, Tool};
 use crate::net::{Channel, ClientMessage, PlayerId, ServerMessage};
 use crate::world::Target;
 use wyven_model::{ModelId, ModelRegistry};
@@ -426,7 +426,7 @@ impl InGameState {
     pub(super) fn melee_damage(&self) -> f32 {
         self.inventory
             .item_in_selected()
-            .and_then(|id| self.content.items.tool(id))
+            .and_then(|id| self.content.items.component::<Tool>(id))
             .and_then(|tool| tool.damage)
             .unwrap_or(PLAYER_ATTACK_DAMAGE)
     }

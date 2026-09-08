@@ -22,7 +22,7 @@ use super::{
 };
 use crate::core::{BlockId, BlockPos};
 use crate::entity::Arrow;
-use crate::inventory::{ARMOR_START, Inventory, ItemId, ItemRegistry, RecipeBook};
+use crate::inventory::{ARMOR_START, Inventory, ItemId, ItemRegistry, RecipeBook, Tool};
 use crate::net::{
     Channel, ClientMessage, Equipment, NetItemStack, PlayerId, PlayerRestore, RecipeData,
     RemotePlayer, ServerMessage,
@@ -316,7 +316,7 @@ impl InGameState {
             .inventories
             .get(&pid)
             .and_then(|(slots, selected)| slots.get(*selected as usize)?.as_ref())
-            .and_then(|stack| self.content.items.tool(ItemId(stack.item)))
+            .and_then(|stack| self.content.items.component::<Tool>(ItemId(stack.item)))
             .and_then(|tool| tool.damage)
             .unwrap_or(mobs::PLAYER_ATTACK_DAMAGE)
     }

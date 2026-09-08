@@ -42,9 +42,15 @@ pub enum Drops {
     SelfItem,
     /// Nothing.
     None,
-    /// The block's own item, but only when the held tool's kind matches
-    /// (e.g. leaves require shears).
-    SelfWithTool { kind: String },
+    /// The block's own item, but only when the held item carries the named
+    /// **capability** (e.g. leaves require `shearable`).
+    ///
+    /// A capability rather than a tool kind, so the gate asks what the held
+    /// item can *do* instead of comparing two free-form strings. `world` sits
+    /// below `inventory` and cannot name the capability set, so the string is
+    /// checked against `inventory::component::COMPONENTS` by `content` once
+    /// both registries exist.
+    RequiresCapability { capability: String },
     /// A different item, by id (resolved against the item registry at use).
     Item { id: String, count: u8 },
 }
@@ -308,13 +314,13 @@ enum TexturesDef {
     },
 }
 
-/// `drops = "self" | "none" | { requires_tool = "..." } | { item = "...", count = N }`.
+/// `drops = "self" | "none" | { requires = "..." } | { item = "...", count = N }`.
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
 enum DropsDef {
     Keyword(String),
-    RequiresTool {
-        requires_tool: String,
+    Requires {
+        requires: String,
     },
     OtherItem {
         item: String,
@@ -385,8 +391,8 @@ impl DropsDef {
                 "none" => Ok(Drops::None),
                 other => Err(format!("unknown drops keyword {other:?}")),
             },
-            Self::RequiresTool { requires_tool } => Ok(Drops::SelfWithTool {
-                kind: requires_tool.clone(),
+            Self::Requires { requires } => Ok(Drops::RequiresCapability {
+                capability: requires.clone(),
             }),
             Self::OtherItem { item, count } => Ok(Drops::Item {
                 id: item.clone(),
@@ -826,8 +832,8 @@ mod tests {
         let reg = BlockRegistry::with_builtins();
         assert_eq!(
             reg.get(blocks::OAK_LEAVES).drops,
-            Drops::SelfWithTool {
-                kind: "shears".into()
+            Drops::RequiresCapability {
+                capability: "shearable".into()
             }
         );
         // Mining stone yields cobblestone, exactly as the recipes assume.

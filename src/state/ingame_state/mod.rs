@@ -344,6 +344,50 @@ mod tests {
         );
     }
 
+    /// End-to-end for the capability drop gate: oak leaves say
+    /// `drops = { requires = "shearable" }`, so they yield their block only for
+    /// an item that declares `[item.shearable]`. What matters is that the gate
+    /// reads a *capability* — an axe is a perfectly good tool and still gets
+    /// nothing, and shears would still work if they were renamed tomorrow.
+    #[test]
+    fn oak_leaves_drop_only_for_an_item_that_can_shear() {
+        use crate::world::block::blocks;
+
+        let leaves_dropped = |held: Option<&str>| {
+            let mut state = InGameState::new(GameContent::builtin(), 7, GameMode::Survival);
+            let hotbar = 0;
+            state.inventory.set_selected(hotbar);
+            state.inventory.set_slot(
+                hotbar,
+                held.map(|name| {
+                    let id = state.content.items.find(name).expect("shipped item");
+                    state.content.items.full_stack(id)
+                }),
+            );
+
+            let look = state.player.look_direction();
+            let at = BlockPos::from_world(state.player.eye_position() + look * 2.0);
+            state.world.set_block(at, blocks::OAK_LEAVES);
+            assert!(state.break_block_at(at));
+
+            let leaves = state
+                .content
+                .items
+                .find("oak_leaves")
+                .expect("shipped item");
+            state
+                .drops
+                .iter()
+                .filter(|d| d.stack.item == leaves)
+                .map(|d| u32::from(d.stack.count))
+                .sum::<u32>()
+        };
+
+        assert_eq!(leaves_dropped(Some("shears")), 1, "shears can shear");
+        assert_eq!(leaves_dropped(Some("iron_axe")), 0, "a tool is not enough");
+        assert_eq!(leaves_dropped(None), 0, "a bare hand gets nothing");
+    }
+
     /// The crosshair must hit ground cover on the plant, not on the cell around
     /// it: a ray through the top corner of a mushroom's block passes over the
     /// mushroom, while one through its middle stops on it.

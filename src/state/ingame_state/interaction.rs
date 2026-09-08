@@ -7,7 +7,7 @@ use glam::Vec3;
 use super::{BreakState, InGameState};
 use crate::core::{Aabb, BlockId, BlockPos};
 use crate::entity::DroppedItem;
-use crate::inventory::{ItemId, ItemStack};
+use crate::inventory::{Consumable, ItemId, ItemStack, Placeable, Tool};
 use crate::world::Target;
 use crate::world::block::Drops;
 
@@ -105,12 +105,13 @@ impl InGameState {
         match &self.content.blocks.get(block).drops {
             Drops::SelfItem => self_item(),
             Drops::None => None,
-            Drops::SelfWithTool { kind } => {
-                let held = self
+            Drops::RequiresCapability { capability } => {
+                // What the held item can *do*, not what it is called.
+                let capable = self
                     .inventory
                     .item_in_selected()
-                    .and_then(|id| self.content.items.tool(id));
-                (held.is_some_and(|tool| tool.kind == *kind)).then(self_item)?
+                    .is_some_and(|id| self.content.items.has(id, capability));
+                capable.then(self_item)?
             }
             Drops::Item { id: drop, count } => {
                 let id = self.content.items.find(drop)?;
@@ -196,7 +197,7 @@ impl InGameState {
         let tool = self
             .inventory
             .item_in_selected()
-            .and_then(|id| self.content.items.tool(id));
+            .and_then(|id| self.content.items.component::<Tool>(id));
         let seconds = crate::inventory::break_seconds(block.hardness, block.material, tool);
 
         // Reset progress when the targeted block changes.
@@ -218,31 +219,46 @@ impl InGameState {
         }
     }
 
-    /// Right-click: eat the held food when hungry, otherwise place its block.
+    /// Right-click: offer the held item to each hook in turn, first one that
+    /// handles it wins.
     pub(super) fn use_selected(&mut self) {
         let Some(item_id) = self.inventory.item_in_selected() else {
             return;
         };
-        if let Some(food) = self.content.items.food(item_id)
-            && self.player.mode.takes_damage()
-            && self.player.is_hungry()
-        {
-            self.player.feed(food.hunger, food.saturation);
-            self.inventory.consume_selected(1);
-            self.view.trigger_swing();
-            return;
+        for hook in USE_HOOKS {
+            if hook(self, item_id) {
+                return;
+            }
         }
-        self.place_block(item_id);
+    }
+
+    /// Eat the held item, if it is edible and the player has room for it.
+    fn try_consume(&mut self, item_id: ItemId) -> bool {
+        let Some(&Consumable { hunger, saturation }) =
+            self.content.items.component::<Consumable>(item_id)
+        else {
+            return false;
+        };
+        if !self.player.mode.takes_damage() || !self.player.is_hungry() {
+            return false;
+        }
+        self.player.feed(hunger, saturation);
+        self.inventory.consume_selected(1);
+        self.view.trigger_swing();
+        true
     }
 
     /// Place the selected item's block against the targeted face. Consumes from
     /// the inventory only in survival (creative has infinite blocks).
-    fn place_block(&mut self, item_id: ItemId) {
-        let Some(block) = self.content.items.get(item_id).place_block else {
-            return;
+    fn try_place(&mut self, item_id: ItemId) -> bool {
+        let Some(&Placeable { block }) = self.content.items.component::<Placeable>(item_id) else {
+            return false;
         };
+        // Every exit below reports the click handled: holding a block *is* a
+        // placement attempt, and a hook after this one must not get a second
+        // go at it just because the ray missed.
         let Some(hit) = self.targeted_block() else {
-            return;
+            return true;
         };
         // Ground cover is swallowed rather than stacked on: without this,
         // building next to a flower would leave blocks perched on top of it.
@@ -255,7 +271,7 @@ impl InGameState {
         if Aabb::block(Vec3::new(target.x as f32, target.y as f32, target.z as f32))
             .intersects(self.player.aabb())
         {
-            return;
+            return true;
         }
         if self.world.set_block(target, block).is_some() {
             self.fluids.block_changed(target);
@@ -265,5 +281,117 @@ impl InGameState {
             self.broadcast_local_edit(target, block);
             self.view.trigger_swing();
         }
+        true
+    }
+}
+
+/// What right-clicking with an item can do, in priority order: the first hook
+/// that reports it handled the click wins.
+///
+/// The *code* half of the capability system. What an item declares is open (see
+/// `inventory::component::COMPONENTS`); what the game does about it is code, so
+/// a new usable capability is one function above and one line here — and the
+/// precedence between them is stated in one place instead of being implied by
+/// the order of an `if` chain.
+const USE_HOOKS: &[fn(&mut InGameState, ItemId) -> bool] =
+    &[InGameState::try_consume, InGameState::try_place];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::content::GameContent;
+    use crate::core::GameMode;
+
+    /// Put `item` in the selected hotbar slot of a fresh survival session.
+    fn holding(item: &str) -> InGameState {
+        let mut state = InGameState::new(GameContent::builtin(), 7, GameMode::Survival);
+        let id = state.content.items.find(item).expect("shipped item");
+        let stack = state.content.items.full_stack(id);
+        state.inventory.set_selected(0);
+        state.inventory.set_slot(0, Some(stack));
+        state
+    }
+
+    /// The first hook that claims the click wins, and eating claims it only
+    /// when the player can actually eat.
+    #[test]
+    fn right_clicking_food_eats_it_when_hungry() {
+        let mut state = holding("bread");
+        let before = state.inventory.slot(0).expect("bread").count;
+        state.player.hunger = 1.0;
+        assert!(
+            state.player.is_hungry(),
+            "the fixture must leave room to eat"
+        );
+
+        state.use_selected();
+
+        assert!(state.player.hunger > 1.0, "eating restores hunger");
+        assert_eq!(
+            state.inventory.slot(0).expect("bread").count,
+            before - 1,
+            "one loaf is consumed"
+        );
+    }
+
+    /// A full player's right-click falls *through* the eating hook rather than
+    /// being swallowed by it — which is what lets an item that both feeds and
+    /// places still place when the player is full.
+    #[test]
+    fn right_clicking_food_while_full_consumes_nothing() {
+        let mut state = holding("bread");
+        let before = state.inventory.slot(0).expect("bread").count;
+        assert!(!state.player.is_hungry(), "a fresh player is fed");
+
+        state.use_selected();
+
+        assert_eq!(
+            state.inventory.slot(0).expect("bread").count,
+            before,
+            "a full player eats nothing"
+        );
+    }
+
+    /// The placing hook, end to end: a block item puts its block in the world
+    /// and spends one from the stack.
+    #[test]
+    fn right_clicking_a_block_item_places_its_block() {
+        let mut state = holding("cobblestone");
+        let before = state.inventory.slot(0).expect("cobblestone").count;
+        let cobblestone = state
+            .content
+            .blocks
+            .find("cobblestone")
+            .expect("shipped block");
+        // Aim at a solid block two ahead, so the ray has a face to build on.
+        let look = state.player.look_direction();
+        let at = BlockPos::from_world(state.player.eye_position() + look * 2.0);
+        state.world.set_block(at, cobblestone);
+        let hit = state.targeted_block().expect("a face to place against");
+
+        state.use_selected();
+
+        assert_eq!(
+            state.world.block_at(hit.place_position()),
+            cobblestone,
+            "the block lands on the targeted face"
+        );
+        assert_eq!(
+            state.inventory.slot(0).expect("cobblestone").count,
+            before - 1,
+            "survival spends one"
+        );
+    }
+
+    /// An item carrying neither capability is inert on right-click: no hook
+    /// claims it, and nothing in the world or the inventory moves.
+    #[test]
+    fn right_clicking_an_item_with_no_usable_capability_does_nothing() {
+        let mut state = holding("stick");
+        let before = state.inventory.slot(0).expect("stick").count;
+
+        state.use_selected();
+
+        assert_eq!(state.inventory.slot(0).expect("stick").count, before);
     }
 }

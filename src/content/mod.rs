@@ -17,10 +17,11 @@ use std::sync::Arc;
 use crate::core::Direction;
 use crate::core::ident::title_case;
 use crate::entity::{EntityRegistry, SpawnConfig};
+use crate::inventory::component;
 use crate::inventory::item::ItemVisuals;
-use crate::inventory::{ItemId, ItemRegistry};
+use crate::inventory::{ItemId, ItemRegistry, Placeable};
 use crate::world::block::{
-    BUILTIN_BLOCKS, BlockJsonSpec, BlockModelSpec, BlockRegistry, BlockVisuals, FluidVisual,
+    BUILTIN_BLOCKS, BlockJsonSpec, BlockModelSpec, BlockRegistry, BlockVisuals, Drops, FluidVisual,
 };
 use crate::world::blockmodel::BakedBlockModel;
 use crate::world::generation::WorldGenConfig;
@@ -257,6 +258,14 @@ impl GameContent {
             models: mut item_model_specs,
             display_names: item_labels,
         } = item_visuals;
+        // A drop rule naming a capability no item can carry would silently make
+        // the block undroppable. `world` sits below `inventory` and cannot check
+        // this at parse time; here is the first place that sees both.
+        for id in unsatisfiable_drops(&blocks) {
+            log::warn!(
+                "block {id:?}: its drops require a capability no item can carry;                  it will never drop"
+            );
+        }
         let block_display_names = resolve_block_display_names(&blocks, block_labels);
         let item_display_names =
             resolve_item_display_names(&items, item_labels, &block_display_names);
@@ -467,18 +476,18 @@ impl GameContent {
     /// reaches here; anything else with no art at all gets the missing marker,
     /// which is the same thing its inventory icon shows.
     pub fn item_shape(&self, item: ItemId) -> ItemShape {
-        // Read the decision off the icon rather than re-deriving it from
-        // `place_block`: the two must agree, and a fluid is the case that proves
-        // it — water places a block but its icon is the flat still frame, so
-        // asking `place_block` would give a dropped bucket-of-nothing a cube the
-        // inventory never shows.
+        // Read the decision off the icon rather than re-deriving it from the
+        // `Placeable` capability: the two must agree, and a fluid is the case
+        // that proves it — water places a block but its icon is the flat still
+        // frame, so asking `Placeable` would give a dropped bucket-of-nothing a
+        // cube the inventory never shows.
         match self.item_icons.get(item.0 as usize) {
             Some(&ItemIcon::Flat(tile)) => ItemShape::Sprite(tile),
             Some(&ItemIcon::Cube { .. }) => ItemShape::Cube(
                 self.items
                     .get(item)
-                    .place_block
-                    .map_or(MISSING_FACES, |block| self.face_textures(block)),
+                    .get::<Placeable>()
+                    .map_or(MISSING_FACES, |p| self.face_textures(p.block)),
             ),
             // A model-backed item is drawn as its model and never reaches here.
             _ => ItemShape::Cube(MISSING_FACES),
@@ -705,7 +714,7 @@ fn build_item_icons(
                 return ItemIcon::Model(model.id);
             }
             // A cube reads wrong for fluids, so only truly solid blocks get one.
-            if let Some(block_id) = item.place_block {
+            if let Some(&Placeable { block: block_id }) = item.get::<Placeable>() {
                 let block = blocks.get(block_id);
                 if block.is_visible() && block.fluid.is_none() {
                     // A Blockbench-authored block's tiles are derived from its
@@ -727,9 +736,9 @@ fn build_item_icons(
             }
             // A fluid has no cube icon but does have derived tiles; preferring
             // them keeps it off the name lookup, which has no art to find.
-            let derived = item.place_block.and_then(|block_id| {
+            let derived = item.get::<Placeable>().and_then(|placeable| {
                 block_face_tiles
-                    .get(block_id.0 as usize)
+                    .get(placeable.block.0 as usize)
                     .copied()
                     .flatten()
                     .map(|faces| faces.tile(Direction::PosY))
@@ -742,10 +751,6 @@ fn build_item_icons(
         .collect()
 }
 
-/// FNV-1a over a canonical rendering of the definitions. The `Debug`
-/// representations cover every gameplay-affecting field deterministically
-/// (all collections are ordered `Vec`s), which is exactly the fidelity the
-/// mismatch check needs.
 /// Read [`BLOCK_ITEM_MODEL`]'s `display` block.
 ///
 /// Fail-soft like every other content loader: no file, or one that does not
@@ -788,6 +793,29 @@ fn load_block_item_display(source: &dyn ContentSource) -> DisplayTransforms {
     }
 }
 
+/// Blocks whose `drops = { requires = "..." }` names something that is not an
+/// item capability, by id.
+///
+/// Separated from the logging so it can be asserted: the shipped data must
+/// report none, which is the check that catches a capability rename that
+/// forgot `blocks.toml`.
+fn unsatisfiable_drops(blocks: &BlockRegistry) -> Vec<&str> {
+    blocks
+        .iter()
+        .filter_map(|(_, block)| match &block.drops {
+            Drops::RequiresCapability { capability } if !component::is_capability(capability) => {
+                Some(block.id.as_str())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// FNV-1a over a canonical rendering of the definitions. The `Debug`
+/// representations cover every gameplay-affecting field deterministically —
+/// all collections are ordered `Vec`s, and an item's capability components are
+/// held in key order for exactly this reason — which is the fidelity the
+/// mismatch check needs.
 fn content_hash(
     blocks: &BlockRegistry,
     items: &ItemRegistry,
@@ -1488,6 +1516,32 @@ mod tests {
             content.hash, builtin.hash,
             "a rejected worldgen file leaves the builtin content in place"
         );
+    }
+
+    /// A block gating its drop on a capability that does not exist can never
+    /// drop, and nothing else would say so — `world` cannot see the capability
+    /// set and `inventory` never reads block drops.
+    #[test]
+    fn the_shipped_drop_rules_all_name_real_capabilities() {
+        let blocks = BlockRegistry::with_builtins();
+        assert_eq!(
+            unsatisfiable_drops(&blocks),
+            Vec::<&str>::new(),
+            "a drop rule names a capability no item can carry"
+        );
+    }
+
+    /// The other half of the same rule: a bad reference *is* reported, so the
+    /// check above is not passing vacuously.
+    #[test]
+    fn a_drop_requiring_an_unknown_capability_is_reported() {
+        let text = BUILTIN_BLOCKS.replace(
+            r#"drops = { requires = "shearable" }"#,
+            r#"drops = { requires = "snippable" }"#,
+        );
+        assert!(text != BUILTIN_BLOCKS, "the fixture substitution missed");
+        let blocks = BlockRegistry::from_toml(&text).expect("still a valid file");
+        assert_eq!(unsatisfiable_drops(&blocks), ["oak_leaves"]);
     }
 
     /// The content hash is stable across loads of identical definitions (it

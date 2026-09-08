@@ -3,7 +3,7 @@
 
 use crate::world::block::BlockMaterial;
 
-use super::item::ToolSpec;
+use super::component::Tool;
 
 /// Speed bonus when the held tool matches the block material.
 const CORRECT_TOOL_FACTOR: f32 = 1.5;
@@ -16,7 +16,7 @@ const MIN_BREAK_SECONDS: f32 = 0.05;
 /// held tool. A tool matches when the block's material is in its `harvests`
 /// list (declared in `assets/items.toml`). Returns `INFINITY` for unbreakable
 /// blocks.
-pub fn break_seconds(hardness: f32, material: BlockMaterial, tool: Option<&ToolSpec>) -> f32 {
+pub fn break_seconds(hardness: f32, material: BlockMaterial, tool: Option<&Tool>) -> f32 {
     if !hardness.is_finite() {
         return f32::INFINITY;
     }
@@ -33,9 +33,8 @@ pub fn break_seconds(hardness: f32, material: BlockMaterial, tool: Option<&ToolS
 mod tests {
     use super::*;
 
-    fn tool(kind: &str, dig_speed: f32, harvests: &[BlockMaterial]) -> ToolSpec {
-        ToolSpec {
-            kind: kind.into(),
+    fn tool(dig_speed: f32, harvests: &[BlockMaterial]) -> Tool {
+        Tool {
             dig_speed,
             durability: 60,
             harvests: harvests.to_vec(),
@@ -45,7 +44,7 @@ mod tests {
 
     #[test]
     fn correct_tool_is_faster_than_hand() {
-        let pick = tool("pickaxe", 2.0, &[BlockMaterial::Stone]);
+        let pick = tool(2.0, &[BlockMaterial::Stone]);
         let with_pick = break_seconds(1.5, BlockMaterial::Stone, Some(&pick));
         let by_hand = break_seconds(1.5, BlockMaterial::Stone, None);
         assert!(with_pick < by_hand);
@@ -53,7 +52,7 @@ mod tests {
 
     #[test]
     fn wrong_tool_is_no_faster_than_hand() {
-        let shovel = tool("shovel", 2.0, &[BlockMaterial::Dirt, BlockMaterial::Sand]);
+        let shovel = tool(2.0, &[BlockMaterial::Dirt, BlockMaterial::Sand]);
         let with_shovel = break_seconds(1.5, BlockMaterial::Stone, Some(&shovel));
         let by_hand = break_seconds(1.5, BlockMaterial::Stone, None);
         assert_eq!(with_shovel, by_hand);
@@ -61,7 +60,7 @@ mod tests {
 
     #[test]
     fn shears_cut_plants_faster_than_hand() {
-        let shears = tool("shears", 5.0, &[BlockMaterial::Plant]);
+        let shears = tool(5.0, &[BlockMaterial::Plant]);
         let with_shears = break_seconds(0.2, BlockMaterial::Plant, Some(&shears));
         let by_hand = break_seconds(0.2, BlockMaterial::Plant, None);
         assert!(with_shears < by_hand);
@@ -74,7 +73,7 @@ mod tests {
         let times: Vec<f32> = [2.0, 4.0, 6.0]
             .iter()
             .map(|&dig_speed| {
-                let pick = tool("pickaxe", dig_speed, &[BlockMaterial::Stone]);
+                let pick = tool(dig_speed, &[BlockMaterial::Stone]);
                 break_seconds(1.5, BlockMaterial::Stone, Some(&pick))
             })
             .collect();

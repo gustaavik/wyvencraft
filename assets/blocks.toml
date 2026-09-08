@@ -42,8 +42,13 @@
 #             faces even when buried, and `tintindex` only on faces that
 #             should take the biome colour (`tint` in assets/worldgen.toml).
 #   drops     what breaking the block yields (default: the block's own item)
-#             "self" | "none" | { requires_tool = "<tool kind>" }
+#             "self" | "none" | { requires = "<item capability>" }
 #             | { item = "<item id>", count = N }
+#             `requires` names a capability the held item must carry — one of
+#             the `[item.<capability>]` tables in assets/items.toml, e.g.
+#             `shearable`. It asks what the held item can *do*, so a second
+#             pair of shears gates leaves by declaring the capability rather
+#             than by being spelled a particular way.
 #   [block.fluid] with `flow_levels = N` marks the block as a fluid source;
 #             the engine auto-registers "<id>_flow_1".."<id>_flow_N"
 #             blocks after all declared blocks, and the fluid simulation
@@ -144,7 +149,7 @@ solid = true
 hardness = 0.2
 material = "plant"
 block_model = "assets/models/blocks/oak_leaves.json"
-drops = { requires_tool = "shears" }
+drops = { requires = "shearable" }
 
 [[block]]
 id = "glass"

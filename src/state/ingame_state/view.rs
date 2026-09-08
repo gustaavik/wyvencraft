@@ -33,7 +33,7 @@ use crate::entity::{
     AnimationState, Arrow, Character, DroppedItem, HeadLook, HumanoidRig, Mob, Motion, Player,
     camera,
 };
-use crate::inventory::{Inventory, ItemId};
+use crate::inventory::{Inventory, ItemId, Placeable};
 use crate::net::{PlayerId, RemotePlayer};
 use crate::world::World;
 use crate::world::meshing::{
@@ -1316,8 +1316,8 @@ impl super::InGameState {
         let shape = |item| {
             let is_transparent = items
                 .get(item)
-                .place_block
-                .is_some_and(|b| blocks.get(b).is_transparent());
+                .get::<Placeable>()
+                .is_some_and(|p| blocks.get(p.block).is_transparent());
             (loaded.item_shape(item), is_transparent)
         };
         let content = ModelContent {
