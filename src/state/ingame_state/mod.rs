@@ -344,6 +344,54 @@ mod tests {
         );
     }
 
+    /// End-to-end for the block's own tool gate: oak leaves declare
+    /// `[block.harvest] tool = "shears", required = true`, so they yield their
+    /// block only for a shears-shaped tool. The rule lives entirely in
+    /// `blocks.toml` — an axe is a perfectly good tool and still gets nothing,
+    /// and no item anywhere had to be told that leaves exist.
+    #[test]
+    fn oak_leaves_drop_only_for_the_tool_they_ask_for() {
+        use crate::world::block::blocks;
+
+        let leaves_dropped = |held: Option<&str>| {
+            let mut state = InGameState::new(GameContent::builtin(), 7, GameMode::Survival);
+            let hotbar = 0;
+            state.inventory.set_selected(hotbar);
+            state.inventory.set_slot(
+                hotbar,
+                held.map(|name| {
+                    let id = state.content.items.find(name).expect("shipped item");
+                    state.content.items.full_stack(id)
+                }),
+            );
+
+            let look = state.player.look_direction();
+            let at = BlockPos::from_world(state.player.eye_position() + look * 2.0);
+            state.world.set_block(at, blocks::OAK_LEAVES);
+            assert!(state.break_block_at(at));
+
+            let leaves = state
+                .content
+                .items
+                .find("oak_leaves")
+                .expect("shipped item");
+            state
+                .drops
+                .iter()
+                .filter(|d| d.stack.item == leaves)
+                .map(|d| u32::from(d.stack.count))
+                .sum::<u32>()
+        };
+
+        assert_eq!(leaves_dropped(Some("shears")), 1, "the tool it asks for");
+        assert_eq!(
+            leaves_dropped(Some("iron_axe")),
+            0,
+            "any tool is not enough"
+        );
+        assert_eq!(leaves_dropped(None), 0, "a bare hand gets nothing");
+    }
+
     /// The crosshair must hit ground cover on the plant, not on the cell around
     /// it: a ray through the top corner of a mushroom's block passes over the
     /// mushroom, while one through its middle stops on it.

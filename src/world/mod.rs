@@ -21,7 +21,7 @@ pub mod generation;
 #[cfg(test)]
 mod meshing_tests;
 
-pub use block::{Block, BlockMaterial, BlockRegistry};
+pub use block::{Block, BlockRegistry, Harvest};
 pub use fluid::FluidSim;
 pub use generation::{NoiseGenerator, WorldGenerator};
 

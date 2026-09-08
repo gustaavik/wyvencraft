@@ -22,7 +22,7 @@ use egui::{Align2, Color32, Context, FontId, Rect, pos2, vec2};
 use crate::content::ItemIcon;
 use crate::core::GameMode;
 use crate::inventory::{
-    ARMOR_SIZE, ARMOR_START, ArmorSlot, HOTBAR_SIZE, INVENTORY_SIZE, Inventory, ItemId,
+    ARMOR_SIZE, ARMOR_START, ArmorSlot, Equippable, HOTBAR_SIZE, INVENTORY_SIZE, Inventory, ItemId,
     ItemRegistry, ItemStack,
 };
 use crate::state::UiTextures;
@@ -480,7 +480,7 @@ impl View<'_> {
     /// The icon tile of the armor item that fits `piece`, for the ghost hint.
     fn armor_ghost(&self, piece: ArmorSlot) -> Option<u32> {
         self.items.iter().find_map(|(id, item)| {
-            let fits = item.armor.map(|a| a.slot) == Some(piece);
+            let fits = item.get::<Equippable>().map(|w| w.slot) == Some(piece);
             match (fits, self.icon_of(id)) {
                 (true, ItemIcon::Flat(tile)) => Some(tile),
                 (true, ItemIcon::Cube { top, .. }) => Some(top),

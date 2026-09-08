@@ -1,8 +1,16 @@
 # Item definitions.
 #
+# There is ONE registry of things the player can hold, and an item is described
+# by the CAPABILITIES it declares rather than by what kind of thing it is. Each
+# `[item.<capability>]` table below adds one; gameplay asks an item for the
+# capability it needs and gets nothing if the item has not got it, so an item
+# may carry any combination.
+#
 # A placeable item is auto-generated for every visible, non-fluid-flow block
 # (same id as the block, stacks to 64, places itself). Entries here either
-# OVERRIDE an auto-generated block item by id, or define new items.
+# OVERRIDE an auto-generated block item by id, or define new items. An override
+# replaces only the capabilities it names — one that says nothing about
+# placement stays placeable.
 #
 # IDS ARE THE SAVE FORMAT: player inventories, crafting recipes, mob drops and
 # `/give` identify items by the exact `id` string.
@@ -17,19 +25,27 @@
 #               `wooden_pickaxe` already reads as "Wooden Pickaxe". Spell it out
 #               only where that rule gets it wrong. A block item with no
 #               `display_name` of its own inherits the block's.
-#   max_stack   defaults to 64, or 1 for tools
-#   place_block id of the block this item places (block items get theirs
-#               automatically)
-#   [item.tool] makes the item a tool:
-#       kind        free-form tool kind; blocks whose drops say
-#                   { requires_tool = "<kind>" } only drop for this kind
-#       dig_speed   mining-speed multiplier when the tool matches (hand = 1.0)
+#   max_stack   defaults to 64, or 1 if any capability wears out (tools, armor)
+#
+# Capabilities — a table nothing recognises rejects the whole file, so a typo
+# is a startup error rather than a silently missing behaviour:
+#   [item.placeable] using the item puts a block in the world:
+#       block       id of the block it places (block items get theirs
+#                   automatically, and keep it through an override)
+#   [item.tool] makes the item dig, and maybe fight:
+#       kind        what shape of tool this is: pickaxe, axe, shovel, sword,
+#                   shears. A tool declares only what it IS — which blocks it
+#                   is good at is the block's business, named in
+#                   `[block.harvest] tool` over in blocks.toml. So adding a
+#                   block never means editing a tool, and the shape set is pure
+#                   data: a new one is a kind here and a block that wants it.
+#       dig_speed   mining-speed multiplier on a block that wants this kind
+#                   (hand = 1.0)
 #       durability  uses before the tool breaks
-#       harvests    block materials this tool mines at full speed
 #       damage      melee damage per swing; omit for a tool that hits no harder
 #                   than a bare fist (pickaxes, shovels)
-#   [item.food] makes the item edible: hunger + saturation restored
-#   [item.armor] makes the item wearable:
+#   [item.consumable] makes the item edible: hunger + saturation restored
+#   [item.equippable] makes the item wearable:
 #       slot        which equipment slot it fits: helmet, chestplate, leggings,
 #                   boots. A piece only goes in its own slot.
 #       defense     defense points, summed across worn pieces
@@ -48,7 +64,7 @@
 #       rotation    degrees about the model's own axes, applied after offset
 #                   (exports disagree on which plane a flat object lies in:
 #                   the tool models are flat in XY, vine_sword in YZ)
-#   Models are visual only: unlike the components above they never affect
+#   Models are visual only: unlike the capabilities above they never affect
 #   gameplay, and never take part in the multiplayer content check.
 #
 # [starter_kit] lists what a fresh survival player spawns with, in hotbar
@@ -57,15 +73,17 @@
 
 # Tools come in three tiers. A tier is expressed purely as dig_speed +
 # durability (+ damage on the shapes that fight) — there is deliberately no
-# harvest-level gate, so every block stays mineable by hand and a better
-# pickaxe only means a faster one:
+# harvest-level gate, so a better pickaxe only means a faster one. Whether a
+# block can be mined by hand at all is the *block's* call (`required` in its
+# `[block.harvest]`), and only oak leaves say no:
 #
 #   wooden  dig_speed 2.0   durability  60
 #   stone   dig_speed 4.0   durability 132
 #   iron    dig_speed 6.0   durability 250
 #
-# Swords are the exception: they only harvest plants, so their tier gradient
-# lives in `damage` and `durability` and their dig_speed stays flat.
+# Swords are the exception: the only blocks that ask for one are plants, so
+# their tier gradient lives in `damage` and `durability` and dig_speed stays
+# flat.
 #
 # The tool models are all flat in the XY plane, so they carry
 # rotation = [0, 90, 0] to sit broadside in the fist the way vine_sword does.
@@ -79,7 +97,6 @@ id = "wooden_pickaxe"
 kind = "pickaxe"
 dig_speed = 2.0
 durability = 60
-harvests = ["stone"]
 
 [item.model]
 path = "assets/models/items/wooden_pickaxe.json"
@@ -94,7 +111,6 @@ id = "wooden_axe"
 kind = "axe"
 dig_speed = 2.0
 durability = 60
-harvests = ["wood"]
 damage = 3.0
 
 [item.model]
@@ -110,7 +126,6 @@ id = "wooden_shovel"
 kind = "shovel"
 dig_speed = 2.0
 durability = 60
-harvests = ["dirt", "sand"]
 
 [item.model]
 path = "assets/models/items/wooden_shovel.json"
@@ -125,7 +140,6 @@ id = "shears"
 kind = "shears"
 dig_speed = 5.0
 durability = 120
-harvests = ["plant"]
 
 [[item]]
 id = "vine_sword"
@@ -134,7 +148,6 @@ id = "vine_sword"
 kind = "sword"
 dig_speed = 1.5
 durability = 200
-harvests = ["plant"]
 damage = 4.0
 
 # Authored as a Java Block/Item model, so its `display` block places it in each
@@ -152,7 +165,6 @@ id = "wooden_sword"
 kind = "sword"
 dig_speed = 1.5
 durability = 60
-harvests = ["plant"]
 damage = 4.0
 
 # Authored as a Java Block/Item model, so its `display` block places it in the
@@ -171,7 +183,6 @@ id = "stone_pickaxe"
 kind = "pickaxe"
 dig_speed = 4.0
 durability = 132
-harvests = ["stone"]
 
 [item.model]
 path = "assets/models/items/stone_pickaxe.json"
@@ -186,7 +197,6 @@ id = "stone_axe"
 kind = "axe"
 dig_speed = 4.0
 durability = 132
-harvests = ["wood"]
 damage = 4.0
 
 [item.model]
@@ -202,7 +212,6 @@ id = "stone_shovel"
 kind = "shovel"
 dig_speed = 4.0
 durability = 132
-harvests = ["dirt", "sand"]
 
 [item.model]
 path = "assets/models/items/stone_shovel.json"
@@ -217,7 +226,6 @@ id = "stone_sword"
 kind = "sword"
 dig_speed = 1.5
 durability = 132
-harvests = ["plant"]
 damage = 5.0
 
 [item.model]
@@ -233,7 +241,6 @@ id = "iron_pickaxe"
 kind = "pickaxe"
 dig_speed = 6.0
 durability = 250
-harvests = ["stone"]
 
 [item.model]
 path = "assets/models/items/iron_pickaxe.json"
@@ -248,7 +255,6 @@ id = "iron_axe"
 kind = "axe"
 dig_speed = 6.0
 durability = 250
-harvests = ["wood"]
 damage = 5.0
 
 [item.model]
@@ -264,7 +270,6 @@ id = "iron_shovel"
 kind = "shovel"
 dig_speed = 6.0
 durability = 250
-harvests = ["dirt", "sand"]
 
 [item.model]
 path = "assets/models/items/iron_shovel.json"
@@ -279,7 +284,6 @@ id = "iron_sword"
 kind = "sword"
 dig_speed = 1.5
 durability = 250
-harvests = ["plant"]
 damage = 6.0
 
 [item.model]
@@ -291,7 +295,7 @@ rotation = [0.0, 90.0, 0.0]
 [[item]]
 id = "apple"
 
-[item.food]
+[item.consumable]
 hunger = 4.0
 saturation = 2.4
 
@@ -301,7 +305,7 @@ path = "assets/models/items/apple.json"
 [[item]]
 id = "bread"
 
-[item.food]
+[item.consumable]
 hunger = 5.0
 saturation = 6.0
 
@@ -311,7 +315,7 @@ saturation = 6.0
 [[item]]
 id = "raw_beef"
 
-[item.food]
+[item.consumable]
 hunger = 3.0
 saturation = 1.8
 
@@ -321,7 +325,7 @@ path = "assets/models/items/raw_beef.json"
 [[item]]
 id = "mutton"
 
-[item.food]
+[item.consumable]
 hunger = 2.0
 saturation = 1.2
 
@@ -331,7 +335,7 @@ path = "assets/models/items/mutton.json"
 [[item]]
 id = "raw_chicken"
 
-[item.food]
+[item.consumable]
 hunger = 2.0
 saturation = 1.2
 
@@ -341,7 +345,7 @@ path = "assets/models/items/raw_chicken.json"
 [[item]]
 id = "cooked_beef"
 
-[item.food]
+[item.consumable]
 hunger = 8.0
 saturation = 12.8
 
@@ -351,7 +355,7 @@ path = "assets/models/items/cooked_beef.json"
 [[item]]
 id = "cooked_mutton"
 
-[item.food]
+[item.consumable]
 hunger = 6.0
 saturation = 9.6
 
@@ -361,7 +365,7 @@ path = "assets/models/items/cooked_mutton.json"
 [[item]]
 id = "cooked_chicken"
 
-[item.food]
+[item.consumable]
 hunger = 6.0
 saturation = 7.2
 
@@ -371,19 +375,19 @@ path = "assets/models/items/cooked_chicken.json"
 [[item]]
 id = "raw_porkchop"
 
-[item.food]
+[item.consumable]
 hunger = 3.0
 saturation = 1.8
 
 [[item]]
 id = "cooked_porkchop"
 
-[item.food]
+[item.consumable]
 hunger = 8.0
 saturation = 12.8
 
-# Mob and block materials. Plain stackables: no components, so their icons are
-# whatever `assets/textures/<id>.png` holds.
+# Mob and block materials. Plain stackables: no capabilities at all, so their
+# icons are whatever `assets/textures/<id>.png` holds.
 
 [item.model]
 path = "assets/models/items/cooked_porkchop.json"
@@ -446,7 +450,7 @@ path = "assets/models/items/copper_ingot.json"
 [[item]]
 id = "copper_helmet"
 
-[item.armor]
+[item.equippable]
 slot = "helmet"
 defense = 2.0
 durability = 120
@@ -457,7 +461,7 @@ path = "assets/models/items/copper_helmet.json"
 [[item]]
 id = "copper_chestplate"
 
-[item.armor]
+[item.equippable]
 slot = "chestplate"
 defense = 6.0
 durability = 240
@@ -468,7 +472,7 @@ path = "assets/models/items/copper_chestplate.json"
 [[item]]
 id = "copper_leggings"
 
-[item.armor]
+[item.equippable]
 slot = "leggings"
 defense = 5.0
 durability = 200
@@ -479,12 +483,12 @@ path = "assets/models/items/copper_leggings.json"
 [[item]]
 id = "copper_boots"
 
-[item.armor]
+[item.equippable]
 slot = "boots"
 defense = 2.0
 durability = 120
 
-# Crafting intermediate: the handle every tool is built around. No components,
+# Crafting intermediate: the handle every tool is built around. No capabilities,
 # so it is a plain stackable drawing its icon from `assets/textures/stick.png`.
 
 [item.model]
@@ -498,7 +502,8 @@ id = "stick"
 # each one a 3D inventory icon, a model in the hand, and a model where it lies
 # on the ground. Naming the same file as the block costs nothing: the model
 # registry memoises by path, so both share one parse and one GPU texture.
-# `place_block` is inherited from the auto-generated item and must not be
+# The `[item.placeable]` capability is inherited from the auto-generated item:
+# an override replaces only the capabilities it names, so it need not be
 # repeated here.
 
 [item.model]

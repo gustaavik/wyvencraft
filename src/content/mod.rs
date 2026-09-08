@@ -18,7 +18,7 @@ use crate::core::Direction;
 use crate::core::ident::title_case;
 use crate::entity::{EntityRegistry, SpawnConfig};
 use crate::inventory::item::ItemVisuals;
-use crate::inventory::{ItemId, ItemRegistry};
+use crate::inventory::{ItemId, ItemRegistry, Placeable, Tool};
 use crate::world::block::{
     BUILTIN_BLOCKS, BlockJsonSpec, BlockModelSpec, BlockRegistry, BlockVisuals, FluidVisual,
 };
@@ -257,6 +257,13 @@ impl GameContent {
             models: mut item_model_specs,
             display_names: item_labels,
         } = item_visuals;
+        // A block asking for a tool kind nothing is would be slow for everyone,
+        // and — if it insists on one — undroppable forever. `world` sits below
+        // `inventory` and cannot see the tools; here is the first place that
+        // sees both.
+        for (block, kind) in unknown_harvest_tools(&blocks, &items) {
+            log::warn!("block {block:?}: wants tool kind {kind:?}, which no item declares");
+        }
         let block_display_names = resolve_block_display_names(&blocks, block_labels);
         let item_display_names =
             resolve_item_display_names(&items, item_labels, &block_display_names);
@@ -467,18 +474,18 @@ impl GameContent {
     /// reaches here; anything else with no art at all gets the missing marker,
     /// which is the same thing its inventory icon shows.
     pub fn item_shape(&self, item: ItemId) -> ItemShape {
-        // Read the decision off the icon rather than re-deriving it from
-        // `place_block`: the two must agree, and a fluid is the case that proves
-        // it — water places a block but its icon is the flat still frame, so
-        // asking `place_block` would give a dropped bucket-of-nothing a cube the
-        // inventory never shows.
+        // Read the decision off the icon rather than re-deriving it from the
+        // `Placeable` capability: the two must agree, and a fluid is the case
+        // that proves it — water places a block but its icon is the flat still
+        // frame, so asking `Placeable` would give a dropped bucket-of-nothing a
+        // cube the inventory never shows.
         match self.item_icons.get(item.0 as usize) {
             Some(&ItemIcon::Flat(tile)) => ItemShape::Sprite(tile),
             Some(&ItemIcon::Cube { .. }) => ItemShape::Cube(
                 self.items
                     .get(item)
-                    .place_block
-                    .map_or(MISSING_FACES, |block| self.face_textures(block)),
+                    .get::<Placeable>()
+                    .map_or(MISSING_FACES, |p| self.face_textures(p.block)),
             ),
             // A model-backed item is drawn as its model and never reaches here.
             _ => ItemShape::Cube(MISSING_FACES),
@@ -705,7 +712,7 @@ fn build_item_icons(
                 return ItemIcon::Model(model.id);
             }
             // A cube reads wrong for fluids, so only truly solid blocks get one.
-            if let Some(block_id) = item.place_block {
+            if let Some(&Placeable { block: block_id }) = item.get::<Placeable>() {
                 let block = blocks.get(block_id);
                 if block.is_visible() && block.fluid.is_none() {
                     // A Blockbench-authored block's tiles are derived from its
@@ -727,9 +734,9 @@ fn build_item_icons(
             }
             // A fluid has no cube icon but does have derived tiles; preferring
             // them keeps it off the name lookup, which has no art to find.
-            let derived = item.place_block.and_then(|block_id| {
+            let derived = item.get::<Placeable>().and_then(|placeable| {
                 block_face_tiles
-                    .get(block_id.0 as usize)
+                    .get(placeable.block.0 as usize)
                     .copied()
                     .flatten()
                     .map(|faces| faces.tile(Direction::PosY))
@@ -742,10 +749,6 @@ fn build_item_icons(
         .collect()
 }
 
-/// FNV-1a over a canonical rendering of the definitions. The `Debug`
-/// representations cover every gameplay-affecting field deterministically
-/// (all collections are ordered `Vec`s), which is exactly the fidelity the
-/// mismatch check needs.
 /// Read [`BLOCK_ITEM_MODEL`]'s `display` block.
 ///
 /// Fail-soft like every other content loader: no file, or one that does not
@@ -788,6 +791,42 @@ fn load_block_item_display(source: &dyn ContentSource) -> DisplayTransforms {
     }
 }
 
+/// Blocks whose `[block.harvest] tool` names a kind no item declares, as
+/// `(block id, unknown kind)` pairs.
+///
+/// The one cross-registry check the tool inversion needs: a block names the
+/// tool it wants, so nothing in `blocks.toml` can tell on its own whether that
+/// tool exists. Separated from the logging so it can be asserted — the shipped
+/// data must report none, which is what catches a tool kind renamed on one side
+/// only.
+fn unknown_harvest_tools<'a>(
+    blocks: &'a BlockRegistry,
+    items: &ItemRegistry,
+) -> Vec<(&'a str, &'a str)> {
+    let declared: std::collections::HashSet<&str> = items
+        .iter()
+        .filter_map(|(_, item)| item.get::<Tool>())
+        .map(|tool| tool.kind.as_str())
+        .collect();
+    let mut unknown = Vec::new();
+    for (_, block) in blocks.iter() {
+        let Some(harvest) = &block.harvest else {
+            continue;
+        };
+        for kind in &harvest.tools {
+            if !declared.contains(kind.as_str()) {
+                unknown.push((block.id.as_str(), kind.as_str()));
+            }
+        }
+    }
+    unknown
+}
+
+/// FNV-1a over a canonical rendering of the definitions. The `Debug`
+/// representations cover every gameplay-affecting field deterministically —
+/// all collections are ordered `Vec`s, and an item's capability components are
+/// held in key order for exactly this reason — which is the fidelity the
+/// mismatch check needs.
 fn content_hash(
     blocks: &BlockRegistry,
     items: &ItemRegistry,
@@ -1015,7 +1054,6 @@ mod tests {
             render = "opaque"
             solid = true
             hardness = 1.0
-            material = "stone"
         "#;
         let err = BlockRegistry::from_toml(bad).expect_err("must not parse");
         assert!(err.contains("ghost"), "{err}");
@@ -1375,7 +1413,6 @@ mod tests {
              render = \"opaque\"\n\
              solid = true\n\
              hardness = 1.0\n\
-             material = \"stone\"\n\
              textures = \"stone\"\n"
         );
         let content = GameContent::from_source(&MapSource::new().with(BLOCKS_PATH, blocks));
@@ -1430,7 +1467,6 @@ mod tests {
              render = \"opaque\"\n\
              solid = true\n\
              hardness = 1.0\n\
-             material = \"stone\"\n\
              textures = \"stone\"\n"
         );
         let content = GameContent::from_source(&MapSource::new().with(BLOCKS_PATH, blocks));
@@ -1487,6 +1523,34 @@ mod tests {
         assert_eq!(
             content.hash, builtin.hash,
             "a rejected worldgen file leaves the builtin content in place"
+        );
+    }
+
+    /// Now that a block names the tool it wants, nothing in `blocks.toml` can
+    /// tell on its own whether that tool exists — a typo would leave the block
+    /// slow for everyone, and if it insisted, undroppable forever.
+    #[test]
+    fn every_shipped_block_asks_for_a_tool_some_item_is() {
+        let blocks = BlockRegistry::with_builtins();
+        let items = ItemRegistry::from_blocks(&blocks);
+        assert_eq!(
+            unknown_harvest_tools(&blocks, &items),
+            Vec::new(),
+            "a block wants a tool kind no item declares"
+        );
+    }
+
+    /// The other half of the same rule: a bad reference *is* reported, so the
+    /// check above is not passing vacuously.
+    #[test]
+    fn a_block_wanting_an_unknown_tool_is_reported() {
+        let text = BUILTIN_BLOCKS.replace(r#"tool = "shears""#, r#"tool = "snippers""#);
+        assert!(text != BUILTIN_BLOCKS, "the fixture substitution missed");
+        let blocks = BlockRegistry::from_toml(&text).expect("still a valid file");
+        let items = ItemRegistry::from_blocks(&blocks);
+        assert_eq!(
+            unknown_harvest_tools(&blocks, &items),
+            [("oak_leaves", "snippers")]
         );
     }
 

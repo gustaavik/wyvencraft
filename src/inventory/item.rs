@@ -1,135 +1,140 @@
-//! Item definitions, stacks, and the [`ItemRegistry`].
+//! Item definitions, stacks, and the [`ItemRegistry`] — the one registry of
+//! everything the player can hold.
 //!
-//! Items are kept independent of rendering. Every placeable block gets an
-//! auto-generated item; `assets/items.toml` then declares the rest (tools,
-//! foods, armor) as data, expressing behavior through typed components
-//! ([`ToolSpec`], [`FoodValue`], [`ArmorSpec`]) that the gameplay code
-//! dispatches on — never on item identity.
+//! An [`Item`] is an id, a stack size, and a **set of capability components**
+//! ([`super::component`]): `placeable`, `tool`, `consumable`, `equippable`,
+//! `shearable`. Gameplay asks an item for the capability it needs and gets
+//! `None` if the item has not got it — it never asks *what the item is*. Every
+//! placeable block gets an item automatically; `assets/items.toml` then declares
+//! the rest, and overrides any auto item by id.
 //!
-//! An item is identified by its **id** (see [`crate::core::ident`]) — the key
-//! saves, recipes, the wire and `/give` all use. The label the player reads is
-//! presentation and rides out of the parse in [`ItemVisuals`] alongside the
-//! models, so it never reaches [`Item`] and never feeds `content_hash`.
+//! Items are kept independent of rendering. An item is identified by its **id**
+//! (see [`crate::core::ident`]) — the key saves, recipes, the wire and `/give`
+//! all use. The label the player reads is presentation and rides out of the
+//! parse in [`ItemVisuals`] alongside the models, so it never reaches [`Item`]
+//! and never feeds `content_hash`.
 
-use crate::core::BlockId;
 use crate::core::ident::is_valid_id;
-use crate::world::block::{BlockMaterial, BlockRegistry};
+use crate::world::block::BlockRegistry;
 use wyven_model::ModelSpec;
+
+use super::component::{self, ComponentCtx, ItemComponent, Placeable};
 
 /// Embedded copy of the shipped item definitions, used when
 /// `assets/items.toml` is missing or invalid.
 pub const BUILTIN_ITEMS: &str = include_str!("../../assets/items.toml");
 
+/// How many of an item fit in one slot when nothing says otherwise.
+const DEFAULT_MAX_STACK: u8 = 64;
+
 /// Identifier of an item type; index into the [`ItemRegistry`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ItemId(pub u16);
 
-/// Tool behavior component (`[item.tool]` in `assets/items.toml`).
-#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ToolSpec {
-    /// Free-form tool kind; matched against block `drops` rules
-    /// (e.g. leaves only drop for kind `"shears"`).
-    pub kind: String,
-    /// Mining-speed multiplier when the tool matches the block (hand = 1.0).
-    pub dig_speed: f32,
-    /// Uses before the tool wears out.
-    pub durability: u16,
-    /// Block materials this tool mines at full speed.
-    pub harvests: Vec<BlockMaterial>,
-    /// Melee damage per swing. `None` means this tool is no better than a bare
-    /// fist, so the fist's damage stays defined in exactly one place
-    /// (`state::ingame_state::mobs::PLAYER_ATTACK_DAMAGE`) instead of being
-    /// duplicated as a default here.
-    #[serde(default)]
-    pub damage: Option<f32>,
-}
-
-/// Food behavior component: what eating the item restores.
-#[derive(Debug, Clone, Copy, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FoodValue {
-    pub hunger: f32,
-    pub saturation: f32,
-}
-
-/// Which equipment slot an armor piece occupies. The discriminants are the
-/// order of the armor slots in the inventory (see `super::inventory::ARMOR_START`)
-/// and of the labelled column in the inventory screen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ArmorSlot {
-    Helmet,
-    Chestplate,
-    Leggings,
-    Boots,
-}
-
-impl ArmorSlot {
-    pub const ALL: [ArmorSlot; 4] = [
-        ArmorSlot::Helmet,
-        ArmorSlot::Chestplate,
-        ArmorSlot::Leggings,
-        ArmorSlot::Boots,
-    ];
-
-    /// Offset of this slot within the inventory's armor region.
-    #[inline]
-    pub fn index(self) -> usize {
-        self as usize
-    }
-
-    /// Display name, also the label shown beside the slot.
-    pub fn label(self) -> &'static str {
-        match self {
-            ArmorSlot::Helmet => "Helmet",
-            ArmorSlot::Chestplate => "Chestplate",
-            ArmorSlot::Leggings => "Leggings",
-            ArmorSlot::Boots => "Boots",
-        }
-    }
-}
-
-/// Armor behavior component (`[item.armor]` in `assets/items.toml`): which slot
-/// the piece fits, how much damage it absorbs, and how long it lasts.
-#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ArmorSpec {
-    pub slot: ArmorSlot,
-    /// Defense points; summed across worn pieces (see `Player::damage`).
-    pub defense: f32,
-    /// Uses before the piece wears out.
-    pub durability: u16,
-}
-
 /// Static description of an item type.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Item {
     /// Machine-readable key: `[a-z0-9_]`, unique, and the save/wire format.
     /// The player-facing label lives on `content`, not here — see
     /// [`ItemVisuals::display_names`].
     pub id: String,
     pub max_stack: u8,
-    /// If set, using this item places the given block.
-    pub place_block: Option<BlockId>,
-    /// If set, the item is a tool.
-    pub tool: Option<ToolSpec>,
-    /// If set, the item is edible.
-    pub food: Option<FoodValue>,
-    /// If set, the item is wearable armor.
-    pub armor: Option<ArmorSpec>,
+    /// What this item can do, at most one component per key and **always in key
+    /// order**.
+    ///
+    /// The ordering is not cosmetic. `Item`'s `Debug` feeds
+    /// `content::content_hash`, which gates multiplayer joins, so two peers who
+    /// spelled the same tables in a different order must hash identically.
+    /// [`Item::set`] is the only mutator and maintains it.
+    components: Vec<Box<dyn ItemComponent>>,
 }
 
 impl Item {
     /// A placeable block item (stacks to 64), sharing the block's id.
-    pub fn block(id: impl Into<String>, block: BlockId) -> Self {
+    pub fn block(id: impl Into<String>, block: crate::core::BlockId) -> Self {
         Self {
             id: id.into(),
-            max_stack: 64,
-            place_block: Some(block),
-            tool: None,
-            food: None,
-            armor: None,
+            max_stack: DEFAULT_MAX_STACK,
+            components: vec![Box::new(Placeable { block })],
+        }
+    }
+
+    /// An item with no capabilities at all (a crafting material).
+    pub fn plain(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            max_stack: DEFAULT_MAX_STACK,
+            components: Vec::new(),
+        }
+    }
+
+    /// This item's `C` capability, if it has one.
+    ///
+    /// The single seam between "what the data declared" and "what the code
+    /// does": a call site depends on the one capability it uses and on nothing
+    /// else about `Item`.
+    pub fn get<C: ItemComponent>(&self) -> Option<&C> {
+        self.components
+            .iter()
+            .find_map(|component| component::downcast::<C>(component.as_ref()))
+    }
+
+    /// Whether this item carries the capability named `key` — the by-name form,
+    /// for the one caller that has a string rather than a type (a block's
+    /// `drops = { requires = "..." }`).
+    pub fn has(&self, key: &str) -> bool {
+        self.components.iter().any(|c| c.key() == key)
+    }
+
+    /// Add `component`, replacing any it already has under that key.
+    ///
+    /// Insertion is by binary search, so the key ordering `components` promises
+    /// is maintained by construction rather than by a sort somebody has to
+    /// remember to call.
+    fn set(&mut self, component: Box<dyn ItemComponent>) {
+        let key = component.key();
+        match self.components.binary_search_by(|held| held.key().cmp(key)) {
+            Ok(index) => self.components[index] = component,
+            Err(index) => self.components.insert(index, component),
+        }
+    }
+
+    /// The stack size the declared capabilities imply: the tightest ceiling any
+    /// of them sets, or [`DEFAULT_MAX_STACK`]. An authored `max_stack` wins over
+    /// this.
+    fn derived_max_stack(&self) -> u8 {
+        self.components
+            .iter()
+            .filter_map(|component| component.stack_limit())
+            .min()
+            .unwrap_or(DEFAULT_MAX_STACK)
+    }
+
+    /// Starting durability, from the first capability in key order that wears.
+    /// An item that is both a tool and a worn piece is a data error; the loader
+    /// warns about it once, and this stays deterministic rather than guessing.
+    fn max_durability(&self) -> Option<u16> {
+        self.components
+            .iter()
+            .find_map(|component| component.durability())
+    }
+
+    /// How many of this item's capabilities declare a durability. Used only by
+    /// the loader, to warn about the ambiguous case exactly once.
+    fn wearing_capabilities(&self) -> usize {
+        self.components
+            .iter()
+            .filter(|component| component.durability().is_some())
+            .count()
+    }
+}
+
+impl Clone for Item {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            max_stack: self.max_stack,
+            components: self.components.iter().map(|c| c.clone_box()).collect(),
         }
     }
 }
@@ -202,21 +207,26 @@ struct ItemFile {
     starter_kit: Option<StarterKitDef>,
 }
 
+/// One `[[item]]` entry.
+///
+/// Everything that is not one of the four named fields is a capability table,
+/// collected raw and handed to the parser in [`component::COMPONENTS`] that
+/// claims its key — which is what makes adding a capability cost nothing here.
+/// That is also why there is no `deny_unknown_fields` (serde forbids it
+/// alongside `flatten`): a table nothing claims is rejected explicitly below,
+/// **by name**, which is a better diagnostic than serde's would have been.
 #[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ItemDef {
     id: String,
     /// Overrides the label derived from `id`, for the ids the rule gets wrong.
     display_name: Option<String>,
     max_stack: Option<u8>,
-    place_block: Option<String>,
-    tool: Option<ToolSpec>,
-    food: Option<FoodValue>,
-    armor: Option<ArmorSpec>,
     /// `[item.model]` — the 3D model this item is drawn as when it is held or
     /// lying in the world. Purely visual, so it is handed back out of band
-    /// rather than stored on [`Item`]: see [`ItemRegistry::from_toml_with_models`].
+    /// rather than stored on [`Item`]: see [`ItemRegistry::from_toml_with_visuals`].
     model: Option<ModelSpec>,
+    #[serde(flatten)]
+    components: toml::Table,
 }
 
 #[derive(serde::Deserialize)]
@@ -281,10 +291,11 @@ impl ItemRegistry {
     /// override an auto item by id or append new items (declared order defines
     /// the numeric [`ItemId`]s after the block items).
     ///
-    /// Structural errors — bad TOML, or a malformed id — fail the whole file,
-    /// and the caller falls back to [`ItemRegistry::from_blocks`]. Bad
-    /// *references* inside entries (an unknown `place_block`) only degrade that
-    /// entry with a warning, following the recipes-file precedent.
+    /// Structural errors — bad TOML, a malformed id, an unknown capability
+    /// table, a capability that will not parse — fail the whole file, and the
+    /// caller falls back to [`ItemRegistry::from_blocks`]. Bad *references*
+    /// inside a capability (an unknown placeable block) only degrade that
+    /// capability with a warning, following the recipes-file precedent.
     pub fn from_toml(text: &str, blocks: &BlockRegistry) -> Result<Self, String> {
         Self::from_toml_with_visuals(text, blocks, &mut ItemVisuals::default())
     }
@@ -311,6 +322,10 @@ impl ItemRegistry {
         models.clear();
         display_names.clear();
         let mut items: Vec<Item> = Vec::new();
+        // An authored `max_stack` wins over the one the capabilities imply, and
+        // has to be remembered per item because the derived value is only
+        // settled once every override has been merged.
+        let mut authored_stack: Vec<Option<u8>> = Vec::new();
         let mut block_to_item = vec![None; blocks.len()];
         for (block_id, block) in blocks.iter() {
             // Flowing fluid is simulation state, not a placeable block.
@@ -319,6 +334,7 @@ impl ItemRegistry {
             }
             let item_id = ItemId(items.len() as u16);
             items.push(Item::block(block.id.clone(), block_id));
+            authored_stack.push(None);
             block_to_item[block_id.0 as usize] = Some(item_id);
         }
 
@@ -332,49 +348,37 @@ impl ItemRegistry {
                     def.id
                 ));
             }
-            let place_block = def.place_block.as_ref().and_then(|block_id| {
-                let id = blocks.find(block_id);
-                if id.is_none() {
-                    log::warn!("item {:?}: unknown place_block {block_id:?}", def.id);
+            let ctx = ComponentCtx {
+                blocks,
+                item: &def.id,
+            };
+            let mut declared: Vec<Box<dyn ItemComponent>> = Vec::new();
+            for (key, value) in def.components {
+                let Some(parser) = component::parser_for(&key) else {
+                    return Err(format!("item {:?}: unknown component [item.{key}]", def.id));
+                };
+                if let Some(built) = parser.parse(value, &ctx)? {
+                    declared.push(built);
                 }
-                id
-            });
+            }
+
             let index = match items.iter().position(|i| i.id == def.id) {
-                // Override an auto-generated block item: only the fields the
-                // entry specifies change.
-                Some(idx) => {
-                    let item = &mut items[idx];
-                    if let Some(max_stack) = def.max_stack {
-                        item.max_stack = max_stack;
-                    }
-                    if place_block.is_some() {
-                        item.place_block = place_block;
-                    }
-                    if def.tool.is_some() {
-                        item.tool = def.tool;
-                    }
-                    if def.food.is_some() {
-                        item.food = def.food;
-                    }
-                    if def.armor.is_some() {
-                        item.armor = def.armor;
-                    }
-                    idx
-                }
+                // Override an auto-generated block item, or an earlier entry:
+                // only the capabilities this entry declares are replaced, so an
+                // override that says nothing about placement keeps it.
+                Some(idx) => idx,
                 None => {
-                    let single = def.tool.is_some() || def.armor.is_some();
-                    let max_stack = def.max_stack.unwrap_or(if single { 1 } else { 64 });
-                    items.push(Item {
-                        id: def.id,
-                        max_stack,
-                        place_block,
-                        tool: def.tool,
-                        food: def.food,
-                        armor: def.armor,
-                    });
+                    items.push(Item::plain(def.id));
+                    authored_stack.push(None);
                     items.len() - 1
                 }
             };
+            for built in declared {
+                items[index].set(built);
+            }
+            if def.max_stack.is_some() {
+                authored_stack[index] = def.max_stack;
+            }
             if let Some(model) = def.model {
                 models.resize(items.len().max(models.len()), None);
                 models[index] = Some(model);
@@ -386,6 +390,19 @@ impl ItemRegistry {
         }
         models.resize(items.len(), None);
         display_names.resize(items.len(), None);
+
+        // Stack sizes settle only now: an override may have added the very
+        // capability that caps them.
+        for (item, authored) in items.iter_mut().zip(&authored_stack) {
+            item.max_stack = authored.unwrap_or_else(|| item.derived_max_stack());
+            if item.wearing_capabilities() > 1 {
+                log::warn!(
+                    "item {:?}: more than one capability declares a durability; \
+                     the first in key order wins",
+                    item.id
+                );
+            }
+        }
 
         let mut reg = Self {
             items,
@@ -418,7 +435,18 @@ impl ItemRegistry {
         &self.items[id.0 as usize]
     }
 
-    pub fn item_for_block(&self, block: BlockId) -> Option<ItemId> {
+    /// The `C` capability of item `id`, if it has one — the shorthand for
+    /// `registry.get(id).get::<C>()`, which is most of what callers want.
+    pub fn component<C: ItemComponent>(&self, id: ItemId) -> Option<&C> {
+        self.get(id).get::<C>()
+    }
+
+    /// Whether item `id` carries the capability named `key`.
+    pub fn has(&self, id: ItemId, key: &str) -> bool {
+        self.get(id).has(key)
+    }
+
+    pub fn item_for_block(&self, block: crate::core::BlockId) -> Option<ItemId> {
         self.block_to_item.get(block.0 as usize).copied().flatten()
     }
 
@@ -435,26 +463,9 @@ impl ItemRegistry {
         self.get(id).max_stack
     }
 
-    pub fn tool(&self, id: ItemId) -> Option<&ToolSpec> {
-        self.get(id).tool.as_ref()
-    }
-
-    pub fn food(&self, id: ItemId) -> Option<FoodValue> {
-        self.get(id).food
-    }
-
-    pub fn armor(&self, id: ItemId) -> Option<ArmorSpec> {
-        self.get(id).armor
-    }
-
-    /// Starting durability of a fresh item, for the components that wear out.
-    /// An item is never both a tool and armor; tools win if a file says otherwise.
+    /// Starting durability of a fresh item, for the capabilities that wear out.
     pub fn max_durability(&self, id: ItemId) -> Option<u16> {
-        let item = self.get(id);
-        item.tool
-            .as_ref()
-            .map(|tool| tool.durability)
-            .or_else(|| item.armor.map(|armor| armor.durability))
+        self.get(id).max_durability()
     }
 
     /// A full, ready-to-use stack of `id` (max count, or a fresh tool).
@@ -485,6 +496,7 @@ impl ItemRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inventory::component::{ArmorSlot, Consumable, Equippable, Tool};
 
     /// Golden snapshot of the shipped item set. The data-driven loader must
     /// reproduce this exactly: names are the save format and registration
@@ -518,34 +530,23 @@ mod tests {
             "brown_mushroom",
             "cornflower",
         ];
-        const STONE: &[BlockMaterial] = &[BlockMaterial::Stone];
-        const WOOD: &[BlockMaterial] = &[BlockMaterial::Wood];
-        const PLANT: &[BlockMaterial] = &[BlockMaterial::Plant];
-        const DIGGABLE: &[BlockMaterial] = &[BlockMaterial::Dirt, BlockMaterial::Sand];
-        /// One expected tool: name, kind, dig_speed, durability, harvests, damage.
-        type ToolRow = (
-            &'static str,
-            &'static str,
-            f32,
-            u16,
-            &'static [BlockMaterial],
-            Option<f32>,
-        );
+        /// One expected tool: name, kind, dig_speed, durability, damage.
+        type ToolRow = (&'static str, &'static str, f32, u16, Option<f32>);
         let tools: [ToolRow; 14] = [
-            ("wooden_pickaxe", "pickaxe", 2.0, 60, STONE, None),
-            ("wooden_axe", "axe", 2.0, 60, WOOD, Some(3.0)),
-            ("wooden_shovel", "shovel", 2.0, 60, DIGGABLE, None),
-            ("shears", "shears", 5.0, 120, PLANT, None),
-            ("vine_sword", "sword", 1.5, 200, PLANT, Some(4.0)),
-            ("wooden_sword", "sword", 1.5, 60, PLANT, Some(4.0)),
-            ("stone_pickaxe", "pickaxe", 4.0, 132, STONE, None),
-            ("stone_axe", "axe", 4.0, 132, WOOD, Some(4.0)),
-            ("stone_shovel", "shovel", 4.0, 132, DIGGABLE, None),
-            ("stone_sword", "sword", 1.5, 132, PLANT, Some(5.0)),
-            ("iron_pickaxe", "pickaxe", 6.0, 250, STONE, None),
-            ("iron_axe", "axe", 6.0, 250, WOOD, Some(5.0)),
-            ("iron_shovel", "shovel", 6.0, 250, DIGGABLE, None),
-            ("iron_sword", "sword", 1.5, 250, PLANT, Some(6.0)),
+            ("wooden_pickaxe", "pickaxe", 2.0, 60, None),
+            ("wooden_axe", "axe", 2.0, 60, Some(3.0)),
+            ("wooden_shovel", "shovel", 2.0, 60, None),
+            ("shears", "shears", 5.0, 120, None),
+            ("vine_sword", "sword", 1.5, 200, Some(4.0)),
+            ("wooden_sword", "sword", 1.5, 60, Some(4.0)),
+            ("stone_pickaxe", "pickaxe", 4.0, 132, None),
+            ("stone_axe", "axe", 4.0, 132, Some(4.0)),
+            ("stone_shovel", "shovel", 4.0, 132, None),
+            ("stone_sword", "sword", 1.5, 132, Some(5.0)),
+            ("iron_pickaxe", "pickaxe", 6.0, 250, None),
+            ("iron_axe", "axe", 6.0, 250, Some(5.0)),
+            ("iron_shovel", "shovel", 6.0, 250, None),
+            ("iron_sword", "sword", 1.5, 250, Some(6.0)),
         ];
         // (name, hunger, saturation)
         let foods = [
@@ -598,8 +599,15 @@ mod tests {
             let item = items.get(ItemId(i as u16));
             assert_eq!(item.id, name, "item {i}: name");
             assert_eq!(item.max_stack, 64, "{name}: max_stack");
-            assert_eq!(item.place_block, blocks.find(name), "{name}: place_block");
-            assert!(item.tool.is_none() && item.food.is_none(), "{name}: plain");
+            assert_eq!(
+                item.get::<Placeable>().map(|p| p.block),
+                blocks.find(name),
+                "{name}: places itself"
+            );
+            assert!(
+                item.get::<Tool>().is_none() && item.get::<Consumable>().is_none(),
+                "{name}: plain"
+            );
             // Blocks map back to their item.
             let block_id = blocks.find(name).unwrap();
             assert_eq!(
@@ -609,28 +617,34 @@ mod tests {
             );
         }
 
-        for (offset, &(name, kind, dig_speed, durability, harvests, damage)) in
-            tools.iter().enumerate()
-        {
+        for (offset, &(name, kind, dig_speed, durability, damage)) in tools.iter().enumerate() {
             let id = ItemId((block_items.len() + offset) as u16);
             let item = items.get(id);
             assert_eq!(item.id, name, "tool: name");
             assert_eq!(item.max_stack, 1, "{name}: max_stack");
-            let tool = item.tool.as_ref().expect("tool spec");
+            let tool = item.get::<Tool>().expect("tool capability");
             assert_eq!(tool.kind, kind, "{name}: kind");
             assert_eq!(tool.dig_speed, dig_speed, "{name}: dig_speed");
             assert_eq!(tool.durability, durability, "{name}: durability");
-            assert_eq!(tool.harvests, harvests, "{name}: harvests");
             assert_eq!(tool.damage, damage, "{name}: damage");
             assert_eq!(items.find(name), Some(id), "{name}: find");
         }
+
+        // A tool says only what shape it is. Nothing here lists a block, and
+        // nothing in this file needs touching when a block is added.
+        let shearers: Vec<&str> = items
+            .iter()
+            .filter(|(_, item)| item.get::<Tool>().is_some_and(|t| t.kind == "shears"))
+            .map(|(_, item)| item.id.as_str())
+            .collect();
+        assert_eq!(shearers, ["shears"], "one item is shears-shaped");
 
         for (offset, &(name, hunger, saturation)) in foods.iter().enumerate() {
             let id = ItemId((block_items.len() + tools.len() + offset) as u16);
             let item = items.get(id);
             assert_eq!(item.id, name, "food: name");
             assert_eq!(item.max_stack, 64, "{name}: max_stack");
-            let food = item.food.expect("food value");
+            let food = item.get::<Consumable>().expect("consumable capability");
             assert_eq!(food.hunger, hunger, "{name}: hunger");
             assert_eq!(food.saturation, saturation, "{name}: saturation");
             assert_eq!(items.find(name), Some(id), "{name}: find");
@@ -641,13 +655,7 @@ mod tests {
             let item = items.get(id);
             assert_eq!(item.id, name, "material: name");
             assert_eq!(item.max_stack, 64, "{name}: max_stack");
-            assert!(
-                item.tool.is_none()
-                    && item.food.is_none()
-                    && item.armor.is_none()
-                    && item.place_block.is_none(),
-                "{name}: carries no components"
-            );
+            assert!(item.components.is_empty(), "{name}: carries no components");
             assert_eq!(items.find(name), Some(id), "{name}: find");
         }
 
@@ -658,10 +666,10 @@ mod tests {
             let item = items.get(id);
             assert_eq!(item.id, name, "armor: name");
             assert_eq!(item.max_stack, 1, "{name}: max_stack");
-            let armor = item.armor.expect("armor spec");
-            assert_eq!(armor.slot, slot, "{name}: slot");
-            assert_eq!(armor.defense, defense, "{name}: defense");
-            assert_eq!(armor.durability, durability, "{name}: durability");
+            let worn = item.get::<Equippable>().expect("equippable capability");
+            assert_eq!(worn.slot, slot, "{name}: slot");
+            assert_eq!(worn.defense, defense, "{name}: defense");
+            assert_eq!(worn.durability, durability, "{name}: durability");
             assert_eq!(items.find(name), Some(id), "{name}: find");
             // Armor wears like a tool: a fresh piece carries full durability.
             assert_eq!(
@@ -683,13 +691,7 @@ mod tests {
             let item = items.get(id);
             assert_eq!(item.id, name, "plain: name");
             assert_eq!(item.max_stack, 64, "{name}: max_stack");
-            assert!(
-                item.tool.is_none()
-                    && item.food.is_none()
-                    && item.armor.is_none()
-                    && item.place_block.is_none(),
-                "{name}: carries no components"
-            );
+            assert!(item.components.is_empty(), "{name}: carries no components");
             assert_eq!(items.find(name), Some(id), "{name}: find");
         }
 
@@ -734,6 +736,117 @@ mod tests {
                 .unwrap_or_else(|| panic!("{bad:?} should be rejected"));
             assert!(err.contains("id"), "{bad:?}: unhelpful error {err:?}");
         }
+    }
+
+    /// A table nothing claims is almost always a typo for one that exists, and
+    /// silently dropping it would ship an item missing the behaviour its author
+    /// wrote down. The error names the key, because that is what has to change.
+    #[test]
+    fn an_unknown_capability_rejects_the_whole_file_and_names_it() {
+        let blocks = BlockRegistry::with_builtins();
+        let err = ItemRegistry::from_toml(
+            "[[item]]\nid = \"stick\"\n\n[item.edible]\nhunger = 1.0\n",
+            &blocks,
+        )
+        .expect_err("`edible` is not a capability");
+        assert!(err.contains("edible"), "unhelpful error {err:?}");
+    }
+
+    /// A capability that fails to *parse* is structural and fails the file, so
+    /// a typo inside a table cannot ship as silently-default numbers.
+    #[test]
+    fn a_malformed_capability_rejects_the_whole_file() {
+        let blocks = BlockRegistry::with_builtins();
+        assert!(
+            ItemRegistry::from_toml(
+                "[[item]]\nid = \"bread\"\n\n[item.consumable]\nhunger = 1.0\n",
+                &blocks,
+            )
+            .is_err(),
+            "a consumable without saturation is incomplete"
+        );
+    }
+
+    /// `Item`'s `Debug` feeds `content_hash`, which gates multiplayer joins —
+    /// so two peers who wrote the same capabilities in a different order must
+    /// produce byte-identical items. Storing components in key order is what
+    /// guarantees it.
+    #[test]
+    fn capability_order_in_the_file_does_not_change_the_item() {
+        let blocks = BlockRegistry::with_builtins();
+        let one = "[[item]]\nid = \"cleaver\"\n\n[item.consumable]\n\
+                   hunger = 1.0\nsaturation = 1.0\n\n[item.tool]\n\
+                   kind = \"sword\"\ndig_speed = 1.0\ndurability = 5\n";
+        let other = "[[item]]\nid = \"cleaver\"\n\n[item.tool]\n\
+                     kind = \"sword\"\ndig_speed = 1.0\ndurability = 5\n\n\
+                     [item.consumable]\nhunger = 1.0\nsaturation = 1.0\n";
+        let render = |text: &str| {
+            let items = ItemRegistry::from_toml(text, &blocks).expect("valid file");
+            let id = items.find("cleaver").expect("declared");
+            format!("{:?}", items.get(id))
+        };
+        assert_eq!(render(one), render(other));
+    }
+
+    /// Stack size is derived from the capabilities rather than from a list of
+    /// item kinds, so a *new* wearing capability gets the rule for free.
+    #[test]
+    fn wearing_capabilities_cap_the_stack_and_an_authored_size_still_wins() {
+        let blocks = BlockRegistry::with_builtins();
+        let items = ItemRegistry::from_toml(
+            "[[item]]\nid = \"plain\"\n\n\
+             [[item]]\nid = \"digger\"\n[item.tool]\n\
+             kind = \"pickaxe\"\ndig_speed = 1.0\ndurability = 5\n\n\
+             [[item]]\nid = \"hat\"\n[item.equippable]\n\
+             slot = \"helmet\"\ndefense = 1.0\ndurability = 5\n\n\
+             [[item]]\nid = \"oddity\"\nmax_stack = 16\n[item.tool]\n\
+             kind = \"pickaxe\"\ndig_speed = 1.0\ndurability = 5\n",
+            &blocks,
+        )
+        .expect("valid file");
+        let stack = |name: &str| items.max_stack(items.find(name).expect("declared"));
+        assert_eq!(stack("plain"), 64, "nothing caps it");
+        assert_eq!(stack("digger"), 1, "a tool wears");
+        assert_eq!(stack("hat"), 1, "a worn piece wears");
+        assert_eq!(stack("oddity"), 16, "an authored size wins over the rule");
+    }
+
+    /// An entry naming an auto-generated block item edits it rather than
+    /// shadowing it: capabilities it does not mention — placement above all —
+    /// survive, which is what lets `blue_bells` add a model and stay placeable.
+    #[test]
+    fn an_override_replaces_by_key_and_keeps_what_it_does_not_mention() {
+        let blocks = BlockRegistry::with_builtins();
+        let items = ItemRegistry::from_toml(
+            "[[item]]\nid = \"stone\"\nmax_stack = 32\n\n[item.consumable]\n\
+             hunger = 1.0\nsaturation = 1.0\n",
+            &blocks,
+        )
+        .expect("valid file");
+        let stone = items.find("stone").expect("auto block item");
+        assert_eq!(
+            items.component::<Placeable>(stone).map(|p| p.block),
+            blocks.find("stone"),
+            "the inherited placement survives"
+        );
+        assert!(
+            items.component::<Consumable>(stone).is_some(),
+            "the declared capability is added"
+        );
+        assert_eq!(items.max_stack(stone), 32);
+    }
+
+    /// The whole point of asking for a capability: an item that has not got it
+    /// says so, instead of the caller testing what kind of item it is.
+    #[test]
+    fn an_absent_capability_reads_as_none() {
+        let blocks = BlockRegistry::with_builtins();
+        let items = ItemRegistry::from_blocks(&blocks);
+        let stick = items.find("stick").expect("stick");
+        assert!(items.component::<Tool>(stick).is_none());
+        assert!(items.component::<Consumable>(stick).is_none());
+        assert!(!items.has(stick, "tool"));
+        assert!(items.has(items.find("shears").expect("shears"), "tool"));
     }
 
     /// Every shipped id is well formed — the loader enforces it, but asserting
@@ -864,7 +977,10 @@ mod tests {
 
         let spec = |name: &str| {
             let id = items.find(name).unwrap_or_else(|| panic!("{name} exists"));
-            items.tool(id).expect("tool spec").clone()
+            items
+                .component::<Tool>(id)
+                .expect("tool capability")
+                .clone()
         };
 
         for shape in ["pickaxe", "axe", "shovel"] {
@@ -877,10 +993,9 @@ mod tests {
                 assert!(hi.dig_speed > lo.dig_speed, "{shape}: dig_speed");
                 assert!(hi.durability > lo.durability, "{shape}: durability");
                 assert_eq!(
-                    hi.harvests, lo.harvests,
-                    "{shape}: harvests are the tier-independent part"
+                    hi.kind, lo.kind,
+                    "{shape}: kind is the tier-independent part"
                 );
-                assert_eq!(hi.kind, lo.kind, "{shape}: kind");
             }
         }
 
@@ -907,13 +1022,17 @@ mod tests {
             for shape in ["pickaxe", "shovel"] {
                 let name = format!("{tier}_{shape}");
                 let id = items.find(&name).expect("tool exists");
-                assert_eq!(items.tool(id).unwrap().damage, None, "{name}: no damage");
+                assert_eq!(
+                    items.component::<Tool>(id).unwrap().damage,
+                    None,
+                    "{name}: no damage"
+                );
             }
             for shape in ["sword", "axe"] {
                 let name = format!("{tier}_{shape}");
                 let id = items.find(&name).expect("tool exists");
                 assert!(
-                    items.tool(id).unwrap().damage.is_some(),
+                    items.component::<Tool>(id).unwrap().damage.is_some(),
                     "{name}: declares damage"
                 );
             }

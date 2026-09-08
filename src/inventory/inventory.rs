@@ -8,7 +8,8 @@
 //! bounded to `..ARMOR_START`, so crafting never eats worn armor and pickups
 //! never land in an armor slot.
 
-use super::item::{ArmorSlot, ItemId, ItemRegistry, ItemStack};
+use super::component::{ArmorSlot, Equippable};
+use super::item::{ItemId, ItemRegistry, ItemStack};
 
 /// Number of quick-access hotbar slots (also the first slots of the inventory).
 pub const HOTBAR_SIZE: usize = 9;
@@ -77,8 +78,11 @@ impl Inventory {
         let Some(offset) = index.checked_sub(ARMOR_START) else {
             return true; // storage slot
         };
-        match (ArmorSlot::ALL.get(offset), items.armor(item)) {
-            (Some(&slot), Some(armor)) => armor.slot == slot,
+        match (
+            ArmorSlot::ALL.get(offset),
+            items.component::<Equippable>(item),
+        ) {
+            (Some(&slot), Some(worn)) => worn.slot == slot,
             _ => false,
         }
     }
@@ -88,8 +92,8 @@ impl Inventory {
         self.slots[ARMOR_START..]
             .iter()
             .flatten()
-            .filter_map(|stack| items.armor(stack.item))
-            .map(|armor| armor.defense)
+            .filter_map(|stack| items.component::<Equippable>(stack.item))
+            .map(|worn| worn.defense)
             .sum()
     }
 
@@ -398,7 +402,7 @@ mod tests {
         for slot in ArmorSlot::ALL {
             let Some((id, _)) = items
                 .iter()
-                .find(|(_, item)| item.armor.is_some_and(|a| a.slot == slot))
+                .find(|(_, item)| item.get::<Equippable>().is_some_and(|w| w.slot == slot))
             else {
                 continue;
             };

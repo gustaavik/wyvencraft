@@ -3,7 +3,7 @@
 //!
 //! Every block and item carries an **id** — `wooden_pickaxe`, `oak_log` — and
 //! that id is the only string the rest of the game keys on: save files, the
-//! wire protocol, `place_block`, `drops`, recipe ingredients, worldgen and
+//! wire protocol, `[item.placeable]`, `drops`, recipe ingredients, worldgen and
 //! `/give`. Restricting it to `[a-z0-9_]` is what makes it safe to type as a
 //! single chat token and to embed in a file without quoting.
 //!

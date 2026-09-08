@@ -42,8 +42,20 @@
 #             faces even when buried, and `tintindex` only on faces that
 #             should take the biome colour (`tint` in assets/worldgen.toml).
 #   drops     what breaking the block yields (default: the block's own item)
-#             "self" | "none" | { requires_tool = "<tool kind>" }
-#             | { item = "<item id>", count = N }
+#             "self" | "none" | { item = "<item id>", count = N }
+#   [block.harvest] which tool this block wants. The requirement lives HERE,
+#             not on the tools: a tool declares only what shape it is
+#             (`[item.tool] kind` in assets/items.toml), so adding a block is
+#             one entry in this file and never an edit to every tool that
+#             should be good at it.
+#       tool      the kind that mines it at full speed — "pickaxe", or a list
+#                 like ["shears", "sword"] when several shapes suit it. A block
+#                 with no [block.harvest] at all (glass, bedrock) is mined at
+#                 the slow rate by everything.
+#       required  when true, breaking it with anything else yields NOTHING.
+#                 Defaults to false, which is the rule the game is built on:
+#                 a better tool means a faster one, and every block stays
+#                 mineable by hand. Only oak leaves set it.
 #   [block.fluid] with `flow_levels = N` marks the block as a fluid source;
 #             the engine auto-registers "<id>_flow_1".."<id>_flow_N"
 #             blocks after all declared blocks, and the fluid simulation
@@ -81,40 +93,47 @@ id = "stone"
 render = "opaque"
 solid = true
 hardness = 1.5
-material = "stone"
 block_model = "assets/models/blocks/stone.json"
 drops = { item = "cobblestone" }
+
+[block.harvest]
+tool = "pickaxe"
 
 [[block]]
 id = "dirt"
 render = "opaque"
 solid = true
 hardness = 0.5
-material = "dirt"
 block_model = "assets/models/blocks/dirt.json"
+
+[block.harvest]
+tool = "shovel"
 
 [[block]]
 id = "grass"
 render = "opaque"
 solid = true
 hardness = 0.6
-material = "dirt"
 block_model = "assets/models/blocks/grass.json"
+
+[block.harvest]
+tool = "shovel"
 
 [[block]]
 id = "sand"
 render = "opaque"
 solid = true
 hardness = 0.5
-material = "sand"
 block_model = "assets/models/blocks/sand.json"
+
+[block.harvest]
+tool = "shovel"
 
 [[block]]
 id = "water"
 render = "transparent"
 solid = false
 hardness = inf
-material = "other"
 
 [block.fluid]
 flow_levels = 7
@@ -134,24 +153,27 @@ id = "oak_log"
 render = "opaque"
 solid = true
 hardness = 2.0
-material = "wood"
 block_model = "assets/models/blocks/oak_log.json"
+
+[block.harvest]
+tool = "axe"
 
 [[block]]
 id = "oak_leaves"
 render = "cutout"
 solid = true
 hardness = 0.2
-material = "plant"
 block_model = "assets/models/blocks/oak_leaves.json"
-drops = { requires_tool = "shears" }
+
+[block.harvest]
+tool = "shears"
+required = true
 
 [[block]]
 id = "glass"
 render = "transparent"
 solid = true
 hardness = 0.3
-material = "glass"
 textures = "blocks/glass"
 
 [[block]]
@@ -159,7 +181,6 @@ id = "bedrock"
 render = "opaque"
 solid = true
 hardness = inf
-material = "other"
 textures = "blocks/bedrock"
 
 [[block]]
@@ -167,57 +188,68 @@ id = "snow"
 render = "opaque"
 solid = true
 hardness = 0.2
-material = "dirt"
 textures = "blocks/snow"
+
+[block.harvest]
+tool = "shovel"
 
 [[block]]
 id = "gravel"
 render = "opaque"
 solid = true
 hardness = 0.6
-material = "dirt"
 block_model = "assets/models/blocks/gravel.json"
+
+[block.harvest]
+tool = "shovel"
 
 [[block]]
 id = "clay"
 render = "opaque"
 solid = true
 hardness = 0.6
-material = "dirt"
 textures = "blocks/clay"
 drops = { item = "clay_ball", count = 4 }
+
+[block.harvest]
+tool = "shovel"
 
 [[block]]
 id = "coal_ore"
 render = "opaque"
 solid = true
 hardness = 3.0
-material = "stone"
 block_model = "assets/models/blocks/coal_ore.json"
 drops = { item = "coal" }
+
+[block.harvest]
+tool = "pickaxe"
 
 [[block]]
 id = "iron_ore"
 render = "opaque"
 solid = true
 hardness = 3.0
-material = "stone"
 block_model = "assets/models/blocks/iron_ore.json"
+
+[block.harvest]
+tool = "pickaxe"
 
 [[block]]
 id = "copper_ore"
 render = "opaque"
 solid = true
 hardness = 3.0
-material = "stone"
 block_model = "assets/models/blocks/copper_ore.json"
+
+[block.harvest]
+tool = "pickaxe"
 
 [[block]]
 id = "cobblestone"
 render = "opaque"
 solid = true
 hardness = 2.0
-material = "stone"
 block_model = "assets/models/blocks/cobblestone.json"
 
 # Ground cover: model-backed, walk-through decoration scattered on the surface
@@ -225,13 +257,18 @@ block_model = "assets/models/blocks/cobblestone.json"
 # — the models carry their own — and no `drops`, so each yields its own item.
 # `hardness = 0.0` still costs one mining tick (break_seconds floors at 0.05 s).
 
+[block.harvest]
+tool = "pickaxe"
+
 [[block]]
 id = "blue_bells"
 render = "cutout"
 solid = false
 hardness = 0.0
-material = "plant"
 random_yaw = true
+
+[block.harvest]
+tool = ["shears", "sword"]
 
 [block.model]
 path = "assets/models/blocks/plant1.bbmodel"
@@ -242,8 +279,10 @@ id = "red_flower"
 render = "cutout"
 solid = false
 hardness = 0.0
-material = "plant"
 random_yaw = true
+
+[block.harvest]
+tool = ["shears", "sword"]
 
 [block.model]
 path = "assets/models/blocks/plant2.bbmodel"
@@ -254,8 +293,10 @@ id = "red_mushroom"
 render = "cutout"
 solid = false
 hardness = 0.0
-material = "plant"
 random_yaw = true
+
+[block.harvest]
+tool = ["shears", "sword"]
 
 [block.model]
 path = "assets/models/blocks/mushroom1.bbmodel"
@@ -266,8 +307,10 @@ id = "brown_mushroom"
 render = "cutout"
 solid = false
 hardness = 0.0
-material = "plant"
 random_yaw = true
+
+[block.harvest]
+tool = ["shears", "sword"]
 
 [block.model]
 path = "assets/models/blocks/mushroom2.bbmodel"
@@ -280,6 +323,8 @@ id = "cornflower"
 render = "cutout"
 solid = false
 hardness = 0.0
-material = "plant"
 random_yaw = true
 block_model = "assets/models/blocks/cornflower.json"
+
+[block.harvest]
+tool = ["shears", "sword"]
