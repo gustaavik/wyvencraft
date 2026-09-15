@@ -71,11 +71,13 @@ jobs:
       # makes rustc report `E0463: can't find crate for vulkano_shaders`. With no
       # system library present, shaderc-sys builds its vendored sources instead
       # and produces a self-contained archive. Do not install libshaderc-dev here.
+      # libasound2-dev ships alsa.pc, which alsa-sys (rodio -> cpal -> alsa on
+      # Linux) needs pkg-config to find; without it its build script fails.
       - name: Install the shaderc build toolchain (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build python3
+          sudo apt-get install -y cmake ninja-build python3 libasound2-dev
 
       # No argument: installs the toolchain named by rust-toolchain.toml. The
       # target is added to that same pinned toolchain.
