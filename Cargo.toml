@@ -18,6 +18,7 @@ wyven-net = { path = "crates/wyven-net", version = "0.1.0" }
 wyven-input = { path = "crates/wyven-input", version = "0.1.0" }
 wyven-auth = { path = "crates/wyven-auth", version = "0.1.0" }
 wyven-app = { path = "crates/wyven-app", version = "0.1.0" }
+wyven-audio = { path = "crates/wyven-audio", version = "0.1.0" }
 
 # --- Rendering (Vulkan) ---
 vulkano = "0.35"
@@ -76,6 +77,9 @@ log = "0.4"
 env_logger = "0.11"
 png = "0.17"
 
+# --- Audio ---
+rodio = { version = "0.22", default-features = false, features = ["playback", "wav"] }
+
 [package]
 name = "wyvencraft"
 version.workspace = true
@@ -99,6 +103,7 @@ wyven-net.workspace = true
 wyven-input.workspace = true
 wyven-auth.workspace = true
 wyven-app.workspace = true
+wyven-audio.workspace = true
 
 vulkano.workspace = true
 vulkano-shaders.workspace = true

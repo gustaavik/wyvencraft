@@ -14,6 +14,7 @@
 //! wyven-input    winit events -> frame-coherent InputState
 //! wyven-auth     account sessions, key cache, Ed25519 ticket verification
 //! wyven-app      window, egui, event loop, screen stack
+//! wyven-audio    audio device output and mixing
 //! ```
 //!
 //! The dependency direction is one-way and enforced by cargo, not by
@@ -44,6 +45,7 @@
 //! world     ← voxel         block table, worldgen, fluid rules
 //! inventory ← world         the one item registry and its capabilities, stacks, crafting
 //! entity    ← inventory     player, physics, mobs, brains, projectiles
+//! audio     ← wyven-audio   sound/music registry (assets/audio.toml), AudioManager, menu-music timing
 //! content   ← all of it     registries loaded from assets/*.toml
 //! chat      ← net           message log, commands, the ops list
 //! paths     ← (nothing)    where the data dir is; saves, profile, ops, keys
@@ -58,7 +60,10 @@
 //!
 //! I/O boundaries are crossed through ports, each with a real implementation and
 //! a test double: [`content::ContentSource`], [`save::WorldRepository`],
-//! [`state::session::Session`], [`boot::Environment`]. Hot paths (meshing, chunk
+//! [`state::session::Session`], [`boot::Environment`],
+//! [`wyven_audio::AudioBackend`] (`RodioBackend`/`NullAudioBackend`, chosen
+//! once in [`state::Wyvencraft`]'s startup via [`audio::open_default_backend`]).
+//! Hot paths (meshing, chunk
 //! generation, fluid ticking) deliberately use none — the indirection buys
 //! nothing there and would cost frame time, which is why `mesh_chunk` takes
 //! `&impl BlockCatalog` and not `&dyn`.
@@ -70,6 +75,7 @@
 
 pub use wyven_app;
 pub use wyven_assets;
+pub use wyven_audio;
 pub use wyven_auth;
 pub use wyven_core;
 pub use wyven_input;
@@ -80,6 +86,7 @@ pub use wyven_voxel;
 
 pub mod app;
 pub mod art;
+pub mod audio;
 pub mod boot;
 pub mod chat;
 pub mod config;

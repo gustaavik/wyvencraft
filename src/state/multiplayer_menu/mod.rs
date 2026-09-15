@@ -134,6 +134,7 @@ impl GameState<Wyvencraft> for MultiplayerMenuState {
         // Every in-flight query advances here rather than in `ui`, so a probe
         // keeps making progress on a frame the list happens not to be drawn.
         self.browser.tick(ctx.dt);
+        ctx.shared.tick_menu_music(ctx.dt);
         Transition::None
     }
 

@@ -94,7 +94,7 @@ aborts at runtime:
 **Building the *game* needs read access to a private repo; the engine does not.**
 `wcauth-ticket` is reachable only from `wyven-auth`, so
 `cargo build -p wyven-core -p wyven-assets -p wyven-render -p wyven-model -p
-wyven-voxel -p wyven-net -p wyven-input -p wyven-app` needs no credential at all.
+wyven-voxel -p wyven-net -p wyven-input -p wyven-app -p wyven-audio` needs no credential at all.
 `wcauth-ticket` — the join-ticket contract — is a git dependency on the **private**
 [gustaavik/wcauthserver](https://github.com/gustaavik/wcauthserver), pinned to
 `branch = "main"` with the exact commit recorded in `Cargo.lock`. `cargo fetch`
@@ -127,6 +127,7 @@ wyven-net      ← core               renet transport, generic over <Protocol, J
 wyven-input    ← core               winit events → frame-coherent InputState
 wyven-auth     ← nothing            accounts, key cache, Ed25519 ticket verify (the ONLY wcauth-ticket user)
 wyven-app      ← core, render, input    window, egui, event loop, screen stack
+wyven-audio    ← nothing            audio device output + mixing: AudioBackend (RodioBackend/NullAudioBackend), AudioClip, PlaybackHandle
 ```
 
 **None of them knows a block's name, a mob's behaviour, or what survival mode
@@ -156,6 +157,7 @@ entity    ← inventory, model  player, swept-AABB physics, rigged + box models,
 content   ← all of it         GameContent: registries loaded from assets/*.toml
 chat      ← net               message log, commands (one per file), ops.toml authorization
 desktop   ← nothing           handing a file to the OS: reveal it, open it
+audio     ← wyven-audio       sound/music registry (assets/audio.toml), AudioManager, and the menu-music fade/restart state machine
 editor    ← content, inventory dev tool: item placement, its two file formats, hot reload
 save      ← world, entity     world/player persistence (saves/ dir)
 ui        ← inventory, egui   HUD + inventory egui views
@@ -257,6 +259,10 @@ those systems are testable without a Vulkan device.
   content, which is what stopped `model` reaching up into `content` for its bytes.
   `editor::{PlacementStore,Stamps}` are the newest pair, and the reason the file
   rewriting and the file watching are both tested with no filesystem at all.
+  `wyven_audio::AudioBackend` (`RodioBackend`/`NullAudioBackend`) is the newest —
+  a session with no audio device falls back to the null backend exactly as one
+  with no save handle falls back to `NullWorldRepository`, chosen once in
+  `Wyvencraft::start` via `audio::open_default_backend`.
   `chat::CommandContext` is a port for a different reason — not I/O, but to invert
   a dependency: commands are policy and live in `chat`, but they act on registries
   and inventories owned by `state`, which already depends on `chat`. Real impl
@@ -332,6 +338,8 @@ those systems are testable without a Vulkan device.
 | 3D item icons           | `wyven_render::icons` (cell layout, framing transform, ortho camera) + `Renderer::draw_icons`; the sheet is rendered **once** at startup by `state::shared::build_icon_sheet`, one cell per `ModelId`. Tune presentation with `ICON_YAW`/`ICON_PITCH`/`ICON_ROLL`/`FILL` in `wyven_render::icons` — but a model declaring `display.gui` poses itself instead, through `icons::frame_authored`, and is then *not* auto-fitted to the cell. The cell index **is** the `ModelId`: `draw_icons` takes `&[Option<TexturedMesh>]` so a model that fails to upload leaves its cell empty in place rather than shifting every icon after it |
 | Screenshots             | `wyven_app::capture` (pure: swapchain bytes → `Rgba8`, the BGRA/RGBA swizzle, the timestamped name) + the copy chained into `App::frame` between the egui pass and `present`. The composited frame only ever exists as the swapchain image, which is why the capture lives in the runner and not in `wyven-render`. The engine picks neither the key nor the directory: both arrive from the game through `Game::screenshots`, which is also what opts the swapchain into `TRANSFER_SRC` — a game returning `None` never asks the driver for the flag. Key is `Keybinds::screenshot` (F2), path is `paths::screenshots_root()`, PNG encoding is `wyven_assets::encode_png` beside its `decode_png` |
 | Telling the player a screenshot was saved | `Frame::screenshot` is a **mailbox, not a pulse**: the runner puts the path there, a screen `take()`s it, and whatever is left is offered again next frame — which is what stops a capture made under the pause overlay from being lost, since the covered `InGameState` never updates. `InGameState::note_screenshot` turns it into a `ChatLog::push_link` line, local by construction (`ChatState` is per-peer and never synced, and a path means nothing on another machine). Clicking is `ui::chat`'s `ChatOutcome::open` → `desktop::show_file`, which reveals the file *and* opens it. `ChatOutcome` has two independent fields because clicking a link also unfocuses the composer: both the open and the close are real |
+| Add background music | `assets/audio.toml`: a `[[sound]]` row with `category = "music"` — its `volume` is the track's authored ceiling, resolved once at startup and applied as a multiplier over the whole fade envelope (`Shared::start`), since `play_music` always takes an explicit volume and would otherwise ignore it. Fading in/out and the restart-after-a-gap timing are a small pure state machine — `audio::MenuMusicPlayer` (`src/audio/music.rs`), phases `NotStarted → FadingIn → Playing → Waiting → FadingIn → …`, or `→ FadingOut → NotStarted` once asked to stop — driven by `entity::brain::MobBrain::think`'s shape: facts and `dt` in, an intent out. `audio::MenuMusic` is the stateful glue that applies that intent to a live `AudioManager` handle; the main menu's instance lives on `Shared` (not on any one screen) precisely so it plays continuously across every menu-flow screen — each just calls `ctx.shared.tick_menu_music(ctx.dt)` in its own `update()` (see `MainMenuState`, `SingleplayerMenuState`, `MultiplayerMenuState`, `ConnectingState`). `InGameState::on_enter` calls `Shared::stop_menu_music`, which only *requests* the fade-out (`MenuMusicPlayer::request_stop`, ramping down from wherever the track actually is rather than snapping to full first) — `InGameState::update` then drives that fade to completion by ticking for as long as `Shared::menu_music_active()` says there is still something fading, and stops touching it the instant that goes false. A second independent music track would get its own `MenuMusic` field and the same `tick`/`is_active`/`fade_out` trio rather than sharing this one |
+| Add a sound effect | one `[[sound]]` row in `assets/audio.toml` (`category = "sfx"`) plus one `frame.shared.audio.play_sound("<id>")` call at whatever moment should trigger it — no other file changes. A missing id warns and plays nothing rather than panicking, matching the missing-texture convention |
 | Live player preview     | There is no offscreen pass — the preview *is* the world. Opening the inventory blends the world camera to `entity::camera::Shot::inspect`, which stands in front of the player's **body** yaw and slides the image left with `Camera::projection_offset` so the model sits in the column the panel leaves clear. Camera in `InGameState::{world_camera,camera_shot}`; the body is forced on past `INSPECT_MODEL_FROM` in `SceneCache::update_player_mesh` (first person has no body mesh otherwise, and culling is off, so it cannot start at 0 or you see the inside of the head) |
 | The inventory's open/close animation | `state::ingame_state::inventory::OpenAnim` — one linear `t`, eased on read, read by *both* the camera and the panel so they cannot desynchronise. Linear-and-eased-on-read is what makes an interrupted sweep resume rather than restart; smoothstep rather than the exponential blend `entity::animation` uses, because both endpoints must be reached exactly |
 | Block drop rules        | `drops = ...` on the block in `assets/blocks.toml` (`"self"`, `"none"`, `{ item, count }`) — *what* drops. *Whether* anything drops is the separate `[block.harvest] required` gate above, checked first in `block_drop_stack`, so the two compose: "needs a pickaxe" and "yields cobblestone" are written independently and neither has to know about the other |
@@ -395,6 +403,11 @@ those systems are testable without a Vulkan device.
   band in `BlockVisuals`, and `content` resolves them to slots. Otherwise two peers whose grass is drawn slightly differently
   would be refused a shared world. If a `content_hash` test starts failing after
   a visual change, that is the invariant breaking, not the test being stale.
+- **Audio never feeds `content_hash`.** `GameContent::sounds` (`assets/audio.toml`)
+  is presentation exactly like a texture or a model — two peers running
+  different sound packs, or no audio device at all, must still be able to
+  share a world — so it loads like every other registry but is never passed
+  into `content::content_hash`.
 - **Block textures end up 256×256 whatever they were authored at.** An array
   image has one extent for every layer, so anything square that divides 256 is
   replicated up to it at load (`wyven_render::block_textures::upscale`) — nearest, at
@@ -499,8 +512,8 @@ those systems are testable without a Vulkan device.
 ## Verifying a change
 
 1. `cargo build --workspace` / `cargo clippy --workspace --all-targets` clean.
-2. `cargo test --workspace` green (874 tests: 9 app, 2 assets, 54 auth, 11 core,
-   116 model, 55 render, 21 voxel, 606 game). One of the game tests
+2. `cargo test --workspace` green (903 tests: 9 app, 2 assets, 4 audio, 54 auth,
+   11 core, 116 model, 55 render, 21 voxel, 631 game). One of the game tests
    (`a_probe_reaches_a_real_host_and_is_answered_without_joining_it`) binds a
    real loopback socket and drives the whole status/join path through it — it is
    the only test here that touches a network, and deliberately so: a probe *is* a
@@ -513,6 +526,6 @@ those systems are testable without a Vulkan device.
 For a change that touches the engine/game line, two extra checks:
 
 4. The engine still builds with no GitHub credential:
-   `cargo build -p wyven-core -p wyven-assets -p wyven-render -p wyven-model -p wyven-voxel -p wyven-net -p wyven-input -p wyven-app`
+   `cargo build -p wyven-core -p wyven-assets -p wyven-render -p wyven-model -p wyven-voxel -p wyven-net -p wyven-input -p wyven-app -p wyven-audio`
 5. The logic crates still test with no Vulkan device:
-   `cargo test -p wyven-core -p wyven-voxel -p wyven-model -p wyven-assets`
+   `cargo test -p wyven-core -p wyven-voxel -p wyven-model -p wyven-assets -p wyven-audio`

@@ -81,6 +81,18 @@ impl GameState<Wyvencraft> for InGameState {
         "InGame"
     }
 
+    fn on_enter(&mut self, ctx: &mut StateContext) {
+        // Begins fading the menu theme out — this is the one place the game
+        // actually leaves the menu flow, as opposed to the menu screens
+        // themselves, which all keep it playing. The fade itself is driven
+        // by `update`'s own `tick_menu_music` call below, for as long as
+        // `menu_music_active` says it is still going. Fires again,
+        // harmlessly (a no-op once already fading or already silent), every
+        // time the pause menu is dismissed and this screen is exposed as the
+        // top of the stack once more (see `on_exit` below).
+        ctx.shared.stop_menu_music();
+    }
+
     fn on_exit(&mut self, _ctx: &mut StateContext) {
         // Fires when pausing (Push), quitting to the menu (ReplaceAll), and on
         // app shutdown (Quit / window close) — every path that leaves the world.
@@ -88,6 +100,12 @@ impl GameState<Wyvencraft> for InGameState {
     }
 
     fn update(&mut self, ctx: &mut StateContext) -> Transition {
+        // Drives the menu theme's fade-out to completion after joining a
+        // world, then stops touching it — see `Shared::menu_music_active`.
+        if ctx.shared.menu_music_active() {
+            ctx.shared.tick_menu_music(ctx.dt);
+        }
+
         let kb = ctx.shared.settings.controls.keybinds.clone();
 
         // Ungated on purpose: a screenshot taken while dead, typing, or with the

@@ -53,6 +53,40 @@ pub struct Shared {
     /// nothing needs a global.
     pub account: wyven_auth::AccountState,
     pub ui_tex: UiTextures,
+    /// Sound/music playback. Real device or silent fallback, chosen once in
+    /// [`Game::start`] — see [`crate::audio::open_default_backend`].
+    pub audio: crate::audio::AudioManager,
+    /// The main menu theme's fade/restart timing and live handle.
+    ///
+    /// Lives here rather than on any one screen so it plays continuously
+    /// across every menu-flow screen (main menu, singleplayer, multiplayer
+    /// and its sub-screens) — see [`Shared::tick_menu_music`].
+    menu_music: crate::audio::MenuMusic,
+}
+
+impl Shared {
+    /// Advance the main menu theme's fade/restart/fade-out timing. Call this
+    /// from every screen the track should stay audible through, and — while
+    /// [`Shared::menu_music_active`] says a fade-out is still in progress —
+    /// from whatever screen it is fading out *into* as well.
+    pub fn tick_menu_music(&mut self, dt: f32) {
+        self.menu_music.tick(dt, &mut self.audio);
+    }
+
+    /// Whether the menu theme still needs ticking — playing, fading in,
+    /// waiting to restart, or fading out. `false` once it is fully silent.
+    pub fn menu_music_active(&self) -> bool {
+        self.menu_music.is_active()
+    }
+
+    /// Begin fading the main menu theme out, rather than cutting it. Call
+    /// this once, from the screen that actually leaves the menu context
+    /// (entering a world) — the fade itself is then driven by that screen's
+    /// own `tick_menu_music` calls for as long as `menu_music_active` says
+    /// there is still something to fade.
+    pub fn stop_menu_music(&mut self) {
+        self.menu_music.fade_out();
+    }
 }
 
 /// The game, before a window exists.
@@ -135,6 +169,24 @@ impl Game for Wyvencraft {
         let model_icons = register(boot.gui, icon_sheet, Filter::Linear);
         let gui = register(boot.gui, load_gui_sheet(boot.render), Filter::Nearest);
 
+        // Opening the audio device is a one-shot OS-level side effect, so it
+        // happens here — the moment the app is actually starting — rather
+        // than in `Wyvencraft::new()`, which only loads content.
+        let audio = crate::audio::AudioManager::new(
+            &self.content.sounds,
+            &wyven_assets::FsSource::cwd(),
+            crate::audio::open_default_backend(),
+        );
+        // The theme's own authored ceiling (`assets/audio.toml`), not a
+        // hardcoded 1.0 — `play_music` always takes an explicit volume
+        // (the fade envelope), so without this the registry's `volume` for
+        // a music entry would silently do nothing.
+        let mainmenu_volume = self
+            .content
+            .sounds
+            .find(crate::audio::MAINMENU_THEME)
+            .map_or(1.0, |def| def.volume);
+
         let shared = Shared {
             settings: self.settings,
             render: boot.render.clone(),
@@ -146,6 +198,8 @@ impl Game for Wyvencraft {
                 model_count: self.content.models.len() as u32,
                 gui,
             },
+            audio,
+            menu_music: crate::audio::MenuMusic::new(crate::audio::MAINMENU_THEME, mainmenu_volume),
         };
         let first = crate::boot::initial_screen(self.plan, &self.content, &self.account);
         (shared, first)

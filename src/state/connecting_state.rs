@@ -259,6 +259,7 @@ impl GameState<Wyvencraft> for ConnectingState {
 
     fn update(&mut self, ctx: &mut StateContext) -> Transition {
         ctx.grab_cursor = false;
+        ctx.shared.tick_menu_music(ctx.dt);
         self.elapsed += ctx.dt;
 
         // Checked before anything else, including the failure hold below: Esc
