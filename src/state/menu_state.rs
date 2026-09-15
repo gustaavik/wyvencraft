@@ -1,4 +1,9 @@
 //! Main menu: choose singleplayer / multiplayer / quit.
+//!
+//! The main menu theme plays continuously through this screen and every menu
+//! screen reachable from it — see [`crate::state::Shared::tick_menu_music`],
+//! which is what each of those screens' `update` calls instead of owning any
+//! music state of their own.
 
 use super::{
     GameState, MultiplayerMenuState, SingleplayerMenuState, StateContext, Transition, Wyvencraft,
@@ -21,6 +26,7 @@ impl GameState<Wyvencraft> for MainMenuState {
     fn update(&mut self, ctx: &mut StateContext) -> Transition {
         // Menus run with a free cursor.
         ctx.grab_cursor = false;
+        ctx.shared.tick_menu_music(ctx.dt);
         Transition::None
     }
 

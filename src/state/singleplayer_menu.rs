@@ -114,6 +114,7 @@ impl GameState<Wyvencraft> for SingleplayerMenuState {
 
     fn update(&mut self, ctx: &mut StateContext) -> Transition {
         ctx.grab_cursor = false;
+        ctx.shared.tick_menu_music(ctx.dt);
         Transition::None
     }
 

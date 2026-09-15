@@ -119,6 +119,11 @@ pub struct GameContent {
     pub worldgen: Arc<WorldGenConfig>,
     /// Mob spawn rules (`assets/spawning.toml`).
     pub spawning: Arc<SpawnConfig>,
+    /// Sound/music definitions from `assets/audio.toml`. Kept off
+    /// [`content_hash`] for the same reason [`ItemModel`] is: two peers with
+    /// different local audio — or no audio device at all — must still be
+    /// able to share a world.
+    pub sounds: Arc<crate::audio::SoundRegistry>,
     /// Every model file referenced by an entity visual or an item, parsed once.
     pub models: Arc<ModelRegistry>,
     /// 2D icon for each item, indexed by `ItemId` (see [`ItemIcon`]).
@@ -182,6 +187,7 @@ const ITEMS_PATH: &str = "assets/items.toml";
 const ENTITIES_PATH: &str = "assets/entities.toml";
 const WORLDGEN_PATH: &str = "assets/worldgen.toml";
 const SPAWNING_PATH: &str = "assets/spawning.toml";
+const AUDIO_PATH: &str = "assets/audio.toml";
 
 /// Where every block item is placed from.
 ///
@@ -293,6 +299,15 @@ impl GameContent {
             |text, _| SpawnConfig::from_toml(text, &entities),
             |_| SpawnConfig::builtin(&entities),
             |config| format!("{} spawn rules", config.entries.len()),
+        ));
+        let sounds = Arc::new(load_or_builtin(
+            source,
+            AUDIO_PATH,
+            "sounds",
+            &mut (),
+            |text, _| crate::audio::SoundRegistry::from_toml(text),
+            |_| crate::audio::SoundRegistry::builtin(),
+            |reg| format!("{} sounds", reg.len()),
         ));
 
         // Models load last: they are named by the entity and item definitions,
@@ -416,6 +431,7 @@ impl GameContent {
             Some(_) => FaceTextures::uniform(tiles.resolve(&format!("items/{ARROW_ITEM}")).tile),
             None => MISSING_FACES,
         };
+        // `sounds` is excluded here on purpose — see its field doc on `GameContent`.
         let hash = content_hash(&blocks, &items, &entities, &worldgen, &spawning);
         Arc::new(Self {
             tiles,
@@ -425,6 +441,7 @@ impl GameContent {
             entities,
             worldgen,
             spawning,
+            sounds,
             models: Arc::new(models),
             item_icons,
             item_models,
@@ -1552,6 +1569,27 @@ mod tests {
             unknown_harvest_tools(&blocks, &items),
             [("oak_leaves", "snippers")]
         );
+    }
+
+    /// A sound is presentation exactly like a texture or a model: two peers
+    /// running different sound packs, or no audio device at all, must still
+    /// be able to share a world.
+    #[test]
+    fn sound_registry_does_not_feed_the_content_hash() {
+        let base = GameContent::from_source(
+            &MapSource::new().with(AUDIO_PATH, crate::audio::BUILTIN_AUDIO),
+        );
+        let extra = format!(
+            "{}\n[[sound]]\nid = \"extra\"\npath = \"x.wav\"\ncategory = \"sfx\"\nvolume = 1.0\n",
+            crate::audio::BUILTIN_AUDIO
+        );
+        let changed = GameContent::from_source(&MapSource::new().with(AUDIO_PATH, extra));
+        assert_ne!(
+            base.sounds.len(),
+            changed.sounds.len(),
+            "fixture actually differs"
+        );
+        assert_eq!(base.hash, changed.hash);
     }
 
     /// The content hash is stable across loads of identical definitions (it

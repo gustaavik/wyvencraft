@@ -1,0 +1,11 @@
+[package]
+name = "wyven-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Audio device output and mixing, generic over what a clip or a fade means to the game."
+
+[dependencies]
+log.workspace = true
+rodio.workspace = true

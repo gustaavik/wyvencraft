@@ -1,0 +1,17 @@
+# Sound & music registry: every playable clip in the game gets one row here.
+#
+#   id        unique key other code references (lowercase, `_`-separated —
+#             enforced like every other content id)
+#   path      assets/-relative path to the audio file (wav today; wyven-audio
+#             may support more formats later without this table changing shape)
+#   category  "music" | "sfx" — informational only for now; does not change
+#             how playback works, but is where a future separate volume
+#             slider would key off
+#   volume    default linear volume (0.0..=1.0) `play_sound`/`play_music` use
+#             when the caller does not pass its own
+
+[[sound]]
+id = "mainmenu_theme"
+path = "assets/audio/happynoise.wav"
+category = "music"
+volume = 0.5
