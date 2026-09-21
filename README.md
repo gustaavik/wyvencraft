@@ -18,7 +18,7 @@ ticket before admitting a player, and the game has no login screen of its own: t
 [launcher](https://github.com/gustaavik/wc-launcher) signs you in and hands the
 session to the game.
 
-Register at **[wyvencraft.com](https://game.wyvencraft.com)**.
+Register at **[game.wyvencraft.com](https://game.wyvencraft.com)**.
 
 ## Features
 
