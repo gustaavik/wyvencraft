@@ -4,7 +4,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use egui_winit_vulkano::{Gui, GuiConfig};
-use vulkano::device::DeviceFeatures;
 use vulkano::format::Format;
 use vulkano::image::ImageUsage;
 use vulkano::swapchain::{PresentMode, SwapchainCreateInfo};
@@ -21,6 +20,7 @@ use wyven_render::{RenderContext, Renderer};
 
 use crate::capture::{self, ScreenshotConfig};
 use crate::screen::{Frame, ScreenStack};
+use crate::vulkan::{self, VulkanUnavailable};
 use crate::{Game, RendererTextures};
 
 /// Window size, title and vsync — everything the runner needs before it can
@@ -54,13 +54,19 @@ pub struct Boot<'a> {
 pub enum AppError {
     #[error("event loop error: {0}")]
     EventLoop(#[from] winit::error::EventLoopError),
+    /// This machine has no GPU the engine can run on. Reported rather than
+    /// panicked on, so a caller can say so and exit with a code of its own.
+    #[error(transparent)]
+    NoVulkan(#[from] VulkanUnavailable),
 }
 
 /// Open a window and run `game` until it quits.
 pub fn run<G: Game>(game: G) -> Result<(), AppError> {
+    // First, before any window: every later Vulkan step unwraps.
+    let choice = vulkan::check()?;
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = App::new(game);
+    let mut app = App::new(game, choice);
     event_loop.run_app(&mut app)?;
     Ok(())
 }
@@ -101,25 +107,16 @@ struct App<G: Game> {
 }
 
 impl<G: Game> App<G> {
-    fn new(game: G) -> Self {
-        // Every feature here is a hard requirement: a device lacking one fails
-        // device creation outright rather than degrading. The first two are
-        // gated by MoltenVK's "portability subset"; the third is plain optional
-        // core, and universally supported.
+    fn new(game: G, choice: vulkan::Choice) -> Self {
+        // The device, and what it is created with, were chosen by
+        // `vulkan::check` — see there for why the requirements vary by device.
+        // The same filter and priority here make vulkano-util land on it.
+        log::info!("Vulkan device chosen: {}", choice.device_name);
         let config = VulkanoConfig {
-            device_features: DeviceFeatures {
-                // The world pass uses dynamic rendering (no VkRenderPass).
-                dynamic_rendering: true,
-                // egui uploads its font/texture images with a component
-                // swizzle, which the portability subset gates behind this.
-                image_view_format_swizzle: true,
-                // The block texture array filters anisotropically. A voxel world
-                // is mostly ground plane seen edge-on, which is the exact case
-                // an isotropic mip chain over-blurs in one axis and aliases in
-                // the other — so distant terrain shimmers as the camera turns.
-                sampler_anisotropy: true,
-                ..DeviceFeatures::empty()
-            },
+            device_extensions: choice.requirements.extensions,
+            device_features: choice.requirements.features,
+            device_filter_fn: Arc::new(vulkan::suitable),
+            device_priority_fn: Arc::new(vulkan::priority),
             ..VulkanoConfig::default()
         };
         let context = VulkanoContext::new(config);
@@ -359,11 +356,11 @@ impl<G: Game> ApplicationHandler for App<G> {
             return; // already created
         }
 
-        let present_mode = if self.window.vsync {
-            PresentMode::Fifo
-        } else {
-            PresentMode::Immediate
-        };
+        // Always open on Fifo: it is the only mode every driver must support,
+        // and vulkano-util unwraps the swapchain, so asking for an unsupported
+        // one panics. The surface only exists once the window does, so the
+        // uncapped mode is chosen afterwards, from what the surface offers.
+        let present_mode = PresentMode::Fifo;
         let descriptor = WindowDescriptor {
             width: self.window.width as f32,
             height: self.window.height as f32,
@@ -383,6 +380,20 @@ impl<G: Game> ApplicationHandler for App<G> {
         };
         self.windows
             .create_window(event_loop, &self.context, &descriptor, modify);
+
+        if !self.window.vsync {
+            let renderer = self.windows.get_primary_renderer_mut().unwrap();
+            let supported = self
+                .context
+                .device()
+                .physical_device()
+                .surface_present_modes(&renderer.surface(), Default::default())
+                .unwrap_or_default();
+            let uncapped = uncapped_present_mode(&supported);
+            if uncapped != PresentMode::Fifo {
+                renderer.set_present_mode(uncapped);
+            }
+        }
 
         let window_renderer = self.windows.get_primary_renderer().unwrap();
         let color_format = window_renderer.swapchain_format();
@@ -484,5 +495,32 @@ impl<G: Game> ApplicationHandler for App<G> {
         if let Some(window) = self.windows.get_primary_window() {
             window.request_redraw();
         }
+    }
+}
+
+/// The mode to present with when vsync is off: Immediate if the surface offers
+/// it, else Mailbox, else Fifo — the one mode every driver must support. Some
+/// Windows drivers expose no Immediate at all.
+fn uncapped_present_mode(supported: &[PresentMode]) -> PresentMode {
+    [PresentMode::Immediate, PresentMode::Mailbox]
+        .into_iter()
+        .find(|mode| supported.contains(mode))
+        .unwrap_or(PresentMode::Fifo)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uncapped_prefers_immediate_then_mailbox_then_fifo() {
+        use PresentMode::*;
+        assert_eq!(
+            uncapped_present_mode(&[Fifo, Mailbox, Immediate]),
+            Immediate
+        );
+        assert_eq!(uncapped_present_mode(&[Fifo, Mailbox]), Mailbox);
+        assert_eq!(uncapped_present_mode(&[Fifo]), Fifo);
+        assert_eq!(uncapped_present_mode(&[]), Fifo);
     }
 }

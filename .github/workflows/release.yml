@@ -37,6 +37,14 @@ jobs:
             runner: macos-15-intel
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+
+    # Every step is bash, including on Windows (Git Bash), so there is one
+    # packaging script rather than a PowerShell twin that drifts from it.
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - name: Resolve the release tag
@@ -79,6 +87,32 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build python3 libasound2-dev
 
+      # Windows builds shaderc from its vendored sources too — MSVC, CMake,
+      # Ninja and Python are all on the runner image. Its CMake tree nests deep
+      # enough under target/ to cross MAX_PATH from the default checkout
+      # directory, so the target dir is moved to a short root.
+      #
+      # The runner's CMake is 4.x, which refuses any project declaring support
+      # for CMake < 3.5 — and the shaderc sources shaderc-sys 0.8.3 vendors do.
+      # CMAKE_POLICY_VERSION_MINIMUM is CMake 4's own escape hatch for exactly
+      # that, read from the environment. Drop it once shaderc-sys ships sources
+      # with a current cmake_minimum_required.
+      #
+      # The C runtime is linked statically. Rust's MSVC target otherwise imports
+      # VCRUNTIME140.dll, which belongs to the Visual C++ Redistributable and is
+      # not on a clean Windows install — the loader then refuses the game with
+      # 0xC0000135 before main runs, so it cannot even log why. Target-scoped,
+      # and the build passes --target, so only the game binary gets it: the
+      # host-side shaderc proc macro keeps the /MD build CMake made, which a
+      # static CRT could not link against. cc reads the same flag and builds
+      # ring with /MT to match.
+      - name: Prepare the Windows build
+        if: runner.os == 'Windows'
+        run: |
+          echo "CARGO_TARGET_DIR=C:/t" >> "$GITHUB_ENV"
+          echo "CMAKE_POLICY_VERSION_MINIMUM=3.5" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS=-C target-feature=+crt-static" >> "$GITHUB_ENV"
+
       # No argument: installs the toolchain named by rust-toolchain.toml. The
       # target is added to that same pinned toolchain.
       - name: Install the pinned toolchain
@@ -103,8 +137,10 @@ jobs:
           MOLTENVK_SHA256: bf3fa76db4d01efede0f3d08d3f9e43497316d968d6b2c672c1df42c5fbe002f
         run: |
           NAME="wyvencraft-${TAG}-${{ matrix.target }}"
+          BIN=wyvencraft
+          [ "$RUNNER_OS" = "Windows" ] && BIN=wyvencraft.exe
           mkdir -p "dist/${NAME}"
-          cp "target/${{ matrix.target }}/release/wyvencraft" "dist/${NAME}/"
+          cp "${CARGO_TARGET_DIR:-target}/${{ matrix.target }}/release/${BIN}" "dist/${NAME}/"
           cp -R assets "dist/${NAME}/"
           cp README.md "dist/${NAME}/"
 
@@ -130,11 +166,31 @@ jobs:
             test -s "dist/${NAME}/MoltenVK/libMoltenVK.dylib"
           fi
 
-          tar -czf "dist/${NAME}.tar.gz" -C dist "${NAME}"
+          # A player's PC may have no Visual C++ Redistributable, so the game
+          # must not need one. The DLL name appears in the binary only as an
+          # import, so finding it means the static CRT above did not take.
+          if [ "$RUNNER_OS" = "Windows" ] && grep -qai 'vcruntime140' "dist/${NAME}/${BIN}"; then
+            echo "::error::${BIN} imports VCRUNTIME140.dll; it would not start on a clean Windows install"
+            exit 1
+          fi
+
+          # Windows gets a .zip — what Explorer opens, and what wc-launcher's
+          # target table expects for x86_64-pc-windows-msvc. Both keep the one
+          # top-level directory the launcher strips.
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            ARCHIVE="${NAME}.zip"
+            (cd dist && 7z a -tzip -bso0 "${ARCHIVE}" "${NAME}")
+          else
+            ARCHIVE="${NAME}.tar.gz"
+            tar -czf "dist/${ARCHIVE}" -C dist "${NAME}"
+          fi
           # Recorded from inside dist/, so the file names a bare filename and a
-          # downloader can `shasum -c` it next to the tarball.
-          (cd dist && shasum -a 256 "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256")
-          echo "ASSET=dist/${NAME}.tar.gz" >> "$GITHUB_ENV"
+          # downloader can `shasum -c` it next to the archive. Git Bash has
+          # sha256sum but no shasum; both print `<hash>  <file>`, which is the
+          # shape the publish job's `cut -d' ' -f1` reads.
+          if command -v sha256sum > /dev/null; then SHA="sha256sum"; else SHA="shasum -a 256"; fi
+          (cd dist && $SHA "${ARCHIVE}" > "${ARCHIVE}.sha256")
+          echo "ASSET=dist/${ARCHIVE}" >> "$GITHUB_ENV"
           echo "NAME=${NAME}" >> "$GITHUB_ENV"
 
       # Also kept as a workflow artifact, so a workflow_dispatch run is useful on
@@ -212,20 +268,27 @@ jobs:
       - name: Describe this release
         run: |
           set -euo pipefail
-          # A target that failed to build leaves no archive, and there is no
-          # .zip target at all today, so an unmatched glob must vanish rather
-          # than survive as a literal.
+          # A target that failed to build leaves no archive, and a run whose
+          # Windows leg failed has no .zip at all, so an unmatched glob must
+          # vanish rather than survive as a literal.
           shopt -s nullglob
           # Built from the files that actually arrived, so release.json can
           # never advertise an archive that was not published. The checksum is
           # read from the sibling the build job wrote, rather than recomputed,
           # so a corrupted transfer through the artifact store is caught here.
+          #
+          # The path carries the start of the checksum, so a rebuild of the
+          # same tag lands at a new URL. Archives are cached as immutable, and
+          # re-running a release once replaced the bytes under an unchanged
+          # URL: the edge kept serving the old archive for a year while the
+          # index advertised the new checksum, and every install failed with a
+          # checksum mismatch. The upload step derives the same path.
           assets=$(
             for archive in dist/*.tar.gz dist/*.zip; do
               name=$(basename "$archive")
               sha=$(cut -d' ' -f1 < "${archive}.sha256")
               jq -n --arg name "$name" \
-                    --arg path "${PREFIX}/${TAG}/${name}" \
+                    --arg path "${PREFIX}/${TAG}/${sha:0:16}/${name}" \
                     --argjson size "$(stat -c%s "$archive")" \
                     --arg sha256 "$sha" \
                     '{name: $name, path: $path, size: $size, sha256: $sha256}'
@@ -250,16 +313,21 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
           KEY="s3://${BUCKET}/${PREFIX}/${TAG}"
-          # Immutable: a tag's bytes never change, so an edge that caches them
-          # forever is exactly what we want. aws s3 cp switches to multipart
-          # above 8 MB, which also keeps every request under Cloudflare's 100 MB
-          # proxied-body cap — do not "optimise" that by raising the threshold.
+          # Immutable, and true by construction: each archive sits under a
+          # directory named by its own checksum (see "Describe this release"),
+          # so bytes at a URL can never change, and an edge that caches them
+          # forever is exactly what we want — even when a tag is rebuilt.
+          # aws s3 cp switches to multipart above 8 MB, which also keeps every
+          # request under Cloudflare's 100 MB proxied-body cap — do not
+          # "optimise" that by raising the threshold.
           for archive in dist/*.tar.gz dist/*.zip; do
             case "$archive" in *.zip) type=application/zip;; *) type=application/gzip;; esac
-            aws s3 cp "$archive" "${KEY}/$(basename "$archive")" \
+            sha=$(cut -d' ' -f1 < "${archive}.sha256")
+            dir="${KEY}/${sha:0:16}"
+            aws s3 cp "$archive" "${dir}/$(basename "$archive")" \
               --content-type "$type" \
               --cache-control "public, max-age=31536000, immutable"
-            aws s3 cp "${archive}.sha256" "${KEY}/$(basename "$archive").sha256" \
+            aws s3 cp "${archive}.sha256" "${dir}/$(basename "$archive").sha256" \
               --content-type "text/plain; charset=utf-8" \
               --cache-control "public, max-age=31536000, immutable"
           done

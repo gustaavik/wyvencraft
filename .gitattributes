@@ -1,0 +1,8 @@
+# Every text file is LF in every checkout, whatever the machine's core.autocrlf.
+#
+# Without this, a Windows checkout (GitHub's Windows runners set autocrlf=true)
+# turned assets/*.toml into CRLF: the Windows release shipped different bytes
+# from macOS and Linux — in assets/ and in the include_str! fallbacks compiled
+# into the binary — and tests that edit asset text by exact substring failed.
+# Binary files (PNGs, models, audio) are detected and left alone.
+* text=auto eol=lf

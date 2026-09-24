@@ -127,3 +127,43 @@ jobs:
       # which needs the private-repo token above.
       - name: Third-party notices are current
         run: make licenses-check
+
+  # Windows is a release target, so it is checked here rather than first found
+  # broken by the release run. No GPU is needed: the tests are pure logic.
+  #
+  # shaderc builds from its vendored sources, as on Linux — MSVC, CMake, Ninja
+  # and Python are on the runner image. Its CMake tree nests deep enough under
+  # target/ to cross MAX_PATH from the default checkout directory, hence the
+  # short CARGO_TARGET_DIR. The cache action follows that variable.
+  windows:
+    name: clippy + tests (Windows)
+    runs-on: windows-latest
+    env:
+      CARGO_TARGET_DIR: C:/t
+      # CMake 4 on the runner refuses shaderc's vendored cmake_minimum_required
+      # (< 3.5); see the same variable in release.yml.
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Authenticate to the private wcauthserver repo
+        env:
+          WCAUTH_TOKEN: ${{ secrets.WCAUTH_TOKEN }}
+        run: |
+          git config --global \
+            url."https://x-access-token:${WCAUTH_TOKEN}@github.com/".insteadOf \
+            "https://github.com/"
+
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - run: cargo clippy --all-targets --locked -- -D warnings
+
+      - run: cargo test --locked

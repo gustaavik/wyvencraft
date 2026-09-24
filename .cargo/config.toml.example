@@ -15,6 +15,12 @@ SHADERC_LIB_DIR = "/usr/local/opt/shaderc/lib"
 VK_ICD_FILENAMES = "/usr/local/etc/vulkan/icd.d/MoltenVK_icd.json"
 VK_DRIVER_FILES = "/usr/local/etc/vulkan/icd.d/MoltenVK_icd.json"
 
+# Windows: comment out every macOS line above. The Vulkan loader ships with the
+# GPU driver, so no VK_* variable is wanted — pointing one at a MoltenVK
+# manifest that does not exist leaves the loader with no driver. With the
+# LunarG Vulkan SDK installed, link its prebuilt shaderc instead of building it:
+# SHADERC_LIB_DIR = "C:/VulkanSDK/<version>/Lib"
+
 # `wcauth-ticket` is a git dependency on the *private* gustaavik/wcauthserver.
 # libgit2 cannot read the `gh` keyring token or the osxkeychain helper, so route
 # the fetch through the system `git`, which can. Without this, `cargo build` fails
