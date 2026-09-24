@@ -276,12 +276,19 @@ jobs:
           # never advertise an archive that was not published. The checksum is
           # read from the sibling the build job wrote, rather than recomputed,
           # so a corrupted transfer through the artifact store is caught here.
+          #
+          # The path carries the start of the checksum, so a rebuild of the
+          # same tag lands at a new URL. Archives are cached as immutable, and
+          # re-running a release once replaced the bytes under an unchanged
+          # URL: the edge kept serving the old archive for a year while the
+          # index advertised the new checksum, and every install failed with a
+          # checksum mismatch. The upload step derives the same path.
           assets=$(
             for archive in dist/*.tar.gz dist/*.zip; do
               name=$(basename "$archive")
               sha=$(cut -d' ' -f1 < "${archive}.sha256")
               jq -n --arg name "$name" \
-                    --arg path "${PREFIX}/${TAG}/${name}" \
+                    --arg path "${PREFIX}/${TAG}/${sha:0:16}/${name}" \
                     --argjson size "$(stat -c%s "$archive")" \
                     --arg sha256 "$sha" \
                     '{name: $name, path: $path, size: $size, sha256: $sha256}'
@@ -306,16 +313,21 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
           KEY="s3://${BUCKET}/${PREFIX}/${TAG}"
-          # Immutable: a tag's bytes never change, so an edge that caches them
-          # forever is exactly what we want. aws s3 cp switches to multipart
-          # above 8 MB, which also keeps every request under Cloudflare's 100 MB
-          # proxied-body cap — do not "optimise" that by raising the threshold.
+          # Immutable, and true by construction: each archive sits under a
+          # directory named by its own checksum (see "Describe this release"),
+          # so bytes at a URL can never change, and an edge that caches them
+          # forever is exactly what we want — even when a tag is rebuilt.
+          # aws s3 cp switches to multipart above 8 MB, which also keeps every
+          # request under Cloudflare's 100 MB proxied-body cap — do not
+          # "optimise" that by raising the threshold.
           for archive in dist/*.tar.gz dist/*.zip; do
             case "$archive" in *.zip) type=application/zip;; *) type=application/gzip;; esac
-            aws s3 cp "$archive" "${KEY}/$(basename "$archive")" \
+            sha=$(cut -d' ' -f1 < "${archive}.sha256")
+            dir="${KEY}/${sha:0:16}"
+            aws s3 cp "$archive" "${dir}/$(basename "$archive")" \
               --content-type "$type" \
               --cache-control "public, max-age=31536000, immutable"
-            aws s3 cp "${archive}.sha256" "${KEY}/$(basename "$archive").sha256" \
+            aws s3 cp "${archive}.sha256" "${dir}/$(basename "$archive").sha256" \
               --content-type "text/plain; charset=utf-8" \
               --cache-control "public, max-age=31536000, immutable"
           done
