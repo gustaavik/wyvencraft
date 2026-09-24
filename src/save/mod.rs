@@ -316,8 +316,25 @@ pub fn slugify(name: &str) -> String {
     }
     if slug.is_empty() {
         "world".to_string()
+    } else if is_reserved_device_name(&slug) {
+        // Windows refuses these as directory names. Suffixed on every OS so a
+        // save copied between machines keeps the same slug.
+        format!("{slug}-world")
     } else {
         slug
+    }
+}
+
+/// Names Windows reserves for devices, which no file or directory may take.
+fn is_reserved_device_name(slug: &str) -> bool {
+    match slug {
+        "con" | "prn" | "aux" | "nul" => true,
+        _ => {
+            let (prefix, digit) = slug.split_at(slug.len().min(3));
+            matches!(prefix, "com" | "lpt")
+                && digit.len() == 1
+                && digit.as_bytes()[0].is_ascii_digit()
+        }
     }
 }
 
@@ -530,6 +547,17 @@ mod tests {
         assert_eq!(slugify("  Cliffs & CAVES 2 "), "cliffs-caves-2");
         assert_eq!(slugify("!!!"), "world");
         assert_eq!(slugify(""), "world");
+    }
+
+    #[test]
+    fn slugify_avoids_windows_device_names() {
+        assert_eq!(slugify("CON"), "con-world");
+        assert_eq!(slugify("nul"), "nul-world");
+        assert_eq!(slugify("Com1"), "com1-world");
+        assert_eq!(slugify("lpt9"), "lpt9-world");
+        assert_eq!(slugify("com0"), "com0-world");
+        assert_eq!(slugify("com10"), "com10");
+        assert_eq!(slugify("console"), "console");
     }
 
     #[test]

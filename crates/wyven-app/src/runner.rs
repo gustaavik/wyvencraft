@@ -359,11 +359,11 @@ impl<G: Game> ApplicationHandler for App<G> {
             return; // already created
         }
 
-        let present_mode = if self.window.vsync {
-            PresentMode::Fifo
-        } else {
-            PresentMode::Immediate
-        };
+        // Always open on Fifo: it is the only mode every driver must support,
+        // and vulkano-util unwraps the swapchain, so asking for an unsupported
+        // one panics. The surface only exists once the window does, so the
+        // uncapped mode is chosen afterwards, from what the surface offers.
+        let present_mode = PresentMode::Fifo;
         let descriptor = WindowDescriptor {
             width: self.window.width as f32,
             height: self.window.height as f32,
@@ -383,6 +383,20 @@ impl<G: Game> ApplicationHandler for App<G> {
         };
         self.windows
             .create_window(event_loop, &self.context, &descriptor, modify);
+
+        if !self.window.vsync {
+            let renderer = self.windows.get_primary_renderer_mut().unwrap();
+            let supported = self
+                .context
+                .device()
+                .physical_device()
+                .surface_present_modes(&renderer.surface(), Default::default())
+                .unwrap_or_default();
+            let uncapped = uncapped_present_mode(&supported);
+            if uncapped != PresentMode::Fifo {
+                renderer.set_present_mode(uncapped);
+            }
+        }
 
         let window_renderer = self.windows.get_primary_renderer().unwrap();
         let color_format = window_renderer.swapchain_format();
@@ -484,5 +498,32 @@ impl<G: Game> ApplicationHandler for App<G> {
         if let Some(window) = self.windows.get_primary_window() {
             window.request_redraw();
         }
+    }
+}
+
+/// The mode to present with when vsync is off: Immediate if the surface offers
+/// it, else Mailbox, else Fifo — the one mode every driver must support. Some
+/// Windows drivers expose no Immediate at all.
+fn uncapped_present_mode(supported: &[PresentMode]) -> PresentMode {
+    [PresentMode::Immediate, PresentMode::Mailbox]
+        .into_iter()
+        .find(|mode| supported.contains(mode))
+        .unwrap_or(PresentMode::Fifo)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uncapped_prefers_immediate_then_mailbox_then_fifo() {
+        use PresentMode::*;
+        assert_eq!(
+            uncapped_present_mode(&[Fifo, Mailbox, Immediate]),
+            Immediate
+        );
+        assert_eq!(uncapped_present_mode(&[Fifo, Mailbox]), Mailbox);
+        assert_eq!(uncapped_present_mode(&[Fifo]), Fifo);
+        assert_eq!(uncapped_present_mode(&[]), Fifo);
     }
 }

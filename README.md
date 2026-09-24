@@ -63,9 +63,32 @@ environment automatically (points `vulkano-shaders` at the prebuilt shaderc
 library and the Vulkan loader at the MoltenVK ICD), so `cargo run` works out of the
 box once the packages above are installed.
 
-> On Linux/Windows the same code should build with the native Vulkan SDK +
-> `shaderc`; the `[env]` paths in `.cargo/config.toml` are macOS/Homebrew specific
-> and can be removed or adjusted.
+### Windows toolchain
+
+- **Visual Studio Build Tools** with the *Desktop development with C++* workload
+  (MSVC, CMake, Ninja). Rust's `x86_64-pc-windows-msvc` target links with it.
+- **Python 3** on `PATH`.
+- The Vulkan runtime (`vulkan-1.dll`) ships with every current GPU driver, so
+  there is nothing to install to *run* the game.
+
+With nothing else set, `shaderc` builds from its vendored sources on the first
+build, which takes several minutes. Two things make that painless:
+
+- Install the [LunarG Vulkan SDK](https://vulkan.lunarg.com/sdk/home#windows)
+  and set `SHADERC_LIB_DIR` to its `Lib` directory. The build then links the
+  SDK's prebuilt `shaderc_combined.lib` instead (see
+  [`.cargo/config.toml.example`](.cargo/config.toml.example)).
+- If you do build from source, keep the checkout (or `CARGO_TARGET_DIR`) at a
+  short path such as `C:\src\wyvencraft`. shaderc's CMake tree nests deep
+  enough to cross the 260-character `MAX_PATH` limit otherwise.
+
+Do **not** copy the macOS `[env]` entries into `.cargo/config.toml` on Windows:
+`VK_ICD_FILENAMES` pointing at a MoltenVK manifest that does not exist leaves
+the Vulkan loader with no driver at all.
+
+> On Linux the same code builds with CMake, Ninja, Python 3 and
+> `libasound2-dev`; leave `SHADERC_LIB_DIR` unset so shaderc builds its vendored
+> sources (Ubuntu's `libshaderc-dev` is not usable, see `ci.yml`).
 
 ## Build & Run
 
