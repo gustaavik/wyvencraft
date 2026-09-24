@@ -91,9 +91,17 @@ jobs:
       # Ninja and Python are all on the runner image. Its CMake tree nests deep
       # enough under target/ to cross MAX_PATH from the default checkout
       # directory, so the target dir is moved to a short root.
-      - name: Shorten the target directory (Windows)
+      #
+      # The runner's CMake is 4.x, which refuses any project declaring support
+      # for CMake < 3.5 — and the shaderc sources shaderc-sys 0.8.3 vendors do.
+      # CMAKE_POLICY_VERSION_MINIMUM is CMake 4's own escape hatch for exactly
+      # that, read from the environment. Drop it once shaderc-sys ships sources
+      # with a current cmake_minimum_required.
+      - name: Prepare the shaderc build (Windows)
         if: runner.os == 'Windows'
-        run: echo "CARGO_TARGET_DIR=C:/t" >> "$GITHUB_ENV"
+        run: |
+          echo "CARGO_TARGET_DIR=C:/t" >> "$GITHUB_ENV"
+          echo "CMAKE_POLICY_VERSION_MINIMUM=3.5" >> "$GITHUB_ENV"
 
       # No argument: installs the toolchain named by rust-toolchain.toml. The
       # target is added to that same pinned toolchain.
