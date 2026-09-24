@@ -12,12 +12,14 @@
 
 pub mod capture;
 pub mod screen;
+pub mod vulkan;
 
 mod runner;
 
 pub use capture::ScreenshotConfig;
 pub use runner::{AppError, Boot, WindowConfig, run};
 pub use screen::{Frame, Screen, ScreenStack, Transition};
+pub use vulkan::VulkanUnavailable;
 
 use wyven_render::BlockTextureSet;
 

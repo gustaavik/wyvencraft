@@ -84,12 +84,25 @@ Homebrew: `molten-vk vulkan-loader vulkan-tools shaderc glslang cmake`.
   instead of rebuilding shaderc from source (huge build-time saving).
 - `VK_ICD_FILENAMES` / `VK_DRIVER_FILES` — point the Vulkan loader at MoltenVK.
 
-**MoltenVK is a "portability subset" device.** Two device features MUST stay
-enabled in `VulkanoConfig.device_features` in
-[crates/wyven-app/src/runner.rs](crates/wyven-app/src/runner.rs) or the app
-aborts at runtime:
+**What a GPU must support lives in one place:**
+[crates/wyven-app/src/vulkan.rs](crates/wyven-app/src/vulkan.rs), and it
+varies by device (`Requirements::for_device`):
 - `dynamic_rendering` — the world pass uses dynamic rendering (no `VkRenderPass`).
+  Below Vulkan 1.3 it also needs `VK_KHR_dynamic_rendering` enabled.
+- `sampler_anisotropy` — the block texture array filters anisotropically.
 - `image_view_format_swizzle` — egui uploads font textures with a swizzle.
+  **Only on a portability-subset device (MoltenVK).** No other device reports
+  the feature, so requesting it unconditionally fails device creation on every
+  Windows and Linux GPU.
+
+`wyven_app::run` calls `vulkan::check` before anything else, because
+vulkano-util *panics* on a missing loader, driver or device. A machine that
+fails the check gets `AppError::NoVulkan`, which `main.rs` turns into exit code
+**3** (`EXIT_NO_VULKAN`). wc-launcher matches that number to tell the player to
+update their graphics driver, so never reuse it. The check also hands
+vulkano-util its device filter and priority, so the device it creates is the
+one that was vetted. To reproduce the failure on a Mac:
+`VK_ICD_FILENAMES=/nonexistent VK_DRIVER_FILES=/nonexistent cargo run`.
 
 **Building the *game* needs read access to a private repo; the engine does not.**
 `wcauth-ticket` is reachable only from `wyven-auth`, so

@@ -47,6 +47,9 @@ Register at **[game.wyvencraft.com](https://game.wyvencraft.com)**.
 
 - **Rust** ≥ 1.85 (the crate uses edition 2024). Built/tested on 1.96.
 - **A Vulkan-capable GPU.** On macOS this means **MoltenVK** (Vulkan-over-Metal).
+  On Windows and Linux, the GPU vendor's driver provides Vulkan. Virtual
+  machines generally have no Vulkan driver and cannot run the game; it exits
+  with code 3 and says so, rather than crashing.
 
 ### macOS toolchain (Homebrew)
 

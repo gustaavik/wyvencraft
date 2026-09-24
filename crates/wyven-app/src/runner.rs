@@ -4,7 +4,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use egui_winit_vulkano::{Gui, GuiConfig};
-use vulkano::device::DeviceFeatures;
 use vulkano::format::Format;
 use vulkano::image::ImageUsage;
 use vulkano::swapchain::{PresentMode, SwapchainCreateInfo};
@@ -21,6 +20,7 @@ use wyven_render::{RenderContext, Renderer};
 
 use crate::capture::{self, ScreenshotConfig};
 use crate::screen::{Frame, ScreenStack};
+use crate::vulkan::{self, VulkanUnavailable};
 use crate::{Game, RendererTextures};
 
 /// Window size, title and vsync — everything the runner needs before it can
@@ -54,13 +54,19 @@ pub struct Boot<'a> {
 pub enum AppError {
     #[error("event loop error: {0}")]
     EventLoop(#[from] winit::error::EventLoopError),
+    /// This machine has no GPU the engine can run on. Reported rather than
+    /// panicked on, so a caller can say so and exit with a code of its own.
+    #[error(transparent)]
+    NoVulkan(#[from] VulkanUnavailable),
 }
 
 /// Open a window and run `game` until it quits.
 pub fn run<G: Game>(game: G) -> Result<(), AppError> {
+    // First, before any window: every later Vulkan step unwraps.
+    let choice = vulkan::check()?;
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = App::new(game);
+    let mut app = App::new(game, choice);
     event_loop.run_app(&mut app)?;
     Ok(())
 }
@@ -101,25 +107,16 @@ struct App<G: Game> {
 }
 
 impl<G: Game> App<G> {
-    fn new(game: G) -> Self {
-        // Every feature here is a hard requirement: a device lacking one fails
-        // device creation outright rather than degrading. The first two are
-        // gated by MoltenVK's "portability subset"; the third is plain optional
-        // core, and universally supported.
+    fn new(game: G, choice: vulkan::Choice) -> Self {
+        // The device, and what it is created with, were chosen by
+        // `vulkan::check` — see there for why the requirements vary by device.
+        // The same filter and priority here make vulkano-util land on it.
+        log::info!("Vulkan device chosen: {}", choice.device_name);
         let config = VulkanoConfig {
-            device_features: DeviceFeatures {
-                // The world pass uses dynamic rendering (no VkRenderPass).
-                dynamic_rendering: true,
-                // egui uploads its font/texture images with a component
-                // swizzle, which the portability subset gates behind this.
-                image_view_format_swizzle: true,
-                // The block texture array filters anisotropically. A voxel world
-                // is mostly ground plane seen edge-on, which is the exact case
-                // an isotropic mip chain over-blurs in one axis and aliases in
-                // the other — so distant terrain shimmers as the camera turns.
-                sampler_anisotropy: true,
-                ..DeviceFeatures::empty()
-            },
+            device_extensions: choice.requirements.extensions,
+            device_features: choice.requirements.features,
+            device_filter_fn: Arc::new(vulkan::suitable),
+            device_priority_fn: Arc::new(vulkan::priority),
             ..VulkanoConfig::default()
         };
         let context = VulkanoContext::new(config);
