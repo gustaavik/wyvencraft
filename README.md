@@ -70,6 +70,10 @@ box once the packages above are installed.
 - **Python 3** on `PATH`.
 - The Vulkan runtime (`vulkan-1.dll`) ships with every current GPU driver, so
   there is nothing to install to *run* the game.
+- Release builds link the C runtime statically
+  (`-C target-feature=+crt-static`, set in `release.yml`), so players need no
+  Visual C++ Redistributable. A plain `cargo build` does not, and its binary
+  will not start on a PC without the redistributable.
 
 With nothing else set, `shaderc` builds from its vendored sources on the first
 build, which takes several minutes. Two things make that painless:

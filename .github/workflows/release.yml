@@ -97,11 +97,21 @@ jobs:
       # CMAKE_POLICY_VERSION_MINIMUM is CMake 4's own escape hatch for exactly
       # that, read from the environment. Drop it once shaderc-sys ships sources
       # with a current cmake_minimum_required.
-      - name: Prepare the shaderc build (Windows)
+      #
+      # The C runtime is linked statically. Rust's MSVC target otherwise imports
+      # VCRUNTIME140.dll, which belongs to the Visual C++ Redistributable and is
+      # not on a clean Windows install — the loader then refuses the game with
+      # 0xC0000135 before main runs, so it cannot even log why. Target-scoped,
+      # and the build passes --target, so only the game binary gets it: the
+      # host-side shaderc proc macro keeps the /MD build CMake made, which a
+      # static CRT could not link against. cc reads the same flag and builds
+      # ring with /MT to match.
+      - name: Prepare the Windows build
         if: runner.os == 'Windows'
         run: |
           echo "CARGO_TARGET_DIR=C:/t" >> "$GITHUB_ENV"
           echo "CMAKE_POLICY_VERSION_MINIMUM=3.5" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS=-C target-feature=+crt-static" >> "$GITHUB_ENV"
 
       # No argument: installs the toolchain named by rust-toolchain.toml. The
       # target is added to that same pinned toolchain.
@@ -154,6 +164,14 @@ jobs:
             printf '%s\n' '{"file_format_version":"1.0.0","ICD":{"library_path":"./libMoltenVK.dylib","api_version":"1.4.0","is_portability_driver":true}}' \
               > "dist/${NAME}/MoltenVK/MoltenVK_icd.json"
             test -s "dist/${NAME}/MoltenVK/libMoltenVK.dylib"
+          fi
+
+          # A player's PC may have no Visual C++ Redistributable, so the game
+          # must not need one. The DLL name appears in the binary only as an
+          # import, so finding it means the static CRT above did not take.
+          if [ "$RUNNER_OS" = "Windows" ] && grep -qai 'vcruntime140' "dist/${NAME}/${BIN}"; then
+            echo "::error::${BIN} imports VCRUNTIME140.dll; it would not start on a clean Windows install"
+            exit 1
           fi
 
           # Windows gets a .zip — what Explorer opens, and what wc-launcher's
