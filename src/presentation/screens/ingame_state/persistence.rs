@@ -1,0 +1,196 @@
+//! World persistence: writing the save handle and restoring a returning
+//! client's player state from the host.
+
+use glam::Vec3;
+
+use super::InGameState;
+use super::net::record_remote;
+use crate::domain::inventory::crafting::KnownItems;
+use crate::domain::inventory::{ItemId, ItemStack, TOTAL_SLOTS};
+use crate::infrastructure::net::{PlayerId, PlayerRestore};
+use crate::infrastructure::save::{DiscoveryData, MobsData, PlayerData, WorldData, WorldSnapshot};
+
+impl InGameState {
+    /// Apply the saved state the host handed back in its `Welcome` (this client
+    /// played this world before). Replaces the starter kit wholesale.
+    pub(super) fn apply_restore(&mut self, restore: &PlayerRestore) {
+        self.player.teleport(Vec3::from_array(restore.position));
+        self.player.yaw = restore.yaw;
+        self.player.pitch = restore.pitch;
+        self.player.health = restore.health;
+        self.player.hunger = restore.hunger;
+        self.player.saturation = restore.saturation;
+        for index in 0..TOTAL_SLOTS {
+            let stack = restore.slots.get(index).and_then(|slot| {
+                slot.and_then(|s| {
+                    ((s.item as usize) < self.content.items.len()).then_some(ItemStack {
+                        item: ItemId(s.item),
+                        count: s.count,
+                        durability: s.durability,
+                    })
+                })
+            });
+            self.inventory.set_slot(index, stack);
+        }
+        self.inventory.set_selected(restore.selected as usize);
+        self.crafting.known = KnownItems::from_wire(&restore.known_items, &self.content.items);
+        // Don't immediately echo the restored inventory back to the host.
+        self.peers.last_synced_inventory = Some(self.inventory.clone());
+        log::info!("restored player state from host at {:?}", restore.position);
+    }
+
+    /// Persist the world if this session owns one (singleplayer or host of a
+    /// named world). Clients and ephemeral worlds hold the null repository, so
+    /// they bail before doing the real work of capturing a snapshot.
+    pub(super) fn save_world(&mut self) {
+        if !self.save.is_persistent() {
+            return;
+        }
+        debug_assert!(
+            self.session.is_authority(),
+            "clients never hold a persistent repository"
+        );
+        // Fold currently connected players into the persistent records first.
+        let connected: Vec<PlayerId> = self.peers.players.keys().copied().collect();
+        for pid in connected {
+            record_remote(
+                &mut self.save.records,
+                &self.peers.identities,
+                &self.peers.players,
+                &self.peers.inventories,
+                &self.content.items,
+                pid,
+            );
+        }
+        let world = WorldData::from_world(&self.world, &self.content.blocks);
+        let player = PlayerData::capture(&self.player, &self.inventory, &self.content.items);
+        let mobs = MobsData::from_mobs(&self.mobs.live);
+        let discovery = DiscoveryData {
+            owner: self.crafting.known.to_ids(&self.content.items),
+            players: self.save.discovery.players.clone(),
+        };
+        let snapshot = WorldSnapshot {
+            world: &world,
+            player: &player,
+            players: &self.save.records,
+            mobs: &mobs,
+            progression: &self.progression,
+            discovery: &discovery,
+            game_mode: self.player.mode,
+            spawn: self.spawn.to_array(),
+            time_of_day: self.day_cycle.time_of_day(),
+        };
+        match self.save.repository.store(&snapshot) {
+            Ok(()) => log::info!(
+                "saved world '{}' ({} edits, {} player records, {} mobs)",
+                self.save.world_name(),
+                world.edits.len(),
+                self.save.records.0.len(),
+                mobs.mobs.len()
+            ),
+            Err(err) => log::error!("failed to save world '{}': {err}", self.save.world_name()),
+        }
+    }
+
+    /// Swap in a different persistence destination. Tests use this to capture a
+    /// save without a `saves/` directory; production wiring sets it in `setup`.
+    #[cfg(test)]
+    pub(super) fn set_repository(
+        &mut self,
+        repo: Box<dyn crate::infrastructure::save::WorldRepository>,
+    ) {
+        self.save.repository = repo;
+    }
+}
+
+/// Where this session's world is persisted, and what it still owes the next
+/// save. Grouping these means the autosave clock and the per-identity records
+/// live with the destination they are written to, rather than as three loose
+/// fields on the in-game state.
+pub(super) struct Persistence {
+    /// A `FileWorldRepository` when playing a named world as singleplayer or
+    /// host; the null repository for clients and ephemeral dev-boot worlds,
+    /// which are never saved.
+    pub repository: Box<dyn crate::infrastructure::save::WorldRepository>,
+    /// Seconds accumulated toward the next periodic autosave.
+    pub autosave_timer: f32,
+    /// Host: saved per-identity player records for this world; handed back to
+    /// returning clients and written to `players.dat`.
+    pub records: crate::infrastructure::save::PlayerRecords,
+    /// Which items each player has held, for `discovery.dat`. The owner's
+    /// half is captured fresh from the live state at every save; the players'
+    /// half is kept here as clients report it (`SyncKnown`).
+    pub discovery: DiscoveryData,
+}
+
+impl Persistence {
+    /// A session that never writes anywhere (client or ephemeral world).
+    pub fn none() -> Self {
+        Self {
+            repository: Box::new(crate::infrastructure::save::NullWorldRepository),
+            autosave_timer: 0.0,
+            records: crate::infrastructure::save::PlayerRecords::default(),
+            discovery: DiscoveryData::default(),
+        }
+    }
+
+    pub fn is_persistent(&self) -> bool {
+        self.repository.is_persistent()
+    }
+
+    pub fn world_name(&self) -> &str {
+        self.repository.world_name()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::core::{BlockPos, GameMode};
+    use crate::domain::world::block::blocks;
+    use crate::infrastructure::content::GameContent;
+    use crate::infrastructure::save::InMemoryWorldRepository;
+
+    /// The null repository is what clients and ephemeral worlds hold: calling
+    /// `save_world` on one must be a silent no-op, not a panic or a write.
+    #[test]
+    fn an_ephemeral_world_never_saves() {
+        let mut state = InGameState::new(GameContent::builtin(), 3, GameMode::Survival);
+        assert!(
+            !state.save.is_persistent(),
+            "a world built without a save handle holds the null repository"
+        );
+        state.save_world(); // must not panic
+        assert_eq!(state.save.world_name(), "(unsaved)");
+    }
+
+    /// A persistent repository receives the session's live state — terrain
+    /// edits, player, mobs, and the metadata that lives in `level.toml`.
+    #[test]
+    fn saving_captures_the_live_session_state() {
+        let mut state = InGameState::new(GameContent::builtin(), 11, GameMode::Creative);
+        let repo = InMemoryWorldRepository::default();
+        let log = repo.log();
+        state.set_repository(Box::new(repo));
+
+        let edit = BlockPos::new(2, 100, -3);
+        state.world.set_block(edit, blocks::STONE);
+        state.player.position = Vec3::new(1.0, 70.0, 2.0);
+        state
+            .spawn_mob("zombie", Vec3::new(4.0, 70.0, 4.0))
+            .expect("zombie spawns");
+
+        state.save_world();
+
+        let log = log.lock().unwrap();
+        assert_eq!(log.writes, 1);
+        let stored = log.last.as_ref().expect("a snapshot was stored");
+        assert_eq!(stored.game_mode, GameMode::Creative);
+        assert_eq!(stored.player.position, [1.0, 70.0, 2.0]);
+        assert_eq!(stored.mobs.mobs.len(), 1);
+        assert!(
+            stored.world.edits.iter().any(|&(pos, _)| pos == edit),
+            "the terrain edit reached the repository"
+        );
+    }
+}

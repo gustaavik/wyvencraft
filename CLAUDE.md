@@ -173,34 +173,65 @@ If you add engine code that needs to know something Wyvencraft-specific, that is
 the signal to grow one of these traits rather than to add a dependency. **Adding
 the game as a dependency of a `wyven-*` crate is always wrong.**
 
-### The game modules (`src/`)
+### The game's layers (`src/`)
+
+The game crate is layered, and the dependencies point **inward**:
 
 ```
-core      ← wyven-core        re-export + GameMode and DayCycle (rules, not primitives)
-art       ← render            PNG tiles: atlas layout for the skin, armor, mob and crack sheets
-world     ← voxel             block table, worldgen (biome rings, underground layers), structures, fluid spreading rules
-inventory ← world             the one item registry, its capability components, stacks, the container
-entity    ← inventory, model  player, swept-AABB physics, rigged + box models, drops, mobs
-content   ← all of it         GameContent: registries loaded from assets/*.toml
-chat      ← net               message log, commands (one per file), ops.toml authorization
-desktop   ← nothing           handing a file to the OS: reveal it, open it
-audio     ← wyven-audio       sound/music registry (assets/audio.toml), AudioManager, and the menu-music fade/restart state machine
-editor    ← content, inventory dev tool: item placement, its two file formats, hot reload
-save      ← world, entity     world/player persistence (saves/ dir)
-progression ← core            shrines read, structures revealed, bosses beaten; compass bearings
-ui        ← inventory, egui   HUD + inventory egui views
-net       ← wyven-net         the wire protocol, who may join, the saved server list and how a server is asked what it is
-config    ← wyven-input       settings, keybinds, and raw keys → MovementInput
-boot      ← save, net         plan: pure env → BootPlan; start: plan → first screen
-state     ← everything        the screens, and the Game impl that starts them
-app       ← state             ~20 lines: name the game, hand it to wyven_app::run
+presentation ─┐
+              ├─→ application ─→ domain
+infrastructure┘
 ```
+
+One crate cannot have cargo enforce that, so **`tests/architecture.rs`** does:
+it reads `src/` and fails on any `domain` file naming an outer layer, `egui`,
+`wyven_render`, `vulkano`, `wyven_app`, `wyven_net`, `renet` or `std::fs`, and on any
+`application` file naming `infrastructure`, `presentation`, a renderer or
+`std::fs`. Comments are skipped. **If it fails, move the code — do not widen
+the rule.**
+
+```
+domain/            the rules — pure
+  core             ← wyven-core   re-export + GameMode, DayCycle, ids, seed parsing
+  world            ← voxel        block table, worldgen (biome rings, underground layers), structures, fluid spreading rules
+  inventory        ← world        the one item registry, its capability components, stacks, the container, crafting rules
+  entity           ← inventory    player, swept-AABB physics, drops, mobs, brains, bosses, animation (incl. Pose), camera shots
+  progression      ← core         shrines read, structures revealed, bosses beaten; compass bearings
+  chat             ← core         message log, ChatKind, commands (one per file), the ops list's rules
+application/       use cases and their ports
+  protocol                        the wire messages (ClientMessage/ServerMessage) — the contract between peers
+  session                         the Session port, Authority/Inbound, HOST_PLAYER_ID, FakeSession
+  sync                            remote-player snapshot smoothing
+  boot_plan                       pure env → BootPlan (the Environment port, SystemEnv, MapEnv)
+infrastructure/    adapters
+  content          ← all domain   GameContent: registries loaded from assets/*.toml (recipes.rs: the recipe file read)
+  save                            world/player persistence (saves/ dir)
+  net                             transports + net::session::{Singleplayer,Host,Client}Session, join gate, server list, status probe
+  audio            ← wyven-audio  sound/music registry (assets/audio.toml), AudioManager, and the menu-music fade/restart state machine
+  paths, fs, profile, ops, desktop   the data dir; write_atomic; profile.toml; ops.toml; handing a file to the OS
+presentation/      everything that draws or reads input
+  screens                         the Screen impls (was `state`), and the Game impl that starts them
+  ui                              egui views, UiTextures, the server-list rows
+  render                          box + rigged entity meshes, the first-person view model, Shot → Camera (ShotCamera)
+  art              ← render       PNG tiles: atlas layout for the skin, armor, mob and crack sheets
+  config           ← wyven-input  settings, keybinds, and raw keys → MovementInput
+  editor                          dev tool: item placement, its two file formats, hot reload
+boot/, app.rs                     the composition root: boot::start turns a BootPlan into the first screen;
+                                  app.rs hands that to Wyvencraft as its FirstScreen factory
+```
+
+> The where-to-change table below still spells many paths the old flat way
+> (`state::ingame_state::view` is now `presentation::screens::ingame_state::view`,
+> `entity::rigged` is `presentation::render::rigged`, and so on). The mapping is
+> mechanical: domain = core/world/inventory/entity/progression/chat;
+> infrastructure = content/save/net/audio/paths/desktop; presentation =
+> ui/config/art/editor and `state` → `screens`.
 
 Key rule, unchanged in spirit and now enforced by the crate graph: **`render`
 never depends on `world`.** The active screen builds plain `CpuMesh` data and
 hands the renderer a `SceneFrame` (camera + mesh references).
 
-Its mirror: **only `state::ingame_state::view` touches `RenderContext`.** Chunk
+Its mirror: **only `presentation::screens::ingame_state::view` touches `RenderContext`.** Chunk
 streaming, mob AI, fluids and interaction are plain logic; `InGameState::refresh_view`
 is the single per-frame seam that turns their results into GPU meshes. That is why
 those systems are testable without a Vulkan device.

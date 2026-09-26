@@ -1,0 +1,348 @@
+//! Construction of [`InGameState`] for each kind of session: fresh
+//! singleplayer/host, a world loaded from disk, or a client joining a host.
+
+use std::sync::Arc;
+
+use glam::Vec3;
+
+use super::MobWorld;
+use super::crafting::CraftingState;
+use super::net::recipes_from_wire;
+use super::peers::Peers;
+use super::persistence::Persistence;
+use super::view::SceneCache;
+use super::{DOUBLE_TAP_WINDOW, InGameState, SPAWN_RADIUS};
+use crate::application::boot_plan;
+use crate::application::session::Session;
+use crate::domain::chat::{ChatState, OpsList};
+use crate::domain::core::{BlockPos, CHUNK_HEIGHT, ChunkPos, DayCycle, GameMode};
+use crate::domain::entity::Player;
+use crate::domain::inventory::crafting::{KnownItems, station_ids};
+use crate::domain::inventory::{HeldLabel, Inventory};
+use crate::domain::progression::WorldProgression;
+use crate::domain::world::{ChunkLoader, FluidSim, NoiseGenerator, World, WorldGenerator};
+use crate::infrastructure::content::GameContent;
+use crate::infrastructure::content::recipes::load_recipe_book;
+use crate::infrastructure::net::session::{ClientSession, HostSession, SingleplayerSession};
+use crate::infrastructure::net::{Client, Host, NetVec3, PlayerId, PlayerRestore, RecipeData};
+use crate::infrastructure::save::{FileWorldRepository, SavedGame};
+use crate::presentation::editor::EditorSession;
+
+impl InGameState {
+    /// Singleplayer world.
+    pub fn new(content: Arc<GameContent>, seed: u64, mode: GameMode) -> Self {
+        Self::build(
+            content,
+            seed,
+            Box::new(SingleplayerSession),
+            None,
+            DayCycle::default(),
+            mode,
+            None,
+        )
+    }
+
+    /// Host a multiplayer session (the host also plays locally).
+    pub fn new_host(content: Arc<GameContent>, seed: u64, host: Host, mode: GameMode) -> Self {
+        Self::build(
+            content,
+            seed,
+            Box::new(HostSession::new(host)),
+            None,
+            DayCycle::default(),
+            mode,
+            None,
+        )
+    }
+
+    /// Singleplayer session of a world loaded from (or just created on) disk.
+    pub fn new_saved(content: Arc<GameContent>, game: SavedGame) -> Self {
+        Self::from_save(content, game, Box::new(SingleplayerSession))
+    }
+
+    /// Host a multiplayer session of a world loaded from (or created on) disk.
+    pub fn new_host_saved(content: Arc<GameContent>, game: SavedGame, host: Host) -> Self {
+        Self::from_save(content, game, Box::new(HostSession::new(host)))
+    }
+
+    /// Build from a saved world: regenerate terrain from the saved seed, replay
+    /// the edit overlay, and restore the player/inventory/clock. This runs
+    /// before the first network pump, so restored edits are already in
+    /// `World::edits` before any client can request world state.
+    fn from_save(content: Arc<GameContent>, game: SavedGame, session: Box<dyn Session>) -> Self {
+        let SavedGame {
+            save,
+            world,
+            player,
+            players,
+            mobs,
+            progression,
+            discovery,
+        } = game;
+        // Anchor spawn-area generation at the saved player position (or the
+        // world's recorded spawn) so there's ground under a restored player.
+        let anchor = player
+            .as_ref()
+            .map(|p| Vec3::from_array(p.position))
+            .or_else(|| world.as_ref().map(|_| Vec3::from_array(save.meta.spawn)));
+        let mut state = Self::build(
+            content,
+            save.meta.seed,
+            session,
+            anchor,
+            DayCycle::new(save.meta.time_of_day),
+            save.meta.game_mode,
+            None,
+        );
+        if let Some(world) = &world {
+            let resolved = world.resolve(&state.content.blocks);
+            let count = resolved.len();
+            for (pos, block) in resolved {
+                state.world.apply_edit(pos, block);
+            }
+            // `build` conflates the generation anchor with the respawn point;
+            // a saved world keeps its recorded spawn instead.
+            state.spawn = Vec3::from_array(save.meta.spawn);
+            log::info!("restored {count} world edits");
+        }
+        if let Some(player) = &player {
+            player.apply(
+                &mut state.player,
+                &mut state.inventory,
+                &state.content.items,
+            );
+        }
+        // Respawn the saved mob population. Fresh ids and brains (both are
+        // session-scoped); unknown kinds fail soft like unknown blocks/items.
+        let saved_mobs = mobs.mobs.len();
+        for data in mobs.mobs {
+            let position = Vec3::from_array(data.position);
+            match state.spawn_mob(&data.kind, position) {
+                Some(_) => {
+                    if let Some(mob) = state.mobs.live.last_mut() {
+                        mob.health = data.health.min(mob.params.max_health);
+                        mob.night_spawned = data.night_spawned;
+                    }
+                }
+                None => log::warn!(
+                    "save references unknown mob kind '{}'; dropping it",
+                    data.kind
+                ),
+            }
+        }
+        state.progression = progression;
+        if saved_mobs > 0 {
+            log::info!(
+                "restored {} of {saved_mobs} saved mobs",
+                state.mobs.live.len()
+            );
+        }
+        log::info!(
+            "loaded world '{}' (seed {}, time {:.3}, player {})",
+            save.meta.name,
+            save.meta.seed,
+            save.meta.time_of_day,
+            if player.is_some() {
+                "restored"
+            } else {
+                "fresh"
+            },
+        );
+        state.crafting.known = KnownItems::from_ids(&discovery.owner, &state.content.items);
+        state.save.records = players;
+        state.save.discovery = discovery;
+        state.save.repository = Box::new(FileWorldRepository::new(save));
+        state
+    }
+
+    /// Join a multiplayer session as a client (world built from the host's seed).
+    /// `spawn` is the position the host assigned us in its `Welcome`; `time_of_day`
+    /// seeds our day/night clock to the host's so skies match on join; `mode` is the
+    /// session's game mode as told by the host; `recipes` are the host's crafting
+    /// recipes (authoritative — the client's own recipe file is ignored);
+    /// `restored` is our saved state if the host's world remembers us.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_client(
+        content: Arc<GameContent>,
+        seed: u64,
+        client: Client,
+        local_id: PlayerId,
+        spawn: NetVec3,
+        time_of_day: f32,
+        mode: GameMode,
+        recipes: Vec<RecipeData>,
+        restored: Option<PlayerRestore>,
+    ) -> Self {
+        let mut state = Self::build(
+            content,
+            seed,
+            Box::new(ClientSession::new(client, local_id)),
+            Some(Vec3::from_array(spawn)),
+            DayCycle::new(time_of_day),
+            mode,
+            Some(recipes),
+        );
+        if let Some(restored) = &restored {
+            state.apply_restore(restored);
+        }
+        state
+    }
+
+    /// Build the in-game state. `spawn_override` (clients) places the player at the
+    /// host-provided position and anchors synchronous generation there; otherwise the
+    /// spawn is found over the origin column. `recipe_data` (clients) is the host's
+    /// recipe book from the `Welcome`; hosts and singleplayer load the local file.
+    fn build(
+        content: Arc<GameContent>,
+        seed: u64,
+        session: Box<dyn Session>,
+        spawn_override: Option<Vec3>,
+        day_cycle: DayCycle,
+        mode: GameMode,
+        recipe_data: Option<Vec<RecipeData>>,
+    ) -> Self {
+        // Everything below reads through `content`; four of these used to be
+        // deep-cloned into `Arc`s the state held separately, which was a copy of
+        // the whole item/block model tables per session for no reason.
+        let items = content.items.clone();
+        let stations = station_ids(&content.blocks);
+        let recipes = match recipe_data {
+            Some(data) => {
+                let book = recipes_from_wire(&data, &items, &stations);
+                log::info!("using {} crafting recipes from host", book.recipes().len());
+                book
+            }
+            None => load_recipe_book(&items, &stations),
+        };
+
+        let noise = Arc::new(NoiseGenerator::with_config(
+            seed,
+            content.worldgen.clone(),
+            content.structures.clone(),
+        ));
+        let structures = noise.structures().clone();
+        let generator: Arc<dyn WorldGenerator> = noise;
+        let mut world = World::new(generator.clone(), content.blocks.clone());
+
+        // Worker pool sized to leave headroom for the main + render threads.
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get().saturating_sub(2).max(1))
+            .unwrap_or(4);
+        let loader = ChunkLoader::new(generator, workers);
+
+        // Synchronously generate the immediate spawn area so the player lands on
+        // solid ground; the rest streams in via the loader. Anchor on the override
+        // (the host-assigned spawn for clients) so there's ground under the player.
+        let center = spawn_override
+            .map(|p| BlockPos::from_world(p).chunk())
+            .unwrap_or_else(|| ChunkPos::new(0, 0));
+        for dx in -SPAWN_RADIUS..=SPAWN_RADIUS {
+            for dz in -SPAWN_RADIUS..=SPAWN_RADIUS {
+                world.ensure_chunk(ChunkPos::new(center.x + dx, center.z + dz));
+            }
+        }
+        let spawn = spawn_override.unwrap_or_else(|| find_spawn(&world));
+
+        // Creative starts empty (items come from the palette); survival gets the
+        // starter kit declared in assets/items.toml so mining, durability, and
+        // eating are usable without crafting.
+        let mut inventory = Inventory::new();
+        if !mode.is_creative() {
+            for (slot, stack) in items.starter_kit_survival().iter().enumerate() {
+                inventory.set_slot(slot, Some(*stack));
+            }
+        }
+
+        // Read before `session` is moved into the struct below.
+        let session_is_authority = session.is_authority();
+
+        let mut state = Self {
+            world,
+            player: Player::new(spawn, mode, content.entities.player()),
+            inventory,
+            held_label: HeldLabel::default(),
+            recipes,
+            crafting: CraftingState::new(stations),
+            show_debug: false,
+            editor: EditorSession::disabled(),
+            view: SceneCache::new(),
+            loader,
+            day_cycle,
+            inventory_open: false,
+            inventory_anim: Default::default(),
+            // Replaced by the real rect on the first `ui` pass, which always
+            // precedes the first `scene_frame`.
+            screen: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1920.0, 1080.0)),
+            chat: ChatState::default(),
+            // A client never authorizes anything, so it never reads the file.
+            ops: if session_is_authority {
+                crate::infrastructure::ops::load_ops()
+            } else {
+                OpsList::default()
+            },
+            held: None,
+            spawn,
+            fluids: FluidSim::new(),
+            breaking: None,
+            tier_hint: None,
+            mobs: MobWorld::new(seed ^ 0x5EED_0F5B_A3B1_E5B0),
+            drops: Vec::new(),
+            dead: false,
+            jump_tap_timer: DOUBLE_TAP_WINDOW * 2.0,
+            physics_accum: 0.0,
+            session,
+            peers: Peers::default(),
+            save: Persistence::none(),
+            structures,
+            progression: WorldProgression::default(),
+            content,
+        };
+        if state.session.is_authority() {
+            state.debug_goto_from_env();
+            state.debug_spawn_from_env();
+        }
+        // Every session, a joining client included: verifying anything drawn on
+        // the player's own body needs *both* ends of a two-process run to be
+        // outside their own head. Read here rather than in `boot::start` for
+        // exactly that reason — a client's state is built behind
+        // `ConnectingState`, which that function never sees.
+        if let Some(perspective) = boot_plan::boot_perspective(&boot_plan::SystemEnv) {
+            log::info!("WYVEN_PERSPECTIVE: opening in {perspective:?}");
+            state.player.perspective = perspective;
+        }
+        // The editor writes into `assets/`, so it is off unless a developer
+        // asked for it. Built here rather than in `boot::start` for the same
+        // reason the perspective is: a client's state is put together behind
+        // `ConnectingState`, which that function never sees.
+        if boot_plan::editor_enabled(&boot_plan::SystemEnv) {
+            let targets = crate::presentation::editor::targets_from(&state.content);
+            log::info!(
+                "WYVEN_EDITOR: item placement editor on ({} items)",
+                targets.len()
+            );
+            state.editor =
+                EditorSession::new(true, Box::new(crate::presentation::editor::FileStore));
+            state.editor.set_targets(targets);
+            if boot_plan::editor_opens_at_boot(&boot_plan::SystemEnv) {
+                state.toggle_editor();
+            }
+        }
+        // Ignored if the editor already took the screen: the two fight over
+        // the camera, which is why E is refused while the editor is up.
+        if boot_plan::inventory_opens_at_boot(&boot_plan::SystemEnv) && !state.editor_open() {
+            log::info!("WYVEN_INVENTORY: opening the inventory at boot");
+            state.toggle_inventory();
+        }
+        state
+    }
+}
+
+/// Find a safe spawn (top solid block at the origin column + 1).
+fn find_spawn(world: &World) -> Vec3 {
+    for y in (0..CHUNK_HEIGHT).rev() {
+        if world.is_solid(BlockPos::new(0, y, 0)) {
+            return Vec3::new(0.5, (y + 1) as f32, 0.5);
+        }
+    }
+    Vec3::new(0.5, 80.0, 0.5)
+}

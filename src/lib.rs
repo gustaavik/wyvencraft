@@ -15,6 +15,7 @@
 //! wyven-auth     account sessions, key cache, Ed25519 ticket verification
 //! wyven-app      window, egui, event loop, screen stack
 //! wyven-audio    audio device output and mixing
+//! wyven-ecs      entity-component store: generational handles, queries, commands
 //! ```
 //!
 //! The dependency direction is one-way and enforced by cargo, not by
@@ -30,49 +31,70 @@
 //!
 //! | Trait | Declared by | Implemented here by |
 //! |---|---|---|
-//! | [`wyven_render::TileSource`] | render | [`art::WyvencraftArt`] |
-//! | [`wyven_voxel::BlockCatalog`] | voxel | [`content::BlockAppearance`] |
-//! | [`wyven_voxel::BlockProperties`] | voxel | [`world::BlockRegistry`] |
-//! | [`wyven_voxel::WorldGenerator`] | voxel | [`world::NoiseGenerator`] |
-//! | [`wyven_net::Protocol`] / [`wyven_net::JoinVerifier`] | net | [`net::WyvenProtocol`] / [`net::TicketJoin`] |
-//! | [`wyven_app::Game`] | app | [`state::Wyvencraft`] |
+//! | [`wyven_render::TileSource`] | render | [`presentation::art::WyvencraftArt`] |
+//! | [`wyven_voxel::BlockCatalog`] | voxel | [`infrastructure::content::BlockAppearance`] |
+//! | [`wyven_voxel::BlockProperties`] | voxel | [`domain::world::BlockRegistry`] |
+//! | [`wyven_voxel::WorldGenerator`] | voxel | [`domain::world::NoiseGenerator`] |
+//! | [`wyven_net::Protocol`] / [`wyven_net::JoinVerifier`] | net | [`infrastructure::net::WyvenProtocol`] / [`infrastructure::net::TicketJoin`] |
+//! | [`wyven_app::Game`] | app | [`presentation::screens::Wyvencraft`] |
 //!
-//! # This crate's own modules
+//! # This crate's layers
+//!
+//! Inside the game the dependencies point inward, and `tests/architecture.rs`
+//! fails the build of the test suite on any import that points outward:
 //!
 //! ```text
-//! core      ← wyven-core + GameMode and DayCycle (rules, not primitives)
-//! art       ← render        PNG tiles; atlas layout for skin, armor, mob and crack sheets
-//! world     ← voxel         block table, worldgen, fluid rules
-//! inventory ← world         the one item registry and its capabilities, stacks, crafting
-//! entity    ← inventory     player, physics, mobs, brains, projectiles
-//! audio     ← wyven-audio   sound/music registry (assets/audio.toml), AudioManager, menu-music timing
-//! content   ← all of it     registries loaded from assets/*.toml
-//! chat      ← net           message log, commands, the ops list
-//! paths     ← (nothing)    where the data dir is; saves, profile, ops, keys
-//! save      ← world, entity world/player persistence under saves/
-//! progression ← core        shrines read, altars revealed, bosses beaten; compass bearings
-//! ui        ← inventory     HUD and inventory egui views
-//! net       ← wyven-net     the wire protocol and the join gate
-//! config    ← wyven-input   settings, keybinds, and the movement intent
-//! boot      ← save, net     pure env -> BootPlan, then plan -> first screen
-//! state     ← everything    the screens, and the Game impl that starts them
-//! app       ← state         twenty lines: name the game, hand it to the runner
+//! presentation ─┐
+//!               ├─→ application ─→ domain
+//! infrastructure┘
+//! ```
+//!
+//! ```text
+//! domain            the rules — pure: no files, sockets, GPU or egui
+//!   core            wyven-core + GameMode, DayCycle, ids, seeds
+//!   world           block table, worldgen, structures, fluid rules
+//!   inventory       the one item registry and its capabilities, stacks, crafting
+//!   entity          player, physics, mobs, brains, bosses, projectiles, animation
+//!   progression     shrines read, altars revealed, bosses beaten; compass bearings
+//!   chat            message log, commands, the ops list's rules
+//! application       use cases and the ports they need
+//!   protocol        the wire messages: the contract between peers
+//!   session         the Session port (who decides, what arrived) + FakeSession
+//!   sync            remote-player snapshot smoothing
+//!   boot_plan       pure env -> BootPlan
+//! infrastructure    adapters: files, sockets, audio devices, assets/
+//!   content         registries and visuals loaded from assets/*.toml
+//!   save            world/player persistence under saves/
+//!   net             transports, sessions, the join gate, server list, status probe
+//!   audio           sound registry, AudioManager, menu-music timing
+//!   paths/fs/profile/ops/desktop   the data dir and what lives in it
+//! presentation      everything that draws or reads input
+//!   screens         the Screen impls, and the Game impl that starts them
+//!   ui              egui views
+//!   render          entity meshes, the view model, the camera
+//!   art             PNG tiles; atlas layout for skin, armor, mob and crack sheets
+//!   config          settings, keybinds, the movement intent
+//!   editor          the F6 item placement editor
+//! boot, app         the composition root: the only code that names concrete
+//!                   adapters and wires them into the first screen
 //! ```
 //!
 //! I/O boundaries are crossed through ports, each with a real implementation and
-//! a test double: [`content::ContentSource`], [`save::WorldRepository`],
-//! [`state::session::Session`], [`boot::Environment`],
-//! [`wyven_audio::AudioBackend`] (`RodioBackend`/`NullAudioBackend`, chosen
-//! once in [`state::Wyvencraft`]'s startup via [`audio::open_default_backend`]).
-//! Hot paths (meshing, chunk
+//! a test double: [`infrastructure::content::ContentSource`],
+//! [`infrastructure::save::WorldRepository`], [`application::session::Session`],
+//! [`application::boot_plan::Environment`], [`wyven_audio::AudioBackend`]
+//! (`RodioBackend`/`NullAudioBackend`, chosen once in
+//! [`presentation::screens::Wyvencraft`]'s startup via
+//! [`infrastructure::audio::open_default_backend`]). Hot paths (meshing, chunk
 //! generation, fluid ticking) deliberately use none — the indirection buys
 //! nothing there and would cost frame time, which is why `mesh_chunk` takes
 //! `&impl BlockCatalog` and not `&dyn`.
 //!
-//! [`chat::CommandContext`] is a port for a different reason: not I/O, but to
-//! invert a dependency. Chat commands are policy and belong in `chat`, yet they
-//! act on registries and inventories owned by `state` — which already depends on
-//! `chat`. Commands depend on the port; `state` implements it.
+//! [`domain::chat::CommandContext`] is a port for a different reason: not I/O,
+//! but to invert a dependency. Chat commands are policy and belong in the
+//! domain, yet they act on registries and inventories owned by the in-game
+//! screen — which already depends on `chat`. Commands depend on the port; the
+//! screen implements it.
 
 pub use wyven_app;
 pub use wyven_assets;
@@ -86,21 +108,8 @@ pub use wyven_render;
 pub use wyven_voxel;
 
 pub mod app;
-pub mod art;
-pub mod audio;
+pub mod application;
 pub mod boot;
-pub mod chat;
-pub mod config;
-pub mod content;
-pub mod core;
-pub mod desktop;
-pub mod editor;
-pub mod entity;
-pub mod inventory;
-pub mod net;
-pub mod paths;
-pub mod progression;
-pub mod save;
-pub mod state;
-pub mod ui;
-pub mod world;
+pub mod domain;
+pub mod infrastructure;
+pub mod presentation;

@@ -1,7 +1,7 @@
 //! Turning a [`BootPlan`] into the screen the app opens on.
 //!
 //! This is where the plan's decisions become effects: opening saves, binding
-//! sockets, signing in. Kept apart from [`super::plan`], which is pure — it reads the
+//! sockets, signing in. Kept apart from [`crate::application::boot_plan`], which is pure — it reads the
 //! environment and decides, and is tested with no window, GPU or socket.
 
 use std::sync::Arc;
@@ -9,11 +9,14 @@ use std::sync::Arc;
 use wyven_app::Screen;
 use wyven_auth::{AccountState, AuthClient, AuthSession, KeyCache};
 
-use crate::content::GameContent;
-use crate::core::GameMode;
-use crate::net::Host;
-use crate::save::{self, AccountProfile, SaveError, SavedGame, WorldSave};
-use crate::state::{ConnectingState, InGameState, LoadingState, MainMenuState, Wyvencraft};
+use crate::domain::core::GameMode;
+use crate::infrastructure::content::GameContent;
+use crate::infrastructure::net::Host;
+use crate::infrastructure::profile::{self, AccountProfile};
+use crate::infrastructure::save::{self, SaveError, SavedGame, WorldSave};
+use crate::presentation::screens::{
+    ConnectingState, InGameState, LoadingState, MainMenuState, Wyvencraft,
+};
 
 use super::{BootPlan, WorldChoice};
 
@@ -50,7 +53,7 @@ fn open_boot_world(world: &WorldChoice, mode: GameMode) -> Option<Result<SavedGa
 fn boot_account(account: &AccountState) {
     let client = wyven_auth::HttpAuthClient::from_env();
 
-    if let Some(stored) = save::stored_account() {
+    if let Some(stored) = profile::stored_account() {
         match client.refresh(&stored.refresh_token) {
             Ok(session) => {
                 log::info!("restored session for {}", session.identity);
@@ -62,7 +65,7 @@ fn boot_account(account: &AccountState) {
             // refresh on every launch.
             Err(err) if !err.is_offline() => {
                 log::warn!("stored session rejected ({err}); signing out");
-                if let Err(err) = save::store_account(None) {
+                if let Err(err) = profile::store_account(None) {
                     log::warn!("could not clear the stored account: {err}");
                 }
                 account.set_offline();
@@ -107,7 +110,7 @@ fn boot_account(account: &AccountState) {
 /// it, the player would be signed out everywhere with nothing to show for it.
 /// So the write happens before anything else can go wrong.
 fn adopt_session(account: &AccountState, client: &impl AuthClient, session: AuthSession) {
-    if let Err(err) = save::store_account(Some(AccountProfile {
+    if let Err(err) = profile::store_account(Some(AccountProfile {
         account_id: session.identity.account_id.to_string(),
         username: session.identity.username.clone(),
         refresh_token: session.refresh_token.clone(),
@@ -122,7 +125,7 @@ fn adopt_session(account: &AccountState, client: &impl AuthClient, session: Auth
     // moment to cache them is now, not when someone tries to join.
     match client.public_keys() {
         Ok(keys) if !keys.is_empty() => {
-            match KeyCache::at(crate::paths::keys_path()).store(&keys) {
+            match KeyCache::at(crate::infrastructure::paths::keys_path()).store(&keys) {
                 Ok(()) => log::info!("cached {} auth key(s) for hosting", keys.len()),
                 Err(err) => log::warn!("could not cache auth keys: {err}"),
             }
@@ -164,8 +167,8 @@ pub fn initial_screen(
             match Host::bind(
                 port,
                 seed,
-                crate::net::host_config(),
-                crate::net::TicketJoin::from_cache(),
+                crate::infrastructure::net::host_config(),
+                crate::infrastructure::net::TicketJoin::from_cache(),
             ) {
                 Ok(host) => match game {
                     Some(game) => {
