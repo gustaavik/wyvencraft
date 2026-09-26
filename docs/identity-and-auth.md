@@ -10,7 +10,7 @@ Two halves that never meet in-process:
 - **The client half** — `wyven-auth::{client, session, account}` talks HTTP to
   [`wcauthserver`](https://github.com/gustaavik/wcauthserver) and comes back with an
   `AuthSession` and, at join time, a `JoinTicket`.
-- **The host half** — `wyven-auth::{keys, verifier}` plus `src/net/join.rs` verifies a
+- **The host half** — `wyven-auth::{keys, verifier}` plus `src/infrastructure/net/join.rs` verifies a
   ticket presented in netcode's `user_data`, entirely locally, against public keys cached in
   `authkeys.toml`. **It makes no network call.**
 
@@ -219,7 +219,7 @@ client.issue_ticket(&session.access_token)
 
 ### The gate itself
 
-`TicketJoin` (`src/net/join.rs:39`) is this game's `wyven_net::JoinVerifier`. The engine's
+`TicketJoin` (`src/infrastructure/net/join.rs:39`) is this game's `wyven_net::JoinVerifier`. The engine's
 `Host` calls it on `ClientConnected` and knows nothing about tickets. Two checks:
 
 ```rust
@@ -268,7 +268,7 @@ identical: a transport drop, then the 12-second timeout in `ConnectingState`.
 
 ## 4. Key distribution
 
-`authkeys.toml`, in the data directory (`src/paths.rs`) and gitignored, written atomically
+`authkeys.toml`, in the data directory (`src/infrastructure/paths.rs`) and gitignored, written atomically
 (temp + rename):
 
 ```toml
@@ -281,7 +281,7 @@ The base64 is exactly what `GET /api/v1/keys` returns — the raw 32-byte Ed2551
 SPKI, not PEM. The endpoint returns **every** key including retired ones, ordered by
 creation, so tickets signed just before a rotation still verify.
 
-`KeyCache` takes its path from the caller — `KeyCache::at(paths::keys_path())`. The engine
+`KeyCache` takes its path from the caller — `KeyCache::at(infrastructure::paths::keys_path())`. The engine
 crate never learns where Wyvencraft keeps its data; the game resolves it and passes it in.
 
 `KeyCache::load` is fail-soft **toward refusal** (`crates/wyven-auth/src/keys.rs:17`):
@@ -310,7 +310,7 @@ Three consequences follow, and all three surprise people:
 
 ## 5. `profile.toml`
 
-In the data directory (`src/paths.rs`), gitignored, written atomically:
+In the data directory (`src/infrastructure/paths.rs`), gitignored, written atomically:
 
 ```toml
 client_id = "1787242050468846896"
@@ -341,7 +341,7 @@ stored session. Concretely it means:
   `ConnectingState` refuses independently — the greyed button is a courtesy, the state is
   the gate.
 - `issue_ticket` returns `Refused { code: "not_signed_in" }`.
-- `netcode_id()` is `None`, so the identity falls back to `save::local_identity()`.
+- `netcode_id()` is `None`, so the identity falls back to `infrastructure::save::local_identity()`.
 - The main menu shows "Playing offline".
 
 **Hosting is not blocked by being offline.** It is blocked by having no keys — a different
@@ -357,7 +357,7 @@ condition that usually coincides. Singleplayer is entirely unaffected.
 ops = [{ id = "0f8e…-…", name = "gustav" }]
 ```
 
-Keyed by **account uuid from a verified ticket** (`src/chat/ops.rs:85`). Player ids are
+Keyed by **account uuid from a verified ticket** (`src/domain/chat/ops.rs:57`). Player ids are
 per-session and shift on reconnect, so they cannot carry a permission.
 
 The chain of custody is worth tracing once, because every link is what makes the next one
@@ -377,7 +377,7 @@ wcauthserver signs TicketClaims { account_id, username, nonce }
 ```
 
 `peers.accounts` is written from nowhere else, which is what lets
-`src/state/ingame_state/chat.rs:141` be this short:
+`src/presentation/screens/ingame_state/chat.rs:148` be this short:
 
 ```rust
 fn is_op(&self, actor: PlayerId) -> bool {

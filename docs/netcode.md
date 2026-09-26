@@ -9,11 +9,13 @@ The stack has four layers, and the split between the bottom two is the interesti
 crates/wyven-net              transport only — sockets, channels, the join gate.
       ▲                       Generic over <P: Protocol, V: JoinVerifier>.
       │                       Knows nothing about blocks, inventories or accounts.
-src/net                       this game's wire format: WyvenProtocol, TicketJoin,
-      ▲                       ClientMessage / ServerMessage
-src/state/session             the `Session` port: Singleplayer / Host / Client / Fake
+src/application/protocol      this game's wire format: ClientMessage / ServerMessage
+src/infrastructure/net        WyvenProtocol, TicketJoin, and the real sessions
+      ▲                       (Singleplayer / Host / Client)
+src/application/session       the `Session` port, and FakeSession for tests
       ▲
-src/state/ingame_state/net.rs interpretation — what a message *does* to the world
+src/presentation/screens/     interpretation — what a message *does* to the world:
+  ingame_state/net/           host.rs (requests), client.rs (updates), outgoing.rs
 ```
 
 `wyven-net` depends only on `wyven-core`, `renet`, `renet_netcode`, `serde`, `bincode` and
@@ -29,8 +31,8 @@ renet 2.0 + `renet_netcode` 2.0 over UDP. A host binds `0.0.0.0:6091` by default
 
 | Setting              | Value                            | Where                                                                           |
 | -------------------- | -------------------------------- | ------------------------------------------------------------------------------- |
-| Protocol id          | `0x5759_564E_0001` (`"WYVN"` v1) | `src/net/join.rs:12` — the *game* picks it; the engine takes it in `HostConfig` |
-| Max clients          | 16                               | `src/net/join.rs:15`                                                            |
+| Protocol id          | `0x5759_564E_0001` (`"WYVN"` v1) | `src/infrastructure/net/join.rs:17` — the *game* picks it; the engine takes it in `HostConfig` |
+| Max clients          | 16                               | `src/infrastructure/net/join.rs:15`                                                            |
 | Default port         | 6091                            | `crates/wyven-net/src/server.rs:21` (no override exists)                        |
 | Encoding             | bincode 2, `config::standard()`  | `crates/wyven-net/src/wire.rs:43`                                               |
 | Connection timeout   | 15 s without a received packet   | from the synthesised connect token                                              |
@@ -112,7 +114,7 @@ pub trait JoinVerifier {
 `Protocol` is one trait rather than two type parameters so a `Host` and a `Client` cannot be
 wired to half a protocol each. `Host<P, V>` is monomorphised over both and fixed at
 construction, so a host cannot be built without deciding who may join. The game names two
-aliases and nothing else (`src/net/mod.rs:29`):
+aliases and nothing else (`src/infrastructure/net/mod.rs:27`):
 
 ```rust
 pub type Host = wyven_net::Host<WyvenProtocol, TicketJoin>;
@@ -157,16 +159,16 @@ host *asks* a client to take items or to move; it does not overwrite them.
 
 ### What the host actually checks
 
-`apply_request` (`src/state/ingame_state/net.rs`) is the authority's entire inbound
+`apply_request` (`src/presentation/screens/ingame_state/net/host.rs`) is the authority's entire inbound
 surface. Of the ten client messages, three are validated:
 
 | `ClientMessage`     | Validation                                                                                                                                                                             |
 | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Attack { id }`     | **Range-checked** — `attack_in_range` against `ATTACK_VALIDATE_RANGE = 7.0` (`src/state/ingame_state/mobs.rs:34`, "their reach plus lag slack")                                        |
-| `UseBlock { pos, slots, selected }` | **Reach-checked** from the client's last `Move`, then `Structures::instance_at` asks the *seed* what stands at `pos` — a hand-placed wayrune or a named position with no shrine does nothing. The message carries the client's inventory, which the host adopts first: a separate sync could be reordered behind it on the unordered channel. An offering is taken from that copy (`src/state/ingame_state/block_use.rs`) |
+| `Attack { id }`     | **Range-checked** — `attack_in_range` against `ATTACK_VALIDATE_RANGE = 7.0` (`src/presentation/screens/ingame_state/mobs.rs:34`, "their reach plus lag slack")                                        |
+| `UseBlock { pos, slots, selected }` | **Reach-checked** from the client's last `Move`, then `Structures::instance_at` asks the *seed* what stands at `pos` — a hand-placed wayrune or a named position with no shrine does nothing. The message carries the client's inventory, which the host adopts first: a separate sync could be reordered behind it on the unordered channel. An offering is taken from that copy (`src/presentation/screens/ingame_state/block_use.rs`) |
 | `Break { pos }` (tier) | The one check a break gets: the block's `[block.harvest] tier` against the client's last-reported held tool. Refused breaks are undone on the client with an addressed `BlockChanged` |
 | `Move`              | none — position accepted verbatim                                                                                                                                                      |
-| `Break` / `Place`   | that `world.set_block` succeeded, i.e. in-bounds, and — for `Break` — the tool tier (next row). **No reach check, no inventory check**, and the block id is taken as given (`src/state/ingame_state/net.rs:215`) |
+| `Break` / `Place`   | that `world.set_block` succeeded, i.e. in-bounds, and — for `Break` — the tool tier (next row). **No reach check, no inventory check**, and the block id is taken as given (`src/presentation/screens/ingame_state/net/host.rs:187`) |
 | `Stats`             | none — by design                                                                                                                                                                       |
 | `SyncInventory`     | none — by design                                                                                                                                                                       |
 | `SetMode`           | none                                                                                                                                                                                   |
@@ -259,7 +261,7 @@ player snapshots are *not* batched into one message the way `MobStates` is.
 
 ### Per-frame ordering
 
-`pump_network` (`src/state/ingame_state/net.rs:36`) is drain → apply → speak → flush, once:
+`pump_network` (`src/presentation/screens/ingame_state/net/mod.rs:45`) is drain → apply → speak → flush, once:
 
 ```
 poll()  →  apply every Inbound
@@ -269,7 +271,7 @@ poll()  →  apply every Inbound
 ```
 
 A host's outbound order within `broadcast_authority_state`
-(`src/state/ingame_state/net.rs:414`) is: player snapshots, then stats (throttled), then
+(`src/presentation/screens/ingame_state/net/outgoing.rs:7`) is: player snapshots, then stats (throttled), then
 changed equipment, then last frame's queued mob events, then the batched `MobStates`.
 
 The queue is the detail worth knowing: mob AI and spawning run *after* `pump_network` in the
@@ -361,8 +363,8 @@ replays it when the chunk loads. That is what makes the whole snapshot order-ind
 ### What each `Welcome` field settles
 
 - **`content_hash`** — the host only publishes it; the **client** compares and refuses
-  (`src/state/connecting_state.rs:199`). FNV-1a over the `Debug` reprs of blocks, items,
-  entities, worldgen and spawning (`src/content/mod.rs:566`). Visual data is deliberately
+  (`src/presentation/screens/connecting_state.rs:199`). FNV-1a over the `Debug` reprs of blocks, items,
+  entities, worldgen and spawning (`src/presentation/content/visuals.rs:253`). Visual data is deliberately
   excluded — atlas tiles, block models and item icons are all on `GameContent` indexed by
   `BlockId`, never on `Block` — so two peers whose grass is drawn slightly differently can
   still share a world. Since block and item ids cross the wire raw, a divergent table would
@@ -410,7 +412,7 @@ sequenceDiagram
 
 `is_op` resolves to the verified account uuid, never to anything the client asserts — see
 [identity-and-auth.md](identity-and-auth.md#7-permissions) for the full chain of custody.
-The ops file is loaded only on an authority (`src/state/ingame_state/setup.rs:253`).
+The ops file is loaded only on an authority (`src/presentation/screens/ingame_state/setup.rs:219`).
 
 `GrantItems` and `Teleport` are both **instructions, not overwrites**, and for the same
 reason: the client owns its inventory and its position. A grant is applied exactly as if the
@@ -421,7 +423,7 @@ Ordinary chat goes into the host's own log first (a broadcast never loops back),
 `Chat { from: Some(pid), kind: Player, text }` carrying the **raw** text rather than a
 pre-formatted line, so each peer renders names its own way.
 
-Adding a command is one new file in `src/chat/command/` plus one entry in `COMMANDS`.
+Adding a command is one new file in `src/domain/chat/command/` plus one entry in `COMMANDS`.
 Commands reach the world only through the `CommandContext` port, bound to the actor — which
 keeps `PlayerId` out of their vocabulary entirely, so a command physically cannot act on
 someone else.
@@ -431,7 +433,7 @@ someone else.
 ## 6. Session roles
 
 The state layer never touches `Host` or `Client` directly. It goes through one port
-(`src/state/session/mod.rs:78`) that splits the question in two: **who decides?**
+(`src/application/session/mod.rs:82`) that splits the question in two: **who decides?**
 (`authority()`) and **what arrived, and what do I send?** (`poll` / `broadcast` / `send_to` /
 `request`).
 
@@ -497,7 +499,7 @@ log**, not the client's.
 ### After the join
 
 **A client whose transport drops stays in-game with a dead socket.** `ClientSession::poll`
-logs the pump error and continues (`src/state/session/client.rs:33`); nothing transitions on
+logs the pump error and continues (`src/infrastructure/net/session/client.rs:33`); nothing transitions on
 `is_connected()` once `InGameState` is running. The HUD keeps reporting the old status. There
 is no reconnect path and no "connection lost" screen.
 
@@ -505,7 +507,7 @@ is no reconnect path and no "connection lost" screen.
 plus one per refusal. `Host::can_verify()` exists but nothing in `src/` surfaces it in the
 UI, so the operator-visible symptom is players who simply cannot connect.
 
-**Mob arrows do not damage remote players.** `src/state/ingame_state/mobs.rs:516` resolves
+**Mob arrows do not damage remote players.** `src/presentation/screens/ingame_state/mobs.rs:208` resolves
 arrow hits against the local player, but the remote-player arm is empty with a comment
 deferring to a net path that does not emit `PlayerDamaged`. Mob *melee* against remote
 players does work. So on a host, a skeleton hurts the host's own player with arrows but only

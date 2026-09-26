@@ -20,6 +20,7 @@ appendix.
 | [identity-and-auth.md](identity-and-auth.md) | Accounts, tokens, join tickets, key distribution, `ops.toml`. How a stranger becomes a named player. |
 | [netcode.md](netcode.md) | The wire protocol, the authority model, the join handshake, chat and commands. |
 | [systems-map.md](systems-map.md) | Everything else at map depth: the engine/game traits, the frame loop, ports and adapters, the render seam, chunk streaming, threads. |
+| [architecture.md](architecture.md) | Inside the game crate: the four layers and the test that holds them, the ECS and its conventions, the simulation and its outbox, and what was deliberately left out. |
 
 For *where to change what* — adding a block, tuning a mob, writing a chat command — see
 [`CLAUDE.md`](../CLAUDE.md) instead. It is a map of locations; this is a map of
@@ -94,16 +95,16 @@ everything it says with equal suspicion.
 | Claim a client makes | Status | Where it is settled |
 | --- | --- | --- |
 | Which account I am | **Proven** — Ed25519 signature over a server-issued ticket | `crates/wyven-auth/src/verifier.rs:63` |
-| That the ticket is mine, not copied from someone connecting alongside me | **Proven** — the netcode id is derived from the account uuid and must match | `src/net/join.rs:82` |
+| That the ticket is mine, not copied from someone connecting alongside me | **Proven** — the netcode id is derived from the account uuid and must match | `src/infrastructure/net/join.rs:82` |
 | That I have not replayed this ticket against this host | **Proven** — nonce cache, held until the ticket could no longer verify | `crates/wyven-auth/src/verifier.rs:83` |
-| That I am an operator | **Proven** — `ops.toml` is keyed on the ticket's account uuid | `src/chat/ops.rs:85`, `src/state/ingame_state/chat.rs:141` |
-| That I ran a command | **Proven** — the client never executes; only the host parses and dispatches | `src/state/ingame_state/chat.rs:65` |
-| Where I am standing | *Claimed* — accepted verbatim | `src/state/ingame_state/net.rs:171` |
+| That I am an operator | **Proven** — `ops.toml` is keyed on the ticket's account uuid | `src/domain/chat/ops.rs:57`, `src/presentation/screens/ingame_state/chat.rs:148` |
+| That I ran a command | **Proven** — the client never executes; only the host parses and dispatches | `src/presentation/screens/ingame_state/chat.rs:66` |
+| Where I am standing | *Claimed* — accepted verbatim | `src/presentation/screens/ingame_state/net/host.rs:178` |
 | My health, hunger, saturation | *Claimed* — the host mirrors them to persist them | same |
 | What is in my inventory | *Claimed* — the host mirrors it for the save | same |
 | Which game mode I am in | *Claimed* | same |
-| That I may break or place this block | *Claimed* — applied with no reach, tool, or inventory check | `src/state/ingame_state/net.rs:215` |
-| That my swing reached that mob | *Partly checked* — range-validated, but against my own claimed position | `src/state/ingame_state/net.rs:273` |
+| That I may break or place this block | *Claimed* — applied with no reach, tool, or inventory check | `src/presentation/screens/ingame_state/net/host.rs:187` |
+| That my swing reached that mob | *Partly checked* — range-validated, but against my own claimed position | `src/presentation/screens/ingame_state/net/host.rs:350` |
 
 The claimed rows are not oversights of equal weight. Vitals and inventory are *deliberately*
 client-owned — the comments say so, and `GrantItems` is written as an instruction to add

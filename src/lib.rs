@@ -62,6 +62,9 @@
 //!   protocol        the wire messages: the contract between peers
 //!   session         the Session port (who decides, what arrived) + FakeSession
 //!   sync            remote-player snapshot smoothing
+//!   simulation      Simulation: the world, its ECS, the local player, and the use cases on them
+//!   ecs             components, spawn bundles and systems over wyven_ecs
+//!   networking      Networking: the session, its peers and the ops list
 //!   boot_plan       pure env -> BootPlan
 //!   content         loading the Registries from assets/*.toml through the asset port
 //! infrastructure    adapters: files, sockets, audio devices, assets/

@@ -44,12 +44,12 @@ though the dependency points the other way.
 
 | Trait                            | Declared                                                              | Implemented                                                | Dispatch                                        |
 | -------------------------------- | --------------------------------------------------------------------- | ---------------------------------------------------------- | ----------------------------------------------- |
-| `TileSource` (+ `ReservedTiles`) | `crates/wyven-render/src/tile_registry.rs:54`                         | `src/art/mod.rs:32` (`WyvencraftArt`)                      | `Box<dyn>`, load-time only                      |
-| `BlockCatalog`                   | `crates/wyven-voxel/src/catalog.rs:28`                                | `src/content/catalog.rs:28` (`BlockAppearance`)            | **`&impl`, monomorphised** — per-voxel hot path |
-| `BlockProperties`                | `crates/wyven-voxel/src/catalog.rs:88`                                | `src/world/block.rs:181` (`BlockRegistry`)                 | `Arc<dyn>` — crosses threads                    |
-| `WorldGenerator`                 | `crates/wyven-voxel/src/generate.rs:9`                                | `src/world/generation/generator.rs:110` (`NoiseGenerator`) | `Arc<dyn>` — cloned into workers                |
-| `Protocol` / `JoinVerifier`      | `crates/wyven-net/src/session.rs:15`, `:32`                           | `src/net/join.rs:20`, `:63`                                | monomorphised into `Host<P, V>`                 |
-| `Game` (+ `Screen`)              | `crates/wyven-app/src/lib.rs:38`, `crates/wyven-app/src/screen.rs:56` | `src/state/shared.rs:92` + every screen                    | `Box<dyn Screen>`                               |
+| `TileSource` (+ `ReservedTiles`) | `crates/wyven-render/src/tile_registry.rs:54`                         | `src/presentation/art/mod.rs:32` (`WyvencraftArt`)                      | `Box<dyn>`, load-time only                      |
+| `BlockCatalog`                   | `crates/wyven-voxel/src/catalog.rs:28`                                | `src/presentation/content/catalog.rs:28` (`BlockAppearance`)            | **`&impl`, monomorphised** — per-voxel hot path |
+| `BlockProperties`                | `crates/wyven-voxel/src/catalog.rs:88`                                | `src/domain/world/block.rs:182` (`BlockRegistry`)                 | `Arc<dyn>` — crosses threads                    |
+| `WorldGenerator`                 | `crates/wyven-voxel/src/generate.rs:9`                                | `src/domain/world/generation/generator.rs:110` (`NoiseGenerator`) | `Arc<dyn>` — cloned into workers                |
+| `Protocol` / `JoinVerifier`      | `crates/wyven-net/src/session.rs:15`, `:32`                           | `src/infrastructure/net/join.rs:20`, `:63`                                | monomorphised into `Host<P, V>`                 |
+| `Game` (+ `Screen`)              | `crates/wyven-app/src/lib.rs:38`, `crates/wyven-app/src/screen.rs:56` | `src/presentation/screens/shared.rs:80` + every screen                    | `Box<dyn Screen>`                               |
 
 The dispatch column is the design rule, not an accident: **ports belong at I/O boundaries,
 never in per-frame or per-voxel hot paths.** `mesh_chunk` takes `&impl BlockCatalog` so
@@ -67,13 +67,19 @@ Each trait has a test double in the engine, which is what proves the engine need
 
 ## 3. The frame loop
 
-`src/app.rs` is the entire game→engine handoff:
+`src/app.rs` is the entire game→engine handoff, and the composition root's last step:
 
 ```rust
 pub fn run() -> Result<(), AppError> {
-    wyven_app::run(Wyvencraft::new())
+    let plan = BootPlan::from_env(&SystemEnv);
+    wyven_app::run(Wyvencraft::new(Box::new(move |content, account| {
+        boot::initial_screen(plan, content, account)
+    })))
 }
 ```
+
+`Wyvencraft` is handed the first screen as a factory rather than calling `boot` itself, so
+the screens never import the composition root that builds them.
 
 The engine then owns the loop and calls back. One-time startup, in order:
 
@@ -86,7 +92,7 @@ game.start(Boot{}) → (Shared, first Screen)
 `Wyvencraft::new()` runs **before any window exists** — content loading, `AccountState`, and
 `BootPlan::from_env` are all GPU-free. `Game::start` is where the one-shot GPU work happens:
 the 3D item-icon sheet, the player-preview image, three egui texture registrations, and then
-`boot::initial_screen`.
+the first-screen factory.
 
 Per frame:
 
@@ -163,8 +169,8 @@ parameters, and *borrowed* mesh references, split into lists by which texture bi
 
 There is still **no model matrix**; every transform is baked on the CPU.
 
-**Only `state::ingame_state::view` touches `RenderContext`.** `SceneCache`
-(`src/state/ingame_state/view.rs:84`) is the sole holder, and `refresh_view` is the single
+**Only `presentation::screens::ingame_state::view` touches `RenderContext`.** `SceneCache`
+(`src/presentation/screens/ingame_state/view/mod.rs:120`) is the sole holder, and `refresh_view` is the single
 per-frame seam where simulation becomes GPU data. Chunk streaming, mob AI, fluids and
 interaction are plain logic — which is exactly why they are testable without a Vulkan
 device. The one exception is startup: `Game::start` uploads temporary meshes to render the
@@ -184,10 +190,10 @@ no filesystem, socket or GPU.
 | Port                                           | Declared                               | Real                           | Null / embedded       | Double                    |
 | ---------------------------------------------- | -------------------------------------- | ------------------------------ | --------------------- | ------------------------- |
 | `AssetSource` (re-exported as `ContentSource`) | `crates/wyven-assets/src/source.rs:25` | `FsSource`                     | `EmbeddedSource`      | `MapSource`               |
-| `WorldRepository`                              | `src/save/repository.rs:32`            | `FileWorldRepository`          | `NullWorldRepository` | `InMemoryWorldRepository` |
-| `Environment`                                  | `src/boot/plan.rs:20`                  | `SystemEnv`                    | —                     | `MapEnv`                  |
-| `CommandContext`                               | `src/chat/command/context.rs:35`       | `SessionContext`               | —                     | `FakeContext`             |
-| `Session`                                      | `src/state/session/mod.rs:78`          | `HostSession`, `ClientSession` | `SingleplayerSession` | `FakeSession`             |
+| `WorldRepository`                              | `src/infrastructure/save/repository.rs:32`            | `FileWorldRepository`          | `NullWorldRepository` | `InMemoryWorldRepository` |
+| `Environment`                                  | `src/application/boot_plan.rs:20`                  | `SystemEnv`                    | —                     | `MapEnv`                  |
+| `CommandContext`                               | `src/domain/chat/command/context.rs:35`       | `SessionContext`               | —                     | `FakeContext`             |
+| `Session`                                      | `src/application/session/mod.rs:82`          | `HostSession`, `ClientSession` | `SingleplayerSession` | `FakeSession`             |
 | `AuthClient`                                   | `crates/wyven-auth/src/client.rs:65`   | `HttpAuthClient`               | —                     | `FakeAuthClient`          |
 
 The doubles are **hand-written real implementations, not mocks** — `FakeAuthClient` actually
@@ -213,7 +219,7 @@ and guard every write with a `None` check, where the `None` stood in for both "c
 
 ## 6. Content loading
 
-Game content is TOML under `assets/`, loaded once into `content::GameContent` and shared via
+Game content is TOML under `assets/`, loaded once into `presentation::content::GameContent` and shared via
 `Arc`. Behaviour is *components plus code hooks*: data declares typed components, each
 implemented once in Rust and dispatched on — **never on block or item identity**.
 
@@ -288,7 +294,7 @@ Signs you are about to put something on the wrong side of a seam:
 
 - Adding `wyvencraft` to a `wyven-*` `Cargo.toml` — cargo will refuse.
 - Hardcoding a block or item name inside an engine crate — cargo will **not** refuse.
-- Reaching for `RenderContext` outside `state::ingame_state::view`.
+- Reaching for `RenderContext` outside `presentation::screens::ingame_state::view`.
 - Putting a visual field on `Block` — it will silently change `content_hash` and split
   multiplayer.
 - Moving game policy into the engine because it was convenient. `GameMode`'s
@@ -296,7 +302,7 @@ Signs you are about to put something on the wrong side of a seam:
   back out.
 
 The counter-example is worth knowing too: **not everything should be extracted.**
-`world::fluid` stayed in the game because all of it is `[block.fluid]` policy with no
+`domain::world::fluid` stayed in the game because all of it is `[block.fluid]` policy with no
 substrate underneath worth extracting, and the mob methods stayed on `InGameState` because
 mob AI genuinely needs the world *and* the player — a `MobSystem::update` taking five
 borrows relocates coupling rather than removing it.
