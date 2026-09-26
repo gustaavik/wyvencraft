@@ -44,6 +44,25 @@ pub struct RuleVisuals {
 /// placeable items, entities gate the spawn rules, blocks and worldgen place
 /// the structures.
 pub fn load_registries(source: &dyn AssetSource) -> (Registries, RuleVisuals) {
+    let (blocks, items, visuals) = load_blocks_and_items(source);
+    let (entities, worldgen, structures, spawning) = load_world_rules(source, &blocks);
+    // The loop's references cross files that load in an order where their
+    // targets cannot yet be seen; this is the first point that sees all.
+    for problem in content::dangling_references(&blocks, &items, &entities, &structures) {
+        log::warn!("{problem}");
+    }
+    for (block, tier) in content::unreachable_tiers(&blocks, &items) {
+        log::warn!("block {block:?}: needs a tier {tier} tool, and no tool reaches it");
+    }
+    let registries = Registries::new(blocks, items, entities, worldgen, structures, spawning);
+    (registries, visuals)
+}
+
+/// The block table and the items that place, harvest and wear it, with the
+/// appearance fields both files declare.
+fn load_blocks_and_items(
+    source: &dyn AssetSource,
+) -> (Arc<BlockRegistry>, Arc<ItemRegistry>, RuleVisuals) {
     let mut block_visuals = BlockVisuals::default();
     let blocks = Arc::new(load_or_builtin(
         source,
@@ -77,6 +96,24 @@ pub fn load_registries(source: &dyn AssetSource) -> (Registries, RuleVisuals) {
     for (block, kind) in content::unknown_harvest_tools(&blocks, &items) {
         log::warn!("block {block:?}: wants tool kind {kind:?}, which no item declares");
     }
+    let visuals = RuleVisuals {
+        blocks: block_visuals,
+        items: item_visuals,
+    };
+    (blocks, items, visuals)
+}
+
+/// What lives in the world: entity kinds, the terrain, its structures and
+/// the spawn rules.
+fn load_world_rules(
+    source: &dyn AssetSource,
+    blocks: &Arc<BlockRegistry>,
+) -> (
+    Arc<EntityRegistry>,
+    Arc<WorldGenConfig>,
+    Arc<StructureConfig>,
+    Arc<SpawnConfig>,
+) {
     let entities = Arc::new(load_or_builtin(
         source,
         ENTITIES_PATH,
@@ -91,8 +128,8 @@ pub fn load_registries(source: &dyn AssetSource) -> (Registries, RuleVisuals) {
         WORLDGEN_PATH,
         "worldgen",
         &mut (),
-        |text, _| WorldGenConfig::from_toml(text, &blocks),
-        |_| WorldGenConfig::builtin(&blocks),
+        |text, _| WorldGenConfig::from_toml(text, blocks),
+        |_| WorldGenConfig::builtin(blocks),
         |_| "worldgen config".to_string(),
     ));
     let structures = Arc::new(load_or_builtin(
@@ -100,8 +137,8 @@ pub fn load_registries(source: &dyn AssetSource) -> (Registries, RuleVisuals) {
         STRUCTURES_PATH,
         "structures",
         &mut (),
-        |text, _| StructureConfig::from_toml(text, &blocks, &worldgen),
-        |_| StructureConfig::builtin(&blocks, &worldgen),
+        |text, _| StructureConfig::from_toml(text, blocks, &worldgen),
+        |_| StructureConfig::builtin(blocks, &worldgen),
         |config| format!("{} structures", config.all().len()),
     ));
     let spawning = Arc::new(load_or_builtin(
@@ -113,21 +150,7 @@ pub fn load_registries(source: &dyn AssetSource) -> (Registries, RuleVisuals) {
         |_| SpawnConfig::builtin(&entities, &worldgen),
         |config| format!("{} spawn rules", config.entries.len()),
     ));
-    // The loop's references cross files that load in an order where their
-    // targets cannot yet be seen; this is the first point that sees all.
-    for problem in content::dangling_references(&blocks, &items, &entities, &structures) {
-        log::warn!("{problem}");
-    }
-    for (block, tier) in content::unreachable_tiers(&blocks, &items) {
-        log::warn!("block {block:?}: needs a tier {tier} tool, and no tool reaches it");
-    }
-
-    let registries = Registries::new(blocks, items, entities, worldgen, structures, spawning);
-    let visuals = RuleVisuals {
-        blocks: block_visuals,
-        items: item_visuals,
-    };
-    (registries, visuals)
+    (entities, worldgen, structures, spawning)
 }
 
 #[cfg(test)]

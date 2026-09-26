@@ -191,118 +191,28 @@ impl Visuals {
                 models.load(path, source);
             }
         }
-        // A block and the item that places it typically name the same file;
-        // `ModelRegistry::load` memoises by path, so they share one parse, one
-        // `ModelId`, one GPU texture and one 3D-icon cell.
-        let block_models: Vec<Option<BlockModel>> = block_model_specs
-            .iter()
-            .map(|entry| {
-                let entry = entry.as_ref()?;
-                let id = models.load(&entry.spec.path, source)?;
-                // The hitbox is measured from the placed geometry, so it can
-                // never drift from what the block actually looks like. The
-                // model registry is borrowed here, before it is wrapped in an
-                // `Arc`, which is the only reason this can't live in `world`.
-                let placed = placed_bounds(models.get(id)?, entry);
-                Some(BlockModel {
-                    id,
-                    scale: entry.spec.scale,
-                    rotation: entry.spec.rotation(),
-                    offset: entry.spec.offset(),
-                    random_yaw: entry.random_yaw,
-                    hitbox: model_hitbox(placed),
-                })
-            })
-            .collect();
+        let block_models = load_placed_block_models(&block_model_specs, &mut models, source);
         // One entry per item, even if the items file fell back to its builtin
         // and left the spec list empty — this vector is indexed by `ItemId`.
         item_model_specs.resize(items.len(), None);
-        let item_models: Vec<Option<ItemModel>> = item_model_specs
-            .iter()
-            .map(|spec| {
-                let spec = spec.as_ref()?;
-                Some(ItemModel {
-                    id: models.load(&spec.path, source)?,
-                    scale: spec.scale,
-                    rotation: spec.rotation(),
-                    offset: spec.offset(),
-                })
-            })
-            .collect();
+        let item_models = load_item_models(&item_model_specs, &mut models, source);
 
-        // Blocks authored in Blockbench. Each `.json` is parsed, its textures
-        // take layers of the shared array, and the geometry is baked into quads
-        // the chunk mesher can place with a translation. Fail-soft like every
-        // other content load: a bad model costs its own block's appearance (it
-        // falls back to whatever `textures` it declared) and nothing else.
         let mut block_textures = BlockTextureSet::new();
-        let mut baked_models: Vec<Option<BakedBlockModel>> = Vec::new();
-        let mut block_face_tiles: Vec<Option<FaceTextures>> = Vec::new();
-        for spec in &block_json_paths {
-            let baked = spec
-                .as_ref()
-                .and_then(|spec| load_block_model(spec, source, &mut block_textures));
-            block_face_tiles.push(
-                baked
-                    .as_ref()
-                    .map(|m| derive_face_tiles(m, &block_textures, &mut tiles)),
-            );
-            baked_models.push(baked);
-        }
-
-        // Fluids draw from an animation strip rather than a model: the frames
-        // take a run of array layers each, and the mesher steps through them.
-        let mut fluid_textures: Vec<Option<FluidTexture>> = Vec::new();
-        for (id, visual) in fluid_visuals.iter().enumerate() {
-            let fluid = visual
-                .as_ref()
-                .and_then(|visual| load_fluid_texture(visual, source, &mut block_textures));
-            // The inventory icon and the dropped-item cube still sample the
-            // atlas, so a fluid needs the same 16-pixel stand-in a Blockbench
-            // block gets — its first still frame, which is the frame the block
-            // spends most of its time looking like.
-            if let Some(tex) = &fluid
-                && block_face_tiles[id].is_none()
-                && let Some(image) = block_textures.layer(tex.still.first)
-            {
-                let tile = tiles
-                    .insert(
-                        &format!("blockmodel:{}", tex.still.first),
-                        block_textures::to_atlas_tile(image),
-                    )
-                    .tile;
-                block_face_tiles[id] = Some(FaceTextures::uniform(tile));
-            }
-            fluid_textures.push(fluid);
-        }
-
-        // Finally the plain `textures = ...` blocks. This is the pass that used
-        // to happen inside `BlockRegistry::from_toml`, and it runs last so a
-        // block that also carries a model or a fluid strip keeps the tiles
-        // derived from its own art.
-        for (id, names) in block_texture_names.iter().enumerate() {
-            let Some(names) = names else { continue };
-            if block_face_tiles.get(id).is_some_and(Option::is_some) {
-                continue;
-            }
-            let faces = std::array::from_fn(|face| tiles.resolve(&names[face]).tile);
-            if id >= block_face_tiles.len() {
-                block_face_tiles.resize(id + 1, None);
-            }
-            block_face_tiles[id] = Some(FaceTextures(faces));
-        }
+        let (baked_models, mut block_face_tiles) =
+            bake_block_json(&block_json_paths, source, &mut block_textures, &mut tiles);
+        let fluid_textures = load_fluid_textures(
+            &fluid_visuals,
+            source,
+            &mut block_textures,
+            &mut tiles,
+            &mut block_face_tiles,
+        );
+        resolve_named_faces(&block_texture_names, &mut tiles, &mut block_face_tiles);
         block_face_tiles.resize(blocks.len(), None);
 
         let item_icons =
             build_item_icons(&mut tiles, blocks, items, &item_models, &block_face_tiles);
-        // An arrow in flight is a flat billboard sampling one atlas tile, so it
-        // reads the *art* by name rather than the item's icon. Those used to be
-        // the same thing; they stopped being when the arrow gained a generated
-        // model and its icon became an `ItemIcon::Model` with no tile at all.
-        let arrow_faces = match items.find(ARROW_ITEM) {
-            Some(_) => FaceTextures::uniform(tiles.resolve(&format!("items/{ARROW_ITEM}")).tile),
-            None => MISSING_FACES,
-        };
+        let arrow_faces = arrow_faces(items, &mut tiles);
         Self {
             tiles,
             block_textures,
@@ -654,4 +564,150 @@ fn placed_bounds(model: &wyven_model::Model, spec: &BlockModelSpec) -> (glam::Ve
             None => Some((p, p)),
         })
         .expect("eight corners")
+}
+
+/// Every `[block.model]` placed into its cell, with a hitbox measured from the
+/// placed geometry — so it can never drift from what the block looks like.
+///
+/// A block and the item that places it typically name the same file;
+/// `ModelRegistry::load` memoises by path, so they share one parse, one
+/// `ModelId`, one GPU texture and one 3D-icon cell. The registry is borrowed
+/// here, before it is wrapped in an `Arc`, which is the only reason this
+/// cannot live in `world`.
+fn load_placed_block_models(
+    specs: &[Option<BlockModelSpec>],
+    models: &mut ModelRegistry,
+    source: &dyn ContentSource,
+) -> Vec<Option<BlockModel>> {
+    specs
+        .iter()
+        .map(|entry| {
+            let entry = entry.as_ref()?;
+            let id = models.load(&entry.spec.path, source)?;
+            let placed = placed_bounds(models.get(id)?, entry);
+            Some(BlockModel {
+                id,
+                scale: entry.spec.scale,
+                rotation: entry.spec.rotation(),
+                offset: entry.spec.offset(),
+                random_yaw: entry.random_yaw,
+                hitbox: model_hitbox(placed),
+            })
+        })
+        .collect()
+}
+
+/// Every `[item.model]`, resolved to a loaded model and its placement.
+fn load_item_models(
+    specs: &[Option<wyven_model::ModelSpec>],
+    models: &mut ModelRegistry,
+    source: &dyn ContentSource,
+) -> Vec<Option<ItemModel>> {
+    specs
+        .iter()
+        .map(|spec| {
+            let spec = spec.as_ref()?;
+            Some(ItemModel {
+                id: models.load(&spec.path, source)?,
+                scale: spec.scale,
+                rotation: spec.rotation(),
+                offset: spec.offset(),
+            })
+        })
+        .collect()
+}
+
+/// Blocks authored in Blockbench. Each `.json` is parsed, its textures take
+/// layers of the shared array, and the geometry is baked into quads the chunk
+/// mesher can place with a translation; each baked block also gets six atlas
+/// tiles derived from its own art. Fail-soft like every other content load: a
+/// bad model costs its own block's appearance (it falls back to whatever
+/// `textures` it declared) and nothing else.
+fn bake_block_json(
+    paths: &[Option<BlockJsonSpec>],
+    source: &dyn ContentSource,
+    block_textures: &mut BlockTextureSet,
+    tiles: &mut TileRegistry,
+) -> (Vec<Option<BakedBlockModel>>, Vec<Option<FaceTextures>>) {
+    let mut baked_models = Vec::new();
+    let mut face_tiles = Vec::new();
+    for spec in paths {
+        let baked = spec
+            .as_ref()
+            .and_then(|spec| load_block_model(spec, source, block_textures));
+        face_tiles.push(
+            baked
+                .as_ref()
+                .map(|m| derive_face_tiles(m, block_textures, tiles)),
+        );
+        baked_models.push(baked);
+    }
+    (baked_models, face_tiles)
+}
+
+/// Fluids draw from an animation strip rather than a model: the frames take a
+/// run of array layers each, and the mesher steps through them.
+///
+/// The inventory icon and the dropped-item cube still sample the atlas, so a
+/// fluid with no tiles yet gets the same stand-in a Blockbench block does —
+/// its first still frame, which is the frame the block spends most of its
+/// time looking like.
+fn load_fluid_textures(
+    visuals: &[Option<FluidVisual>],
+    source: &dyn ContentSource,
+    block_textures: &mut BlockTextureSet,
+    tiles: &mut TileRegistry,
+    face_tiles: &mut [Option<FaceTextures>],
+) -> Vec<Option<FluidTexture>> {
+    let mut fluid_textures = Vec::new();
+    for (id, visual) in visuals.iter().enumerate() {
+        let fluid = visual
+            .as_ref()
+            .and_then(|visual| load_fluid_texture(visual, source, block_textures));
+        if let Some(tex) = &fluid
+            && face_tiles[id].is_none()
+            && let Some(image) = block_textures.layer(tex.still.first)
+        {
+            let tile = tiles
+                .insert(
+                    &format!("blockmodel:{}", tex.still.first),
+                    block_textures::to_atlas_tile(image),
+                )
+                .tile;
+            face_tiles[id] = Some(FaceTextures::uniform(tile));
+        }
+        fluid_textures.push(fluid);
+    }
+    fluid_textures
+}
+
+/// The plain `textures = ...` blocks. This runs last so a block that also
+/// carries a model or a fluid strip keeps the tiles derived from its own art.
+fn resolve_named_faces(
+    names: &[Option<[String; 6]>],
+    tiles: &mut TileRegistry,
+    face_tiles: &mut Vec<Option<FaceTextures>>,
+) {
+    for (id, names) in names.iter().enumerate() {
+        let Some(names) = names else { continue };
+        if face_tiles.get(id).is_some_and(Option::is_some) {
+            continue;
+        }
+        let faces = std::array::from_fn(|face| tiles.resolve(&names[face]).tile);
+        if id >= face_tiles.len() {
+            face_tiles.resize(id + 1, None);
+        }
+        face_tiles[id] = Some(FaceTextures(faces));
+    }
+}
+
+/// The faces an arrow in flight is drawn with. It is a flat billboard sampling
+/// one atlas tile, so it reads the *art* by name rather than the item's icon.
+/// Those used to be the same thing; they stopped being when the arrow gained a
+/// generated model and its icon became an `ItemIcon::Model` with no tile.
+fn arrow_faces(items: &ItemRegistry, tiles: &mut TileRegistry) -> FaceTextures {
+    match items.find(ARROW_ITEM) {
+        Some(_) => FaceTextures::uniform(tiles.resolve(&format!("items/{ARROW_ITEM}")).tile),
+        None => MISSING_FACES,
+    }
 }
