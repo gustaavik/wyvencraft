@@ -1,0 +1,9 @@
+[package]
+name = "wyven-ecs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A small sparse-set entity-component store: generational handles, closure queries, deferred commands."
+
+[dependencies]

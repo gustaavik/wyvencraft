@@ -227,7 +227,7 @@ The **code** is dual licensed under either of
   <https://www.apache.org/licenses/LICENSE-2.0>)
 - MIT license ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
 
-at your option. This covers `src/` and the nine `wyven-*` engine crates under
+at your option. This covers `src/` and the ten `wyven-*` engine crates under
 `crates/`, which are usable on their own — the engine knows nothing about
 Wyvencraft and depends on none of it.
 
