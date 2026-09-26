@@ -8,7 +8,7 @@ change what*, see [`CLAUDE.md`](../CLAUDE.md).
 
 ## 1. The crate graph
 
-A cargo workspace. Nine `wyven-*` members under `crates/` are the **engine**; the root
+A cargo workspace. Ten `wyven-*` members under `crates/` are the **engine**; the root
 package `wyvencraft` (`src/`) is the **game**.
 
 ```
@@ -21,6 +21,8 @@ wyven-net      ← core               renet transport, generic over <Protocol, J
 wyven-input    ← core               winit events → frame-coherent InputState
 wyven-auth     ← nothing            accounts, key cache, ticket verify
 wyven-app      ← core, render, input    window, egui, event loop, screen stack
+wyven-audio    ← nothing            audio device output + mixing behind AudioBackend
+wyven-ecs      ← nothing            entity-component store: generational handles, queries, commands
 ```
 
 **The direction is enforced by cargo.** No engine crate lists the game, so a violation stops

@@ -19,6 +19,7 @@ wyven-input = { path = "crates/wyven-input", version = "0.1.0" }
 wyven-auth = { path = "crates/wyven-auth", version = "0.1.0" }
 wyven-app = { path = "crates/wyven-app", version = "0.1.0" }
 wyven-audio = { path = "crates/wyven-audio", version = "0.1.0" }
+wyven-ecs = { path = "crates/wyven-ecs", version = "0.1.0" }
 
 # --- Rendering (Vulkan) ---
 vulkano = "0.35"

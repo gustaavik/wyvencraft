@@ -1,6 +1,6 @@
 # Wyvencraft — how the systems communicate
 
-Wyvencraft is built out of parts that deliberately do not know about each other. Nine
+Wyvencraft is built out of parts that deliberately do not know about each other. Ten
 `wyven-*` engine crates know nothing about grass, zombies or survival mode. An account
 server runs in a different process, in a different repository. A multiplayer host and its
 clients share no memory at all. Everything those parts need from each other crosses a

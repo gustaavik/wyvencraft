@@ -12,7 +12,7 @@ and borrows Terraria's layered underground and tiered gear. Built with **Vulkan 
 `egui_winit_vulkano`), and `renet` 2.0 for multiplayer. Edition 2024. See
 [README.md](README.md) for the player-facing overview.
 
-**A cargo workspace: engine and game are separate crates.** The nine `wyven-*`
+**A cargo workspace: engine and game are separate crates.** The ten `wyven-*`
 members under `crates/` are the engine and know nothing about grass, zombies or
 survival mode; the root package `wyvencraft` is the game built on them. The
 direction is enforced by cargo — no engine crate lists the game, so a violation
@@ -120,7 +120,7 @@ one that was vetted. To reproduce the failure on a Mac:
 **Building the *game* needs read access to a private repo; the engine does not.**
 `wcauth-ticket` is reachable only from `wyven-auth`, so
 `cargo build -p wyven-core -p wyven-assets -p wyven-render -p wyven-model -p
-wyven-voxel -p wyven-net -p wyven-input -p wyven-app -p wyven-audio` needs no credential at all.
+wyven-voxel -p wyven-net -p wyven-input -p wyven-app -p wyven-audio -p wyven-ecs` needs no credential at all.
 `wcauth-ticket` — the join-ticket contract — is a git dependency on the **private**
 [gustaavik/wcauthserver](https://github.com/gustaavik/wcauthserver), pinned to
 `branch = "main"` with the exact commit recorded in `Cargo.lock`. `cargo fetch`
@@ -140,7 +140,7 @@ uncomment the `[patch."https://github.com/gustaavik/wcauthserver.git"]` block in
 
 ### The engine crates (`crates/`)
 
-Nine workspace members, **one-directional** and enforced by cargo — none of them
+Ten workspace members, **one-directional** and enforced by cargo — none of them
 lists the game, so a violation stops compiling:
 
 ```
@@ -154,6 +154,7 @@ wyven-input    ← core               winit events → frame-coherent InputState
 wyven-auth     ← nothing            accounts, key cache, Ed25519 ticket verify (the ONLY wcauth-ticket user)
 wyven-app      ← core, render, input    window, egui, event loop, screen stack
 wyven-audio    ← nothing            audio device output + mixing: AudioBackend (RodioBackend/NullAudioBackend), AudioClip, PlaybackHandle
+wyven-ecs      ← nothing            entity-component store: generational Entity, SparseSet per type, closure queries, CommandBuffer
 ```
 
 **None of them knows a block's name, a mob's behaviour, or what survival mode
@@ -540,7 +541,7 @@ those systems are testable without a Vulkan device.
   quit, and window close via `StateStack::shutdown`) + a 60 s autosave. Only
   singleplayer/host sessions of a *named* world hold a save handle; clients and
   `WYVEN_BOOT_INGAME`-without-`WYVEN_WORLD` boots never write.
-- **The code is open; the art and the name are not.** `src/` and all nine
+- **The code is open; the art and the name are not.** `src/` and all ten
   `wyven-*` crates are `MIT OR Apache-2.0` (inherited from
   `[workspace.package]`), and the engine crates are meant for crates.io — which
   is why the internal deps in `[workspace.dependencies]` carry a `version`
@@ -574,6 +575,6 @@ those systems are testable without a Vulkan device.
 For a change that touches the engine/game line, two extra checks:
 
 4. The engine still builds with no GitHub credential:
-   `cargo build -p wyven-core -p wyven-assets -p wyven-render -p wyven-model -p wyven-voxel -p wyven-net -p wyven-input -p wyven-app -p wyven-audio`
+   `cargo build -p wyven-core -p wyven-assets -p wyven-render -p wyven-model -p wyven-voxel -p wyven-net -p wyven-input -p wyven-app -p wyven-audio -p wyven-ecs`
 5. The logic crates still test with no Vulkan device:
-   `cargo test -p wyven-core -p wyven-voxel -p wyven-model -p wyven-assets -p wyven-audio`
+   `cargo test -p wyven-core -p wyven-voxel -p wyven-model -p wyven-assets -p wyven-audio -p wyven-ecs`
