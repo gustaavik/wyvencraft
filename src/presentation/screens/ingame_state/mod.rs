@@ -25,6 +25,7 @@ mod interaction;
 mod inventory;
 mod mobs;
 mod net;
+mod panels;
 mod persistence;
 mod progression_net;
 mod setup;

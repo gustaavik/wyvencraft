@@ -3,6 +3,7 @@
 
 use winit::event::MouseButton;
 
+use super::panels::draw_death_screen;
 use super::{AUTOSAVE_INTERVAL, DOUBLE_TAP_WINDOW, InGameState};
 use crate::domain::entity::MovementInput;
 use crate::presentation::config::Keybinds;
@@ -27,7 +28,7 @@ impl InGameState {
     /// on the aspect, so a disagreement can resolve to a different clamped
     /// distance: a different camera *position*, not merely a different
     /// projection, and nameplates that drift off their players.
-    fn draw_nameplates(&self, egui_ctx: &egui::Context, aspect: f32) {
+    pub(super) fn draw_nameplates(&self, egui_ctx: &egui::Context, aspect: f32) {
         if self
             .sim
             .ecs
@@ -145,8 +146,6 @@ impl GameState<Wyvencraft> for InGameState {
     }
 
     fn ui(&mut self, egui_ctx: &egui::Context, ctx: &mut StateContext) -> Transition {
-        use crate::presentation::ui::inventory::InvAction;
-
         // Carried across to the world camera, which is derived after this pass
         // but is only given an aspect ratio. Recorded before anything else so
         // the nameplates below see this frame's rect, not the last one's.
@@ -154,26 +153,7 @@ impl GameState<Wyvencraft> for InGameState {
 
         // Death screen takes over everything else.
         if self.sim.dead {
-            let mut respawn = false;
-            egui::Area::new(egui::Id::new("death_screen"))
-                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-                .show(egui_ctx, |ui| {
-                    ui.vertical_centered(|ui| {
-                        ui.label(
-                            egui::RichText::new("You died")
-                                .size(40.0)
-                                .color(egui::Color32::from_rgb(220, 40, 40)),
-                        );
-                        ui.add_space(12.0);
-                        if ui
-                            .add_sized([180.0, 40.0], egui::Button::new("Respawn"))
-                            .clicked()
-                        {
-                            respawn = true;
-                        }
-                    });
-                });
-            if respawn {
+            if draw_death_screen(egui_ctx) {
                 self.sim.respawn();
             }
             return Transition::None;
@@ -190,140 +170,14 @@ impl GameState<Wyvencraft> for InGameState {
         // two are the same nine slots and at progress 0 they coincide exactly,
         // so exactly one of them is drawn and the swap is invisible.
         if self.inventory_anim.active() {
-            let entries = self.crafting_entries();
-            let crafting_view = (!self.sim.player.mode.is_creative()).then(|| {
-                crate::presentation::ui::crafting::CraftingView {
-                    entries: &entries,
-                    discovered: self.crafting.revealed.len(),
-                    total: self.sim.recipes.recipes().len(),
-                    stations: &self.crafting.stations,
-                    nearby: &self.crafting.nearby,
-                    selected: self.crafting.selected,
-                    craftable_only: self.crafting.craftable_only,
-                    inventory: &self.sim.inventory,
-                    items: &self.content.rules.items,
-                    icons: &ctx.shared.content.visuals.item_icons,
-                    names: &ctx.shared.content.visuals.item_display_names,
-                    tex: ctx.shared.ui_tex,
-                }
-            });
-            let out = crate::presentation::ui::inventory::draw_inventory(
-                egui_ctx,
-                &self.sim.inventory,
-                &self.content.rules.items,
-                &ctx.shared.content.visuals.item_icons,
-                &ctx.shared.content.visuals.item_display_names,
-                self.sim.held,
-                self.sim.player.mode,
-                self.inventory_anim.progress(),
-                // The panel has the keyboard to itself here: it holds no text
-                // field, so egui consumes nothing and the binding still lands.
-                ctx.input
-                    .just_pressed(ctx.shared.settings.controls.keybinds.drop_item),
-                ctx.shared.ui_tex,
-                crafting_view.as_ref(),
-            );
-            if let Some(action) = out {
-                match action {
-                    InvAction::Slot(index) => self.handle_slot_click(index),
-                    InvAction::Split(index) => self.handle_slot_split(index),
-                    InvAction::Pick(id) => {
-                        self.sim.held = Some(self.content.rules.items.full_stack(id))
-                    }
-                    InvAction::DropSlot(index) => self.drop_slot(index),
-                    InvAction::DropHeld { all } => self.drop_held(all),
-                    InvAction::DropOne(index) => self.drop_one(index),
-                    InvAction::Craft(craft) => self.handle_craft_action(craft),
-                }
-            }
+            self.draw_inventory_panel(egui_ctx, ctx);
             return Transition::None;
         }
 
-        // Before the HUD, so a name can never sit on top of the hotbar or the
-        // vitals.
-        self.draw_nameplates(egui_ctx, ctx.aspect);
-
-        self.draw_chat(egui_ctx);
-
-        hud::draw_crosshair(egui_ctx);
-        hud::draw_hotbar(
-            egui_ctx,
-            &self.sim.inventory,
-            &self.content.rules.items,
-            &ctx.shared.content.visuals.item_icons,
-            ctx.shared.ui_tex,
-        );
-        // Name whatever is in hand, until it fades. Observing here rather than
-        // wherever the selection changes catches every route into the hand —
-        // scrolling, the number keys, picking a block up, a tool breaking.
-        let survival = self.sim.player.mode.takes_damage();
-        self.held_label
-            .observe(self.sim.inventory.item_in_selected());
-        self.held_label.tick(ctx.dt);
-        if let Some((item, alpha)) = self.held_label.visible() {
-            let name = ctx.shared.content.item_display_name(item);
-            hud::draw_held_label(egui_ctx, name, alpha, survival);
-        }
-        hud::draw_mode_indicator(egui_ctx, self.sim.player.mode.label());
-        crate::presentation::ui::compass::draw_compass(
-            egui_ctx,
-            self.sim.player.yaw,
-            &self.waypoints(),
-        );
-        if let Some(bar) = self.boss_bar() {
-            crate::presentation::ui::boss_bar::draw_boss_bar(egui_ctx, &bar);
-        }
-
-        // Survival HUD: vitals and break progress.
-        if survival {
-            hud::draw_vitals(
-                egui_ctx,
-                self.sim.player.health,
-                self.sim.player.vitals().max_health,
-                self.sim.player.hunger,
-                self.sim.player.vitals().max_hunger,
-            );
-        }
-
+        self.draw_hud(egui_ctx, ctx);
         if self.show_debug {
-            let fps = if ctx.dt > 0.0 { 1.0 / ctx.dt } else { 0.0 };
-            let p = self.sim.player.position;
-            let facing = self.sim.player.look_direction();
-            let lines = vec![
-                format!("Wyvencraft — {fps:.0} fps"),
-                format!("xyz: {:.2} {:.2} {:.2}", p.x, p.y, p.z),
-                format!("facing: {:.2} {:.2} {:.2}", facing.x, facing.y, facing.z),
-                format!(
-                    "chunks: {} loaded / {} meshes / {} queued / {} pending",
-                    self.sim.world.loaded_count(),
-                    self.view.loaded_mesh_count(),
-                    self.view.queued_mesh_count(),
-                    self.sim.loader.pending_count()
-                ),
-                format!("on_ground: {}", self.sim.player.on_ground),
-                self.biome_line(),
-                format!(
-                    "mobs: {} live / {} arrows / {} drops",
-                    self.sim
-                        .ecs
-                        .count::<crate::application::ecs::components::MobId>(),
-                    self.sim
-                        .ecs
-                        .count::<crate::application::ecs::components::Projectile>(),
-                    self.sim
-                        .ecs
-                        .count::<crate::application::ecs::components::ItemDrop>()
-                ),
-                format!("net: {}", self.net_status()),
-                format!(
-                    "time: {}",
-                    format_time_of_day(self.sim.day_cycle.time_of_day())
-                ),
-                format!("world: {}", self.save.world_name()),
-            ];
-            hud::draw_debug(egui_ctx, &lines);
+            hud::draw_debug(egui_ctx, &self.debug_lines(ctx));
         }
-
         Transition::None
     }
 
@@ -338,7 +192,7 @@ impl GameState<Wyvencraft> for InGameState {
 }
 
 /// Format a normalized time-of-day `[0,1)` (0.0 = midnight) as a 24-hour clock.
-fn format_time_of_day(t: f32) -> String {
+pub(super) fn format_time_of_day(t: f32) -> String {
     let minutes = (t.rem_euclid(1.0) * 24.0 * 60.0) as u32;
     format!("{:02}:{:02}", (minutes / 60) % 24, minutes % 60)
 }
