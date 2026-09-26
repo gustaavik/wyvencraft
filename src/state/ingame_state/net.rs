@@ -225,7 +225,11 @@ impl InGameState {
                     rp.push_snapshot(Vec3::from_array(position), yaw, pitch);
                 }
             }
-            ClientMessage::Break { pos } => self.apply_client_edit(pos, BlockId::AIR),
+            ClientMessage::Break { pos } => {
+                if self.client_may_break(pid, pos) {
+                    self.apply_client_edit(pos, BlockId::AIR);
+                }
+            }
             ClientMessage::Place { pos, block } => self.apply_client_edit(pos, block),
             ClientMessage::Stats {
                 health,
@@ -261,7 +265,50 @@ impl InGameState {
             }
             ClientMessage::RequestStatus => self.report_status(pid),
             ClientMessage::Attack { id } => self.apply_client_attack(pid, id),
+            ClientMessage::UseBlock {
+                pos,
+                slots,
+                selected,
+            } => {
+                // Adopt the snapshot first, so the use is judged against
+                // exactly what the client held when it clicked.
+                if let Some(rp) = self.peers.players.get_mut(&pid) {
+                    rp.equipment = equipment_from_slots(&slots, selected);
+                }
+                self.peers.inventories.insert(pid, (slots, selected));
+                self.use_block(pid, pos);
+            }
         }
+    }
+
+    /// Whether a client's tool meets the tier of the block it broke — the
+    /// progression gate, checked here too so a modified client cannot mine a
+    /// later biome's ore on day one. Read off the inventory it last reported,
+    /// the same trust `client_melee_damage` extends. A refused break is undone
+    /// on the client by echoing the block back, since it already applied the
+    /// edit optimistically.
+    fn client_may_break(&mut self, pid: PlayerId, pos: BlockPos) -> bool {
+        let existing = self.world.block_at(pos);
+        let harvest = self.content.blocks.get(existing).harvest.as_ref();
+        let tool = self
+            .peers
+            .inventories
+            .get(&pid)
+            .and_then(|(slots, selected)| slots.get(*selected as usize)?.as_ref())
+            .and_then(|stack| self.content.items.component::<Tool>(ItemId(stack.item)));
+        if crate::inventory::meets_tier(harvest, tool) {
+            return true;
+        }
+        log::info!("player {} broke {pos:?} below its tier; undoing", pid.0);
+        self.session.send_to(
+            pid,
+            &ServerMessage::BlockChanged {
+                pos,
+                block: existing,
+            },
+            Channel::Reliable,
+        );
+        false
     }
 
     /// Apply a client's block edit and echo the result to everyone.
@@ -302,6 +349,11 @@ impl InGameState {
         for msg in spawned {
             self.session.send_to(pid, &msg, Channel::Reliable);
         }
+        self.session.send_to(
+            pid,
+            &ServerMessage::Progression(self.progression.clone()),
+            Channel::Reliable,
+        );
     }
 
     /// Damage a client's swing lands, from the item in the hotbar slot they
@@ -349,6 +401,14 @@ impl InGameState {
     /// Apply one authoritative update from the host.
     fn apply_update(&mut self, msg: ServerMessage) {
         let local_id = self.session.local_id();
+        // The biome/boss loop's messages are handled beside the code that
+        // sends them; whatever they decline comes back to be matched here.
+        let Some(msg) = self.apply_progression_update(msg) else {
+            return;
+        };
+        let Some(msg) = self.apply_boss_update(msg) else {
+            return;
+        };
         match msg {
             // The welcome is consumed during construction, not here.
             ServerMessage::Welcome { .. } => {}
@@ -422,9 +482,12 @@ impl InGameState {
                     }
                 }
             }
-            ServerMessage::MobHurt { .. } => {
-                // Reserved for hurt feedback (flash/sound); the authoritative
-                // outcome arrives as MobDespawned.
+            ServerMessage::MobHurt { id, health } => {
+                // Mirrored for the boss bar; the authoritative outcome of a
+                // killing blow still arrives as MobDespawned.
+                if let Some(mob) = self.mobs.remote.get_mut(&id) {
+                    mob.health = health;
+                }
             }
             ServerMessage::MobDespawned { id, killed_by } => {
                 if let Some(mob) = self.mobs.remote.remove(&id)
@@ -736,7 +799,7 @@ pub(super) fn recipes_to_wire(book: &RecipeBook, items: &ItemRegistry) -> Vec<Re
 }
 
 /// Convert the local inventory to its wire form for `SyncInventory`.
-fn inventory_to_wire(inventory: &Inventory) -> (Vec<Option<NetItemStack>>, u32) {
+pub(super) fn inventory_to_wire(inventory: &Inventory) -> (Vec<Option<NetItemStack>>, u32) {
     let slots = inventory
         .slots()
         .iter()

@@ -368,6 +368,9 @@ pub struct EntityKind {
     pub item: Option<ItemEntityParams>,
     #[serde(default)]
     pub mob: Option<MobParams>,
+    /// `[entity.boss]` — makes a mob a boss (see [`crate::entity::boss`]).
+    #[serde(default)]
+    pub boss: Option<crate::entity::boss::BossParams>,
     pub visual: VisualSpec,
 }
 
@@ -397,7 +400,18 @@ impl EntityRegistry {
     /// copy) when the required kinds are missing their required components.
     pub fn from_toml(text: &str) -> Result<Self, String> {
         let file: EntityFile = toml::from_str(text).map_err(|e| e.to_string())?;
-        let kinds = file.entity;
+        let mut kinds = file.entity;
+        for kind in &mut kinds {
+            if let Some(boss) = &mut kind.boss {
+                if kind.mob.is_none() {
+                    return Err(format!(
+                        "entity {:?}: [entity.boss] needs [entity.mob]",
+                        kind.name
+                    ));
+                }
+                boss.validate(&kind.name)?;
+            }
+        }
         for (i, kind) in kinds.iter().enumerate() {
             if kinds[..i].iter().any(|other| other.name == kind.name) {
                 return Err(format!("duplicate entity {:?}", kind.name));
@@ -460,7 +474,8 @@ mod tests {
     #[test]
     fn builtin_entities_golden() {
         let reg = EntityRegistry::builtin();
-        assert_eq!(reg.len(), 9);
+        // The nine vanilla kinds, plus the Meadows' deer, thornling and boss.
+        assert_eq!(reg.len(), 12);
 
         let player = reg.player();
         assert_eq!(player.physics.gravity, 28.0);
@@ -707,5 +722,31 @@ mod tests {
             kind = "humanoid"
         "#;
         assert!(EntityRegistry::from_toml(no_vitals).is_err());
+    }
+
+    /// The Meadows boss parses whole: a mob with a validated boss component
+    /// whose phases resolve to its own attacks.
+    #[test]
+    fn the_elder_stag_is_a_boss() {
+        let reg = EntityRegistry::builtin();
+        let stag = reg.find("elder stag").expect("elder stag");
+        assert!(stag.mob.is_some());
+        let boss = stag.boss.as_ref().expect("boss component");
+        assert_eq!(boss.offering.item, "stag_effigy");
+        assert_eq!(boss.phases.len(), 2);
+        assert!(boss.phases[1].attack_indices.len() > boss.phases[0].attack_indices.len());
+        assert!(reg.find("deer").unwrap().boss.is_none());
+    }
+
+    #[test]
+    fn a_malformed_boss_rejects_the_file() {
+        let text = BUILTIN_ENTITIES.replacen("[entity.boss]\ntitle", "[entity.oops]\ntitle", 1);
+        assert!(EntityRegistry::from_toml(&text).is_err(), "unknown table");
+        let text = BUILTIN_ENTITIES.replace(
+            "attacks = [\"gore\", \"stomp\", \"antler_lightning\"]",
+            "attacks = [\"gore\", \"moonbeam\"]",
+        );
+        let err = EntityRegistry::from_toml(&text).unwrap_err();
+        assert!(err.contains("moonbeam"), "{err}");
     }
 }

@@ -11,6 +11,8 @@
 //!   which is how a `BlockId` acquires meaning inside the engine.
 //! - [`generation`] — [`NoiseGenerator`], this game's implementation of
 //!   [`wyven_voxel::WorldGenerator`], plus its climate, biome and feature model.
+//! - [`structure`] — shrines and boss altars: their templates, where the
+//!   seed places them, and stamping them into chunks as they generate.
 //! - [`fluid`] — the spreading rules for `[block.fluid]` components. Levels,
 //!   auto-registered flowing variants and decay are Wyvencraft's policy, not a
 //!   substrate anything else would reuse.
@@ -20,6 +22,7 @@ pub mod fluid;
 pub mod generation;
 #[cfg(test)]
 mod meshing_tests;
+pub mod structure;
 
 pub use block::{Block, BlockRegistry, Harvest};
 pub use fluid::FluidSim;

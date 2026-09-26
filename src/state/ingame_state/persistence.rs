@@ -68,6 +68,7 @@ impl InGameState {
             player: &player,
             players: &self.save.records,
             mobs: &mobs,
+            progression: &self.progression,
             game_mode: self.player.mode,
             spawn: self.spawn.to_array(),
             time_of_day: self.day_cycle.time_of_day(),

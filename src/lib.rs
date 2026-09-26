@@ -50,6 +50,7 @@
 //! chat      ← net           message log, commands, the ops list
 //! paths     ← (nothing)    where the data dir is; saves, profile, ops, keys
 //! save      ← world, entity world/player persistence under saves/
+//! progression ← core        shrines read, altars revealed, bosses beaten; compass bearings
 //! ui        ← inventory     HUD and inventory egui views
 //! net       ← wyven-net     the wire protocol and the join gate
 //! config    ← wyven-input   settings, keybinds, and the movement intent
@@ -98,6 +99,7 @@ pub mod entity;
 pub mod inventory;
 pub mod net;
 pub mod paths;
+pub mod progression;
 pub mod save;
 pub mod state;
 pub mod ui;

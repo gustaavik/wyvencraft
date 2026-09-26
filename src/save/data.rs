@@ -185,8 +185,11 @@ impl MobsData {
     /// Snapshot the live mobs for the save.
     pub fn from_mobs(mobs: &[crate::entity::Mob]) -> Self {
         Self {
+            // A boss is a summoned fight, not part of the population: saving
+            // one would replay the fight on every load without its offering.
             mobs: mobs
                 .iter()
+                .filter(|mob| mob.boss().is_none())
                 .map(|mob| MobData {
                     kind: mob.kind_name.clone(),
                     position: mob.position.to_array(),

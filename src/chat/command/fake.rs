@@ -7,8 +7,10 @@
 //! a GPU: what `/give bread 12` *means* is testable in three lines.
 
 use super::{CommandContext, ItemName, Position};
+use crate::core::BlockPos;
 use crate::core::ident::title_case;
 use crate::net::ChatKind;
+use crate::progression::WorldProgression;
 
 /// A context that answers from fixed data and records everything done to it.
 #[derive(Debug, Clone, Default)]
@@ -27,6 +29,12 @@ pub struct FakeContext {
     pub given: Vec<(String, u32)>,
     /// Every destination teleported to, in order.
     pub teleports: Vec<Position>,
+    /// Structures this world places, and where each nearest one stands.
+    pub structures: Vec<(String, Position)>,
+    /// Boss kinds this world knows.
+    pub bosses: Vec<String>,
+    /// The progression commands have read and changed.
+    pub progress: WorldProgression,
 }
 
 impl FakeContext {
@@ -104,6 +112,40 @@ impl CommandContext for FakeContext {
 
     fn player_positions(&self) -> Vec<(String, Position)> {
         self.players.clone()
+    }
+
+    fn structure_ids(&self) -> Vec<String> {
+        self.structures.iter().map(|(id, _)| id.clone()).collect()
+    }
+
+    fn boss_ids(&self) -> Vec<String> {
+        self.bosses.clone()
+    }
+
+    fn locate(&self, structure: &str) -> Option<Position> {
+        self.structures
+            .iter()
+            .find(|(id, _)| id == structure)
+            .map(|(_, at)| *at)
+    }
+
+    fn reveal(&mut self, structure: &str) -> Option<Position> {
+        let at = self.locate(structure)?;
+        let anchor = BlockPos::new(at[0] as i32, at[1] as i32, at[2] as i32);
+        self.progress.reveal(structure, anchor);
+        Some(at)
+    }
+
+    fn defeat_boss(&mut self, boss: &str) -> bool {
+        self.progress.defeat(boss)
+    }
+
+    fn reset_progression(&mut self) {
+        self.progress.reset();
+    }
+
+    fn progression(&self) -> WorldProgression {
+        self.progress.clone()
     }
 }
 

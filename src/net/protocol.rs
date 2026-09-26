@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::{BlockId, BlockPos, GameMode};
 use crate::inventory::ARMOR_SIZE;
+use crate::progression::WorldProgression;
 use wyven_net::PlayerId;
 
 /// 3D vector as it appears on the wire.
@@ -108,6 +109,20 @@ pub enum ClientMessage {
     /// asked for the world — never announces it and never records it. A playing
     /// client must never send it.
     RequestStatus,
+    /// Right-click on the block at `pos` — a shrine's wayrune, a boss altar.
+    /// The host checks reach and asks the *seed* what stands there, so a client
+    /// cannot conjure a shrine by naming a position.
+    ///
+    /// Carries the client's inventory as it stands at the click, which the
+    /// host adopts before judging an offering. A separate `SyncInventory`
+    /// cannot do that job: `Channel::Reliable` is *unordered*, so a sync sent
+    /// first may still arrive second and leave the offering counted against a
+    /// stale copy.
+    UseBlock {
+        pos: BlockPos,
+        slots: Vec<Option<NetItemStack>>,
+        selected: u32,
+    },
 }
 
 /// Everything a remote player's body is drawn with, as one value.
@@ -274,6 +289,47 @@ pub enum ServerMessage {
         /// The most it will hold, the host included.
         max: u32,
         content_hash: u64,
+    },
+    /// The world's whole progression, sent to a joining client and re-sent
+    /// whenever it changes. Small (a few positions and names), so a snapshot is
+    /// simpler and safer than a stream of deltas that could be missed.
+    Progression(WorldProgression),
+    /// A player read a shrine and it revealed a structure — the chat line and
+    /// compass flash. `by` is `None` for a reveal by command.
+    Revealed {
+        structure: String,
+        anchor: BlockPos,
+        by: Option<PlayerId>,
+    },
+    /// The host takes items from the addressed player — an altar offering.
+    /// The mirror of [`ServerMessage::GrantItems`]: clients own their
+    /// inventory, so the host instructs rather than overwrites.
+    ConsumeItems {
+        to: PlayerId,
+        stacks: Vec<NetItemStack>,
+    },
+    /// A boss crossed into its next phase.
+    BossPhase {
+        id: u64,
+        phase: u8,
+    },
+    /// A boss is winding up an attack — the telegraph every peer shows so a
+    /// player can dodge. Damage stays host-side.
+    BossTelegraph {
+        id: u64,
+        attack: String,
+        windup: f32,
+    },
+    /// A boss fell. `participants` are the players who were in the arena —
+    /// each rolls the boss's loot locally, like any other mob drop.
+    BossDefeated {
+        id: u64,
+        kind: String,
+        /// Where it fell — where each participant's loot drops. Carried rather
+        /// than read off the replica, because the unordered reliable channel
+        /// may deliver the boss's `MobDespawned` first.
+        position: NetVec3,
+        participants: Vec<PlayerId>,
     },
 }
 
@@ -668,6 +724,120 @@ mod tests {
                 assert_eq!(equipment.armor, [None; ARMOR_SIZE]);
             }
             other => panic!("expected PlayerEquipment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn use_block_roundtrips() {
+        let msg = ClientMessage::UseBlock {
+            pos: BlockPos::new(-40, 97, 12),
+            slots: vec![None],
+            selected: 0,
+        };
+        let back = decode::<ClientMessage>(&encode(&msg)).unwrap();
+        assert!(matches!(
+            back,
+            ClientMessage::UseBlock {
+                pos: BlockPos {
+                    x: -40,
+                    y: 97,
+                    z: 12
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn progression_messages_roundtrip() {
+        let mut progression = WorldProgression::default();
+        progression.read_shrine(
+            BlockPos::new(1, 2, 3),
+            "meadows_altar",
+            BlockPos::new(300, 95, -80),
+        );
+        progression.defeat("elder stag");
+        match decode::<ServerMessage>(&encode(&ServerMessage::Progression(progression.clone())))
+            .unwrap()
+        {
+            ServerMessage::Progression(back) => assert_eq!(back, progression),
+            other => panic!("expected Progression, got {other:?}"),
+        }
+
+        let revealed = ServerMessage::Revealed {
+            structure: "meadows_altar".into(),
+            anchor: BlockPos::new(300, 95, -80),
+            by: Some(PlayerId(2)),
+        };
+        match decode::<ServerMessage>(&encode(&revealed)).unwrap() {
+            ServerMessage::Revealed {
+                structure,
+                anchor,
+                by,
+            } => {
+                assert_eq!(structure, "meadows_altar");
+                assert_eq!(anchor, BlockPos::new(300, 95, -80));
+                assert_eq!(by, Some(PlayerId(2)));
+            }
+            other => panic!("expected Revealed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn consume_items_roundtrips() {
+        let msg = ServerMessage::ConsumeItems {
+            to: PlayerId(3),
+            stacks: vec![NetItemStack {
+                item: 44,
+                count: 1,
+                durability: None,
+            }],
+        };
+        match decode::<ServerMessage>(&encode(&msg)).unwrap() {
+            ServerMessage::ConsumeItems { to, stacks } => {
+                assert_eq!(to, PlayerId(3));
+                assert_eq!(stacks[0].item, 44);
+            }
+            other => panic!("expected ConsumeItems, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn boss_messages_roundtrip() {
+        let phase = decode::<ServerMessage>(&encode(&ServerMessage::BossPhase { id: 7, phase: 1 }))
+            .unwrap();
+        assert!(matches!(
+            phase,
+            ServerMessage::BossPhase { id: 7, phase: 1 }
+        ));
+
+        let telegraph = ServerMessage::BossTelegraph {
+            id: 7,
+            attack: "stomp".into(),
+            windup: 0.9,
+        };
+        match decode::<ServerMessage>(&encode(&telegraph)).unwrap() {
+            ServerMessage::BossTelegraph { id, attack, windup } => {
+                assert_eq!((id, attack.as_str()), (7, "stomp"));
+                assert!((windup - 0.9).abs() < 1e-6);
+            }
+            other => panic!("expected BossTelegraph, got {other:?}"),
+        }
+
+        let defeated = ServerMessage::BossDefeated {
+            id: 7,
+            kind: "elder stag".into(),
+            position: [3.0, 97.0, -8.0],
+            participants: vec![PlayerId(0), PlayerId(4)],
+        };
+        match decode::<ServerMessage>(&encode(&defeated)).unwrap() {
+            ServerMessage::BossDefeated {
+                kind, participants, ..
+            } => {
+                assert_eq!(kind, "elder stag");
+                assert_eq!(participants, vec![PlayerId(0), PlayerId(4)]);
+            }
+            other => panic!("expected BossDefeated, got {other:?}"),
         }
     }
 }

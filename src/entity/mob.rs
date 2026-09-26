@@ -11,6 +11,7 @@ use glam::Vec3;
 
 use crate::core::{Aabb, BlockPos};
 use crate::entity::animation::{AnimationState, Motion};
+use crate::entity::boss::{BossBrain, BossMove, BossParams, BossSense};
 use crate::entity::brain::{Gait, Intent, MobBrain, Perception};
 use crate::entity::kind::{EntityKind, MobParams, PhysicsParams, VisualSpec};
 use crate::entity::physics;
@@ -32,6 +33,16 @@ pub enum MobAction {
     Fire {
         velocity: Vec3,
         damage: f32,
+    },
+    /// A boss committed to attack `attack` (an index into its
+    /// `BossParams::attacks`); it lands in `seconds` — show the telegraph.
+    BossWindup {
+        attack: usize,
+        seconds: f32,
+    },
+    /// A boss's attack `attack` lands now; the owner applies its effect.
+    BossRelease {
+        attack: usize,
     },
 }
 
@@ -72,6 +83,10 @@ pub struct Mob {
     /// Raw player id (`net::PlayerId.0`) of the last attacker, for kill
     /// credit. A bare `u64` keeps this module free of net-layer types.
     pub last_attacker: Option<u64>,
+    /// Present on bosses: the move set and the brain that fights with it.
+    boss: Option<(BossParams, BossBrain)>,
+    /// A phase change the owner has not yet announced.
+    pending_phase: Option<u8>,
 }
 
 impl Mob {
@@ -80,6 +95,10 @@ impl Mob {
     /// stream, making the mob's decisions reproducible.
     pub fn spawn(kind: &EntityKind, id: MobId, position: Vec3, seed: u64) -> Option<Self> {
         let params = kind.mob.clone()?;
+        let boss = kind.boss.clone().map(|boss| {
+            let brain = BossBrain::new(&boss, seed.rotate_left(17));
+            (boss, brain)
+        });
         Some(Self {
             id,
             kind_name: kind.name.clone(),
@@ -98,7 +117,24 @@ impl Mob {
             hurt: false,
             night_spawned: false,
             last_attacker: None,
+            boss,
+            pending_phase: None,
         })
+    }
+
+    /// The boss component, if this mob is a boss.
+    pub fn boss(&self) -> Option<&BossParams> {
+        self.boss.as_ref().map(|(params, _)| params)
+    }
+
+    /// The fight's current phase (0 for a mob that is no boss).
+    pub fn boss_phase(&self) -> u8 {
+        self.boss.as_ref().map_or(0, |(_, brain)| brain.phase())
+    }
+
+    /// Drain the phase change the last update made, if any.
+    pub fn take_phase_change(&mut self) -> Option<u8> {
+        self.pending_phase.take()
     }
 
     /// Collision box in world space.
@@ -158,10 +194,17 @@ impl Mob {
         if let Some(yaw) = intent.yaw {
             self.yaw = yaw;
         }
-        let speed = match intent.gait {
+        let base_speed = match intent.gait {
             Gait::Stand => 0.0,
             Gait::Walk => self.params.walk_speed,
             Gait::Run => self.params.run_speed,
+        };
+        // A boss plants itself while winding up, so the telegraph points where
+        // the blow will land, and closes faster in its later phases.
+        let speed = match &self.boss {
+            Some((_, brain)) if brain.is_winding() => 0.0,
+            Some((params, brain)) => base_speed * brain.speed(params),
+            None => base_speed,
         };
         let (sy, cy) = self.yaw.sin_cos();
         let forward = Vec3::new(sy, 0.0, -cy);
@@ -205,7 +248,35 @@ impl Mob {
         let motion = Motion::new(horizontal, self.velocity.y, !self.on_ground);
         self.anim.advance(motion, self.yaw, dt);
 
+        if self.boss.is_some() {
+            return self.resolve_boss(&perception, dt);
+        }
         self.resolve_attack(intent, &perception)
+    }
+
+    /// A boss's attack for this frame, from its own brain rather than the
+    /// plain cooldown: wind-ups, releases, phase changes.
+    fn resolve_boss(&mut self, perception: &Perception, dt: f32) -> MobAction {
+        let health_fraction = self.health / self.params.max_health.max(1.0);
+        let Some((params, brain)) = &mut self.boss else {
+            return MobAction::None;
+        };
+        let sense = BossSense {
+            health_fraction,
+            target_distance: perception.target.filter(|t| t.visible).map(|t| t.distance),
+        };
+        let thought = brain.think(&sense, params, dt);
+        if let Some(phase) = thought.new_phase {
+            self.pending_phase = Some(phase);
+        }
+        match thought.action {
+            BossMove::Idle => MobAction::None,
+            BossMove::Windup { attack, seconds } => MobAction::BossWindup { attack, seconds },
+            BossMove::Release { attack } => {
+                self.anim.trigger_swing();
+                MobAction::BossRelease { attack }
+            }
+        }
     }
 
     /// Turn an attacking intent into a committed action, respecting the

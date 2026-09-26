@@ -19,6 +19,7 @@ use crate::editor::EditorSession;
 use crate::entity::Player;
 use crate::inventory::{HeldLabel, Inventory, RecipeBook};
 use crate::net::{Client, Host, NetVec3, PlayerId, PlayerRestore, RecipeData};
+use crate::progression::WorldProgression;
 use crate::save::{FileWorldRepository, SavedGame};
 use crate::state::session::{ClientSession, HostSession, Session, SingleplayerSession};
 use crate::world::{ChunkLoader, FluidSim, NoiseGenerator, World, WorldGenerator};
@@ -71,6 +72,7 @@ impl InGameState {
             player,
             players,
             mobs,
+            progression,
         } = game;
         // Anchor spawn-area generation at the saved player position (or the
         // world's recorded spawn) so there's ground under a restored player.
@@ -123,6 +125,7 @@ impl InGameState {
                 ),
             }
         }
+        state.progression = progression;
         if saved_mobs > 0 {
             log::info!(
                 "restored {} of {saved_mobs} saved mobs",
@@ -204,8 +207,13 @@ impl InGameState {
             None => RecipeBook::load(&items),
         };
 
-        let generator: Arc<dyn WorldGenerator> =
-            Arc::new(NoiseGenerator::with_config(seed, content.worldgen.clone()));
+        let noise = Arc::new(NoiseGenerator::with_config(
+            seed,
+            content.worldgen.clone(),
+            content.structures.clone(),
+        ));
+        let structures = noise.structures().clone();
+        let generator: Arc<dyn WorldGenerator> = noise;
         let mut world = World::new(generator.clone(), content.blocks.clone());
 
         // Worker pool sized to leave headroom for the main + render threads.
@@ -267,6 +275,7 @@ impl InGameState {
             spawn,
             fluids: FluidSim::new(),
             breaking: None,
+            tier_hint: None,
             mobs: MobWorld::new(seed ^ 0x5EED_0F5B_A3B1_E5B0),
             drops: Vec::new(),
             dead: false,
@@ -275,9 +284,12 @@ impl InGameState {
             session,
             peers: Peers::default(),
             save: Persistence::none(),
+            structures,
+            progression: WorldProgression::default(),
             content,
         };
         if state.session.is_authority() {
+            state.debug_goto_from_env();
             state.debug_spawn_from_env();
         }
         // Every session, a joining client included: verifying anything drawn on

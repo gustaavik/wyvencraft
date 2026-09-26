@@ -13,6 +13,8 @@
 #   cap           most simultaneous live mobs of this type
 #   night_only    only spawn while the sun is down
 #   despawn_in_daylight   reap survivors when the sun comes back up
+#   biomes        only spawn on ground in these worldgen.toml biomes
+#                 (omit for everywhere); an unknown name rejects the file
 
 [limits]
 max_mobs = 40              # global live-mob cap
@@ -61,3 +63,11 @@ group = [1, 1]
 cap = 6
 night_only = true
 despawn_in_daylight = true
+
+[[spawn]]
+entity = "deer"
+weight = 12
+group = [2, 4]
+cap = 10
+biomes = ["meadows"]
+

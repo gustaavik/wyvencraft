@@ -26,9 +26,11 @@ use super::InGameState;
 use crate::chat::{
     self, ChatKind, ChatState, CommandContext, Invocation, ItemName, Permission, Position,
 };
+use crate::core::BlockPos;
 use crate::entity::DroppedItem;
 use crate::inventory::{ItemId, ItemRegistry, ItemStack};
 use crate::net::{Channel, ClientMessage, NetItemStack, NetVec3, PlayerId, ServerMessage};
+use crate::progression::WorldProgression;
 use crate::ui::chat::ChatAction;
 use std::path::Path;
 
@@ -220,7 +222,7 @@ impl InGameState {
 
     /// Say something back to whoever ran the command: into our own log if that
     /// is us, otherwise addressed to them over the wire.
-    fn reply(&mut self, actor: PlayerId, kind: ChatKind, text: String) {
+    pub(super) fn reply(&mut self, actor: PlayerId, kind: ChatKind, text: String) {
         if actor == self.session.local_id() {
             self.chat.log.push(kind, text);
         } else {
@@ -310,7 +312,7 @@ impl InGameState {
 
     /// Display name for a player id. Names are still generated rather than
     /// chosen, matching what `welcome_player` puts in the peer list.
-    fn player_name(&self, id: PlayerId) -> String {
+    pub(super) fn player_name(&self, id: PlayerId) -> String {
         self.peers
             .players
             .get(&id)
@@ -390,6 +392,60 @@ impl CommandContext for SessionContext<'_> {
             .chain(own)
             .collect()
     }
+
+    fn structure_ids(&self) -> Vec<String> {
+        let config = self.state.structures.config();
+        config.all().iter().map(|s| s.id.clone()).collect()
+    }
+
+    fn boss_ids(&self) -> Vec<String> {
+        self.state
+            .content
+            .entities
+            .iter()
+            .filter(|kind| kind.boss.is_some())
+            .map(|kind| kind.name.clone())
+            .collect()
+    }
+
+    fn locate(&self, structure: &str) -> Option<Position> {
+        self.state
+            .locate_structure(structure, self.position())
+            .map(stand_on)
+    }
+
+    fn reveal(&mut self, structure: &str) -> Option<Position> {
+        let anchor = self.state.locate_structure(structure, self.position())?;
+        if self.state.progression.reveal(structure, anchor) {
+            self.state.announce_reveal(structure, anchor, None);
+        }
+        Some(stand_on(anchor))
+    }
+
+    fn defeat_boss(&mut self, boss: &str) -> bool {
+        let news = self.state.progression.defeat(boss);
+        self.state.broadcast_progression();
+        news
+    }
+
+    fn reset_progression(&mut self) {
+        self.state.progression.reset();
+        self.state.broadcast_progression();
+    }
+
+    fn progression(&self) -> WorldProgression {
+        self.state.progression.clone()
+    }
+}
+
+/// Where to stand on a structure anchored at `anchor`: the centre of the
+/// block above its ground layer.
+fn stand_on(anchor: BlockPos) -> Position {
+    [
+        anchor.x as f32 + 0.5,
+        anchor.y as f32 + 1.0,
+        anchor.z as f32 + 0.5,
+    ]
 }
 
 /// Split `count` items into deliverable stacks.

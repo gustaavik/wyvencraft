@@ -13,7 +13,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::core::GameMode;
 
-use super::{MobsData, PlayerData, PlayerRecords, SaveError, WorldData, WorldSave};
+use super::{MobsData, PlayerData, PlayerRecords, SaveError, SavePayload, WorldData, WorldSave};
+use crate::progression::WorldProgression;
 
 /// Everything one save call persists. Bundling it keeps [`WorldRepository`] to
 /// a single method, and keeps the caller from having to know that the metadata
@@ -23,6 +24,7 @@ pub struct WorldSnapshot<'a> {
     pub player: &'a PlayerData,
     pub players: &'a PlayerRecords,
     pub mobs: &'a MobsData,
+    pub progression: &'a WorldProgression,
     pub game_mode: GameMode,
     pub spawn: [f32; 3],
     pub time_of_day: f32,
@@ -63,12 +65,13 @@ impl WorldRepository for FileWorldRepository {
         self.save.meta.game_mode = snapshot.game_mode;
         self.save.meta.spawn = snapshot.spawn;
         self.save.meta.time_of_day = snapshot.time_of_day;
-        self.save.write(
-            snapshot.world,
-            snapshot.player,
-            snapshot.players,
-            snapshot.mobs,
-        )
+        self.save.write(&SavePayload {
+            world: snapshot.world,
+            player: snapshot.player,
+            players: snapshot.players,
+            mobs: snapshot.mobs,
+            progression: snapshot.progression,
+        })
     }
 
     fn is_persistent(&self) -> bool {
@@ -129,6 +132,7 @@ pub struct StoredWorld {
     pub player: PlayerData,
     pub players: PlayerRecords,
     pub mobs: MobsData,
+    pub progression: WorldProgression,
     pub game_mode: GameMode,
     pub spawn: [f32; 3],
     pub time_of_day: f32,
@@ -150,6 +154,7 @@ impl WorldRepository for InMemoryWorldRepository {
             player: snapshot.player.clone(),
             players: snapshot.players.clone(),
             mobs: snapshot.mobs.clone(),
+            progression: snapshot.progression.clone(),
             game_mode: snapshot.game_mode,
             spawn: snapshot.spawn,
             time_of_day: snapshot.time_of_day,

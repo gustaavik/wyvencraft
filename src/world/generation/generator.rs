@@ -3,25 +3,25 @@
 use std::sync::Arc;
 
 use super::WorldGenerator;
-use super::biome::Biome;
 use super::config::WorldGenConfig;
 use super::features;
-use super::noise::TerrainNoise;
+use super::terrain::{Column, Terrain};
+use super::underground::{Fill, Ground, underground};
 use crate::core::{BlockId, CHUNK_HEIGHT, CHUNK_SIZE, ChunkPos, LocalPos};
 use crate::world::block::BlockRegistry;
 use crate::world::chunk::Chunk;
+use crate::world::structure::{StructureConfig, Structures};
 
-/// Carve where the tunnel field (see [`TerrainNoise::cave_tunnel`]) is below
-/// this squared radius.
-const TUNNEL_RADIUS_SQ: f32 = 0.01;
+/// Blocks of `subsurface` under a biome's surface block, above the layers.
+const SUBSURFACE_DEPTH: i32 = 3;
 
 /// Generates terrain from layered noise, placing the blocks chosen by the
 /// [`WorldGenConfig`]. Fully deterministic in `(seed, pos)` for a given
 /// config, which is what lets every multiplayer peer reproduce the same world.
 pub struct NoiseGenerator {
     seed: u64,
-    noise: TerrainNoise,
-    config: Arc<WorldGenConfig>,
+    terrain: Arc<Terrain>,
+    structures: Arc<Structures>,
 }
 
 impl NoiseGenerator {
@@ -29,44 +29,50 @@ impl NoiseGenerator {
     /// fallbacks; the app passes the loaded config via `with_config`).
     pub fn new(seed: u64) -> Self {
         let blocks = BlockRegistry::with_builtins();
-        Self::with_config(seed, Arc::new(WorldGenConfig::builtin(&blocks)))
+        let worldgen = Arc::new(WorldGenConfig::builtin(&blocks));
+        let structures = Arc::new(StructureConfig::builtin(&blocks, &worldgen));
+        Self::with_config(seed, worldgen, structures)
     }
 
-    pub fn with_config(seed: u64, config: Arc<WorldGenConfig>) -> Self {
+    pub fn with_config(
+        seed: u64,
+        config: Arc<WorldGenConfig>,
+        structures: Arc<StructureConfig>,
+    ) -> Self {
+        let terrain = Arc::new(Terrain::new(seed, config));
         Self {
             seed,
-            noise: TerrainNoise::with_ore_fields(seed as u32, config.ores.len()),
-            config,
+            structures: Arc::new(Structures::new(seed, terrain.clone(), structures)),
+            terrain,
         }
     }
 
     pub fn config(&self) -> &WorldGenConfig {
-        &self.config
+        self.terrain.config()
     }
 
-    /// Whether caves hollow out this below-surface cell. Blob caverns open up
-    /// with depth; winding tunnels connect them. A protective shell under the
-    /// surface (thicker under oceans) is never carved.
-    fn is_cave(&self, x: i32, y: i32, z: i32, height: i32, underwater: bool) -> bool {
-        let shell = if underwater { 4 } else { 2 };
-        if y > height - shell {
-            return false;
-        }
-        let cavern_threshold = 0.52 + 0.10 * (y as f32 / 48.0).min(1.0);
-        if self.noise.cave_blob(x, y, z) > cavern_threshold {
-            return true;
-        }
-        self.noise.cave_tunnel(x, y, z) < TUNNEL_RADIUS_SQ
+    /// The column sampler this generator builds from — shared with anything
+    /// that must agree with it about biomes and heights (the HUD, structure
+    /// lookups).
+    pub fn terrain(&self) -> &Arc<Terrain> {
+        &self.terrain
+    }
+
+    /// Where this world's shrines and altars stand — the same instances the
+    /// generator stamps, for the game to locate, reveal and validate.
+    pub fn structures(&self) -> &Arc<Structures> {
+        &self.structures
     }
 
     /// Ocean-floor covering: shallows near the coast, then noise-driven
     /// patches (gravel/clay/default per the config) in deeper water.
     fn seabed_block(&self, x: i32, z: i32, height: i32) -> BlockId {
-        let seabed = &self.config.seabed;
-        if self.config.sea_level - height <= 2 {
+        let config = self.config();
+        let seabed = &config.seabed;
+        if config.sea_level - height <= 2 {
             return seabed.shallow;
         }
-        let n = self.noise.seabed(x, z);
+        let n = self.terrain.noise().seabed(x, z);
         if n > seabed.gravel_above {
             seabed.gravel
         } else if n < seabed.clay_below {
@@ -76,34 +82,35 @@ impl NoiseGenerator {
         }
     }
 
-    /// Stone, upgraded to an ore where an ore vein's noise clears its threshold.
-    fn ore_or_stone(&self, x: i32, y: i32, z: i32) -> BlockId {
-        for (field, vein) in self.config.ores.iter().enumerate() {
-            if (vein.min_y..=vein.max_y).contains(&y)
-                && self.noise.ore_density(field, x, y, z) > vein.threshold
-            {
-                return vein.block;
-            }
+    /// The block for a cell at or below the surface (`y <= column.height`).
+    fn solid_block(&self, x: i32, y: i32, z: i32, column: &Column, entrance: bool) -> BlockId {
+        let config = self.config();
+        let underwater = column.height < config.sea_level;
+        let ground = Ground {
+            biome: column.biome,
+            height: column.height,
+            underwater,
+            entrance,
+        };
+        let depth = column.height - y;
+        let fill = underground(self.terrain.noise(), config, ground, x, y, z);
+        if let Fill::Void(flooded) = fill {
+            return flooded.unwrap_or(BlockId::AIR);
         }
-        self.config.stone
-    }
-
-    /// Pick the block for a cell at or below the surface (`y <= height`).
-    fn solid_block(&self, x: i32, y: i32, z: i32, height: i32, biome: Biome) -> BlockId {
-        let underwater = height < self.config.sea_level;
-        if self.is_cave(x, y, z, height, underwater) {
-            return BlockId::AIR;
-        }
+        let biome = config.biome(column.biome);
         if underwater {
-            if y >= height - 2 {
-                return self.seabed_block(x, z, height);
+            if depth <= 2 {
+                return self.seabed_block(x, z, column.height);
             }
-        } else if y == height {
-            return self.config.biome(biome).surface;
-        } else if y >= height - 3 {
-            return self.config.biome(biome).subsurface;
+        } else if depth == 0 {
+            return biome.surface;
+        } else if depth <= SUBSURFACE_DEPTH {
+            return biome.subsurface;
         }
-        self.ore_or_stone(x, y, z)
+        match fill {
+            Fill::Solid(block) => block,
+            Fill::Void(_) => unreachable!("handled above"),
+        }
     }
 }
 
@@ -113,23 +120,22 @@ impl WorldGenerator for NoiseGenerator {
     }
 
     fn biome_tint(&self, x: i32, z: i32, index: u8) -> [u8; 4] {
-        // The same climate sample `generate` uses to pick surface blocks, so a
+        // The same ring sample `generate` uses to pick surface blocks, so a
         // grass block's tint always agrees with the biome that placed it.
-        let biome = Biome::from_temperature(self.noise.temperature(x, z));
-        self.config.biome(biome).tint(index)
+        self.terrain.tint(x, z, index)
     }
 
     fn generate(&self, pos: ChunkPos) -> Chunk {
         let mut chunk = Chunk::new(pos);
         let origin = pos.origin();
+        let config = self.config();
 
         for lx in 0..CHUNK_SIZE {
             for lz in 0..CHUNK_SIZE {
                 let wx = origin.x + lx;
                 let wz = origin.z + lz;
-
-                let height = self.noise.surface_height(wx, wz).clamp(1, CHUNK_HEIGHT - 1);
-                let biome = Biome::from_temperature(self.noise.temperature(wx, wz));
+                let column = self.terrain.column(wx, wz);
+                let entrance = self.terrain.noise().cave_entrance(wx, wz);
 
                 for y in 0..CHUNK_HEIGHT {
                     let local = LocalPos {
@@ -139,16 +145,16 @@ impl WorldGenerator for NoiseGenerator {
                     };
 
                     let block = if y == 0 {
-                        self.config.bedrock
-                    } else if y > height {
+                        config.bedrock
+                    } else if y > column.height {
                         // Above ground: water up to sea level, else air.
-                        if y <= self.config.sea_level {
-                            self.config.water
+                        if y <= config.sea_level {
+                            config.water
                         } else {
                             BlockId::AIR
                         }
                     } else {
-                        self.solid_block(wx, y, wz, height, biome)
+                        self.solid_block(wx, y, wz, &column, entrance)
                     };
 
                     if !block.is_air() {
@@ -158,7 +164,8 @@ impl WorldGenerator for NoiseGenerator {
             }
         }
 
-        features::populate(&mut chunk, &self.noise, self.seed, &self.config);
+        features::populate(&mut chunk, &self.terrain, self.seed);
+        self.structures.stamp(&mut chunk);
 
         chunk
     }
@@ -213,18 +220,18 @@ mod tests {
             ChunkPos::new(8, 5),
         ];
         const EXPECTED: [u64; 12] = [
-            0x3a9c467d235d287b,
-            0x3294c27f6aa5a4b6,
-            0xd6e2a2aa8a46a894,
-            0x79231897e6fa2ef8,
-            0x77e43818845368f8,
-            0x025635edcf5f3d68,
-            0xbfa408e2d502f6e1,
-            0xe87742aed6015651,
-            0x8ceee4fc9b2f476a,
-            0x85f16f4f0a9ece01,
-            0x707bd8b13a1e6493,
-            0xd5e40a4811e47ba9,
+            0x8f6948a59c07b437,
+            0x88f88fc22f02e301,
+            0x06fab1ced8f542b7,
+            0x87d9b64b87a13ded,
+            0x046cfd11c57c41bd,
+            0x7fb67548762376f1,
+            0xcb503fdceca740df,
+            0x583639ebdda9534c,
+            0xae8377d68d9c2d69,
+            0x926fa0ca225ba872,
+            0x9b484f1514d1a890,
+            0x2d5ffcaca9207e70,
         ];
         let got: Vec<u64> = [42u64, 0x00C0_FFEE]
             .iter()
@@ -242,15 +249,22 @@ mod tests {
         );
     }
 
+    /// Near spawn only the Meadows' ores generate — every biome's metal
+    /// waits in its own ring (see `underground::biome_ores_stay_under_their_biome`).
     #[test]
-    fn every_ore_appears_but_stays_rare() {
+    fn spawn_has_coal_but_no_biome_metal() {
         let generator = NoiseGenerator::new(42);
         let area = sample_area();
         let stone = count_blocks(&generator, &area, blocks::STONE);
-        for vein in &generator.config().ores {
-            let ore = count_blocks(&generator, &area, vein.block);
-            assert!(ore > 0, "no {:?} generated in sample area", vein.block);
-            assert!(ore * 20 < stone, "{:?} too common: {ore}", vein.block);
+        let coal = count_blocks(&generator, &area, blocks::COAL_ORE);
+        assert!(coal > 0, "no coal near spawn");
+        assert!(coal * 20 < stone, "coal too common: {coal}");
+        for metal in [blocks::COPPER_ORE, blocks::TIN_ORE, blocks::IRON_ORE] {
+            assert_eq!(
+                count_blocks(&generator, &area, metal),
+                0,
+                "{metal:?} at spawn"
+            );
         }
     }
 
@@ -261,7 +275,7 @@ mod tests {
         let deep_air = (0..CHUNK_SIZE)
             .flat_map(|x| (0..CHUNK_SIZE).map(move |z| (x, z)))
             .flat_map(|(x, z)| {
-                (1..40).map(move |y| LocalPos {
+                (1..70).map(move |y| LocalPos {
                     x: x as u8,
                     y: y as u16,
                     z: z as u8,
@@ -269,7 +283,7 @@ mod tests {
             })
             .filter(|&local| chunk.get(local).is_air())
             .count();
-        assert!(deep_air > 0, "expected caves below y=40");
+        assert!(deep_air > 0, "expected caves below y=70");
     }
 
     #[test]
@@ -321,7 +335,7 @@ mod tests {
     #[test]
     fn boulders_rise_above_the_surface() {
         let generator = NoiseGenerator::new(42);
-        let noise = TerrainNoise::new(42);
+        let terrain = generator.terrain().clone();
         let found = (-8..8)
             .flat_map(|x| (-8..8).map(move |z| ChunkPos::new(x, z)))
             .any(|pos| {
@@ -330,7 +344,7 @@ mod tests {
                 (0..CHUNK_SIZE)
                     .flat_map(|lx| (0..CHUNK_SIZE).map(move |lz| (lx, lz)))
                     .any(|(lx, lz)| {
-                        let surface = noise.surface_height(origin.x + lx, origin.z + lz);
+                        let surface = terrain.height(origin.x + lx, origin.z + lz);
                         (surface + 1..CHUNK_HEIGHT).any(|y| {
                             chunk.get(LocalPos {
                                 x: lx as u8,
@@ -350,7 +364,12 @@ mod tests {
     fn deep_ocean_floors_use_varied_seabed_materials() {
         let generator = NoiseGenerator::new(42);
         let mut seen = [0usize; 3]; // sand, gravel, clay
-        for pos in (-6..6).flat_map(|x| (-6..6).map(move |z| ChunkPos::new(x, z))) {
+        // Meadows seas are shallow lakes, so sample a wide, sparse area to
+        // find water deep enough for the seabed noise to matter.
+        let area = (-24..24)
+            .step_by(3)
+            .flat_map(|x| (-24..24).step_by(3).map(move |z| ChunkPos::new(x, z)));
+        for pos in area {
             let chunk = generator.generate(pos);
             for lx in 0..CHUNK_SIZE {
                 for lz in 0..CHUNK_SIZE {

@@ -11,8 +11,12 @@ pub mod config;
 pub mod features;
 pub mod generator;
 pub mod noise;
+pub mod terrain;
+pub mod underground;
 
+pub use biome::BiomeId;
 pub use config::WorldGenConfig;
 pub use generator::NoiseGenerator;
+pub use terrain::Terrain;
 // The trait itself is engine — the voxel loader is what calls it.
 pub use wyven_voxel::WorldGenerator;

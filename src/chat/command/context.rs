@@ -27,6 +27,7 @@
 //! `chat` free of a maths dependency it otherwise has no use for.
 
 use crate::net::ChatKind;
+use crate::progression::WorldProgression;
 
 /// A world position as commands see it: `[x, y, z]`.
 pub type Position = [f32; 3];
@@ -81,4 +82,29 @@ pub trait CommandContext {
     /// destination by name. Excludes the runner: teleporting to yourself is a
     /// no-op worth reporting as "no such player" rather than silently accepting.
     fn player_positions(&self) -> Vec<(String, Position)>;
+
+    // --- World progression ------------------------------------------------------
+
+    /// Every structure id this world can place (`assets/structures.toml`).
+    fn structure_ids(&self) -> Vec<String>;
+
+    /// Every boss kind (entity names carrying `[entity.boss]`).
+    fn boss_ids(&self) -> Vec<String>;
+
+    /// Where the nearest `structure` to the runner stands — the top of its
+    /// ground layer, a safe place to teleport to. `None` if none is near.
+    fn locate(&self, structure: &str) -> Option<Position>;
+
+    /// Reveal the nearest `structure` to the runner for everyone, exactly as
+    /// reading a shrine would. Returns where it stands.
+    fn reveal(&mut self, structure: &str) -> Option<Position>;
+
+    /// Record `boss` as defeated. Returns whether it was news.
+    fn defeat_boss(&mut self, boss: &str) -> bool;
+
+    /// Forget every shrine read, altar revealed and boss beaten.
+    fn reset_progression(&mut self);
+
+    /// The world's progression as it stands.
+    fn progression(&self) -> WorldProgression;
 }
