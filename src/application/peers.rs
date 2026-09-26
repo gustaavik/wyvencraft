@@ -12,11 +12,13 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::domain::inventory::Inventory;
-use crate::infrastructure::net::{Equipment, NetItemStack, PlayerId, ServerMessage};
+use wyven_net::PlayerId;
+
+use crate::application::protocol::{Equipment, NetItemStack, ServerMessage};
 
 /// Everything the session knows about the other peers.
 #[derive(Default)]
-pub(super) struct Peers {
+pub struct Peers {
     /// Host: stable identity (netcode client id) of each connected player,
     /// used to match a returning player to their saved record.
     pub identities: HashMap<PlayerId, u64>,

@@ -15,12 +15,12 @@ impl InGameState {
     /// Apply the saved state the host handed back in its `Welcome` (this client
     /// played this world before). Replaces the starter kit wholesale.
     pub(super) fn apply_restore(&mut self, restore: &PlayerRestore) {
-        self.player.teleport(Vec3::from_array(restore.position));
-        self.player.yaw = restore.yaw;
-        self.player.pitch = restore.pitch;
-        self.player.health = restore.health;
-        self.player.hunger = restore.hunger;
-        self.player.saturation = restore.saturation;
+        self.sim.player.teleport(Vec3::from_array(restore.position));
+        self.sim.player.yaw = restore.yaw;
+        self.sim.player.pitch = restore.pitch;
+        self.sim.player.health = restore.health;
+        self.sim.player.hunger = restore.hunger;
+        self.sim.player.saturation = restore.saturation;
         for index in 0..TOTAL_SLOTS {
             let stack = restore.slots.get(index).and_then(|slot| {
                 slot.and_then(|s| {
@@ -31,13 +31,13 @@ impl InGameState {
                     })
                 })
             });
-            self.inventory.set_slot(index, stack);
+            self.sim.inventory.set_slot(index, stack);
         }
-        self.inventory.set_selected(restore.selected as usize);
+        self.sim.inventory.set_selected(restore.selected as usize);
         self.crafting.known =
             KnownItems::from_wire(&restore.known_items, &self.content.rules.items);
         // Don't immediately echo the restored inventory back to the host.
-        self.peers.last_synced_inventory = Some(self.inventory.clone());
+        self.net.peers.last_synced_inventory = Some(self.sim.inventory.clone());
         log::info!("restored player state from host at {:?}", restore.position);
     }
 
@@ -49,24 +49,28 @@ impl InGameState {
             return;
         }
         debug_assert!(
-            self.session.is_authority(),
+            self.net.session.is_authority(),
             "clients never hold a persistent repository"
         );
         // Fold currently connected players into the persistent records first.
-        let connected: Vec<PlayerId> = players::all(&self.ecs).map(|rp| rp.id).collect();
+        let connected: Vec<PlayerId> = players::all(&self.sim.ecs).map(|rp| rp.id).collect();
         for pid in connected {
             record_remote(
                 &mut self.save.records,
-                &self.peers.identities,
-                &self.ecs,
-                &self.peers.inventories,
+                &self.net.peers.identities,
+                &self.sim.ecs,
+                &self.net.peers.inventories,
                 &self.content.rules.items,
                 pid,
             );
         }
-        let world = WorldData::from_world(&self.world, &self.content.rules.blocks);
-        let player = PlayerData::capture(&self.player, &self.inventory, &self.content.rules.items);
-        let mobs = MobsData::from_ecs(&self.ecs);
+        let world = WorldData::from_world(&self.sim.world, &self.content.rules.blocks);
+        let player = PlayerData::capture(
+            &self.sim.player,
+            &self.sim.inventory,
+            &self.content.rules.items,
+        );
+        let mobs = MobsData::from_ecs(&self.sim.ecs);
         let discovery = DiscoveryData {
             owner: self.crafting.known.to_ids(&self.content.rules.items),
             players: self.save.discovery.players.clone(),
@@ -76,11 +80,11 @@ impl InGameState {
             player: &player,
             players: &self.save.records,
             mobs: &mobs,
-            progression: &self.progression,
+            progression: &self.sim.progression,
             discovery: &discovery,
-            game_mode: self.player.mode,
-            spawn: self.spawn.to_array(),
-            time_of_day: self.day_cycle.time_of_day(),
+            game_mode: self.sim.player.mode,
+            spawn: self.sim.spawn.to_array(),
+            time_of_day: self.sim.day_cycle.time_of_day(),
         };
         match self.save.repository.store(&snapshot) {
             Ok(()) => log::info!(
@@ -176,8 +180,8 @@ mod tests {
         state.set_repository(Box::new(repo));
 
         let edit = BlockPos::new(2, 100, -3);
-        state.world.set_block(edit, blocks::STONE);
-        state.player.position = Vec3::new(1.0, 70.0, 2.0);
+        state.sim.world.set_block(edit, blocks::STONE);
+        state.sim.player.position = Vec3::new(1.0, 70.0, 2.0);
         state
             .spawn_mob("zombie", Vec3::new(4.0, 70.0, 4.0))
             .expect("zombie spawns");

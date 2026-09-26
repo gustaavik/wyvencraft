@@ -14,7 +14,7 @@ use super::block_use::UseAt;
 use crate::application::ecs::With;
 use crate::application::ecs::components::{Boss, Health, Kind, Mob, Replica, Transform};
 use crate::application::ecs::systems::mobs::{self as mob_systems, Reaped};
-use crate::domain::core::{BlockPos, Rng64};
+use crate::domain::core::Rng64;
 use crate::domain::entity::MobId;
 use crate::domain::entity::boss::{AttackEffect, BossParams};
 use crate::domain::entity::mob::eye_position;
@@ -31,23 +31,7 @@ const SLAM_LIFT: f32 = 6.0;
 /// Where volley projectiles leave the boss, ahead of its face.
 const MUZZLE: f32 = 0.8;
 
-/// The one fight a world may have going at a time.
-pub(super) struct BossFight {
-    pub mob: MobId,
-    /// The altar it was summoned at — the centre of its arena.
-    pub altar: BlockPos,
-    /// Seconds the arena has stood empty.
-    pub empty_for: f32,
-}
-
-/// An attack being wound up, as every peer shows it.
-#[derive(Debug, Clone)]
-pub(super) struct Telegraph {
-    pub mob: u64,
-    /// The attack's id, title-cased for display.
-    pub name: String,
-    pub remaining: f32,
-}
+pub(super) use crate::application::simulation::{BossFight, Telegraph};
 
 /// One beat of a boss fight, collected during the mob tick and resolved once
 /// the mobs are no longer borrowed.
@@ -82,7 +66,7 @@ impl InGameState {
             log::warn!("altar at {:?} names {boss:?}, which is no boss", at.pos);
             return;
         };
-        if self.mobs.fight.is_some() {
+        if self.sim.mobs.fight.is_some() {
             let text = "The altar is cold — a battle already rages.".to_string();
             self.reply(at.actor, ChatKind::System, text);
             return;
@@ -114,7 +98,7 @@ impl InGameState {
         let Some(mob) = self.spawn_mob(boss, Vec3::new(spot.x, ground, spot.z)) else {
             return;
         };
-        self.mobs.fight = Some(BossFight {
+        self.sim.mobs.fight = Some(BossFight {
             mob,
             altar: at.pos,
             empty_for: 0.0,
@@ -144,12 +128,13 @@ impl InGameState {
 
     /// A live boss by id: where it stands, where it sees from, and its move set.
     fn boss_mob(&self, id: MobId) -> Option<(Vec3, Vec3, &BossParams)> {
-        let entity = mob_systems::find(&self.ecs, id)?;
-        let transform = self.ecs.get::<Transform>(entity)?;
+        let entity = mob_systems::find(&self.sim.ecs, id)?;
+        let transform = self.sim.ecs.get::<Transform>(entity)?;
         let body = self
+            .sim
             .ecs
             .get::<crate::application::ecs::components::Body>(entity)?;
-        let boss = self.ecs.get::<Boss>(entity)?;
+        let boss = self.sim.ecs.get::<Boss>(entity)?;
         Some((
             transform.position,
             eye_position(transform.position, &body.physics),
@@ -162,7 +147,7 @@ impl InGameState {
             return;
         };
         let attack_id = params.attacks[attack].id.clone();
-        self.mobs.telegraph = Some(Telegraph {
+        self.sim.mobs.telegraph = Some(Telegraph {
             mob: id.0,
             name: crate::domain::core::ident::title_case(&attack_id),
             remaining: seconds,
@@ -191,8 +176,14 @@ impl InGameState {
             return;
         };
         let spec = params.attacks[attack].clone();
-        if self.mobs.telegraph.as_ref().is_some_and(|t| t.mob == id.0) {
-            self.mobs.telegraph = None;
+        if self
+            .sim
+            .mobs
+            .telegraph
+            .as_ref()
+            .is_some_and(|t| t.mob == id.0)
+        {
+            self.sim.mobs.telegraph = None;
         }
         match spec.effect {
             AttackEffect::Melee { damage } => {
@@ -246,7 +237,7 @@ impl InGameState {
                         lifetime,
                     });
                     crate::application::ecs::spawn::arrow(
-                        &mut self.ecs,
+                        &mut self.sim.ecs,
                         origin,
                         velocity,
                         damage,
@@ -257,13 +248,14 @@ impl InGameState {
             }
             AttackEffect::Summon { entity, count, cap } => {
                 let alive = self
+                    .sim
                     .ecs
                     .query::<(&Kind, &Transform, With<Mob>)>()
                     .filter(|(_, (kind, t, ()))| {
                         kind.name == entity && t.position.distance(position) < 48.0
                     })
                     .count() as u32;
-                let mut rng = Rng64::new(self.world.seed() ^ id.0 ^ self.mobs.next_id);
+                let mut rng = Rng64::new(self.sim.world.seed() ^ id.0 ^ self.sim.mobs.next_id);
                 let want = rng.range_u32(u32::from(count[0]), u32::from(count[1]));
                 for i in 0..want.min(cap.saturating_sub(alive)) {
                     let angle = i as f32 * 2.1 + rng.range_f32(0.0, 1.0);
@@ -283,7 +275,7 @@ impl InGameState {
         match player {
             None => {
                 self.damage_local_player(damage);
-                self.player.velocity += push;
+                self.sim.player.velocity += push;
             }
             Some(id) => self.emit_mob_event(ServerMessage::PlayerDamaged { id, amount: damage }),
         }
@@ -292,14 +284,14 @@ impl InGameState {
     /// Authority, every frame: the leash, and the telegraph clock.
     pub(super) fn update_boss_fight(&mut self, dt: f32) {
         self.tick_telegraph(dt);
-        let Some(fight) = &self.mobs.fight else {
+        let Some(fight) = &self.sim.mobs.fight else {
             return;
         };
         let (id, altar) = (fight.mob, fight.altar);
         let Some((_, _, params)) = self.boss_mob(id) else {
             // Killed (the defeat already cleared the fight) or gone some other
             // way: either way nothing is left to leash.
-            self.mobs.fight = None;
+            self.sim.mobs.fight = None;
             return;
         };
         let radius = params.arena_radius;
@@ -307,7 +299,7 @@ impl InGameState {
         let title = params.title.clone();
         let centre = Vec3::new(altar.x as f32 + 0.5, altar.y as f32, altar.z as f32 + 0.5);
         let occupied = self.fighters_near(centre, radius).next().is_some();
-        let Some(fight) = &mut self.mobs.fight else {
+        let Some(fight) = &mut self.sim.mobs.fight else {
             return;
         };
         fight.empty_for = if occupied { 0.0 } else { fight.empty_for + dt };
@@ -316,9 +308,9 @@ impl InGameState {
         }
         // Nobody stayed to fight: the boss returns whence it came, and takes
         // the offering with it.
-        self.mobs.fight = None;
-        if let Some(entity) = mob_systems::find(&self.ecs, id) {
-            self.ecs.despawn(entity);
+        self.sim.mobs.fight = None;
+        if let Some(entity) = mob_systems::find(&self.sim.ecs, id) {
+            self.sim.ecs.despawn(entity);
         }
         self.emit_mob_event(ServerMessage::MobDespawned {
             id: id.0,
@@ -330,9 +322,9 @@ impl InGameState {
     /// Players (local as `None`) within `radius` of `centre`, alive ones only.
     fn fighters_near(&self, centre: Vec3, radius: f32) -> impl Iterator<Item = Option<PlayerId>> {
         let flat = |p: Vec3| Vec3::new(p.x - centre.x, 0.0, p.z - centre.z).length();
-        let local = (!self.dead && flat(self.player.position) <= radius).then_some(None);
+        let local = (!self.sim.dead && flat(self.sim.player.position) <= radius).then_some(None);
         let remote: Vec<Option<PlayerId>> =
-            crate::application::ecs::systems::players::all(&self.ecs)
+            crate::application::ecs::systems::players::all(&self.sim.ecs)
                 .filter(|p| flat(p.position()) <= radius)
                 .map(|p| Some(p.id))
                 .collect();
@@ -340,10 +332,10 @@ impl InGameState {
     }
 
     fn tick_telegraph(&mut self, dt: f32) {
-        if let Some(t) = &mut self.mobs.telegraph {
+        if let Some(t) = &mut self.sim.mobs.telegraph {
             t.remaining -= dt;
             if t.remaining <= 0.0 {
-                self.mobs.telegraph = None;
+                self.sim.mobs.telegraph = None;
             }
         }
     }
@@ -357,7 +349,7 @@ impl InGameState {
         let participants: Vec<Option<PlayerId>> = self
             .fighters_near(mob.position, params.arena_radius)
             .collect();
-        let local_id = self.session.local_id();
+        let local_id = self.net.session.local_id();
         let wire: Vec<PlayerId> = participants.iter().map(|p| p.unwrap_or(local_id)).collect();
         self.emit_mob_event(ServerMessage::BossDefeated {
             id: mob.id.0,
@@ -368,17 +360,24 @@ impl InGameState {
         if participants.contains(&None) {
             self.pop_drops_for(&mob.kind, loot_seed(mob.id.0, local_id), mob.position);
         }
-        let first = self.progression.defeat(&mob.kind);
-        if self.mobs.fight.as_ref().is_some_and(|f| f.mob == mob.id) {
-            self.mobs.fight = None;
+        let first = self.sim.progression.defeat(&mob.kind);
+        if self
+            .sim
+            .mobs
+            .fight
+            .as_ref()
+            .is_some_and(|f| f.mob == mob.id)
+        {
+            self.sim.mobs.fight = None;
         }
         if self
+            .sim
             .mobs
             .telegraph
             .as_ref()
             .is_some_and(|t| t.mob == mob.id.0)
         {
-            self.mobs.telegraph = None;
+            self.sim.mobs.telegraph = None;
         }
         self.broadcast_progression();
         let title = params.title.clone();
@@ -393,17 +392,17 @@ impl InGameState {
     /// Client: apply a boss update from the host. Returns the message back if
     /// it was not one of ours.
     pub(super) fn apply_boss_update(&mut self, msg: ServerMessage) -> Option<ServerMessage> {
-        let local_id = self.session.local_id();
+        let local_id = self.net.session.local_id();
         match msg {
             ServerMessage::BossPhase { id, phase } => {
-                if let Some(entity) = mob_systems::find(&self.ecs, MobId(id))
-                    && let Some(replica) = self.ecs.get_mut::<Replica>(entity)
+                if let Some(entity) = mob_systems::find(&self.sim.ecs, MobId(id))
+                    && let Some(replica) = self.sim.ecs.get_mut::<Replica>(entity)
                 {
                     replica.phase = phase;
                 }
             }
             ServerMessage::BossTelegraph { id, attack, windup } => {
-                self.mobs.telegraph = Some(Telegraph {
+                self.sim.mobs.telegraph = Some(Telegraph {
                     mob: id,
                     name: crate::domain::core::ident::title_case(&attack),
                     remaining: windup,
@@ -419,8 +418,14 @@ impl InGameState {
                     let at = Vec3::from_array(position);
                     self.pop_drops_for(&kind, loot_seed(id, local_id), at);
                 }
-                if self.mobs.telegraph.as_ref().is_some_and(|t| t.mob == id) {
-                    self.mobs.telegraph = None;
+                if self
+                    .sim
+                    .mobs
+                    .telegraph
+                    .as_ref()
+                    .is_some_and(|t| t.mob == id)
+                {
+                    self.sim.mobs.telegraph = None;
                 }
             }
             other => return Some(other),
@@ -437,11 +442,12 @@ impl InGameState {
     /// The boss bar for the nearest boss this player is close to, simulated
     /// here or replicated from the host.
     pub(super) fn boss_bar(&self) -> Option<BossBarView> {
-        let here = self.player.position;
+        let here = self.sim.player.position;
         // Simulated here or replicated from the host, a boss is the same
         // entity shape: a kind, a place, a health, and a phase — from its
         // brain when simulated, from the host's last word when replicated.
         let bosses = self
+            .sim
             .ecs
             .query::<(
                 &MobId,
@@ -476,6 +482,7 @@ impl InGameState {
             fraction: fraction.clamp(0.0, 1.0),
             phase,
             telegraph: self
+                .sim
                 .mobs
                 .telegraph
                 .as_ref()
@@ -495,6 +502,7 @@ fn loot_seed(mob: u64, player: PlayerId) -> u64 {
 mod tests {
     use super::*;
     use crate::application::session::FakeSession;
+    use crate::domain::core::BlockPos;
     use crate::domain::core::GameMode;
     use crate::domain::world::block::blocks;
     use crate::domain::world::structure::Cell;
@@ -504,9 +512,10 @@ mod tests {
     /// A survival world with the altar nearest spawn, and that altar block.
     fn at_the_altar() -> (InGameState, BlockPos) {
         let state = InGameState::new(GameContent::builtin(), 5, GameMode::Survival);
-        let config = state.structures.config();
+        let config = state.sim.structures.config();
         let index = config.find("meadows_altar").unwrap();
         let altar = state
+            .sim
             .structures
             .nearest(index, BlockPos::new(0, 0, 0), 4)
             .expect("an altar near spawn");
@@ -525,11 +534,14 @@ mod tests {
 
     fn give_local(state: &mut InGameState, item: &str, count: u8) {
         let id = state.content.rules.items.find(item).unwrap();
-        state.inventory.set_slot(0, Some(ItemStack::new(id, count)));
+        state
+            .sim
+            .inventory
+            .set_slot(0, Some(ItemStack::new(id, count)));
     }
 
     fn stand_beside(state: &mut InGameState, pos: BlockPos) {
-        state.player.teleport(Vec3::new(
+        state.sim.player.teleport(Vec3::new(
             pos.x as f32 + 2.5,
             pos.y as f32,
             pos.z as f32 + 0.5,
@@ -537,7 +549,7 @@ mod tests {
     }
 
     fn use_altar(state: &mut InGameState, pos: BlockPos) {
-        let local = state.session.local_id();
+        let local = state.net.session.local_id();
         state.use_block(local, pos);
     }
 
@@ -551,7 +563,7 @@ mod tests {
         stand_beside(&mut state, altar);
         use_altar(&mut state, altar);
         assert_eq!(bosses(&state), 0);
-        assert!(state.mobs.fight.is_none());
+        assert!(state.sim.mobs.fight.is_none());
     }
 
     #[test]
@@ -562,12 +574,16 @@ mod tests {
         use_altar(&mut state, altar);
         assert_eq!(bosses(&state), 1);
         let effigy = state.content.rules.items.find("stag_effigy").unwrap();
-        assert_eq!(state.inventory.count_of(effigy), 1, "exactly one offered");
+        assert_eq!(
+            state.sim.inventory.count_of(effigy),
+            1,
+            "exactly one offered"
+        );
 
         // A second offering while it lives is refused and costs nothing.
         use_altar(&mut state, altar);
         assert_eq!(bosses(&state), 1);
-        assert_eq!(state.inventory.count_of(effigy), 1);
+        assert_eq!(state.sim.inventory.count_of(effigy), 1);
     }
 
     /// A client's offering comes out of the copy of its inventory the host
@@ -580,7 +596,7 @@ mod tests {
         state.set_session(Box::new(session));
         let pid = PlayerId(1);
         let beside = Vec3::new(altar.x as f32 + 2.5, altar.y as f32, altar.z as f32 + 0.5);
-        crate::application::ecs::systems::players::entry(&mut state.ecs, pid, beside);
+        crate::application::ecs::systems::players::entry(&mut state.sim.ecs, pid, beside);
         let effigy = state.content.rules.items.find("stag_effigy").unwrap();
         let mut slots = vec![None; 4];
         slots[3] = Some(NetItemStack {
@@ -588,7 +604,7 @@ mod tests {
             count: 1,
             durability: None,
         });
-        state.peers.inventories.insert(pid, (slots, 0));
+        state.net.peers.inventories.insert(pid, (slots, 0));
 
         state.use_block(pid, altar);
         assert_eq!(bosses(&state), 1);
@@ -613,18 +629,18 @@ mod tests {
         let boss = state.simulated_mobs().into_iter().find(|m| m.boss).unwrap();
         let at = boss.position;
         crate::application::ecs::systems::mobs::hit(
-            &mut state.ecs,
+            &mut state.sim.ecs,
             boss.entity,
             10_000.0,
             Vec3::ZERO,
             0,
         );
-        state.player.teleport(at + Vec3::X * 3.0);
+        state.sim.player.teleport(at + Vec3::X * 3.0);
         state.update_mobs(1.0 / 60.0);
 
         assert_eq!(bosses(&state), 0);
-        assert!(state.progression.is_defeated("elder stag"));
-        assert!(state.mobs.fight.is_none());
+        assert!(state.sim.progression.is_defeated("elder stag"));
+        assert!(state.sim.mobs.fight.is_none());
         let antler = state.content.rules.items.find("elder_antler").unwrap();
         let dropped: u32 = state
             .drops()
@@ -642,13 +658,13 @@ mod tests {
         stand_beside(&mut state, altar);
         give_local(&mut state, "stag_effigy", 1);
         use_altar(&mut state, altar);
-        state.player.teleport(Vec3::new(5000.0, 120.0, 5000.0));
+        state.sim.player.teleport(Vec3::new(5000.0, 120.0, 5000.0));
         for _ in 0..40 {
             state.update_boss_fight(1.0);
         }
         assert_eq!(bosses(&state), 0);
-        assert!(state.mobs.fight.is_none());
-        assert!(!state.progression.is_defeated("elder stag"));
+        assert!(state.sim.mobs.fight.is_none());
+        assert!(!state.sim.progression.is_defeated("elder stag"));
     }
 
     #[test]
@@ -660,7 +676,7 @@ mod tests {
         let bar = state.boss_bar().expect("a bar beside the boss");
         assert_eq!(bar.title, "The Elder Stag");
         assert!((bar.fraction - 1.0).abs() < 1e-6);
-        state.player.teleport(Vec3::new(5000.0, 120.0, 5000.0));
+        state.sim.player.teleport(Vec3::new(5000.0, 120.0, 5000.0));
         assert!(state.boss_bar().is_none());
     }
 

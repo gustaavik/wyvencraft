@@ -7,6 +7,9 @@
 pub mod boot_plan;
 pub mod content;
 pub mod ecs;
+pub mod networking;
+pub mod peers;
 pub mod protocol;
 pub mod session;
+pub mod simulation;
 pub mod sync;

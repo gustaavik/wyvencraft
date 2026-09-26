@@ -80,11 +80,11 @@ impl InGameState {
     /// distance, plus — on a host — every remote player at [`SIM_RADIUS`].
     pub(super) fn stream_anchors(&self, radius: i32) -> Vec<Anchor> {
         let mut anchors = vec![Anchor {
-            center: BlockPos::from_world(self.player.position).chunk(),
+            center: BlockPos::from_world(self.sim.player.position).chunk(),
             radius,
         }];
-        if self.session.serves_peers() {
-            anchors.extend(players::all(&self.ecs).map(|rp| Anchor {
+        if self.net.session.serves_peers() {
+            anchors.extend(players::all(&self.sim.ecs).map(|rp| Anchor {
                 center: BlockPos::from_world(rp.position()).chunk(),
                 radius: SIM_RADIUS.min(radius),
             }));
@@ -98,38 +98,39 @@ impl InGameState {
 
         // 1. Insert finished chunks (discard any that drifted out of range).
         let mut inserted = 0;
-        for chunk in self.loader.drain_ready() {
+        for chunk in self.sim.loader.drain_ready() {
             if is_kept(&anchors, chunk.pos, UNLOAD_MARGIN) {
-                self.world.insert_chunk(chunk);
+                self.sim.world.insert_chunk(chunk);
                 inserted += 1;
             }
         }
         if inserted > 0 {
             log::debug!(
                 "streamed +{inserted} chunks (loaded={}, pending={})",
-                self.world.loaded_count(),
-                self.loader.pending_count()
+                self.sim.world.loaded_count(),
+                self.sim.loader.pending_count()
             );
         }
 
         // 2. Request missing chunks, nearest first.
         let missing: Vec<ChunkPos> = wanted_chunks(&anchors)
             .into_iter()
-            .filter(|p| !self.world.is_loaded(*p) && !self.loader.is_pending(*p))
+            .filter(|p| !self.sim.world.is_loaded(*p) && !self.sim.loader.is_pending(*p))
             .take(REQUEST_BUDGET)
             .collect();
         for pos in missing {
-            self.loader.request(pos);
+            self.sim.loader.request(pos);
         }
 
         // 3. Unload chunks nobody is near, and their meshes.
         let to_unload: Vec<ChunkPos> = self
+            .sim
             .world
             .loaded_positions()
             .filter(|p| !is_kept(&anchors, *p, UNLOAD_MARGIN))
             .collect();
         for pos in to_unload {
-            self.world.unload_chunk(pos);
+            self.sim.world.unload_chunk(pos);
             self.view.forget_chunk(pos);
         }
     }
@@ -186,7 +187,7 @@ mod tests {
         let mut state = InGameState::new(GameContent::builtin(), 5, GameMode::Survival);
         state.set_session(Box::new(FakeSession::host()));
         let far = Vec3::new(2000.0, 90.0, -1500.0);
-        players::entry(&mut state.ecs, PlayerId(1), far);
+        players::entry(&mut state.sim.ecs, PlayerId(1), far);
 
         let anchors = state.stream_anchors(8);
         let target = BlockPos::from_world(far).chunk();
@@ -198,7 +199,11 @@ mod tests {
     fn a_client_streams_only_around_itself() {
         let mut state = InGameState::new(GameContent::builtin(), 5, GameMode::Survival);
         state.set_session(Box::new(FakeSession::client(PlayerId(1))));
-        players::entry(&mut state.ecs, PlayerId(0), Vec3::new(2000.0, 90.0, 0.0));
+        players::entry(
+            &mut state.sim.ecs,
+            PlayerId(0),
+            Vec3::new(2000.0, 90.0, 0.0),
+        );
         assert_eq!(state.stream_anchors(8).len(), 1);
     }
 }

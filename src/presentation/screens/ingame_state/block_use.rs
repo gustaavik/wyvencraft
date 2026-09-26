@@ -45,13 +45,13 @@ impl InGameState {
         let Some(hit) = self.targeted_block() else {
             return false;
         };
-        let block = self.world.block_at(hit.block);
+        let block = self.sim.world.block_at(hit.block);
         if self.content.rules.blocks.get(block).interact.is_none() {
             return false;
         }
-        self.player_anim.trigger_swing();
-        if self.session.is_authority() {
-            self.use_block(self.session.local_id(), hit.block);
+        self.sim.player_anim.trigger_swing();
+        if self.net.session.is_authority() {
+            self.use_block(self.net.session.local_id(), hit.block);
         } else {
             self.request_block_use(hit.block);
         }
@@ -61,15 +61,15 @@ impl InGameState {
     /// Authority: whether `actor` stands close enough to use `pos`. The local
     /// player's reach was already enforced by the crosshair ray.
     pub(super) fn within_use_reach(&self, actor: PlayerId, pos: BlockPos) -> bool {
-        if actor == self.session.local_id() {
+        if actor == self.net.session.local_id() {
             return true;
         }
-        let Some(player) = players::get(&self.ecs, actor) else {
+        let Some(player) = players::get(&self.sim.ecs, actor) else {
             return false;
         };
         let centre = Vec3::new(pos.x as f32 + 0.5, pos.y as f32 + 0.5, pos.z as f32 + 0.5);
-        let eye = player.position() + Vec3::Y * self.player.movement().eye_height;
-        eye.distance(centre) <= self.player.movement().reach + REACH_SLACK
+        let eye = player.position() + Vec3::Y * self.sim.player.movement().eye_height;
+        eye.distance(centre) <= self.sim.player.movement().reach + REACH_SLACK
     }
 
     /// Authority: carry out `actor` using the block at `pos`.
@@ -78,7 +78,7 @@ impl InGameState {
             log::info!("player {} tried to use {pos:?} out of reach", actor.0);
             return;
         }
-        let Some((instance, Cell::Block(block))) = self.structures.instance_at(pos) else {
+        let Some((instance, Cell::Block(block))) = self.sim.structures.instance_at(pos) else {
             self.reply(
                 actor,
                 ChatKind::System,
@@ -103,14 +103,18 @@ impl InGameState {
     /// Read a shrine: find the structure it points to, reveal it to everyone,
     /// and tell the reader which way to go.
     fn read_shrine(&mut self, at: &UseAt) {
-        let config = self.structures.config();
+        let config = self.sim.structures.config();
         let Some(target) = config.get(at.instance.structure).reveals else {
             self.reply(at.actor, ChatKind::System, "The wayrune is blank.".into());
             return;
         };
         let target_id = config.get(target).id.clone();
         let name = title_case(&target_id);
-        let Some(found) = self.structures.nearest(target, at.pos, SHRINE_SEARCH_RINGS) else {
+        let Some(found) = self
+            .sim
+            .structures
+            .nearest(target, at.pos, SHRINE_SEARCH_RINGS)
+        else {
             let text = format!("The runes are silent: no {name} lies within reach.");
             self.reply(at.actor, ChatKind::System, text);
             return;
@@ -122,6 +126,7 @@ impl InGameState {
             format!("The wayrune reveals the {name} — {way}."),
         );
         if self
+            .sim
             .progression
             .read_shrine(at.pos, &target_id, found.anchor)
         {
@@ -180,9 +185,10 @@ mod tests {
 
     /// The wayrune of the nearest shrine to spawn in `state`'s world.
     fn nearest_wayrune(state: &InGameState) -> BlockPos {
-        let config = state.structures.config();
+        let config = state.sim.structures.config();
         let shrine = config.find("meadows_shrine").unwrap();
         let instance = state
+            .sim
             .structures
             .nearest(shrine, BlockPos::new(0, 0, 0), 4)
             .expect("a shrine near spawn");
@@ -205,17 +211,17 @@ mod tests {
         let mut state = InGameState::new(GameContent::builtin(), 5, GameMode::Survival);
         let rune = nearest_wayrune(&state);
         state.use_block(PlayerId(0), rune);
-        let revealed: Vec<_> = state.progression.revealed().collect();
+        let revealed: Vec<_> = state.sim.progression.revealed().collect();
         assert_eq!(revealed.len(), 1);
         assert_eq!(revealed[0].0, "meadows_altar");
-        assert!(state.progression.read_shrines.contains(&rune));
+        assert!(state.sim.progression.read_shrines.contains(&rune));
     }
 
     #[test]
     fn a_hand_placed_wayrune_reveals_nothing() {
         let mut state = InGameState::new(GameContent::builtin(), 5, GameMode::Survival);
         state.use_block(PlayerId(0), BlockPos::new(3, 150, 3));
-        assert_eq!(state.progression.revealed().count(), 0);
+        assert_eq!(state.sim.progression.revealed().count(), 0);
     }
 
     /// A client asks; the host checks the client really stands at the shrine
@@ -230,9 +236,9 @@ mod tests {
         let pid = PlayerId(1);
 
         // Far away: refused.
-        players::entry(&mut state.ecs, pid, Vec3::new(5000.0, 90.0, 5000.0));
+        players::entry(&mut state.sim.ecs, pid, Vec3::new(5000.0, 90.0, 5000.0));
         state.use_block(pid, rune);
-        assert_eq!(state.progression.revealed().count(), 0);
+        assert_eq!(state.sim.progression.revealed().count(), 0);
 
         // Standing beside it: revealed, and everyone hears.
         let beside = Vec3::new(
@@ -240,10 +246,10 @@ mod tests {
             rune.y as f32 - 1.0,
             rune.z as f32 + 0.5,
         );
-        players::remove(&mut state.ecs, pid);
-        players::entry(&mut state.ecs, pid, beside);
+        players::remove(&mut state.sim.ecs, pid);
+        players::entry(&mut state.sim.ecs, pid, beside);
         state.use_block(pid, rune);
-        assert_eq!(state.progression.revealed().count(), 1);
+        assert_eq!(state.sim.progression.revealed().count(), 1);
         let guard = handle.lock();
         let sent = guard.broadcasts();
         assert!(

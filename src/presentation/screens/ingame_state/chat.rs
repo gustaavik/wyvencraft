@@ -96,14 +96,15 @@ impl InGameState {
         if text.is_empty() {
             return;
         }
-        if self.session.is_authority() {
-            let me = self.session.local_id();
+        if self.net.session.is_authority() {
+            let me = self.net.session.local_id();
             self.dispatch_chat(me, text);
         } else {
             // Send it raw — commands *and* ordinary messages. Nothing is echoed
             // locally: the host's reply is the single copy, which is what keeps
             // a client from seeing its own message twice.
-            self.session
+            self.net
+                .session
                 .request(&ClientMessage::Chat(text), Channel::Reliable);
         }
     }
@@ -146,7 +147,7 @@ impl InGameState {
     fn relay_chat(&mut self, from: PlayerId, text: String) {
         let line = format!("<{}> {text}", self.player_name(from));
         self.chat.log.push(ChatKind::Player, line);
-        self.session.broadcast(
+        self.net.session.broadcast(
             &ServerMessage::Chat {
                 from: Some(from),
                 kind: ChatKind::Player,
@@ -168,13 +169,14 @@ impl InGameState {
     /// signature, so there is no way to be authorized without having proved who
     /// you are.
     fn is_op(&self, actor: PlayerId) -> bool {
-        if actor == self.session.local_id() {
+        if actor == self.net.session.local_id() {
             return true;
         }
-        self.peers
+        self.net
+            .peers
             .accounts
             .get(&actor)
-            .is_some_and(|account| self.ops.is_op(&account.account_id))
+            .is_some_and(|account| self.net.ops.is_op(&account.account_id))
     }
 
     /// Split `count` of `name` into stacks and hand them to `actor`.
@@ -201,13 +203,13 @@ impl InGameState {
     fn teleport(&mut self, actor: PlayerId, position: Position) {
         let [x, y, z] = position;
         log::info!("teleporting player {} to {x:.1} {y:.1} {z:.1}", actor.0);
-        if actor == self.session.local_id() {
-            self.player.teleport(Vec3::from_array(position));
-            self.player.velocity = Vec3::ZERO;
-            self.breaking = None;
+        if actor == self.net.session.local_id() {
+            self.sim.player.teleport(Vec3::from_array(position));
+            self.sim.player.velocity = Vec3::ZERO;
+            self.sim.breaking = None;
             return;
         }
-        self.session.send_to(
+        self.net.session.send_to(
             actor,
             &ServerMessage::Teleport {
                 to: actor,
@@ -219,9 +221,9 @@ impl InGameState {
 
     /// Apply a `Teleport` addressed to us.
     pub(super) fn apply_teleport(&mut self, position: NetVec3) {
-        self.player.teleport(Vec3::from_array(position));
-        self.player.velocity = Vec3::ZERO;
-        self.breaking = None;
+        self.sim.player.teleport(Vec3::from_array(position));
+        self.sim.player.velocity = Vec3::ZERO;
+        self.sim.breaking = None;
     }
 
     // --- Role-agnostic effects ------------------------------------------------------
@@ -229,10 +231,10 @@ impl InGameState {
     /// Say something back to whoever ran the command: into our own log if that
     /// is us, otherwise addressed to them over the wire.
     pub(super) fn reply(&mut self, actor: PlayerId, kind: ChatKind, text: String) {
-        if actor == self.session.local_id() {
+        if actor == self.net.session.local_id() {
             self.chat.log.push(kind, text);
         } else {
-            self.session.send_to(
+            self.net.session.send_to(
                 actor,
                 &ServerMessage::Chat {
                     from: None,
@@ -248,7 +250,7 @@ impl InGameState {
     /// otherwise as a `GrantItems` they apply to themselves. Clients own their
     /// inventory, so the host asks rather than writes.
     fn grant(&mut self, actor: PlayerId, stacks: Vec<ItemStack>) {
-        if actor == self.session.local_id() {
+        if actor == self.net.session.local_id() {
             self.receive_stacks(stacks);
             return;
         }
@@ -260,7 +262,7 @@ impl InGameState {
                 durability: stack.durability,
             })
             .collect();
-        self.session.send_to(
+        self.net.session.send_to(
             actor,
             &ServerMessage::GrantItems {
                 to: actor,
@@ -274,7 +276,7 @@ impl InGameState {
     /// front of the player — the same overflow rule as crafting.
     pub(super) fn receive_stacks(&mut self, stacks: Vec<ItemStack>) {
         for stack in stacks {
-            let leftover = self.inventory.add(stack, &self.content.rules.items);
+            let leftover = self.sim.inventory.add(stack, &self.content.rules.items);
             if leftover > 0 {
                 self.throw(ItemStack {
                     count: leftover,
@@ -314,14 +316,14 @@ impl InGameState {
     /// Display name for a player id. Names are still generated rather than
     /// chosen, matching what `welcome_player` puts in the peer list.
     pub(super) fn player_name(&self, id: PlayerId) -> String {
-        crate::application::ecs::systems::players::get(&self.ecs, id)
+        crate::application::ecs::systems::players::get(&self.sim.ecs, id)
             .map(|player| player.name.clone())
             .unwrap_or_else(|| format!("Player {}", id.0))
     }
 
     #[cfg(test)]
     pub(super) fn set_ops(&mut self, ops: crate::domain::chat::OpsList) {
-        self.ops = ops;
+        self.net.ops = ops;
     }
 }
 
@@ -363,9 +365,9 @@ impl CommandContext for SessionContext<'_> {
     }
 
     fn position(&self) -> Position {
-        match crate::application::ecs::systems::players::get(&self.state.ecs, self.actor) {
+        match crate::application::ecs::systems::players::get(&self.state.sim.ecs, self.actor) {
             Some(player) => player.position().to_array(),
-            None => self.state.player.position.to_array(),
+            None => self.state.sim.player.position.to_array(),
         }
     }
 
@@ -374,16 +376,16 @@ impl CommandContext for SessionContext<'_> {
     }
 
     fn player_positions(&self) -> Vec<(String, Position)> {
-        let local = self.state.session.local_id();
+        let local = self.state.net.session.local_id();
         // The local player only appears here when someone *else* is the runner —
         // a command never lists its own runner as a destination.
         let own = (self.actor != local).then(|| {
             (
                 self.state.player_name(local),
-                self.state.player.position.to_array(),
+                self.state.sim.player.position.to_array(),
             )
         });
-        crate::application::ecs::systems::players::all(&self.state.ecs)
+        crate::application::ecs::systems::players::all(&self.state.sim.ecs)
             .filter(|player| player.id != self.actor)
             .map(|player| (player.name.clone(), player.position().to_array()))
             .chain(own)
@@ -391,7 +393,7 @@ impl CommandContext for SessionContext<'_> {
     }
 
     fn structure_ids(&self) -> Vec<String> {
-        let config = self.state.structures.config();
+        let config = self.state.sim.structures.config();
         config.all().iter().map(|s| s.id.clone()).collect()
     }
 
@@ -414,25 +416,25 @@ impl CommandContext for SessionContext<'_> {
 
     fn reveal(&mut self, structure: &str) -> Option<Position> {
         let anchor = self.state.locate_structure(structure, self.position())?;
-        if self.state.progression.reveal(structure, anchor) {
+        if self.state.sim.progression.reveal(structure, anchor) {
             self.state.announce_reveal(structure, anchor, None);
         }
         Some(stand_on(anchor))
     }
 
     fn defeat_boss(&mut self, boss: &str) -> bool {
-        let news = self.state.progression.defeat(boss);
+        let news = self.state.sim.progression.defeat(boss);
         self.state.broadcast_progression();
         news
     }
 
     fn reset_progression(&mut self) {
-        self.state.progression.reset();
+        self.state.sim.progression.reset();
         self.state.broadcast_progression();
     }
 
     fn progression(&self) -> WorldProgression {
-        self.state.progression.clone()
+        self.state.sim.progression.clone()
     }
 }
 
@@ -560,7 +562,7 @@ mod tests {
             .items
             .find(name)
             .expect("the item exists");
-        state.inventory.count_of(id)
+        state.sim.inventory.count_of(id)
     }
 
     #[test]
@@ -593,6 +595,7 @@ mod tests {
         let id = state.content.rules.items.find("wooden_pickaxe").unwrap();
         let full = state.content.rules.items.max_durability(id).unwrap();
         let picks: Vec<_> = state
+            .sim
             .inventory
             .slots()
             .iter()
@@ -632,14 +635,19 @@ mod tests {
         // Fill every storage slot, so nothing can be absorbed.
         for slot in 0..crate::domain::inventory::INVENTORY_SIZE {
             state
+                .sim
                 .inventory
                 .set_slot(slot, Some(ItemStack::new(stone, max)));
         }
-        let before = state.inventory.count_of(stone);
+        let before = state.sim.inventory.count_of(stone);
 
         state.submit_chat("/give bread 5".to_string());
 
-        assert_eq!(state.inventory.count_of(stone), before, "nothing displaced");
+        assert_eq!(
+            state.sim.inventory.count_of(stone),
+            before,
+            "nothing displaced"
+        );
         assert_eq!(count_of(&state, "bread"), 0, "no room for it");
         let bread = state.content.rules.items.find("bread").unwrap();
         let dropped: u32 = state
@@ -655,7 +663,7 @@ mod tests {
     fn a_singleplayer_tp_moves_the_player() {
         let mut state = InGameState::new(GameContent::builtin(), 5, GameMode::Creative);
         state.submit_chat("/tp 10 70 -20".to_string());
-        assert_eq!(state.player.position, Vec3::new(10.0, 70.0, -20.0));
+        assert_eq!(state.sim.player.position, Vec3::new(10.0, 70.0, -20.0));
     }
 
     /// Relative coordinates anchor on the runner, which is the whole reason the
@@ -663,9 +671,9 @@ mod tests {
     #[test]
     fn a_relative_tp_is_measured_from_where_the_player_stands() {
         let mut state = InGameState::new(GameContent::builtin(), 5, GameMode::Creative);
-        state.player.position = Vec3::new(4.0, 65.0, 8.0);
+        state.sim.player.position = Vec3::new(4.0, 65.0, 8.0);
         state.submit_chat("/tp ~ ~30 ~".to_string());
-        assert_eq!(state.player.position, Vec3::new(4.0, 95.0, 8.0));
+        assert_eq!(state.sim.player.position, Vec3::new(4.0, 95.0, 8.0));
     }
 
     /// Arriving mid-plunge must not carry the descent into the destination.
@@ -674,21 +682,21 @@ mod tests {
     #[test]
     fn teleporting_drops_the_momentum_you_arrived_with() {
         let mut state = InGameState::new(GameContent::builtin(), 5, GameMode::Creative);
-        state.player.position = Vec3::new(0.0, 200.0, 0.0);
-        state.player.velocity = Vec3::new(0.0, -40.0, 0.0);
+        state.sim.player.position = Vec3::new(0.0, 200.0, 0.0);
+        state.sim.player.velocity = Vec3::new(0.0, -40.0, 0.0);
 
         state.submit_chat("/tp 0 20 0".to_string());
 
-        assert_eq!(state.player.position, Vec3::new(0.0, 20.0, 0.0));
-        assert_eq!(state.player.velocity, Vec3::ZERO);
+        assert_eq!(state.sim.player.position, Vec3::new(0.0, 20.0, 0.0));
+        assert_eq!(state.sim.player.velocity, Vec3::ZERO);
     }
 
     #[test]
     fn a_tp_outside_the_world_is_refused_and_the_player_stays_put() {
         let mut state = InGameState::new(GameContent::builtin(), 5, GameMode::Creative);
-        let before = state.player.position;
+        let before = state.sim.player.position;
         state.submit_chat("/tp 0 -5 0".to_string());
-        assert_eq!(state.player.position, before);
+        assert_eq!(state.sim.player.position, before);
         let last = state.chat.log.lines().next_back().expect("an error line");
         assert_eq!(last.kind, ChatKind::Error);
     }
@@ -704,7 +712,7 @@ mod tests {
                 .unwrap(),
         );
         join(&mut state, &handle, pid, 5);
-        state.player.position = Vec3::new(64.0, 71.0, -8.0);
+        state.sim.player.position = Vec3::new(64.0, 71.0, -8.0);
 
         handle.deliver(Inbound::Request {
             player: pid,
@@ -724,7 +732,7 @@ mod tests {
         );
         drop(net);
         assert_eq!(
-            state.player.position,
+            state.sim.player.position,
             Vec3::new(64.0, 71.0, -8.0),
             "and the host itself does not move"
         );
@@ -741,13 +749,13 @@ mod tests {
         }));
         state.pump_network(1.0 / 60.0);
 
-        assert_eq!(state.player.position, Vec3::new(1.0, 80.0, 2.0));
+        assert_eq!(state.sim.player.position, Vec3::new(1.0, 80.0, 2.0));
     }
 
     #[test]
     fn a_client_ignores_a_teleport_addressed_to_someone_else() {
         let (mut state, handle) = client_session(PlayerId(2));
-        let before = state.player.position;
+        let before = state.sim.player.position;
 
         handle.deliver(Inbound::Update(ServerMessage::Teleport {
             to: PlayerId(9),
@@ -755,7 +763,7 @@ mod tests {
         }));
         state.pump_network(1.0 / 60.0);
 
-        assert_eq!(state.player.position, before);
+        assert_eq!(state.sim.player.position, before);
     }
 
     /// Registry-driven, so a command added to `chat::COMMANDS` is covered here
@@ -869,7 +877,7 @@ mod tests {
         assert_eq!(granted[0].item, bread.0);
         assert_eq!(granted[0].count, 5);
         assert_eq!(
-            state.inventory.count_of(bread),
+            state.sim.inventory.count_of(bread),
             0,
             "the host's own inventory is untouched"
         );
@@ -1074,7 +1082,7 @@ mod tests {
         }));
         state.pump_network(1.0 / 60.0);
 
-        assert_eq!(state.inventory.count_of(bread), 7);
+        assert_eq!(state.sim.inventory.count_of(bread), 7);
     }
 
     /// A grant addressed to someone else arrives on the wire only by accident,
@@ -1094,7 +1102,7 @@ mod tests {
         }));
         state.pump_network(1.0 / 60.0);
 
-        assert_eq!(state.inventory.count_of(bread), 0);
+        assert_eq!(state.sim.inventory.count_of(bread), 0);
     }
 
     /// The content hash gates divergent builds, but a malformed message still
@@ -1114,7 +1122,7 @@ mod tests {
         }));
         state.pump_network(1.0 / 60.0);
 
-        assert!(state.inventory.slots().iter().all(Option::is_none));
+        assert!(state.sim.inventory.slots().iter().all(Option::is_none));
     }
 
     #[test]

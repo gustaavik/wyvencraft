@@ -4,9 +4,10 @@
 
 use glam::Vec3;
 
-use super::{BreakState, InGameState};
+use super::InGameState;
 use crate::application::ecs::components::ItemDrop;
 use crate::application::ecs::{spawn, systems};
+use crate::application::simulation::BreakState;
 use crate::domain::core::{Aabb, BlockId, BlockPos};
 use crate::domain::entity::Launch;
 use crate::domain::inventory::{Consumable, ItemId, ItemStack, Placeable, Tool};
@@ -19,10 +20,10 @@ impl InGameState {
     /// fluids. Also what the selection outline and crack overlay are drawn
     /// around, so all three always agree.
     pub(super) fn target_at(&self, pos: BlockPos) -> Option<Target> {
-        if !self.world.is_targetable(pos) {
+        if !self.sim.world.is_targetable(pos) {
             return None;
         }
-        let block = self.world.block_at(pos);
+        let block = self.sim.world.block_at(pos);
         // Both model paths measure a hitbox from their own geometry, so a
         // Blockbench-authored flower is no more targetable than a `.bbmodel`
         // one. A block with neither is an ordinary cube and fills its cell.
@@ -63,9 +64,9 @@ impl InGameState {
     /// The block the player is currently looking at within reach, if any.
     pub(super) fn targeted_block(&self) -> Option<crate::domain::world::RaycastHit> {
         crate::domain::world::raycast(
-            self.player.eye_position(),
-            self.player.look_direction(),
-            self.player.movement().reach,
+            self.sim.player.eye_position(),
+            self.sim.player.look_direction(),
+            self.sim.player.movement().reach,
             |p| self.target_at(p),
         )
     }
@@ -74,14 +75,14 @@ impl InGameState {
     /// item; in creative it just disappears. Broadcasts the edit. Returns `true`
     /// on a hit.
     pub(super) fn break_block_at(&mut self, pos: BlockPos) -> bool {
-        let Some(prev) = self.world.set_block(pos, BlockId::AIR) else {
+        let Some(prev) = self.sim.world.set_block(pos, BlockId::AIR) else {
             return false;
         };
         if prev.is_air() {
             return false;
         }
-        self.fluids.block_changed(pos);
-        if self.player.mode.consumes_blocks()
+        self.sim.fluids.block_changed(pos);
+        if self.sim.player.mode.consumes_blocks()
             && let Some(stack) = self.block_drop_stack(prev)
         {
             // Scatter direction varies with the animation clock — cheap pseudo-random.
@@ -100,7 +101,7 @@ impl InGameState {
 
     /// The `kind` of the tool in the selected hotbar slot, if it is a tool.
     fn held_tool(&self) -> Option<&Tool> {
-        let id = self.inventory.item_in_selected()?;
+        let id = self.sim.inventory.item_in_selected()?;
         self.content.rules.items.component::<Tool>(id)
     }
 
@@ -149,7 +150,7 @@ impl InGameState {
 
     /// Toss one item from the selected hotbar slot out in front of the player.
     pub(super) fn drop_selected_item(&mut self) {
-        let Some(stack) = self.inventory.take_one_selected() else {
+        let Some(stack) = self.sim.inventory.take_one_selected() else {
             return;
         };
         self.throw(stack);
@@ -163,8 +164,8 @@ impl InGameState {
     pub(super) fn throw(&mut self, stack: ItemStack) {
         let drop = ItemDrop::thrown(
             stack,
-            self.player.eye_position(),
-            self.player.look_direction(),
+            self.sim.player.eye_position(),
+            self.sim.player.look_direction(),
             self.content.rules.entities.dropped_item(),
         );
         self.spawn_drop(drop);
@@ -173,7 +174,7 @@ impl InGameState {
     /// Put a dropped item into the world, colliding as the "dropped item" kind.
     pub(super) fn spawn_drop(&mut self, drop: (ItemDrop, Launch)) {
         spawn::drop_item(
-            &mut self.ecs,
+            &mut self.sim.ecs,
             drop,
             self.content.rules.entities.dropped_item(),
         );
@@ -181,12 +182,12 @@ impl InGameState {
 
     /// Advance drop physics, collect drops the player walks over, cull expired ones.
     pub(super) fn update_drops(&mut self, dt: f32) {
-        let world = &self.world;
-        systems::drops::fall(&mut self.ecs, dt, |p| world.is_solid_for_collision(p));
+        let world = &self.sim.world;
+        systems::drops::fall(&mut self.sim.ecs, dt, |p| world.is_solid_for_collision(p));
         // A dead player walks over drops without collecting them.
-        let collector = (!self.dead).then(|| self.player.aabb());
-        let (inventory, items) = (&mut self.inventory, &self.content.rules.items);
-        systems::drops::pick_up(&mut self.ecs, collector, |stack| {
+        let collector = (!self.sim.dead).then(|| self.sim.player.aabb());
+        let (inventory, items) = (&mut self.sim.inventory, &self.content.rules.items);
+        systems::drops::pick_up(&mut self.sim.ecs, collector, |stack| {
             inventory.add(stack, items)
         });
     }
@@ -194,7 +195,8 @@ impl InGameState {
     /// Every drop lying in the world, with where it is.
     #[cfg(test)]
     pub(super) fn drops(&self) -> impl Iterator<Item = (&ItemDrop, glam::Vec3)> {
-        self.ecs
+        self.sim
+            .ecs
             .query::<(&ItemDrop, &crate::application::ecs::components::Transform)>()
             .map(|(_, (drop, transform))| (drop, transform.position))
     }
@@ -203,20 +205,20 @@ impl InGameState {
     /// while the dig button is held, breaking it once progress reaches 1.0.
     pub(super) fn update_mining(&mut self, digging: bool, dt: f32) {
         if !digging {
-            self.breaking = None;
+            self.sim.breaking = None;
             return;
         }
         let Some(hit) = self.targeted_block() else {
-            self.breaking = None;
+            self.sim.breaking = None;
             return;
         };
         let block = self
             .content
             .rules
             .blocks
-            .get(self.world.block_at(hit.block));
+            .get(self.sim.world.block_at(hit.block));
         if !block.is_breakable() {
-            self.breaking = None;
+            self.sim.breaking = None;
             return;
         }
         // Mining is a run of blows, so the arm swings for as long as the button
@@ -224,12 +226,12 @@ impl InGameState {
         // (rather than triggering it) is what lets each arc finish before the
         // next begins; the blow that finally breaks the block is covered by the
         // same loop, so it needs no trigger of its own.
-        self.player_anim.keep_swinging();
+        self.sim.player_anim.keep_swinging();
         // Effective tool: the held item, if it's a tool. Whether it is the
         // *right* one is the block's call, not the tool's.
         let tool = self.held_tool();
         if !crate::domain::inventory::meets_tier(block.harvest.as_ref(), tool) {
-            self.breaking = None;
+            self.sim.breaking = None;
             self.hint_tier(hit.block);
             return;
         }
@@ -237,18 +239,18 @@ impl InGameState {
             crate::domain::inventory::break_seconds(block.hardness, block.harvest.as_ref(), tool);
 
         // Reset progress when the targeted block changes.
-        let prior = match &self.breaking {
+        let prior = match &self.sim.breaking {
             Some(b) if b.block == hit.block => b.progress,
             _ => 0.0,
         };
         let progress = prior + dt / seconds.max(1.0e-3);
         if progress >= 1.0 {
             if self.break_block_at(hit.block) {
-                self.inventory.damage_selected_tool();
+                self.sim.inventory.damage_selected_tool();
             }
-            self.breaking = None;
+            self.sim.breaking = None;
         } else {
-            self.breaking = Some(BreakState {
+            self.sim.breaking = Some(BreakState {
                 block: hit.block,
                 progress,
             });
@@ -258,11 +260,11 @@ impl InGameState {
     /// Say — once per block — why a tiered ore will not give: the Valheim
     /// gate is only fair if the player is told what opens it.
     fn hint_tier(&mut self, pos: BlockPos) {
-        if self.tier_hint == Some(pos) {
+        if self.sim.tier_hint == Some(pos) {
             return;
         }
-        self.tier_hint = Some(pos);
-        let block = self.content.rules.blocks.get(self.world.block_at(pos));
+        self.sim.tier_hint = Some(pos);
+        let block = self.content.rules.blocks.get(self.sim.world.block_at(pos));
         let Some(harvest) = &block.harvest else {
             return;
         };
@@ -280,7 +282,7 @@ impl InGameState {
         if self.use_targeted_block() {
             return;
         }
-        let Some(item_id) = self.inventory.item_in_selected() else {
+        let Some(item_id) = self.sim.inventory.item_in_selected() else {
             return;
         };
         for hook in USE_HOOKS {
@@ -297,12 +299,12 @@ impl InGameState {
         else {
             return false;
         };
-        if !self.player.mode.takes_damage() || !self.player.is_hungry() {
+        if !self.sim.player.mode.takes_damage() || !self.sim.player.is_hungry() {
             return false;
         }
-        self.player.feed(hunger, saturation);
-        self.inventory.consume_selected(1);
-        self.player_anim.trigger_swing();
+        self.sim.player.feed(hunger, saturation);
+        self.sim.inventory.consume_selected(1);
+        self.sim.player_anim.trigger_swing();
         true
     }
 
@@ -321,24 +323,24 @@ impl InGameState {
         };
         // Ground cover is swallowed rather than stacked on: without this,
         // building next to a flower would leave blocks perched on top of it.
-        let target = if self.world.is_replaceable(hit.block) {
+        let target = if self.sim.world.is_replaceable(hit.block) {
             hit.block
         } else {
             hit.place_position()
         };
         // Don't place inside the player.
         if Aabb::block(Vec3::new(target.x as f32, target.y as f32, target.z as f32))
-            .intersects(self.player.aabb())
+            .intersects(self.sim.player.aabb())
         {
             return true;
         }
-        if self.world.set_block(target, block).is_some() {
-            self.fluids.block_changed(target);
-            if self.player.mode.consumes_blocks() {
-                self.inventory.consume_selected(1);
+        if self.sim.world.set_block(target, block).is_some() {
+            self.sim.fluids.block_changed(target);
+            if self.sim.player.mode.consumes_blocks() {
+                self.sim.inventory.consume_selected(1);
             }
             self.broadcast_local_edit(target, block);
-            self.player_anim.trigger_swing();
+            self.sim.player_anim.trigger_swing();
         }
         true
     }
@@ -366,8 +368,8 @@ mod tests {
         let mut state = InGameState::new(GameContent::builtin(), 7, GameMode::Survival);
         let id = state.content.rules.items.find(item).expect("shipped item");
         let stack = state.content.rules.items.full_stack(id);
-        state.inventory.set_selected(0);
-        state.inventory.set_slot(0, Some(stack));
+        state.sim.inventory.set_selected(0);
+        state.sim.inventory.set_slot(0, Some(stack));
         state
     }
 
@@ -376,18 +378,18 @@ mod tests {
     #[test]
     fn right_clicking_food_eats_it_when_hungry() {
         let mut state = holding("bread");
-        let before = state.inventory.slot(0).expect("bread").count;
-        state.player.hunger = 1.0;
+        let before = state.sim.inventory.slot(0).expect("bread").count;
+        state.sim.player.hunger = 1.0;
         assert!(
-            state.player.is_hungry(),
+            state.sim.player.is_hungry(),
             "the fixture must leave room to eat"
         );
 
         state.use_selected();
 
-        assert!(state.player.hunger > 1.0, "eating restores hunger");
+        assert!(state.sim.player.hunger > 1.0, "eating restores hunger");
         assert_eq!(
-            state.inventory.slot(0).expect("bread").count,
+            state.sim.inventory.slot(0).expect("bread").count,
             before - 1,
             "one loaf is consumed"
         );
@@ -399,13 +401,13 @@ mod tests {
     #[test]
     fn right_clicking_food_while_full_consumes_nothing() {
         let mut state = holding("bread");
-        let before = state.inventory.slot(0).expect("bread").count;
-        assert!(!state.player.is_hungry(), "a fresh player is fed");
+        let before = state.sim.inventory.slot(0).expect("bread").count;
+        assert!(!state.sim.player.is_hungry(), "a fresh player is fed");
 
         state.use_selected();
 
         assert_eq!(
-            state.inventory.slot(0).expect("bread").count,
+            state.sim.inventory.slot(0).expect("bread").count,
             before,
             "a full player eats nothing"
         );
@@ -416,7 +418,7 @@ mod tests {
     #[test]
     fn right_clicking_a_block_item_places_its_block() {
         let mut state = holding("cobblestone");
-        let before = state.inventory.slot(0).expect("cobblestone").count;
+        let before = state.sim.inventory.slot(0).expect("cobblestone").count;
         let cobblestone = state
             .content
             .rules
@@ -424,20 +426,20 @@ mod tests {
             .find("cobblestone")
             .expect("shipped block");
         // Aim at a solid block two ahead, so the ray has a face to build on.
-        let look = state.player.look_direction();
-        let at = BlockPos::from_world(state.player.eye_position() + look * 2.0);
-        state.world.set_block(at, cobblestone);
+        let look = state.sim.player.look_direction();
+        let at = BlockPos::from_world(state.sim.player.eye_position() + look * 2.0);
+        state.sim.world.set_block(at, cobblestone);
         let hit = state.targeted_block().expect("a face to place against");
 
         state.use_selected();
 
         assert_eq!(
-            state.world.block_at(hit.place_position()),
+            state.sim.world.block_at(hit.place_position()),
             cobblestone,
             "the block lands on the targeted face"
         );
         assert_eq!(
-            state.inventory.slot(0).expect("cobblestone").count,
+            state.sim.inventory.slot(0).expect("cobblestone").count,
             before - 1,
             "survival spends one"
         );
@@ -448,11 +450,11 @@ mod tests {
     #[test]
     fn right_clicking_an_item_with_no_usable_capability_does_nothing() {
         let mut state = holding("stick");
-        let before = state.inventory.slot(0).expect("stick").count;
+        let before = state.sim.inventory.slot(0).expect("stick").count;
 
         state.use_selected();
 
-        assert_eq!(state.inventory.slot(0).expect("stick").count, before);
+        assert_eq!(state.sim.inventory.slot(0).expect("stick").count, before);
     }
 
     /// A tiered ore under a lesser pickaxe does not crack at all, and the
@@ -461,18 +463,23 @@ mod tests {
     fn a_tiered_ore_refuses_a_lesser_pickaxe_and_says_why() {
         use crate::domain::world::block::blocks;
         let mut state = InGameState::new(GameContent::builtin(), 7, GameMode::Survival);
-        let look = state.player.look_direction();
-        let at = BlockPos::from_world(state.player.eye_position() + look * 2.0);
-        state.world.set_block(at, blocks::TIN_ORE);
+        let look = state.sim.player.look_direction();
+        let at = BlockPos::from_world(state.sim.player.eye_position() + look * 2.0);
+        state.sim.world.set_block(at, blocks::TIN_ORE);
         let pick = state.content.rules.items.find("stone_pickaxe").unwrap();
         state
+            .sim
             .inventory
             .set_slot(0, Some(state.content.rules.items.full_stack(pick)));
-        state.inventory.set_selected(0);
+        state.sim.inventory.set_selected(0);
         for _ in 0..600 {
             state.update_mining(true, 1.0 / 60.0);
         }
-        assert_eq!(state.world.block_at(at), blocks::TIN_ORE, "never breaks");
+        assert_eq!(
+            state.sim.world.block_at(at),
+            blocks::TIN_ORE,
+            "never breaks"
+        );
         let hints = state
             .chat
             .log
@@ -483,13 +490,14 @@ mod tests {
 
         let antler = state.content.rules.items.find("antler_pickaxe").unwrap();
         state
+            .sim
             .inventory
             .set_slot(0, Some(state.content.rules.items.full_stack(antler)));
         for _ in 0..600 {
             state.update_mining(true, 1.0 / 60.0);
         }
         assert!(
-            state.world.block_at(at).is_air(),
+            state.sim.world.block_at(at).is_air(),
             "the antler pickaxe breaks it"
         );
     }

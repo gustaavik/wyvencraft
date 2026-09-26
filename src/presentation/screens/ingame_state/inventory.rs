@@ -86,9 +86,9 @@ impl InGameState {
         self.inventory_open = !self.inventory_open;
         self.inventory_anim.set_open(self.inventory_open);
         if !self.inventory_open
-            && let Some(held) = self.held.take()
+            && let Some(held) = self.sim.held.take()
         {
-            let leftover = self.inventory.add(held, &self.content.rules.items);
+            let leftover = self.sim.inventory.add(held, &self.content.rules.items);
             if leftover > 0 {
                 self.throw(ItemStack {
                     count: leftover,
@@ -103,14 +103,15 @@ impl InGameState {
     /// Mirrors the left-click path's armor gate, so a right click can no more
     /// put a pickaxe on your head than a left one can.
     pub(super) fn handle_slot_split(&mut self, index: usize) {
-        if let Some(held) = self.held
+        if let Some(held) = self.sim.held
             && !self
+                .sim
                 .inventory
                 .can_equip(index, held.item, &self.content.rules.items)
         {
             return;
         }
-        match (self.held, self.inventory.slot(index)) {
+        match (self.sim.held, self.sim.inventory.slot(index)) {
             // Empty hand: take the larger half, so a single item is picked up
             // whole rather than being unsplittable.
             (None, Some(mut stack)) => {
@@ -119,8 +120,9 @@ impl InGameState {
                 // the other way round: `ItemStack::split` builds a fresh stack
                 // and would drop the durability of whatever it returns.
                 let rest = stack.split(stack.count - taken);
-                self.held = Some(stack);
-                self.inventory
+                self.sim.held = Some(stack);
+                self.sim
+                    .inventory
                     .set_slot(index, (rest.count > 0).then_some(rest));
             }
             // Holding something: put one of it down.
@@ -131,7 +133,7 @@ impl InGameState {
                             return;
                         }
                         stack.count += 1;
-                        self.inventory.set_slot(index, Some(stack));
+                        self.sim.inventory.set_slot(index, Some(stack));
                     }
                     // A different item is left alone: right-click places, it
                     // never swaps. Swapping is what left click is for.
@@ -139,13 +141,14 @@ impl InGameState {
                     // Copied from the held stack rather than built fresh, so a
                     // single item put down keeps its durability.
                     None => self
+                        .sim
                         .inventory
                         .set_slot(index, Some(ItemStack { count: 1, ..held })),
                 }
                 // One decrement, after whichever branch ran — `split` would
                 // have taken it too, and the pair double-counted.
                 held.count -= 1;
-                self.held = (held.count > 0).then_some(held);
+                self.sim.held = (held.count > 0).then_some(held);
             }
             (None, None) => {}
         }
@@ -153,31 +156,31 @@ impl InGameState {
 
     /// Throw a slot's whole stack into the world — the drag-it-out gesture.
     pub(super) fn drop_slot(&mut self, index: usize) {
-        if let Some(stack) = self.inventory.slot(index) {
-            self.inventory.set_slot(index, None);
+        if let Some(stack) = self.sim.inventory.slot(index) {
+            self.sim.inventory.set_slot(index, None);
             self.throw(stack);
         }
     }
 
     /// Throw a single item out of a slot — the drop key over a slot.
     pub(super) fn drop_one(&mut self, index: usize) {
-        if let Some(one) = self.inventory.take_one(index) {
+        if let Some(one) = self.sim.inventory.take_one(index) {
             self.throw(one);
         }
     }
 
     /// Throw the stack on the cursor, all of it or one item.
     pub(super) fn drop_held(&mut self, all: bool) {
-        let Some(mut held) = self.held else {
+        let Some(mut held) = self.sim.held else {
             return;
         };
         if all {
-            self.held = None;
+            self.sim.held = None;
             self.throw(held);
             return;
         }
         let one = held.split(1);
-        self.held = (held.count > 0).then_some(held);
+        self.sim.held = (held.count > 0).then_some(held);
         self.throw(one);
     }
 
@@ -185,28 +188,29 @@ impl InGameState {
     pub(super) fn handle_slot_click(&mut self, index: usize) {
         // An armor slot only accepts its own piece. Taking a piece back off is
         // always allowed, so this only gates the held stack going in.
-        if let Some(held) = self.held
+        if let Some(held) = self.sim.held
             && !self
+                .sim
                 .inventory
                 .can_equip(index, held.item, &self.content.rules.items)
         {
             return;
         }
-        match (self.held, self.inventory.slot(index)) {
+        match (self.sim.held, self.sim.inventory.slot(index)) {
             (None, Some(stack)) => {
-                self.held = Some(stack);
-                self.inventory.set_slot(index, None);
+                self.sim.held = Some(stack);
+                self.sim.inventory.set_slot(index, None);
             }
             (Some(held), None) => {
-                self.inventory.set_slot(index, Some(held));
-                self.held = None;
+                self.sim.inventory.set_slot(index, Some(held));
+                self.sim.held = None;
             }
             (Some(mut held), Some(mut stack)) => {
                 if held.item == stack.item {
                     let max = self.content.rules.items.max_stack(stack.item);
                     let leftover = stack.merge(held, max);
-                    self.inventory.set_slot(index, Some(stack));
-                    self.held = if leftover == 0 {
+                    self.sim.inventory.set_slot(index, Some(stack));
+                    self.sim.held = if leftover == 0 {
                         None
                     } else {
                         held.count = leftover;
@@ -214,8 +218,8 @@ impl InGameState {
                     };
                 } else {
                     // Swap held and slot.
-                    self.inventory.set_slot(index, Some(held));
-                    self.held = Some(stack);
+                    self.sim.inventory.set_slot(index, Some(held));
+                    self.sim.held = Some(stack);
                 }
             }
             (None, None) => {}
@@ -339,6 +343,7 @@ mod interaction_tests {
     fn stocked(state: &mut InGameState, index: usize, id: &str, count: u8) {
         let item = state.content.rules.items.find(id).expect("builtin item");
         state
+            .sim
             .inventory
             .set_slot(index, Some(ItemStack::new(item, count)));
     }
@@ -351,8 +356,8 @@ mod interaction_tests {
         stocked(&mut state, SLOT, "stone", 7);
         state.handle_slot_split(SLOT);
 
-        assert_eq!(state.held.expect("a stack on the cursor").count, 4);
-        assert_eq!(state.inventory.slot(SLOT).expect("the rest").count, 3);
+        assert_eq!(state.sim.held.expect("a stack on the cursor").count, 4);
+        assert_eq!(state.sim.inventory.slot(SLOT).expect("the rest").count, 3);
     }
 
     /// An even stack halves cleanly, and a single item comes up whole — there
@@ -362,34 +367,37 @@ mod interaction_tests {
         let mut even = state();
         stocked(&mut even, SLOT, "stone", 8);
         even.handle_slot_split(SLOT);
-        assert_eq!(even.held.expect("held").count, 4);
-        assert_eq!(even.inventory.slot(SLOT).expect("rest").count, 4);
+        assert_eq!(even.sim.held.expect("held").count, 4);
+        assert_eq!(even.sim.inventory.slot(SLOT).expect("rest").count, 4);
 
         let mut state = state();
         stocked(&mut state, SLOT, "stone", 1);
         state.handle_slot_split(SLOT);
-        assert_eq!(state.held.expect("held").count, 1);
-        assert!(state.inventory.slot(SLOT).is_none(), "the slot is emptied");
+        assert_eq!(state.sim.held.expect("held").count, 1);
+        assert!(
+            state.sim.inventory.slot(SLOT).is_none(),
+            "the slot is emptied"
+        );
     }
 
     #[test]
     fn right_click_while_holding_places_one_item_at_a_time() {
         let mut state = state();
         let stone = state.content.rules.items.find("stone").expect("stone");
-        state.held = Some(ItemStack::new(stone, 3));
+        state.sim.held = Some(ItemStack::new(stone, 3));
 
         state.handle_slot_split(SLOT);
-        assert_eq!(state.inventory.slot(SLOT).expect("placed").count, 1);
-        assert_eq!(state.held.expect("still holding").count, 2);
+        assert_eq!(state.sim.inventory.slot(SLOT).expect("placed").count, 1);
+        assert_eq!(state.sim.held.expect("still holding").count, 2);
 
         state.handle_slot_split(SLOT);
-        assert_eq!(state.inventory.slot(SLOT).expect("topped up").count, 2);
-        assert_eq!(state.held.expect("still holding").count, 1);
+        assert_eq!(state.sim.inventory.slot(SLOT).expect("topped up").count, 2);
+        assert_eq!(state.sim.held.expect("still holding").count, 1);
 
         // The last one leaves the cursor empty rather than a zero-count stack.
         state.handle_slot_split(SLOT);
-        assert_eq!(state.inventory.slot(SLOT).expect("topped up").count, 3);
-        assert!(state.held.is_none(), "the cursor empties out");
+        assert_eq!(state.sim.inventory.slot(SLOT).expect("topped up").count, 3);
+        assert!(state.sim.held.is_none(), "the cursor empties out");
     }
 
     /// Right click places; it never swaps. Swapping is left click's job, and
@@ -399,15 +407,15 @@ mod interaction_tests {
         let mut state = state();
         stocked(&mut state, SLOT, "dirt", 5);
         let stone = state.content.rules.items.find("stone").expect("stone");
-        state.held = Some(ItemStack::new(stone, 3));
+        state.sim.held = Some(ItemStack::new(stone, 3));
 
         state.handle_slot_split(SLOT);
         assert_eq!(
-            state.held.expect("held").count,
+            state.sim.held.expect("held").count,
             3,
             "the cursor is untouched"
         );
-        assert_eq!(state.inventory.slot(SLOT).expect("slot").count, 5);
+        assert_eq!(state.sim.inventory.slot(SLOT).expect("slot").count, 5);
     }
 
     /// The armor gate is the left-click path's, and right click must not be a
@@ -416,12 +424,15 @@ mod interaction_tests {
     fn right_click_cannot_put_the_wrong_thing_in_an_armor_slot() {
         let mut state = state();
         let stone = state.content.rules.items.find("stone").expect("stone");
-        state.held = Some(ItemStack::new(stone, 4));
+        state.sim.held = Some(ItemStack::new(stone, 4));
 
         let helmet = Inventory::armor_slot_index(ArmorSlot::Helmet);
         state.handle_slot_split(helmet);
-        assert!(state.inventory.slot(helmet).is_none(), "stone is not a hat");
-        assert_eq!(state.held.expect("held").count, 4);
+        assert!(
+            state.sim.inventory.slot(helmet).is_none(),
+            "stone is not a hat"
+        );
+        assert_eq!(state.sim.held.expect("held").count, 4);
     }
 
     #[test]
@@ -430,7 +441,7 @@ mod interaction_tests {
         stocked(&mut state, SLOT, "stone", 5);
 
         state.drop_one(SLOT);
-        assert_eq!(state.inventory.slot(SLOT).expect("the rest").count, 4);
+        assert_eq!(state.sim.inventory.slot(SLOT).expect("the rest").count, 4);
         assert_eq!(state.drops().count(), 1);
     }
 
@@ -449,10 +460,10 @@ mod interaction_tests {
             durability: Some(7),
             ..ItemStack::single(pick)
         };
-        state.inventory.set_slot(SLOT, Some(worn));
+        state.sim.inventory.set_slot(SLOT, Some(worn));
 
         state.drop_one(SLOT);
-        assert!(state.inventory.slot(SLOT).is_none(), "the slot empties");
+        assert!(state.sim.inventory.slot(SLOT).is_none(), "the slot empties");
         assert_eq!(state.drops().count(), 1);
         assert_eq!(
             state.drops().next().unwrap().0.stack.durability,
@@ -475,7 +486,7 @@ mod interaction_tests {
         assert!(state.drops().next().is_none());
 
         state.drop_slot(SLOT);
-        assert!(state.inventory.slot(SLOT).is_none(), "the slot empties");
+        assert!(state.sim.inventory.slot(SLOT).is_none(), "the slot empties");
         assert_eq!(state.drops().count(), 1, "and it lands in the world");
     }
 
@@ -484,13 +495,13 @@ mod interaction_tests {
         let mut state = state();
         let stone = state.content.rules.items.find("stone").expect("stone");
 
-        state.held = Some(ItemStack::new(stone, 3));
+        state.sim.held = Some(ItemStack::new(stone, 3));
         state.drop_held(false);
-        assert_eq!(state.held.expect("two left").count, 2);
+        assert_eq!(state.sim.held.expect("two left").count, 2);
         assert_eq!(state.drops().count(), 1);
 
         state.drop_held(true);
-        assert!(state.held.is_none(), "the cursor empties");
+        assert!(state.sim.held.is_none(), "the cursor empties");
         assert_eq!(state.drops().count(), 2);
     }
 

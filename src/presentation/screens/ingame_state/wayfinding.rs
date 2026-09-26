@@ -18,17 +18,19 @@ impl InGameState {
     /// The anchor of the nearest `structure` to `from`, if there is one within
     /// reach of the search.
     pub(super) fn locate_structure(&self, structure: &str, from: [f32; 3]) -> Option<BlockPos> {
-        let index = self.structures.config().find(structure)?;
+        let index = self.sim.structures.config().find(structure)?;
         let from = BlockPos::from_world(Vec3::from_array(from));
-        self.structures
+        self.sim
+            .structures
             .nearest(index, from, LOCATE_RINGS)
             .map(|found| found.anchor)
     }
 
     /// A compass marker for every structure this world has revealed.
     pub(super) fn waypoints(&self) -> Vec<Waypoint> {
-        let here = self.player.position;
-        self.progression
+        let here = self.sim.player.position;
+        self.sim
+            .progression
             .revealed()
             .map(|(structure, anchor)| {
                 let at = Vec3::new(
@@ -36,7 +38,7 @@ impl InGameState {
                     anchor.y as f32,
                     anchor.z as f32 + 0.5,
                 );
-                let b = bearing(here, self.player.yaw, at);
+                let b = bearing(here, self.sim.player.yaw, at);
                 Waypoint {
                     label: title_case(structure),
                     angle: b.angle,
@@ -55,23 +57,24 @@ impl InGameState {
             return;
         };
         let structure = structure.trim();
-        let Some(anchor) = self.locate_structure(structure, self.player.position.to_array()) else {
+        let Some(anchor) = self.locate_structure(structure, self.sim.player.position.to_array())
+        else {
             log::warn!("WYVEN_DEBUG_GOTO: no structure {structure:?} near spawn");
             return;
         };
         let standoff = Vec3::new(0.5, 0.0, DEBUG_GOTO_STANDOFF + 0.5);
         let target = Vec3::new(anchor.x as f32, anchor.y as f32 + 1.0, anchor.z as f32);
-        self.player.teleport(target + standoff);
+        self.sim.player.teleport(target + standoff);
         // Face it: looking along -z is yaw 0, and the standoff is due south.
-        self.player.yaw = 0.0;
-        self.player.pitch = -0.25;
+        self.sim.player.yaw = 0.0;
+        self.sim.player.pitch = -0.25;
         log::info!("WYVEN_DEBUG_GOTO: at {structure} ({anchor:?})");
     }
 
     /// "biome: darkwood (tier 2)" for the debug overlay.
     pub(super) fn biome_line(&self) -> String {
-        let p = self.player.position;
-        let terrain = self.structures.terrain();
+        let p = self.sim.player.position;
+        let terrain = self.sim.structures.terrain();
         let biome = terrain.biome_gen(p.x.floor() as i32, p.z.floor() as i32);
         let ring = terrain.ring_distance(p.x.floor() as i32, p.z.floor() as i32);
         format!(
@@ -92,11 +95,11 @@ mod tests {
         let mut state = InGameState::new(GameContent::builtin(), 5, GameMode::Survival);
         assert!(state.waypoints().is_empty());
         let spot = BlockPos::new(
-            state.player.position.x as i32,
+            state.sim.player.position.x as i32,
             90,
-            state.player.position.z as i32 - 300,
+            state.sim.player.position.z as i32 - 300,
         );
-        state.progression.reveal("meadows_altar", spot);
+        state.sim.progression.reveal("meadows_altar", spot);
         let marks = state.waypoints();
         assert_eq!(marks.len(), 1);
         assert_eq!(marks[0].label, "Meadows Altar");

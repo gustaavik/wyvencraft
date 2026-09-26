@@ -57,15 +57,16 @@ impl InGameState {
     /// Once a frame: learn from what the player carries, announce what that
     /// reveals, and look around for stations while the panel is up.
     pub(super) fn tick_crafting(&mut self) {
-        let mut learned = self.crafting.known.learn_from(&self.inventory);
-        if let Some(held) = self.held {
+        let mut learned = self.crafting.known.learn_from(&self.sim.inventory);
+        if let Some(held) = self.sim.held {
             learned |= self.crafting.known.learn(held.item);
         }
         if learned || !self.crafting.primed {
             self.refresh_revealed();
-            if learned && !self.session.is_authority() {
+            if learned && !self.net.session.is_authority() {
                 let items = self.crafting.known.to_wire();
-                self.session
+                self.net
+                    .session
                     .request(&ClientMessage::SyncKnown { items }, Channel::Reliable);
             }
         }
@@ -76,7 +77,7 @@ impl InGameState {
 
     /// Recompute the revealed recipes and announce the new ones.
     fn refresh_revealed(&mut self) {
-        let revealed = self.crafting.known.known_recipes(&self.recipes);
+        let revealed = self.crafting.known.known_recipes(&self.sim.recipes);
         let fresh: Vec<usize> = revealed
             .iter()
             .copied()
@@ -89,7 +90,7 @@ impl InGameState {
         self.crafting.unseen.extend(fresh.iter().copied());
         let names: Vec<&str> = fresh
             .iter()
-            .filter_map(|&i| self.recipes.get(i))
+            .filter_map(|&i| self.sim.recipes.get(i))
             .map(|r| self.item_name(r.output))
             .collect();
         self.chat.log.push(ChatKind::System, announcement(&names));
@@ -97,10 +98,10 @@ impl InGameState {
 
     /// The stations within reach of the player's eye.
     pub(super) fn refresh_stations(&mut self) {
-        let center = BlockPos::from_world(self.player.eye_position());
+        let center = BlockPos::from_world(self.sim.player.eye_position());
         self.crafting.nearby =
             stations_near(center, STATION_RADIUS, &self.content.rules.blocks, |p| {
-                self.world.block_at(p)
+                self.sim.world.block_at(p)
             });
     }
 
@@ -115,8 +116,8 @@ impl InGameState {
             .content
             .rules
             .blocks
-            .get(self.world.block_at(hit.block));
-        if block.station.is_none() || self.player.mode.is_creative() {
+            .get(self.sim.world.block_at(hit.block));
+        if block.station.is_none() || self.sim.player.mode.is_creative() {
             return false;
         }
         if !self.inventory_open {
@@ -134,10 +135,10 @@ impl InGameState {
 
     /// What stands between the player and recipe `index` right now.
     pub(super) fn recipe_availability(&self, index: usize) -> Option<Availability> {
-        let recipe = self.recipes.get(index)?;
+        let recipe = self.sim.recipes.get(index)?;
         Some(availability(
             recipe,
-            &self.inventory,
+            &self.sim.inventory,
             &self.content.rules.items,
             &self.crafting.nearby,
         ))
@@ -152,13 +153,13 @@ impl InGameState {
             (true, Some(Availability::Craftable { max })) => max,
             _ => 1,
         };
-        let Some(recipe) = self.recipes.get(index) else {
+        let Some(recipe) = self.sim.recipes.get(index) else {
             return;
         };
         let items = &self.content.rules.items;
         match craft(
             recipe,
-            &mut self.inventory,
+            &mut self.sim.inventory,
             items,
             &self.crafting.nearby,
             times,
@@ -186,7 +187,7 @@ impl InGameState {
             .revealed
             .iter()
             .filter_map(|&index| {
-                let recipe = self.recipes.get(index)?;
+                let recipe = self.sim.recipes.get(index)?;
                 let availability = self.recipe_availability(index)?;
                 let entry = RecipeEntry {
                     index,
@@ -247,13 +248,14 @@ mod tests {
 
     fn state() -> InGameState {
         let mut state = InGameState::new(GameContent::builtin(), 7, GameMode::Survival);
-        state.inventory = Inventory::new();
+        state.sim.inventory = Inventory::new();
         state
     }
 
     fn give(state: &mut InGameState, id: &str, count: u8) {
         let item = state.content.rules.items.find(id).expect("builtin item");
         state
+            .sim
             .inventory
             .add(ItemStack::new(item, count), &state.content.rules.items);
     }
@@ -261,6 +263,7 @@ mod tests {
     fn index_of(state: &InGameState, output: &str) -> usize {
         let item = state.content.rules.items.find(output).unwrap();
         state
+            .sim
             .recipes
             .recipes()
             .iter()
@@ -315,9 +318,10 @@ mod tests {
         give(&mut state, "oak_log", 4);
         state.handle_craft(index_of(&state, "workbench"), false);
         let bench = state.content.rules.items.find("workbench").unwrap();
-        assert_eq!(state.inventory.count_of(bench), 1);
+        assert_eq!(state.sim.inventory.count_of(bench), 1);
         assert_eq!(
             state
+                .sim
                 .inventory
                 .count_of(state.content.rules.items.find("oak_log").unwrap()),
             0
@@ -335,7 +339,7 @@ mod tests {
         let pick_item = state.content.rules.items.find("stone_pickaxe").unwrap();
 
         state.handle_craft(pick, false);
-        assert_eq!(state.inventory.count_of(pick_item), 0);
+        assert_eq!(state.sim.inventory.count_of(pick_item), 0);
         assert!(
             state
                 .chat
@@ -345,13 +349,13 @@ mod tests {
             "the refusal names the station"
         );
 
-        let beside = BlockPos::from_world(state.player.eye_position());
-        state.world.set_block(
+        let beside = BlockPos::from_world(state.sim.player.eye_position());
+        state.sim.world.set_block(
             BlockPos::new(beside.x + 2, beside.y, beside.z),
             blocks::WORKBENCH,
         );
         state.handle_craft(pick, false);
-        assert_eq!(state.inventory.count_of(pick_item), 1);
+        assert_eq!(state.sim.inventory.count_of(pick_item), 1);
     }
 
     #[test]
@@ -360,7 +364,7 @@ mod tests {
         give(&mut state, "oak_log", 5);
         state.handle_craft(index_of(&state, "stick"), true);
         let stick = state.content.rules.items.find("stick").unwrap();
-        assert_eq!(state.inventory.count_of(stick), 20);
+        assert_eq!(state.sim.inventory.count_of(stick), 20);
     }
 
     #[test]

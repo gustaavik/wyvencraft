@@ -29,6 +29,7 @@ impl InGameState {
     /// projection, and nameplates that drift off their players.
     fn draw_nameplates(&self, egui_ctx: &egui::Context, aspect: f32) {
         if self
+            .sim
             .ecs
             .count::<crate::application::ecs::components::RemotePlayer>()
             == 0
@@ -44,6 +45,7 @@ impl InGameState {
 
         let alpha = self.view.render_alpha;
         let plates: Vec<Nameplate<'_>> = self
+            .sim
             .ecs
             .query::<(&crate::application::ecs::components::RemotePlayer,)>()
             .map(|(_, (remote,))| {
@@ -74,7 +76,8 @@ impl InGameState {
         }
 
         crate::domain::world::raycast(camera.position, to_anchor, distance, |at| {
-            self.world
+            self.sim
+                .world
                 .is_solid(at)
                 .then_some(crate::domain::world::Target::Cell)
         })
@@ -125,7 +128,7 @@ impl GameState<Wyvencraft> for InGameState {
         // between opening the bar and the widget taking focus.
         let typing = self.chat.composer.open;
 
-        if !typing && !self.dead && !self.inventory_open {
+        if !typing && !self.sim.dead && !self.inventory_open {
             if ctx.input.just_pressed(kb.chat) {
                 self.chat.composer.begin("");
             } else if ctx.input.just_pressed(kb.chat_command) {
@@ -135,13 +138,14 @@ impl GameState<Wyvencraft> for InGameState {
 
         // Not while the editor is up: its third-person view and the inventory's
         // camera sweep would fight each other for the same camera.
-        if !typing && !self.dead && !self.editor_open() && ctx.input.just_pressed(kb.inventory) {
+        if !typing && !self.sim.dead && !self.editor_open() && ctx.input.just_pressed(kb.inventory)
+        {
             self.toggle_inventory();
         }
         // Outside the `in_control` block below, unlike the other function keys:
         // the editor takes the controls itself, so a toggle gated on having them
         // could open the panel and never close it.
-        if !typing && !self.dead && ctx.input.just_pressed(kb.toggle_editor) {
+        if !typing && !self.sim.dead && ctx.input.just_pressed(kb.toggle_editor) {
             self.toggle_editor();
         }
         self.update_editor(ctx.dt);
@@ -171,18 +175,18 @@ impl GameState<Wyvencraft> for InGameState {
         // The editor is the fourth thing that takes the controls away. Its panel
         // needs a cursor, and mouse-look would fight every drag.
         let in_control = !self.inventory_anim.active()
-            && !self.dead
+            && !self.sim.dead
             && !self.chat.composer.open
             && !self.editor_open();
         ctx.grab_cursor = in_control;
         if !in_control {
             // Whatever was being mined is abandoned — that one *is* an input.
-            self.breaking = None;
+            self.sim.breaking = None;
         }
 
         if in_control {
             if ctx.input.just_pressed(kb.toggle_perspective) {
-                self.player.toggle_perspective();
+                self.sim.player.toggle_perspective();
             }
             if ctx.input.just_pressed(kb.toggle_debug) {
                 self.show_debug = !self.show_debug;
@@ -190,16 +194,16 @@ impl GameState<Wyvencraft> for InGameState {
 
             // Live game-mode toggle (F4).
             if ctx.input.just_pressed(kb.toggle_gamemode) {
-                self.player.set_mode(self.player.mode.toggled());
-                self.breaking = None;
+                self.sim.player.set_mode(self.sim.player.mode.toggled());
+                self.sim.breaking = None;
                 self.broadcast_mode_change();
             }
 
             // Creative flight: double-tap the jump key within the window.
             self.jump_tap_timer += ctx.dt;
             if ctx.input.just_pressed(kb.jump) {
-                if self.player.mode.can_fly() && self.jump_tap_timer < DOUBLE_TAP_WINDOW {
-                    self.player.flying = !self.player.flying;
+                if self.sim.player.mode.can_fly() && self.jump_tap_timer < DOUBLE_TAP_WINDOW {
+                    self.sim.player.flying = !self.sim.player.flying;
                 }
                 self.jump_tap_timer = 0.0;
             }
@@ -212,18 +216,19 @@ impl GameState<Wyvencraft> for InGameState {
                 -1.0
             };
             let delta = ctx.input.mouse_delta();
-            self.player
+            self.sim
+                .player
                 .rotate(delta.x * sens, pitch_sign * delta.y * sens);
 
             // Hotbar selection via scroll.
             let scroll = ctx.input.scroll_delta();
             if scroll != 0.0 {
-                self.inventory.scroll_selected(-scroll.signum() as i32);
+                self.sim.inventory.scroll_selected(-scroll.signum() as i32);
             }
             // Hotbar selection via the number keys.
             for (i, key) in kb.hotbar.iter().enumerate() {
                 if ctx.input.just_pressed(*key) {
-                    self.inventory.set_selected(i);
+                    self.sim.inventory.set_selected(i);
                 }
             }
 
@@ -242,7 +247,7 @@ impl GameState<Wyvencraft> for InGameState {
         // Death is the one real freeze. There is nothing left to simulate, and
         // a corpse sliding to a halt under the respawn dialog reads as a bug.
         let dt = ctx.dt.min(0.05);
-        if !self.dead {
+        if !self.sim.dead {
             // No input while the controls are released — the player coasts on
             // the velocity they already had rather than walking on for ever.
             let movement = if in_control {
@@ -252,27 +257,28 @@ impl GameState<Wyvencraft> for InGameState {
             };
             // Refresh the worn defense first: `step_fixed` can raise fall damage
             // internally, and it must be mitigated by whatever is worn *now*.
-            self.player.defense = self.inventory.total_defense(&self.content.rules.items);
-            let health_before = self.player.health;
+            self.sim.player.defense = self.sim.inventory.total_defense(&self.content.rules.items);
+            let health_before = self.sim.player.health;
             // Player physics is stepped at a fixed rate, not on the frame delta,
             // so jump height is the same at every framerate.
             self.view.render_alpha =
-                self.player
-                    .step_fixed(movement, ctx.dt, &mut self.physics_accum, |p| {
-                        self.world.is_solid_for_collision(p)
+                self.sim
+                    .player
+                    .step_fixed(movement, ctx.dt, &mut self.sim.physics_accum, |p| {
+                        self.sim.world.is_solid_for_collision(p)
                     });
             // A health drop across the step means fall damage landed; the health
             // delta is the only signal that escapes it, and it's enough.
-            if self.player.health < health_before {
-                self.inventory.wear_armor(1);
+            if self.sim.player.health < health_before {
+                self.sim.inventory.wear_armor(1);
             }
 
             // Survival vitals: hunger drain, regen, starvation.
-            if self.player.mode.takes_damage() {
-                self.player.tick_survival(dt, movement.sprint);
-                if self.player.is_dead() {
-                    self.dead = true;
-                    self.breaking = None;
+            if self.sim.player.mode.takes_damage() {
+                self.sim.player.tick_survival(dt, movement.sprint);
+                if self.sim.player.is_dead() {
+                    self.sim.dead = true;
+                    self.sim.breaking = None;
                 }
             }
         }
@@ -281,14 +287,14 @@ impl GameState<Wyvencraft> for InGameState {
             // Block interaction. The main-hand swing fires on every left click,
             // even when punching air (no block hit).
             if ctx.input.mouse_just_pressed(MouseButton::Left) {
-                self.player_anim.trigger_swing();
+                self.sim.player_anim.trigger_swing();
             }
             // A mob in the crosshair takes the hit (and blocks mining on the
             // block behind it); otherwise the click falls through to blocks.
             let mob_target = self.targeted_mob();
-            if self.player.mode.instant_break() {
+            if self.sim.player.mode.instant_break() {
                 // Creative: instant break on click.
-                self.breaking = None;
+                self.sim.breaking = None;
                 if ctx.input.mouse_just_pressed(MouseButton::Left) {
                     match mob_target {
                         Some(index) => self.attack_mob(index),
@@ -301,7 +307,7 @@ impl GameState<Wyvencraft> for InGameState {
                 }
             } else if let Some(index) = mob_target {
                 // Survival with a mob in reach: swing on click, don't mine.
-                self.breaking = None;
+                self.sim.breaking = None;
                 if ctx.input.mouse_just_pressed(MouseButton::Left) {
                     self.attack_mob(index);
                 }
@@ -332,7 +338,7 @@ impl GameState<Wyvencraft> for InGameState {
         self.chat.log.tick(ctx.dt);
         // Learn from whatever arrived this frame, and look for stations.
         self.tick_crafting();
-        self.day_cycle.advance(ctx.dt);
+        self.sim.day_cycle.advance(ctx.dt);
         // Periodic autosave for persistent worlds (also fires on pause/exit).
         if self.save.is_persistent() {
             self.save.autosave_timer += ctx.dt;
@@ -344,10 +350,11 @@ impl GameState<Wyvencraft> for InGameState {
         self.pump_network(ctx.dt);
         // Water flow: singleplayer/host simulate authoritatively and broadcast
         // each change; clients receive them as ordinary BlockChanged edits.
-        if self.session.is_authority() {
+        if self.net.session.is_authority() {
             for (pos, block) in
-                self.fluids
-                    .tick(&mut self.world, &self.content.rules.blocks, ctx.dt)
+                self.sim
+                    .fluids
+                    .tick(&mut self.sim.world, &self.content.rules.blocks, ctx.dt)
             {
                 self.broadcast_local_edit(pos, block);
             }
@@ -367,14 +374,14 @@ impl GameState<Wyvencraft> for InGameState {
         // A client's mob replicas animate from the movement their snapshots
         // show. Every peer runs it; the authority simply has none.
         crate::application::ecs::systems::mobs::animate_replicas(
-            &mut self.ecs,
+            &mut self.sim.ecs,
             ctx.dt.min(0.05),
             super::REMOTE_MAX_SPEED,
         );
         // Other players likewise, from the interpolated position their body
         // and nameplate are drawn at.
         crate::application::ecs::systems::players::animate(
-            &mut self.ecs,
+            &mut self.sim.ecs,
             ctx.dt.min(0.05),
             self.view.render_alpha,
             super::REMOTE_MAX_SPEED,
@@ -386,15 +393,16 @@ impl GameState<Wyvencraft> for InGameState {
         // idle pose would have them gliding to a stop with their feet planted
         // — in full view of the camera that just panned onto them.
         let local_motion = {
-            let v = self.player.velocity;
+            let v = self.sim.player.velocity;
             Motion::new(
                 Vec3::new(v.x, 0.0, v.z).length(),
                 v.y,
-                !self.player.on_ground,
+                !self.sim.player.on_ground,
             )
         };
-        self.player_anim
-            .advance(local_motion, self.player.yaw, ctx.dt.min(0.05));
+        self.sim
+            .player_anim
+            .advance(local_motion, self.sim.player.yaw, ctx.dt.min(0.05));
 
         // Simulation for this frame is settled; bring the GPU state in line.
         self.refresh_view(&ctx.shared.render);
@@ -410,7 +418,7 @@ impl GameState<Wyvencraft> for InGameState {
         self.screen = egui_ctx.screen_rect();
 
         // Death screen takes over everything else.
-        if self.dead {
+        if self.sim.dead {
             let mut respawn = false;
             egui::Area::new(egui::Id::new("death_screen"))
                 .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
@@ -448,16 +456,16 @@ impl GameState<Wyvencraft> for InGameState {
         // so exactly one of them is drawn and the swap is invisible.
         if self.inventory_anim.active() {
             let entries = self.crafting_entries();
-            let crafting_view = (!self.player.mode.is_creative()).then(|| {
+            let crafting_view = (!self.sim.player.mode.is_creative()).then(|| {
                 crate::presentation::ui::crafting::CraftingView {
                     entries: &entries,
                     discovered: self.crafting.revealed.len(),
-                    total: self.recipes.recipes().len(),
+                    total: self.sim.recipes.recipes().len(),
                     stations: &self.crafting.stations,
                     nearby: &self.crafting.nearby,
                     selected: self.crafting.selected,
                     craftable_only: self.crafting.craftable_only,
-                    inventory: &self.inventory,
+                    inventory: &self.sim.inventory,
                     items: &self.content.rules.items,
                     icons: &ctx.shared.content.visuals.item_icons,
                     names: &ctx.shared.content.visuals.item_display_names,
@@ -466,12 +474,12 @@ impl GameState<Wyvencraft> for InGameState {
             });
             let out = crate::presentation::ui::inventory::draw_inventory(
                 egui_ctx,
-                &self.inventory,
+                &self.sim.inventory,
                 &self.content.rules.items,
                 &ctx.shared.content.visuals.item_icons,
                 &ctx.shared.content.visuals.item_display_names,
-                self.held,
-                self.player.mode,
+                self.sim.held,
+                self.sim.player.mode,
                 self.inventory_anim.progress(),
                 // The panel has the keyboard to itself here: it holds no text
                 // field, so egui consumes nothing and the binding still lands.
@@ -485,7 +493,7 @@ impl GameState<Wyvencraft> for InGameState {
                     InvAction::Slot(index) => self.handle_slot_click(index),
                     InvAction::Split(index) => self.handle_slot_split(index),
                     InvAction::Pick(id) => {
-                        self.held = Some(self.content.rules.items.full_stack(id))
+                        self.sim.held = Some(self.content.rules.items.full_stack(id))
                     }
                     InvAction::DropSlot(index) => self.drop_slot(index),
                     InvAction::DropHeld { all } => self.drop_held(all),
@@ -505,7 +513,7 @@ impl GameState<Wyvencraft> for InGameState {
         hud::draw_crosshair(egui_ctx);
         hud::draw_hotbar(
             egui_ctx,
-            &self.inventory,
+            &self.sim.inventory,
             &self.content.rules.items,
             &ctx.shared.content.visuals.item_icons,
             ctx.shared.ui_tex,
@@ -513,17 +521,18 @@ impl GameState<Wyvencraft> for InGameState {
         // Name whatever is in hand, until it fades. Observing here rather than
         // wherever the selection changes catches every route into the hand —
         // scrolling, the number keys, picking a block up, a tool breaking.
-        let survival = self.player.mode.takes_damage();
-        self.held_label.observe(self.inventory.item_in_selected());
+        let survival = self.sim.player.mode.takes_damage();
+        self.held_label
+            .observe(self.sim.inventory.item_in_selected());
         self.held_label.tick(ctx.dt);
         if let Some((item, alpha)) = self.held_label.visible() {
             let name = ctx.shared.content.item_display_name(item);
             hud::draw_held_label(egui_ctx, name, alpha, survival);
         }
-        hud::draw_mode_indicator(egui_ctx, self.player.mode.label());
+        hud::draw_mode_indicator(egui_ctx, self.sim.player.mode.label());
         crate::presentation::ui::compass::draw_compass(
             egui_ctx,
-            self.player.yaw,
+            self.sim.player.yaw,
             &self.waypoints(),
         );
         if let Some(bar) = self.boss_bar() {
@@ -534,41 +543,47 @@ impl GameState<Wyvencraft> for InGameState {
         if survival {
             hud::draw_vitals(
                 egui_ctx,
-                self.player.health,
-                self.player.vitals().max_health,
-                self.player.hunger,
-                self.player.vitals().max_hunger,
+                self.sim.player.health,
+                self.sim.player.vitals().max_health,
+                self.sim.player.hunger,
+                self.sim.player.vitals().max_hunger,
             );
         }
 
         if self.show_debug {
             let fps = if ctx.dt > 0.0 { 1.0 / ctx.dt } else { 0.0 };
-            let p = self.player.position;
-            let facing = self.player.look_direction();
+            let p = self.sim.player.position;
+            let facing = self.sim.player.look_direction();
             let lines = vec![
                 format!("Wyvencraft — {fps:.0} fps"),
                 format!("xyz: {:.2} {:.2} {:.2}", p.x, p.y, p.z),
                 format!("facing: {:.2} {:.2} {:.2}", facing.x, facing.y, facing.z),
                 format!(
                     "chunks: {} loaded / {} meshes / {} queued / {} pending",
-                    self.world.loaded_count(),
+                    self.sim.world.loaded_count(),
                     self.view.loaded_mesh_count(),
                     self.view.queued_mesh_count(),
-                    self.loader.pending_count()
+                    self.sim.loader.pending_count()
                 ),
-                format!("on_ground: {}", self.player.on_ground),
+                format!("on_ground: {}", self.sim.player.on_ground),
                 self.biome_line(),
                 format!(
                     "mobs: {} live / {} arrows / {} drops",
-                    self.ecs
+                    self.sim
+                        .ecs
                         .count::<crate::application::ecs::components::MobId>(),
-                    self.ecs
+                    self.sim
+                        .ecs
                         .count::<crate::application::ecs::components::Projectile>(),
-                    self.ecs
+                    self.sim
+                        .ecs
                         .count::<crate::application::ecs::components::ItemDrop>()
                 ),
                 format!("net: {}", self.net_status()),
-                format!("time: {}", format_time_of_day(self.day_cycle.time_of_day())),
+                format!(
+                    "time: {}",
+                    format_time_of_day(self.sim.day_cycle.time_of_day())
+                ),
                 format!("world: {}", self.save.world_name()),
             ];
             hud::draw_debug(egui_ctx, &lines);
@@ -578,10 +593,11 @@ impl GameState<Wyvencraft> for InGameState {
     }
 
     fn scene_frame(&self, aspect: f32) -> Option<SceneFrame<'_>> {
-        Some(
-            self.view
-                .scene_frame(&self.player, &self.day_cycle, self.world_camera(aspect)),
-        )
+        Some(self.view.scene_frame(
+            &self.sim.player,
+            &self.sim.day_cycle,
+            self.world_camera(aspect),
+        ))
     }
 }
 

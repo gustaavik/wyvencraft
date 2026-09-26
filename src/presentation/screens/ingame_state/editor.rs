@@ -48,7 +48,7 @@ impl InGameState {
     /// cube and shares one placement with every other block item, and telling
     /// that from an item with a model of its own needs the content registries.
     fn held_placement_key(&self) -> Option<PlacementKey> {
-        let item = self.inventory.selected_stack()?.item;
+        let item = self.sim.inventory.selected_stack()?.item;
         Some(
             match self.content.visuals.item_models.get(item.0 as usize) {
                 Some(Some(_)) => PlacementKey::Item(item),
@@ -84,8 +84,8 @@ impl InGameState {
         let PlacementKey::Item(item) = self.editor.current()?.key else {
             return None;
         };
-        let eye = self.player.eye_position();
-        let look = self.player.look_direction();
+        let eye = self.sim.player.eye_position();
+        let look = self.sim.player.look_direction();
         let at = eye + Vec3::new(look.x, 0.0, look.z).normalize_or_zero() * PREVIEW_DISTANCE
             - Vec3::Y * PREVIEW_DROP;
         let kind = self.content.rules.entities.dropped_item();
@@ -108,10 +108,10 @@ impl InGameState {
         if let EditorAction::Context(context) = action {
             match context {
                 DisplayContext::FirstPersonRightHand => {
-                    self.player.perspective = Perspective::First;
+                    self.sim.player.perspective = Perspective::First;
                 }
                 DisplayContext::ThirdPersonRightHand => {
-                    self.player.perspective = Perspective::ThirdBack;
+                    self.sim.player.perspective = Perspective::ThirdBack;
                 }
                 // The icon sheet is rendered once, inside `Game::start`, which
                 // is the only moment a `&mut Gui` exists. A `gui` edit is saved

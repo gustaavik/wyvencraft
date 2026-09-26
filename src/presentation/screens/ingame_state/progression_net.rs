@@ -21,8 +21,8 @@ impl InGameState {
     /// from the host's copy, which must be this one, not whichever sync the
     /// unordered channel happened to deliver last.
     pub(super) fn request_block_use(&mut self, pos: BlockPos) {
-        let (slots, selected) = inventory_to_wire(&self.inventory);
-        self.session.request(
+        let (slots, selected) = inventory_to_wire(&self.sim.inventory);
+        self.net.session.request(
             &ClientMessage::UseBlock {
                 pos,
                 slots,
@@ -30,13 +30,13 @@ impl InGameState {
             },
             Channel::Reliable,
         );
-        self.peers.last_synced_inventory = Some(self.inventory.clone());
+        self.net.peers.last_synced_inventory = Some(self.sim.inventory.clone());
     }
 
     /// Authority: send the whole progression to everyone.
     pub(super) fn broadcast_progression(&mut self) {
-        self.session.broadcast(
-            &ServerMessage::Progression(self.progression.clone()),
+        self.net.session.broadcast(
+            &ServerMessage::Progression(self.sim.progression.clone()),
             Channel::Reliable,
         );
     }
@@ -51,7 +51,7 @@ impl InGameState {
         by: Option<PlayerId>,
     ) {
         self.broadcast_progression();
-        self.session.broadcast(
+        self.net.session.broadcast(
             &ServerMessage::Revealed {
                 structure: structure.to_string(),
                 anchor,
@@ -59,7 +59,7 @@ impl InGameState {
             },
             Channel::Reliable,
         );
-        if by != Some(self.session.local_id()) {
+        if by != Some(self.net.session.local_id()) {
             self.note_reveal(structure, anchor, by);
         }
     }
@@ -67,7 +67,7 @@ impl InGameState {
     /// Authority: a system line for everyone — here and on every client.
     pub(super) fn announce(&mut self, text: String) {
         self.chat.log.push(ChatKind::System, text.clone());
-        self.session.broadcast(
+        self.net.session.broadcast(
             &ServerMessage::Chat {
                 from: None,
                 kind: ChatKind::System,
@@ -79,7 +79,7 @@ impl InGameState {
 
     /// The chat line for someone else's reveal, with directions from here.
     fn note_reveal(&mut self, structure: &str, anchor: BlockPos, by: Option<PlayerId>) {
-        let here = BlockPos::from_world(self.player.position);
+        let here = BlockPos::from_world(self.sim.player.position);
         let name = title_case(structure);
         let way = describe_way(here, anchor);
         let line = match by {
@@ -96,9 +96,11 @@ impl InGameState {
     /// that is us, otherwise as an instruction to the client, mirrored into the
     /// host's copy so a second offering in the same breath is refused.
     pub(super) fn take_items(&mut self, actor: PlayerId, stacks: &[ItemStack]) {
-        if actor == self.session.local_id() {
+        if actor == self.net.session.local_id() {
             for stack in stacks {
-                self.inventory.remove(stack.item, u32::from(stack.count));
+                self.sim
+                    .inventory
+                    .remove(stack.item, u32::from(stack.count));
             }
             return;
         }
@@ -110,12 +112,12 @@ impl InGameState {
                 durability: s.durability,
             })
             .collect();
-        if let Some((slots, _)) = self.peers.inventories.get_mut(&actor) {
+        if let Some((slots, _)) = self.net.peers.inventories.get_mut(&actor) {
             for stack in stacks {
                 remove_from_wire(slots, stack.item.0, u32::from(stack.count));
             }
         }
-        self.session.send_to(
+        self.net.session.send_to(
             actor,
             &ServerMessage::ConsumeItems {
                 to: actor,
@@ -132,25 +134,29 @@ impl InGameState {
         actor: PlayerId,
         item: crate::domain::inventory::ItemId,
     ) -> u32 {
-        if actor == self.session.local_id() {
-            return self.inventory.count_of(item);
+        if actor == self.net.session.local_id() {
+            return self.sim.inventory.count_of(item);
         }
-        self.peers.inventories.get(&actor).map_or(0, |(slots, _)| {
-            storage(slots)
-                .iter()
-                .flatten()
-                .filter(|s| s.item == item.0)
-                .map(|s| u32::from(s.count))
-                .sum()
-        })
+        self.net
+            .peers
+            .inventories
+            .get(&actor)
+            .map_or(0, |(slots, _)| {
+                storage(slots)
+                    .iter()
+                    .flatten()
+                    .filter(|s| s.item == item.0)
+                    .map(|s| u32::from(s.count))
+                    .sum()
+            })
     }
 
     /// Client: apply a progression-related update from the host. Returns the
     /// message back if it was not one of ours.
     pub(super) fn apply_progression_update(&mut self, msg: ServerMessage) -> Option<ServerMessage> {
-        let local_id = self.session.local_id();
+        let local_id = self.net.session.local_id();
         match msg {
-            ServerMessage::Progression(progression) => self.progression = progression,
+            ServerMessage::Progression(progression) => self.sim.progression = progression,
             ServerMessage::Revealed {
                 structure,
                 anchor,
@@ -164,11 +170,11 @@ impl InGameState {
                 for stack in stacks {
                     let item = crate::domain::inventory::ItemId(stack.item);
                     if (stack.item as usize) < self.content.rules.items.len() {
-                        self.inventory.remove(item, u32::from(stack.count));
+                        self.sim.inventory.remove(item, u32::from(stack.count));
                     }
                 }
                 // Already consistent with the host's copy: no need to echo.
-                self.peers.last_synced_inventory = Some(self.inventory.clone());
+                self.net.peers.last_synced_inventory = Some(self.sim.inventory.clone());
             }
             other => return Some(other),
         }
@@ -269,7 +275,7 @@ mod tests {
     fn a_use_block_carries_the_inventory_it_is_judged_by() {
         let (mut state, handle) = hosting();
         let pid = PlayerId(1);
-        state.peers.inventories.insert(pid, (vec![], 0));
+        state.net.peers.inventories.insert(pid, (vec![], 0));
         let slots = holding(&state, "stag_effigy");
         handle.deliver(Inbound::Request {
             player: pid,
@@ -280,7 +286,7 @@ mod tests {
             },
         });
         state.pump_network(1.0 / 60.0);
-        assert_eq!(state.peers.inventories.get(&pid), Some(&(slots, 0)));
+        assert_eq!(state.net.peers.inventories.get(&pid), Some(&(slots, 0)));
     }
 
     /// A modified client breaking a tier-2 ore with a tier-1 pickaxe is
@@ -290,15 +296,15 @@ mod tests {
         let (mut state, handle) = hosting();
         let pid = PlayerId(1);
         let pos = BlockPos::new(1, 60, 1);
-        state.world.set_block(pos, blocks::TIN_ORE);
+        state.sim.world.set_block(pos, blocks::TIN_ORE);
         let slots = holding(&state, "stone_pickaxe");
-        state.peers.inventories.insert(pid, (slots, 0));
+        state.net.peers.inventories.insert(pid, (slots, 0));
         handle.deliver(Inbound::Request {
             player: pid,
             msg: ClientMessage::Break { pos },
         });
         state.pump_network(1.0 / 60.0);
-        assert_eq!(state.world.block_at(pos), blocks::TIN_ORE);
+        assert_eq!(state.sim.world.block_at(pos), blocks::TIN_ORE);
         let guard = handle.lock();
         assert!(guard.messages_to(pid).iter().any(|m| matches!(
             m,
@@ -307,14 +313,14 @@ mod tests {
         drop(guard);
 
         let slots = holding(&state, "antler_pickaxe");
-        state.peers.inventories.insert(pid, (slots, 0));
+        state.net.peers.inventories.insert(pid, (slots, 0));
         handle.deliver(Inbound::Request {
             player: pid,
             msg: ClientMessage::Break { pos },
         });
         state.pump_network(1.0 / 60.0);
         assert!(
-            state.world.block_at(pos).is_air(),
+            state.sim.world.block_at(pos).is_air(),
             "the right tool breaks it"
         );
     }

@@ -5,16 +5,17 @@ use std::sync::Arc;
 
 use glam::Vec3;
 
-use super::MobWorld;
 use super::crafting::CraftingState;
 use super::net::recipes_from_wire;
-use super::peers::Peers;
 use super::persistence::Persistence;
 use super::view::SceneCache;
 use super::{DOUBLE_TAP_WINDOW, InGameState, SPAWN_RADIUS};
 use crate::application::boot_plan;
 use crate::application::ecs::Ecs;
+use crate::application::networking::Networking;
+use crate::application::peers::Peers;
 use crate::application::session::Session;
+use crate::application::simulation::{MobDirector, Simulation};
 use crate::domain::chat::{ChatState, OpsList};
 use crate::domain::core::{BlockPos, CHUNK_HEIGHT, ChunkPos, DayCycle, GameMode};
 use crate::domain::entity::Player;
@@ -99,17 +100,17 @@ impl InGameState {
             let resolved = world.resolve(&state.content.rules.blocks);
             let count = resolved.len();
             for (pos, block) in resolved {
-                state.world.apply_edit(pos, block);
+                state.sim.world.apply_edit(pos, block);
             }
             // `build` conflates the generation anchor with the respawn point;
             // a saved world keeps its recorded spawn instead.
-            state.spawn = Vec3::from_array(save.meta.spawn);
+            state.sim.spawn = Vec3::from_array(save.meta.spawn);
             log::info!("restored {count} world edits");
         }
         if let Some(player) = &player {
             player.apply(
-                &mut state.player,
-                &mut state.inventory,
+                &mut state.sim.player,
+                &mut state.sim.inventory,
                 &state.content.rules.items,
             );
         }
@@ -126,11 +127,12 @@ impl InGameState {
                 ),
             }
         }
-        state.progression = progression;
+        state.sim.progression = progression;
         if saved_mobs > 0 {
             log::info!(
                 "restored {} of {saved_mobs} saved mobs",
                 state
+                    .sim
                     .ecs
                     .count::<crate::application::ecs::components::Mob>()
             );
@@ -255,48 +257,53 @@ impl InGameState {
         let session_is_authority = session.is_authority();
 
         let mut state = Self {
-            world,
-            player: Player::new(spawn, mode, content.rules.entities.player()),
-            inventory,
+            sim: Simulation {
+                rules: content.rules.clone(),
+                world,
+                loader,
+                fluids: FluidSim::new(),
+                structures,
+                progression: WorldProgression::default(),
+                day_cycle,
+                ecs: Ecs::new(),
+                mobs: MobDirector::new(seed ^ 0x5EED_0F5B_A3B1_E5B0),
+                player: Player::new(spawn, mode, content.rules.entities.player()),
+                player_anim: crate::domain::entity::AnimationState::new(),
+                physics_accum: 0.0,
+                inventory,
+                held: None,
+                recipes,
+                spawn,
+                dead: false,
+                breaking: None,
+                tier_hint: None,
+            },
+            net: Networking {
+                session,
+                peers: Peers::default(),
+                // A client never authorizes anything, so it never reads the file.
+                ops: if session_is_authority {
+                    crate::infrastructure::ops::load_ops()
+                } else {
+                    OpsList::default()
+                },
+            },
             held_label: HeldLabel::default(),
-            recipes,
             crafting: CraftingState::new(stations),
             show_debug: false,
             editor: EditorSession::disabled(),
             view: SceneCache::new(),
-            loader,
-            day_cycle,
             inventory_open: false,
             inventory_anim: Default::default(),
             // Replaced by the real rect on the first `ui` pass, which always
             // precedes the first `scene_frame`.
             screen: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1920.0, 1080.0)),
             chat: ChatState::default(),
-            // A client never authorizes anything, so it never reads the file.
-            ops: if session_is_authority {
-                crate::infrastructure::ops::load_ops()
-            } else {
-                OpsList::default()
-            },
-            held: None,
-            spawn,
-            fluids: FluidSim::new(),
-            breaking: None,
-            tier_hint: None,
-            mobs: MobWorld::new(seed ^ 0x5EED_0F5B_A3B1_E5B0),
-            ecs: Ecs::new(),
-            player_anim: crate::domain::entity::AnimationState::new(),
-            dead: false,
             jump_tap_timer: DOUBLE_TAP_WINDOW * 2.0,
-            physics_accum: 0.0,
-            session,
-            peers: Peers::default(),
             save: Persistence::none(),
-            structures,
-            progression: WorldProgression::default(),
             content,
         };
-        if state.session.is_authority() {
+        if state.net.session.is_authority() {
             state.debug_goto_from_env();
             state.debug_spawn_from_env();
         }
@@ -307,7 +314,7 @@ impl InGameState {
         // `ConnectingState`, which that function never sees.
         if let Some(perspective) = boot_plan::boot_perspective(&boot_plan::SystemEnv) {
             log::info!("WYVEN_PERSPECTIVE: opening in {perspective:?}");
-            state.player.perspective = perspective;
+            state.sim.player.perspective = perspective;
         }
         // The editor writes into `assets/`, so it is off unless a developer
         // asked for it. Built here rather than in `boot::start` for the same

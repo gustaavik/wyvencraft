@@ -1158,6 +1158,7 @@ impl super::InGameState {
         let shot = self.camera_shot();
         let yaw = self.framing_yaw();
         let eye = self
+            .sim
             .player
             .interpolated_eye_position(self.view.render_alpha);
 
@@ -1168,7 +1169,7 @@ impl super::InGameState {
         } else {
             let clearance = Camera::new(self.view.fov_degrees, aspect).near_radius();
             camera::clear_distance(eye, shot.offset(yaw), shot.distance, clearance, |p| {
-                self.world.is_solid_for_collision(p)
+                self.sim.world.is_solid_for_collision(p)
             })
         };
 
@@ -1183,9 +1184,9 @@ impl super::InGameState {
     /// yaw would show a model visibly turned away from the camera.
     fn framing_yaw(&self) -> f32 {
         if self.inventory_anim.active() {
-            self.player_anim.body_yaw()
+            self.sim.player_anim.body_yaw()
         } else {
-            self.player.yaw
+            self.sim.player.yaw
         }
     }
 
@@ -1197,9 +1198,10 @@ impl super::InGameState {
     /// their head at the halfway point.
     fn camera_shot(&self) -> Shot {
         let gameplay = self
+            .sim
             .player
             .perspective
-            .shot(self.player.pitch, THIRD_PERSON_DISTANCE);
+            .shot(self.sim.player.pitch, THIRD_PERSON_DISTANCE);
         let t = self.inventory_anim.progress();
         if t <= 0.0 {
             return gameplay;
@@ -1208,9 +1210,11 @@ impl super::InGameState {
         // points wide from the screen — so it has to be handed the *real*
         // screen rect. Handing it a normalised one collapses the whole stage to
         // zero width and slams the model into the left edge.
-        let stage =
-            crate::presentation::ui::inventory::layout(self.screen, self.player.mode.is_creative())
-                .stage_center_x;
+        let stage = crate::presentation::ui::inventory::layout(
+            self.screen,
+            self.sim.player.mode.is_creative(),
+        )
+        .stage_center_x;
         gameplay.blend(Shot::inspect(self.view.fov_degrees.to_radians(), stage), t)
     }
 
@@ -1225,11 +1229,12 @@ impl super::InGameState {
         // block's targeting box, so cracks and outline hug a mushroom the same
         // way the crosshair does.
         let breaking = self
+            .sim
             .breaking
             .as_ref()
             .map(|b| (b.block, self.hitbox_at(b.block), b.progress));
         self.view.update_break_overlay(ctx, breaking);
-        let target = if self.dead {
+        let target = if self.sim.dead {
             None
         } else {
             self.targeted_block()
@@ -1238,11 +1243,11 @@ impl super::InGameState {
         self.view.update_target_outline(ctx, target);
 
         // Chunk meshes: queue what the world dirtied, then spend the budget.
-        let dirty = self.world.take_dirty();
+        let dirty = self.sim.world.take_dirty();
         self.view.enqueue_dirty(dirty);
         self.view.process_mesh_budget(
             ctx,
-            &self.world,
+            &self.sim.world,
             BlockAppearance {
                 blocks: &self.content.rules.blocks,
                 face_tiles: &self.content.visuals.block_face_tiles,
@@ -1279,7 +1284,7 @@ impl super::InGameState {
         // The editor's ground preview, when it has one, rides along with the
         // real drops so it is drawn by exactly the same code.
         let preview = self.editor_ground_preview();
-        let drops = self.ecs.query::<(&ItemDrop, &Transform, &Body)>().map(
+        let drops = self.sim.ecs.query::<(&ItemDrop, &Transform, &Body)>().map(
             |(_, (drop, transform, body))| DropSprite {
                 item: drop.stack.item,
                 center: drop.render_center(transform.position, &body.physics),
@@ -1292,6 +1297,7 @@ impl super::InGameState {
         // Simulated and replicated mobs alike: a kind, a place and an
         // animation. Replicas were animated in `update`, so this only reads.
         let mobs = self
+            .sim
             .ecs
             .query::<(&Kind, &Transform, &Animation, &MobId)>()
             .map(|(_, (kind, transform, anim, _))| MobSprite {
@@ -1302,6 +1308,7 @@ impl super::InGameState {
             });
         self.view.update_mob_meshes(ctx, mobs, models);
         let arrows = self
+            .sim
             .ecs
             .query::<(&Projectile, &Transform, &Velocity)>()
             .map(|(_, (_, transform, velocity))| ArrowSprite {
@@ -1314,9 +1321,9 @@ impl super::InGameState {
 
         self.view.update_player_mesh(
             ctx,
-            &self.player,
-            &self.player_anim,
-            &self.inventory,
+            &self.sim.player,
+            &self.sim.player_anim,
+            &self.sim.inventory,
             self.inventory_anim.progress(),
             content,
         );
@@ -1325,6 +1332,7 @@ impl super::InGameState {
         self.view.bind_player_rig(&loaded.rules.entities, models);
         let alpha = self.view.render_alpha;
         let peers = self
+            .sim
             .ecs
             .query::<(&RemotePlayer, &Animation)>()
             .map(|(_, (rp, anim))| PeerSprite {

@@ -135,8 +135,8 @@ impl InGameState {
     /// Queue a mob event for the host broadcast (dropped outside hosting; a
     /// singleplayer session has no listeners and clients never emit).
     pub(super) fn emit_mob_event(&mut self, msg: ServerMessage) {
-        if self.session.serves_peers() {
-            self.peers.mob_events.push(msg);
+        if self.net.session.serves_peers() {
+            self.net.peers.mob_events.push(msg);
         }
     }
 
@@ -145,10 +145,10 @@ impl InGameState {
     /// from the world seed and the mob id, so runs are reproducible.
     pub(super) fn spawn_mob(&mut self, kind_name: &str, position: Vec3) -> Option<MobId> {
         let kind = self.content.rules.entities.find(kind_name)?;
-        let id = MobId(self.mobs.next_id);
-        let seed = self.world.seed() ^ id.0.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-        spawn::mob(&mut self.ecs, kind, id, position, seed)?;
-        self.mobs.next_id += 1;
+        let id = MobId(self.sim.mobs.next_id);
+        let seed = self.sim.world.seed() ^ id.0.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        spawn::mob(&mut self.sim.ecs, kind, id, position, seed)?;
+        self.sim.mobs.next_id += 1;
         self.emit_mob_event(ServerMessage::MobSpawned {
             id: id.0,
             kind: kind_name.to_string(),
@@ -160,13 +160,17 @@ impl InGameState {
     /// Put back what a save remembered about mob `id`: its health (never
     /// above what its kind allows) and whether dawn should reap it.
     pub(super) fn restore_mob(&mut self, id: MobId, health: f32, night_spawned: bool) {
-        let Some(entity) = mob_systems::find(&self.ecs, id) else {
+        let Some(entity) = mob_systems::find(&self.sim.ecs, id) else {
             return;
         };
-        if let Some(current) = self.ecs.get_mut::<crate::domain::entity::Health>(entity) {
+        if let Some(current) = self
+            .sim
+            .ecs
+            .get_mut::<crate::domain::entity::Health>(entity)
+        {
             current.current = health.min(current.max);
         }
-        if let Some(mob) = self.ecs.get_mut::<Mob>(entity) {
+        if let Some(mob) = self.sim.ecs.get_mut::<Mob>(entity) {
             mob.night_spawned = night_spawned;
         }
     }
@@ -175,10 +179,10 @@ impl InGameState {
     /// or in a protected mode) plus survival-mode remote players.
     pub(super) fn mob_targets(&self) -> Vec<MobTarget> {
         let mut targets = Vec::new();
-        if !self.dead && self.player.mode.takes_damage() {
+        if !self.sim.dead && self.sim.player.mode.takes_damage() {
             targets.push(MobTarget {
                 player: None,
-                eye: self.player.eye_position(),
+                eye: self.sim.player.eye_position(),
             });
         }
         let eye_height = self
@@ -189,7 +193,7 @@ impl InGameState {
             .movement
             .map(|m| m.eye_height)
             .unwrap_or(1.62);
-        for remote in players::all(&self.ecs) {
+        for remote in players::all(&self.sim.ecs) {
             let id = &remote.id;
             if remote.mode.takes_damage() {
                 targets.push(MobTarget {
@@ -206,9 +210,9 @@ impl InGameState {
     /// resolve the attacks they commit to.
     pub(super) fn update_mobs(&mut self, dt: f32) {
         let targets = self.mob_targets();
-        let world = &self.world;
+        let world = &self.sim.world;
         let steps = mob_systems::simulate(
-            &mut self.ecs,
+            &mut self.sim.ecs,
             dt,
             // Mobs straddling the streaming edge freeze until their chunk is
             // back (unloaded chunks read as solid, which would trap them).
@@ -241,6 +245,7 @@ impl InGameState {
                 }
                 MobAction::Fire { velocity, damage } => {
                     let ranged = self
+                        .sim
                         .ecs
                         .get::<Mob>(entity)
                         .and_then(|mob| mob.params.ranged)
@@ -280,7 +285,7 @@ impl InGameState {
                 lifetime,
             });
             crate::application::ecs::spawn::arrow(
-                &mut self.ecs,
+                &mut self.sim.ecs,
                 origin,
                 velocity,
                 damage,
@@ -306,7 +311,7 @@ impl InGameState {
     /// drops): the host rolls for its own kills; a client killer learns via
     /// `MobDespawned { killed_by }` and rolls the identical table itself.
     fn reap_dead_mobs(&mut self) {
-        for mob in mob_systems::reap(&mut self.ecs) {
+        for mob in mob_systems::reap(&mut self.sim.ecs) {
             if mob.boss.is_some() {
                 // Everyone in the arena shares a boss's loot, so it is handed
                 // out by the defeat rather than by kill credit. The defeat
@@ -348,7 +353,8 @@ impl InGameState {
         let Some(params) = kind.mob.clone() else {
             return;
         };
-        let mut rng = Rng64::new(self.world.seed() ^ mob_id.wrapping_mul(0xA24B_AED4_963E_E407));
+        let mut rng =
+            Rng64::new(self.sim.world.seed() ^ mob_id.wrapping_mul(0xA24B_AED4_963E_E407));
         let block = BlockPos::from_world(position + Vec3::Y * 0.25);
         for drop in &params.drops {
             let Some(item) = self.content.rules.items.find(&drop.item) else {
@@ -381,7 +387,8 @@ impl InGameState {
     /// hotbar slot. A tool without a `damage` component — a pickaxe, a shovel —
     /// hits exactly as hard as a bare fist.
     pub(super) fn melee_damage(&self) -> f32 {
-        self.inventory
+        self.sim
+            .inventory
             .item_in_selected()
             .and_then(|id| self.content.rules.items.component::<Tool>(id))
             .and_then(|tool| tool.damage)
@@ -392,9 +399,9 @@ impl InGameState {
     /// no solid block is closer (no punching mobs through walls). The
     /// authority scans its own mobs; a client scans its replicas.
     pub(super) fn targeted_mob(&self) -> Option<MobTargetRef> {
-        let eye = self.player.eye_position();
-        let look = self.player.look_direction();
-        let reach = self.player.movement().reach;
+        let eye = self.sim.player.eye_position();
+        let look = self.sim.player.look_direction();
+        let reach = self.sim.player.movement().reach;
         // Cap the ray at the targeted block, so the block face wins ties.
         let max_t = self
             .targeted_block()
@@ -415,15 +422,17 @@ impl InGameState {
             ))
         };
         let nearest = |a: &(Entity, MobId, f32), b: &(Entity, MobId, f32)| a.2.total_cmp(&b.2);
-        if !self.session.is_authority() {
-            self.ecs
+        if !self.net.session.is_authority() {
+            self.sim
+                .ecs
                 .query::<(&Transform, &Body, &MobId, With<Replica>)>()
                 .map(|(e, (t, b, id, ()))| (e, (t, b, id)))
                 .filter_map(under)
                 .min_by(nearest)
                 .map(|(_, id, _)| MobTargetRef::Remote(id.0))
         } else {
-            self.ecs
+            self.sim
+                .ecs
                 .query::<(&Transform, &Body, &MobId, With<Mob>)>()
                 .map(|(e, (t, b, id, ()))| (e, (t, b, id)))
                 .filter_map(under)
@@ -438,21 +447,22 @@ impl InGameState {
     pub(super) fn attack_mob(&mut self, target: MobTargetRef) {
         match target {
             MobTargetRef::Local(entity) => {
-                let look = self.player.look_direction();
+                let look = self.sim.player.look_direction();
                 let push = Vec3::new(look.x, 0.0, look.z).normalize_or_zero() * KNOCKBACK_PUSH
                     + Vec3::Y * KNOCKBACK_LIFT;
                 let damage = self.melee_damage();
-                let id = self.ecs.get::<MobId>(entity).copied();
+                let id = self.sim.ecs.get::<MobId>(entity).copied();
                 if let Some(id) = id
                     && let Some(health) =
-                        mob_systems::hit(&mut self.ecs, entity, damage, push, HOST_PLAYER_ID.0)
+                        mob_systems::hit(&mut self.sim.ecs, entity, damage, push, HOST_PLAYER_ID.0)
                 {
                     self.emit_mob_event(ServerMessage::MobHurt { id: id.0, health });
                 }
             }
             MobTargetRef::Remote(id) => {
                 // Only the host may apply damage; ask it to.
-                self.session
+                self.net
+                    .session
                     .request(&ClientMessage::Attack { id }, Channel::Reliable);
             }
         }
@@ -461,12 +471,12 @@ impl InGameState {
     /// Advance arrows on every peer (they're visual off the authority); the
     /// authority alone hit-tests players and applies damage.
     pub(super) fn update_arrows(&mut self, dt: f32) {
-        let authority = self.session.is_authority();
-        let local_box = (authority && !self.dead && self.player.mode.takes_damage())
-            .then(|| self.player.aabb());
+        let authority = self.net.session.is_authority();
+        let local_box = (authority && !self.sim.dead && self.sim.player.mode.takes_damage())
+            .then(|| self.sim.player.aabb());
         let player_kind = self.content.rules.entities.player().physics;
         let remote_boxes: Vec<(PlayerId, Aabb)> = if authority {
-            players::all(&self.ecs)
+            players::all(&self.sim.ecs)
                 .filter(|rp| rp.mode.takes_damage())
                 .map(|rp| {
                     let id = &rp.id;
@@ -491,9 +501,9 @@ impl InGameState {
             .into_iter()
             .chain(remote_boxes.into_iter().map(|(id, b)| (Some(id), b)))
             .collect();
-        let world = &self.world;
+        let world = &self.sim.world;
         let hits = crate::application::ecs::systems::projectiles::fly(
-            &mut self.ecs,
+            &mut self.sim.ecs,
             dt,
             |p| world.is_solid_for_collision(p),
             &targets,
@@ -510,7 +520,7 @@ impl InGameState {
 
     /// The walkable surface at `(x, z)` (see [`ground_at`]).
     pub(super) fn find_ground(&self, x: f32, z: f32, top: i32) -> Option<f32> {
-        ground_at(&self.world, x, z, top)
+        ground_at(&self.sim.world, x, z, top)
     }
 
     /// Periodic mob spawning + the standing despawn rules (authority only).
@@ -518,18 +528,18 @@ impl InGameState {
     /// feeds it the live world and applies its plan.
     pub(super) fn update_spawning(&mut self, dt: f32) {
         let cfg = self.content.rules.spawning.clone();
-        let mut anchors = vec![self.player.position];
-        anchors.extend(players::all(&self.ecs).map(|r| r.position()));
-        let is_night = self.day_cycle.is_night();
+        let mut anchors = vec![self.sim.player.position];
+        anchors.extend(players::all(&self.sim.ecs).map(|r| r.position()));
+        let is_night = self.sim.day_cycle.is_night();
         // Cap the surface search near player height: caves far below the
         // surface aren't valid spawn floors for surface mobs (and there's no
         // light level to gate on yet).
-        let top = (self.player.position.y + 24.0) as i32;
+        let top = (self.sim.player.position.y + 24.0) as i32;
 
-        let world = &self.world;
-        let terrain = self.structures.terrain();
-        let ecs = &self.ecs;
-        let requests = self.mobs.spawner.tick(
+        let world = &self.sim.world;
+        let terrain = self.sim.structures.terrain();
+        let ecs = &self.sim.ecs;
+        let requests = self.sim.mobs.spawner.tick(
             &cfg,
             dt,
             is_night,
@@ -549,8 +559,8 @@ impl InGameState {
                     .entry(&request.entity)
                     .is_some_and(|e| e.despawn_in_daylight);
                 if night_rule
-                    && let Some(entity) = mob_systems::find(&self.ecs, id)
-                    && let Some(mob) = self.ecs.get_mut::<Mob>(entity)
+                    && let Some(entity) = mob_systems::find(&self.sim.ecs, id)
+                    && let Some(mob) = self.sim.ecs.get_mut::<Mob>(entity)
                 {
                     mob.night_spawned = true;
                 }
@@ -568,6 +578,7 @@ impl InGameState {
         let day = !is_night;
         let despawn_sq = cfg.limits.despawn_distance * cfg.limits.despawn_distance;
         let leaving: Vec<(Entity, MobId)> = self
+            .sim
             .ecs
             .query::<(&Mob, &Transform, &MobId)>()
             .filter(|(_, (mob, transform, _))| {
@@ -579,7 +590,7 @@ impl InGameState {
             .map(|(entity, (_, _, id))| (entity, *id))
             .collect();
         for (entity, id) in leaving {
-            self.ecs.despawn(entity);
+            self.sim.ecs.despawn(entity);
             self.emit_mob_event(ServerMessage::MobDespawned {
                 id: id.0,
                 killed_by: None,
@@ -596,7 +607,7 @@ impl InGameState {
         };
         // Beside the player, not the spawn, so it composes with
         // `WYVEN_DEBUG_GOTO` (which may have moved them to a far structure).
-        let near = self.player.position;
+        let near = self.sim.player.position;
         for (i, kind) in kinds.split(',').map(str::trim).enumerate() {
             let x = near.x + 3.0 + 2.0 * i as f32;
             let z = near.z + 3.0;
@@ -613,14 +624,14 @@ impl InGameState {
     /// Route damage to the authority's own player: armor mitigates inside
     /// `Player::damage`, worn pieces take wear, and death freezes control.
     pub(super) fn damage_local_player(&mut self, amount: f32) {
-        let before = self.player.health;
-        self.player.damage(amount);
-        if self.player.health < before {
-            self.inventory.wear_armor(1);
+        let before = self.sim.player.health;
+        self.sim.player.damage(amount);
+        if self.sim.player.health < before {
+            self.sim.inventory.wear_armor(1);
         }
-        if self.player.is_dead() && !self.dead {
-            self.dead = true;
-            self.breaking = None;
+        if self.sim.player.is_dead() && !self.sim.dead {
+            self.sim.dead = true;
+            self.sim.breaking = None;
         }
     }
 }

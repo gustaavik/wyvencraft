@@ -25,7 +25,6 @@ mod interaction;
 mod inventory;
 mod mobs;
 mod net;
-mod peers;
 mod persistence;
 mod progression_net;
 mod setup;
@@ -35,20 +34,12 @@ mod wayfinding;
 
 use std::sync::Arc;
 
-use glam::Vec3;
-
-use crate::application::ecs::Ecs;
-use crate::application::session::Session;
-use crate::domain::chat::{ChatState, OpsList};
-use crate::domain::core::{BlockPos, DayCycle};
-use crate::domain::entity::{AnimationState, Player, Spawner};
-use crate::domain::inventory::{HeldLabel, Inventory, ItemStack, RecipeBook};
-use crate::domain::progression::WorldProgression;
-use crate::domain::world::structure::Structures;
-use crate::domain::world::{ChunkLoader, FluidSim, World};
+use crate::application::networking::Networking;
+use crate::application::simulation::Simulation;
+use crate::domain::chat::ChatState;
+use crate::domain::inventory::HeldLabel;
 use crate::presentation::content::GameContent;
 use crate::presentation::editor::EditorSession;
-use peers::Peers;
 use persistence::Persistence;
 use view::SceneCache;
 
@@ -88,53 +79,23 @@ const INVENTORY_SYNC_INTERVAL: f32 = 1.0;
 /// Colour of the selection outline on the targeted block (near-black).
 const OUTLINE_COLOR: [f32; 3] = [0.05, 0.05, 0.05];
 
-/// Progressive break state for survival timed mining.
-struct BreakState {
-    block: BlockPos,
-    /// Accumulated progress in `[0, 1)`; the block breaks at `>= 1.0`.
-    progress: f32,
-}
-
-/// The living population of a session.
-struct MobWorld {
-    next_id: u64,
-    /// Seeded spawn planner — deterministic in (seed, tick), so a host and its
-    /// clients agree without exchanging the decision.
-    spawner: Spawner,
-    /// The boss fight in progress, if one is (authority only).
-    fight: Option<bosses::BossFight>,
-    /// The boss attack being wound up, shown on the boss bar.
-    telegraph: Option<bosses::Telegraph>,
-}
-
-impl MobWorld {
-    /// Empty, with a spawn planner seeded from the world.
-    fn new(seed: u64) -> Self {
-        Self {
-            next_id: 0,
-            spawner: Spawner::new(seed),
-            fight: None,
-            telegraph: None,
-        }
-    }
-}
-
+/// The playing screen: a [`Simulation`], how it reaches other peers, and
+/// everything that draws it or reads input for it.
 pub struct InGameState {
-    pub world: World,
-    pub player: Player,
-    /// Everything loaded from `assets/*.toml`, shared by every session.
-    ///
-    /// Held whole rather than destructured into a field per registry: eleven of
-    /// those were just this `Arc` taken apart, and putting them back means the
-    /// systems below can each borrow the one table they need without the state
-    /// growing a field every time content does.
+    /// The world, its entities and the local player — see [`Simulation`].
+    pub sim: Simulation,
+    /// The session's role and its peers — see [`Networking`].
+    net: Networking,
+    /// Everything loaded from `assets/*.toml`, shared by every session. The
+    /// rules are also on `sim`; this carries the visuals and sounds besides.
     pub content: Arc<GameContent>,
-    pub inventory: Inventory,
-    /// The fading name of the item in hand, shown above the hotbar. Ephemeral
-    /// presentation state, so it is never saved and never crosses the wire.
+    /// Where this session's world is persisted, and what it still owes the
+    /// next save.
+    save: Persistence,
+
+    // --- Presentation: never saved, never sent. ---
+    /// The fading name of the item in hand, shown above the hotbar.
     held_label: HeldLabel,
-    /// Crafting recipes, loaded from `assets/recipes.toml` at world start.
-    pub recipes: RecipeBook,
     /// What this player has discovered, the stations in reach, and the
     /// crafting panel's selection.
     crafting: crafting::CraftingState,
@@ -146,10 +107,6 @@ pub struct InGameState {
     /// Every GPU resource this session has uploaded, plus the camera
     /// parameters and animation clocks that feed them.
     view: SceneCache,
-    /// Background terrain generation.
-    loader: ChunkLoader,
-    /// Time-of-day clock driving the sky and world lighting.
-    day_cycle: DayCycle,
     /// Whether the player has asked for the inventory. The *rendered* state is
     /// `inventory_anim`, which lags this while the panel and camera move.
     inventory_open: bool,
@@ -166,69 +123,16 @@ pub struct InGameState {
     /// The chat history this peer has seen and the line it is typing. Purely
     /// local: only the messages travel, never this.
     chat: ChatState,
-    /// Who may run op-only commands, by stable client identity. Loaded from
-    /// `ops.toml` on the authority; always empty on a client, which never
-    /// decides anything.
-    ops: OpsList,
-    /// Stack currently "held" by the cursor in the inventory screen.
-    held: Option<ItemStack>,
-    /// Where the player (re)spawns on death.
-    spawn: Vec3,
-    /// Water flow simulation. Only singleplayer/host sessions tick it (the
-    /// authority); clients receive the resulting edits over the network.
-    fluids: FluidSim,
-    /// Progressive block-break state for survival timed mining.
-    breaking: Option<BreakState>,
-    /// The last block the player was told is too hard for their tool, so the
-    /// hint is said once per block rather than every frame of digging.
-    tier_hint: Option<BlockPos>,
-    /// Everything alive that is not a player: the mobs this peer simulates
-    /// and the ones a host told it about.
-    ///
-    /// Grouped because they are one concern with one lifetime — a mob spawns,
-    /// shoots, dies and drops together, and nothing outside `mobs` and `view`
-    /// touches any of them. The *methods* stay on `InGameState`: mob AI
-    /// perceives the world and attacks the player, so moving them here would
-    /// replace one honest `&mut self` with six borrows threaded through every
-    /// call — not less coupling, only less visible coupling.
-    mobs: MobWorld,
-    /// The session's entities: item drops lying in the world (local-only, never
-    /// synced) and arrows in flight. See [`crate::application::ecs`].
-    ecs: Ecs,
-    /// True while the player is dead and awaiting respawn (control frozen).
-    dead: bool,
     /// Time (s) since the last jump press, for creative double-tap-to-fly.
     jump_tap_timer: f32,
-    /// Unspent frame time owed to the fixed-rate player physics step. Keeping
-    /// player physics off the variable frame delta is what makes jump height
-    /// identical at every framerate.
-    physics_accum: f32,
-    /// The local player's walk/idle/swing animation. Simulation state like
-    /// the player it poses — advanced in `update`, only read by the view.
-    player_anim: AnimationState,
-    /// This session's networking role: who has authority, and how messages
-    /// reach the other peers (a no-op transport in singleplayer).
-    session: Box<dyn Session>,
-    /// The other peers in this session and what we still owe them.
-    peers: Peers,
-    /// Where this session's world is persisted, and what it still owes the
-    /// next save.
-    save: Persistence,
-    /// This world's shrines and altars, and the terrain sampler they were
-    /// placed with — the generator's own, so the game locates exactly what
-    /// the chunks contain.
-    structures: Arc<Structures>,
-    /// How far through the biome/boss loop this world is. Authoritative on the
-    /// host and in singleplayer; a mirror of the host's on a client.
-    progression: WorldProgression,
 }
 
 impl InGameState {
     /// Reset the player at the world spawn after death.
     fn respawn(&mut self) {
-        self.player.respawn_at(self.spawn);
-        self.dead = false;
-        self.breaking = None;
+        self.sim.player.respawn_at(self.sim.spawn);
+        self.sim.dead = false;
+        self.sim.breaking = None;
     }
 }
 
@@ -239,7 +143,7 @@ struct MobSnapshot {
     id: crate::domain::entity::MobId,
     entity: crate::application::ecs::Entity,
     kind: String,
-    position: Vec3,
+    position: glam::Vec3,
     health: f32,
     night_spawned: bool,
     boss: bool,
@@ -250,7 +154,8 @@ impl InGameState {
     /// Every mob this peer simulates, in storage order.
     fn simulated_mobs(&self) -> Vec<MobSnapshot> {
         use crate::application::ecs::components::{Boss, Health, Kind, Mob, MobId, Transform};
-        self.ecs
+        self.sim
+            .ecs
             .query::<(&MobId, &Kind, &Transform, &Health, &Mob, Option<&Boss>)>()
             .map(|(entity, (id, kind, t, health, mob, boss))| MobSnapshot {
                 id: *id,
@@ -267,10 +172,14 @@ impl InGameState {
 
 #[cfg(test)]
 mod tests {
+    use glam::Vec3;
+
     use super::net::{recipes_from_wire, recipes_to_wire};
     use super::*;
+    use crate::domain::core::BlockPos;
     use crate::domain::core::GameMode;
     use crate::domain::inventory::ItemRegistry;
+    use crate::domain::inventory::ItemStack;
     use crate::domain::inventory::crafting::station_ids;
     use crate::domain::world::BlockRegistry;
     use crate::infrastructure::net::RecipeData;
@@ -317,14 +226,15 @@ mod tests {
     /// under their feet, so a test's line of sight never depends on terrain.
     fn flatten_around_player(state: &mut InGameState) {
         use crate::domain::world::block::blocks;
-        let feet = BlockPos::from_world(state.player.position);
+        let feet = BlockPos::from_world(state.sim.player.position);
         for dx in -4..=4 {
             for dz in -4..=4 {
                 let floor = BlockPos::new(feet.x + dx, feet.y - 1, feet.z + dz);
-                state.world.set_block(floor, blocks::STONE);
+                state.sim.world.set_block(floor, blocks::STONE);
                 for dy in 0..4 {
                     let air = BlockPos::new(feet.x + dx, feet.y + dy, feet.z + dz);
                     state
+                        .sim
                         .world
                         .set_block(air, crate::domain::core::BlockId::AIR);
                 }
@@ -343,8 +253,8 @@ mod tests {
         // Stand the cow on the ground right in front of the player, on a pad
         // carved flat so whatever the seed grew at spawn cannot hide it.
         flatten_around_player(&mut state);
-        let look = state.player.look_direction();
-        let pos = state.player.position + Vec3::new(look.x, 0.0, look.z).normalize() * 2.0;
+        let look = state.sim.player.look_direction();
+        let pos = state.sim.player.position + Vec3::new(look.x, 0.0, look.z).normalize() * 2.0;
         let ground = state
             .find_ground(pos.x, pos.z, crate::domain::core::CHUNK_HEIGHT - 2)
             .expect("ground near spawn");
@@ -354,8 +264,8 @@ mod tests {
 
         // The crosshair ray finds it: aim from the eye down at its body, which
         // on flat ground sits below eye level.
-        let body = Vec3::new(pos.x, ground + 0.6, pos.z) - state.player.eye_position();
-        state.player.pitch = body.y.atan2(Vec3::new(body.x, 0.0, body.z).length());
+        let body = Vec3::new(pos.x, ground + 0.6, pos.z) - state.sim.player.eye_position();
+        state.sim.player.pitch = body.y.atan2(Vec3::new(body.x, 0.0, body.z).length());
         let Some(mobs::MobTargetRef::Local(index)) = state.targeted_mob() else {
             panic!("cow should be under the crosshair as a local mob");
         };
@@ -394,19 +304,19 @@ mod tests {
 
         let mut state = InGameState::new(GameContent::builtin(), 7, GameMode::Survival);
         // Two blocks ahead at eye level, well inside reach.
-        let look = state.player.look_direction();
-        let at = BlockPos::from_world(state.player.eye_position() + look * 2.0);
-        state.world.set_block(at, blocks::RED_MUSHROOM);
+        let look = state.sim.player.look_direction();
+        let at = BlockPos::from_world(state.sim.player.eye_position() + look * 2.0);
+        state.sim.world.set_block(at, blocks::RED_MUSHROOM);
 
         assert!(
-            !state.world.is_solid(at),
+            !state.sim.world.is_solid(at),
             "ground cover must not collide with the player"
         );
         let hit = state.targeted_block().expect("plant is in the crosshair");
         assert_eq!(hit.block, at, "the crosshair stops at the plant");
 
         assert!(state.break_block_at(at));
-        assert!(state.world.block_at(at).is_air(), "the plant is gone");
+        assert!(state.sim.world.block_at(at).is_air(), "the plant is gone");
 
         let expected = state
             .content
@@ -438,8 +348,8 @@ mod tests {
         let leaves_dropped = |held: Option<&str>| {
             let mut state = InGameState::new(GameContent::builtin(), 7, GameMode::Survival);
             let hotbar = 0;
-            state.inventory.set_selected(hotbar);
-            state.inventory.set_slot(
+            state.sim.inventory.set_selected(hotbar);
+            state.sim.inventory.set_slot(
                 hotbar,
                 held.map(|name| {
                     let id = state.content.rules.items.find(name).expect("shipped item");
@@ -447,9 +357,9 @@ mod tests {
                 }),
             );
 
-            let look = state.player.look_direction();
-            let at = BlockPos::from_world(state.player.eye_position() + look * 2.0);
-            state.world.set_block(at, blocks::OAK_LEAVES);
+            let look = state.sim.player.look_direction();
+            let at = BlockPos::from_world(state.sim.player.eye_position() + look * 2.0);
+            state.sim.world.set_block(at, blocks::OAK_LEAVES);
             assert!(state.break_block_at(at));
 
             let leaves = state
@@ -487,7 +397,13 @@ mod tests {
         // High above the terrain, inside the chunks loaded around spawn, so the
         // rays below travel through nothing but air and the two test blocks.
         let at = BlockPos::new(2, 200, 2);
-        assert!(state.world.set_block(at, blocks::RED_MUSHROOM).is_some());
+        assert!(
+            state
+                .sim
+                .world
+                .set_block(at, blocks::RED_MUSHROOM)
+                .is_some()
+        );
 
         let Some(Target::Box(box_)) = state.target_at(at) else {
             panic!("ground cover must offer a box, not a whole cell");
@@ -501,7 +417,7 @@ mod tests {
 
         // A plain block behind it still fills its cell.
         let stone = BlockPos::new(6, 200, 2);
-        assert!(state.world.set_block(stone, blocks::STONE).is_some());
+        assert!(state.sim.world.set_block(stone, blocks::STONE).is_some());
         assert!(matches!(state.target_at(stone), Some(Target::Cell)));
 
         // Fire along +X through the middle of the mushroom: hits it.
@@ -532,18 +448,18 @@ mod tests {
         let mut state = InGameState::new(GameContent::load(), 7, GameMode::Survival);
         // High above the terrain, inside the chunks loaded around spawn, so the
         // only thing the camera can meet is the wall placed below.
-        state.player.position = Vec3::new(2.5, 200.0, 2.5);
+        state.sim.player.position = Vec3::new(2.5, 200.0, 2.5);
         // Fully caught up to the position just set, rather than interpolating
         // from wherever the player spawned.
         state.view.render_alpha = 1.0;
         // Looking down +X, so the third-person camera swings out along -X.
-        state.player.yaw = std::f32::consts::FRAC_PI_2;
-        state.player.pitch = 0.0;
+        state.sim.player.yaw = std::f32::consts::FRAC_PI_2;
+        state.sim.player.pitch = 0.0;
 
         let aspect = 16.0 / 9.0;
-        let eye = state.player.eye_position();
+        let eye = state.sim.player.eye_position();
 
-        state.player.perspective = Perspective::First;
+        state.sim.player.perspective = Perspective::First;
         let first = state.world_camera(aspect);
         assert!(
             (first.position - eye).length() < 1.0e-5,
@@ -552,7 +468,7 @@ mod tests {
         );
 
         // Nothing behind: the camera takes the whole distance.
-        state.player.perspective = Perspective::ThirdBack;
+        state.sim.player.perspective = Perspective::ThirdBack;
         let open = state.world_camera(aspect);
         assert!(
             ((open.position - eye).length() - THIRD_PERSON_DISTANCE).abs() < 1.0e-3,
@@ -563,7 +479,7 @@ mod tests {
         // A wall two cells behind must push the camera in front of it. It goes
         // at the *eye's* height, not the feet's — the trace is horizontal.
         let wall = BlockPos::from_world(eye - Vec3::X * 2.0);
-        assert!(state.world.set_block(wall, blocks::STONE).is_some());
+        assert!(state.sim.world.set_block(wall, blocks::STONE).is_some());
         let blocked = state.world_camera(aspect);
         // The wall's near face is at x = 1.0. The camera must sit just outside
         // it — clear of the block, but not thrown all the way to the player.
@@ -592,7 +508,7 @@ mod tests {
 
         let state = InGameState::new(GameContent::builtin(), 7, GameMode::Survival);
         let probe = BlockPos::new(0, 200, 0); // empty sky, nothing generated
-        assert!(!state.world.is_targetable(probe), "air");
+        assert!(!state.sim.world.is_targetable(probe), "air");
 
         let registry = &state.content.rules.blocks;
         assert!(registry.get(blocks::STONE).solid);
@@ -632,17 +548,17 @@ mod tests {
         // "Play": place a block above ground, move, rearrange the inventory,
         // and share the world with a slightly hurt zombie.
         let edit_pos = BlockPos::new(3, 200, 5);
-        assert!(state.world.set_block(edit_pos, blocks::STONE).is_some());
-        state.player.position = Vec3::new(10.0, 90.0, -4.0);
-        state.player.health = 13.5;
-        state.inventory.set_slot(
+        assert!(state.sim.world.set_block(edit_pos, blocks::STONE).is_some());
+        state.sim.player.position = Vec3::new(10.0, 90.0, -4.0);
+        state.sim.player.health = 13.5;
+        state.sim.inventory.set_slot(
             8,
             Some(ItemStack::new(
                 state.content.rules.items.find("bread").unwrap(),
                 2,
             )),
         );
-        state.inventory.set_selected(8);
+        state.sim.inventory.set_selected(8);
         state
             .spawn_mob("zombie", Vec3::new(6.0, 80.0, 6.0))
             .expect("zombie spawns");
@@ -654,20 +570,20 @@ mod tests {
         let game = WorldSave::open(&root, "roundtrip").unwrap().load().unwrap();
         let state = InGameState::new_saved(GameContent::builtin(), game);
         assert_eq!(
-            state.world.block_at(edit_pos),
+            state.sim.world.block_at(edit_pos),
             blocks::STONE,
             "terrain edit persists"
         );
-        assert_eq!(state.player.position, Vec3::new(10.0, 90.0, -4.0));
-        assert_eq!(state.player.health, 13.5);
+        assert_eq!(state.sim.player.position, Vec3::new(10.0, 90.0, -4.0));
+        assert_eq!(state.sim.player.health, 13.5);
         assert_eq!(
-            state.inventory.slot(8),
+            state.sim.inventory.slot(8),
             Some(ItemStack::new(
                 state.content.rules.items.find("bread").unwrap(),
                 2
             ))
         );
-        assert_eq!(state.inventory.selected_index(), 8);
+        assert_eq!(state.sim.inventory.selected_index(), 8);
         let mobs = state.simulated_mobs();
         assert_eq!(mobs.len(), 1, "the zombie survives the reload");
         assert_eq!(mobs[0].kind, "zombie");
