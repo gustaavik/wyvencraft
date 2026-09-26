@@ -1,0 +1,23 @@
+//! egui-based user interface: menus, HUD, and the inventory screen.
+//!
+//! The egui ↔ winit ↔ vulkano integration (a `Gui` from `egui_winit_vulkano`) is
+//! created by the app in milestone M5. Individual screens are drawn either here
+//! (HUD) or directly in their owning [`crate::presentation::screens`] (menus), and migrate into
+//! dedicated view modules (`main_menu`, `multiplayer_menu`, `inventory`,
+//! `pause_menu`) as those milestones land.
+
+pub mod boss_bar;
+pub mod chat;
+pub mod compass;
+pub mod crafting;
+pub mod editor;
+pub mod hud;
+pub mod icon;
+pub mod inventory;
+pub mod multiplayer_menu;
+pub mod nameplate;
+pub mod ninepatch;
+pub mod slot;
+pub mod textures;
+
+pub use textures::UiTextures;

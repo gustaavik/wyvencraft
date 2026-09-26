@@ -1,5 +1,5 @@
-# World generation configuration: which blocks terrain is made of, the ore
-# table, tree/boulder features, and per-biome surface blocks.
+# World generation configuration: the biome rings, the underground layers,
+# the ore table, tree/boulder features, and what each biome places.
 #
 # ⚠ Terrain regenerates from the world seed on every load — only player edits
 # are saved. Changing anything here changes the unedited terrain of EXISTING
@@ -9,11 +9,21 @@
 # file (the engine falls back to its builtin copy) — worldgen silently
 # placing the wrong block would corrupt worlds.
 
+# `base_height` is the average ground level every biome's `base_offset` is
+# measured from; the underground layers below it are ~90 blocks deep.
+#
+# The biomes are concentric RINGS around the origin (see [[biome]] below).
+# `ring_warp` is how far (blocks) low-frequency noise may push a border in or
+# out, so rings wander instead of reading as circles; `ring_blend` is the
+# half-width of the band across which neighbouring biomes' terrain shapes are
+# blended, so a border is never a cliff.
 [terrain]
 bedrock = "bedrock" # placed at y = 0
-stone = "stone"     # base solid, upgraded to ores below
 water = "water"     # fills air up to sea_level
-sea_level = 62
+base_height = 96
+sea_level = 94
+ring_warp = 220.0
+ring_blend = 48.0
 
 # Ocean-floor covering: `shallow` within 2 blocks of sea level, then noise
 # patches — `gravel.above`/`clay.below` are thresholds on the seabed noise
@@ -24,27 +34,79 @@ default = "sand"
 gravel = { block = "gravel", above = 0.30 }
 clay = { block = "clay", below = -0.35 }
 
+# The underground, Terraria style: bands stacked top to bottom. The first
+# starts just under each biome's surface/subsurface blocks; each ends at its
+# `bottom` y, and the last must reach y = 1 (bedrock is y = 0).
+#   fill   what the band is made of
+#   mix    a second block marbled through it where the 3D strata noise is
+#          above `above` (roughly [-1, 1]; higher = rarer). A biome's
+#          `strata` replaces the FIRST layer's mix block.
+#   caves  `blob` is the cheese-cavern threshold (higher = fewer, smaller),
+#          `tunnel` the squared tunnel radius (higher = wider, more)
+#   pool   carved air below `below` fills with `block` — flooded depths
+[[layer]]
+id = "surface"
+bottom = 72
+fill = "stone"
+mix = { block = "dirt", above = 0.35 }
+caves = { blob = 0.68, tunnel = 0.006 }
+
+[[layer]]
+id = "cavern"
+bottom = 30
+fill = "stone"
+mix = { block = "gravel", above = 0.62 }
+caves = { blob = 0.54, tunnel = 0.012 }
+
+[[layer]]
+id = "deep"
+bottom = 1
+fill = "deepstone"
+caves = { blob = 0.46, tunnel = 0.010 }
+pool = { block = "water", below = 12 }
+
 # Ore veins, rarest first: earlier entries win where noise fields overlap.
 # ⚠ ORDER IS SEMANTIC: entry i uses noise field i (seeded from its index),
 # so reordering or inserting entries relocates ores in existing worlds.
-# `threshold` is on the ore noise field — higher = rarer.
+# `threshold` is on the ore noise field — higher = rarer. `biomes` and
+# `layers` restrict where a vein may appear (omit either for "everywhere").
+# Each biome's metal is what the NEXT tier of gear is made from, and its block
+# carries a `[block.harvest] tier` (blocks.toml) so it cannot be mined until
+# the previous biome's boss has been beaten.
+[[ore]]
+block = "cinder_ore"
+threshold = 0.58
+biomes = ["ashlands"]
+layers = ["deep"]
+
+[[ore]]
+block = "silver_ore"
+threshold = 0.60
+biomes = ["frostpeaks"]
+layers = ["cavern", "deep"]
+
 [[ore]]
 block = "iron_ore"
-min_y = 8
-max_y = 72
+threshold = 0.58
+biomes = ["mire"]
+layers = ["cavern", "deep"]
+
+[[ore]]
+block = "tin_ore"
 threshold = 0.60
+biomes = ["darkwood"]
+layers = ["cavern", "deep"]
 
 [[ore]]
 block = "copper_ore"
-min_y = 8
-max_y = 80
-threshold = 0.58
+threshold = 0.57
+biomes = ["darkwood"]
+layers = ["cavern", "deep"]
 
 [[ore]]
 block = "coal_ore"
-min_y = 16
-max_y = 108
 threshold = 0.55
+layers = ["surface", "cavern"]
 
 # Tree types. `shape` names a built-in canopy strategy ("oak": layered round
 # crown; "spruce": cone); the blocks and trunk height range are data.
@@ -62,34 +124,55 @@ trunk = "oak_log"
 leaves = "oak_leaves"
 trunk_height = [6, 8]
 
+[[tree]]
+name = "old_spruce"
+shape = "spruce"
+trunk = "oak_log"
+leaves = "oak_leaves"
+trunk_height = [8, 11]
+
 # Half-buried boulders on dry land.
 [boulder]
 block = "stone"
 chance_per_mille = 300
 
-# What each biome places. The climate model itself (temperature thresholds,
-# mesas) stays in code. `tree` names a [[tree] ] entry; omit for no trees.
-# `tree_chance_per_mille` is the per-candidate-cell chance before vegetation
-# clumping scales it.
+# The biomes, innermost ring first. Every biome is one step of the
+# progression: it has a boss (entities.toml `[entity.boss]`), shrines that
+# reveal the boss's altar (structures.toml), and an ore the previous boss
+# unlocks.
 #
-# `plants` is ground cover: single blocks dropped one above the surface, picked
-# uniformly from the list, on a much denser candidate grid than trees. Omit
-# both keys for a bare biome. Like every other name here these are strict — a
-# typo rejects the whole file.
-#
-# `tint`, `foliage_tint` and `water_tint` are the colours multiplied into the
-# faces marked `tintindex` — 0 takes `tint` (the grass top and side overlay), 1
-# takes `foliage_tint` (leaves), 2 takes `water_tint` (the fluid animation in
-# assets/textures/blocks/water_flow.png). Those textures are deliberately greyscale so
-# one set of art serves every climate. Omit `tint` for white, which multiplies to
-# no change at all; omit `foliage_tint` and it follows `tint`. `water_tint` is
-# the exception — omitting it takes a default blue, because nothing else in the
-# water art supplies any colour at all.
-[biome.plains]
+#   id, tier     the name other files use, and the progression step (1 at spawn)
+#   start        inner radius of the ring, in blocks from the origin (warped by
+#                `ring_warp`). The first biome starts at 0; each later one must
+#                start further out. The last ring has no outer edge.
+#   base_offset  ground level relative to [terrain] base_height
+#   amplitude    how far the terrain rolls above/below that (blocks)
+#   mesa         0..1 strength of terraced tabletop buttes
+#   surface, subsurface   the top block and the 3 below it
+#   strata       replaces the first underground layer's `mix` block here
+#   tree / tree_chance_per_mille / plants / plant_chance_per_mille
+#                vegetation. `plants` is ground cover dropped one above the
+#                surface on a much denser grid than trees.
+#   tint, foliage_tint, water_tint
+#                the colours multiplied into faces marked `tintindex` — 0 takes
+#                `tint` (the grass top and side overlay), 1 `foliage_tint`
+#                (leaves), 2 `water_tint` (assets/textures/blocks/water_flow.png).
+#                Those textures are deliberately greyscale so one set of art
+#                serves every climate. Omit `tint` for white; omit
+#                `foliage_tint` and it follows `tint`; omit `water_tint` for a
+#                default blue, since nothing else in the water art is coloured.
+#                Colours blend across ring borders.
+
+# Tier 1 — gentle rolling grassland around spawn.
+[[biome]]
+id = "meadows"
+tier = 1
+start = 0
+amplitude = 16
 surface = "grass"
 subsurface = "dirt"
 tree = "oak"
-tree_chance_per_mille = 550
+tree_chance_per_mille = 450
 plants = [
     "blue_bells",
     "red_flower",
@@ -102,25 +185,70 @@ tint = [124, 189, 107]
 foliage_tint = [93, 165, 74]
 water_tint = [63, 118, 228]
 
-[biome.snowy]
-surface = "snow"
+# Tier 2 — dense, dark conifer forest over hilly ground.
+[[biome]]
+id = "darkwood"
+tier = 2
+start = 700
+base_offset = 6
+amplitude = 26
+surface = "grass"
 subsurface = "dirt"
+tree = "old_spruce"
+tree_chance_per_mille = 900
+plants = ["red_mushroom", "brown_mushroom", "blue_bells"]
+plant_chance_per_mille = 45
+tint = [86, 128, 76]
+foliage_tint = [52, 92, 58]
+water_tint = [44, 88, 150]
+
+# Tier 3 — flat, half-drowned swamp barely above the waterline.
+[[biome]]
+id = "mire"
+tier = 3
+start = 1600
+base_offset = -2
+amplitude = 5
+surface = "grass"
+subsurface = "mud"
+strata = "mud"
+tree = "oak"
+tree_chance_per_mille = 250
+plants = ["brown_mushroom", "red_mushroom"]
+plant_chance_per_mille = 60
+tint = [106, 112, 68]
+foliage_tint = [84, 96, 52]
+water_tint = [72, 86, 52]
+
+# Tier 4 — towering snowbound peaks.
+[[biome]]
+id = "frostpeaks"
+tier = 4
+start = 2600
+base_offset = 24
+amplitude = 60
+surface = "snow"
+subsurface = "packed_snow"
+strata = "packed_snow"
 tree = "spruce"
-tree_chance_per_mille = 400
-# Only fungi survive the cold, and sparsely.
+tree_chance_per_mille = 180
 plants = ["red_mushroom", "brown_mushroom"]
-plant_chance_per_mille = 15
-# Washed-out and blue-shifted, for grass poking through the snow line.
+plant_chance_per_mille = 10
 tint = [128, 180, 151]
 foliage_tint = [98, 152, 122]
-# Cold and pale, as if half-frozen.
 water_tint = [90, 150, 200]
 
-[biome.desert]
-surface = "sand"
-subsurface = "sand"
-# Dry and yellowed; barely used, since desert grows no grass.
-tint = [191, 183, 85]
-foliage_tint = [174, 164, 42]
-# Shallow, warm and turquoise.
-water_tint = [46, 176, 176]
+# Tier 5 — scorched terraced badlands.
+[[biome]]
+id = "ashlands"
+tier = 5
+start = 3800
+base_offset = 4
+amplitude = 18
+mesa = 1.0
+surface = "ash"
+subsurface = "basalt"
+strata = "basalt"
+tint = [150, 120, 80]
+foliage_tint = [120, 90, 60]
+water_tint = [150, 80, 50]

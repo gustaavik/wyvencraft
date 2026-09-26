@@ -71,15 +71,20 @@
 # order. Tools and armor spawn fresh (full durability); `count` applies to
 # stackables.
 
-# Tools come in three tiers. A tier is expressed purely as dig_speed +
-# durability (+ damage on the shapes that fight) — there is deliberately no
-# harvest-level gate, so a better pickaxe only means a faster one. Whether a
-# block can be mined by hand at all is the *block's* call (`required` in its
-# `[block.harvest]`), and only oak leaves say no:
+# Tools come in tiers. Speed is dig_speed + durability (+ damage on the shapes
+# that fight); `tier` is the PROGRESSION GATE — a block whose
+# `[block.harvest] tier` (blocks.toml) is higher cannot be broken with this
+# tool at all. Ordinary blocks have no tier, so everything stays mineable by
+# hand; each biome's ore carries one, and the pickaxe that meets it is made
+# from what the previous biome's boss drops:
 #
-#   wooden  dig_speed 2.0   durability  60
-#   stone   dig_speed 4.0   durability 132
-#   iron    dig_speed 6.0   durability 250
+#   wooden   tier 1   dig_speed 2.0   durability  60
+#   stone    tier 1   dig_speed 4.0   durability 132
+#   antler   tier 2   dig_speed 5.0   durability 200   (Elder Stag → copper, tin)
+#   iron     tier 4   dig_speed 6.0   durability 250   (silver)
+#
+# Iron sits at tier 4 because iron ore is a tier-3 ore of the Mire: the
+# bronze tier between them arrives with the Darkwood boss.
 #
 # Swords are the exception: the only blocks that ask for one are plants, so
 # their tier gradient lives in `damage` and `durability` and dig_speed stays
@@ -95,6 +100,7 @@ id = "wooden_pickaxe"
 
 [item.tool]
 kind = "pickaxe"
+tier = 1
 dig_speed = 2.0
 durability = 60
 
@@ -181,6 +187,7 @@ id = "stone_pickaxe"
 
 [item.tool]
 kind = "pickaxe"
+tier = 1
 dig_speed = 4.0
 durability = 132
 
@@ -239,6 +246,7 @@ id = "iron_pickaxe"
 
 [item.tool]
 kind = "pickaxe"
+tier = 4
 dig_speed = 6.0
 durability = 250
 
@@ -508,6 +516,71 @@ id = "stick"
 
 [item.model]
 path = "assets/models/items/stick.json"
+
+# ---- The Meadows' progression loop ------------------------------------------
+# Deer drop antler shards; four of them carved with wood and flint make the
+# stag effigy the elder altar takes. The Elder Stag drops elder antlers — the
+# head of the antler pickaxe, the first tool that meets Darkwood ore's tier —
+# and its trophy.
+
+[[item]]
+id = "antler_shard"
+
+[item.model]
+path = "assets/models/items/antler_shard.json"
+
+[[item]]
+id = "raw_venison"
+
+[item.consumable]
+hunger = 3.0
+saturation = 2.0
+
+[item.model]
+path = "assets/models/items/raw_venison.json"
+
+[[item]]
+id = "cooked_venison"
+
+[item.consumable]
+hunger = 8.0
+saturation = 12.0
+
+[item.model]
+path = "assets/models/items/cooked_venison.json"
+
+[[item]]
+id = "stag_effigy"
+
+[item.model]
+path = "assets/models/items/stag_effigy.json"
+
+[[item]]
+id = "elder_antler"
+
+[item.model]
+path = "assets/models/items/elder_antler.json"
+
+[[item]]
+id = "elder_stag_trophy"
+
+[item.model]
+path = "assets/models/items/elder_stag_trophy.json"
+
+[[item]]
+id = "antler_pickaxe"
+
+[item.tool]
+kind = "pickaxe"
+tier = 2
+dig_speed = 5.0
+durability = 200
+
+[item.model]
+path = "assets/models/items/antler_pickaxe.json"
+scale = 0.55
+offset = [-0.5, 0.0, -0.5]
+rotation = [0.0, 90.0, 0.0]
 
 [[item]]
 id = "blue_bells"

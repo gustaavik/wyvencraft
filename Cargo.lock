@@ -4797,6 +4797,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "wyven-ecs"
+version = "0.1.0"
+
+[[package]]
 name = "wyven-input"
 version = "0.1.0"
 dependencies = [
@@ -4899,6 +4903,7 @@ dependencies = [
  "wyven-audio",
  "wyven-auth",
  "wyven-core",
+ "wyven-ecs",
  "wyven-input",
  "wyven-model",
  "wyven-net",

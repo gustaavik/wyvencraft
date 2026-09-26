@@ -5,6 +5,13 @@
 #   output      - id of the crafted item (must match an in-game item id)
 #   count       - how many the craft produces (optional, default 1)
 #   ingredients - table of item id -> count, consumed from the inventory
+#   station     - the crafting station that must stand within a few blocks
+#                 (a block's `station` in blocks.toml: "workbench" or "forge").
+#                 Omit it for a recipe made by hand, anywhere.
+#
+# Players only see a recipe once they have held one of its ingredients (or
+# what it makes), Valheim-style; the file order is the order the crafting
+# panel lists them in, grouped by station.
 #
 # Item ids are single lowercase tokens, so they need no quoting as keys,
 # e.g.  ingredients = { coal_ore = 2, oak_log = 1 }
@@ -22,9 +29,23 @@ output = "stick"
 count = 4
 ingredients = { oak_log = 1 }
 
+# ---- Crafting stations ------------------------------------------------------
+
+# The first rung: made by hand, and where every tool below is made.
+[[recipe]]
+output = "workbench"
+ingredients = { oak_log = 4 }
+
+# Smelting and cooking. Built at a workbench; the coal is its first charge.
+[[recipe]]
+output = "forge"
+ingredients = { cobblestone = 8, coal = 2 }
+station = "workbench"
+
 # Tools. The shape fixes the sticks and the head count; the tier only changes
-# which material the head is beaten from — wood, stone, or (as with the armor
-# below) raw iron ore, until smelting exists.
+# which material the head is beaten from — wood, stone, or raw iron ore, until
+# iron smelting exists. Wood and stone are made at a workbench; iron needs the
+# forge's heat.
 #
 #   pickaxe  3 material + 2 sticks
 #   axe      3 material + 2 sticks
@@ -34,60 +55,74 @@ ingredients = { oak_log = 1 }
 [[recipe]]
 output = "wooden_pickaxe"
 ingredients = { oak_log = 3, stick = 2 }
+station = "workbench"
 
 [[recipe]]
 output = "wooden_axe"
 ingredients = { oak_log = 3, stick = 2 }
+station = "workbench"
 
 [[recipe]]
 output = "wooden_shovel"
 ingredients = { oak_log = 1, stick = 2 }
+station = "workbench"
 
 [[recipe]]
 output = "wooden_sword"
 ingredients = { oak_log = 2, stick = 1 }
+station = "workbench"
 
 [[recipe]]
 output = "stone_pickaxe"
 ingredients = { cobblestone = 3, stick = 2 }
+station = "workbench"
 
 [[recipe]]
 output = "stone_axe"
 ingredients = { cobblestone = 3, stick = 2 }
+station = "workbench"
 
 [[recipe]]
 output = "stone_shovel"
 ingredients = { cobblestone = 1, stick = 2 }
+station = "workbench"
 
 [[recipe]]
 output = "stone_sword"
 ingredients = { cobblestone = 2, stick = 1 }
+station = "workbench"
 
 [[recipe]]
 output = "iron_pickaxe"
 ingredients = { iron_ore = 3, stick = 2 }
+station = "forge"
 
 [[recipe]]
 output = "iron_axe"
 ingredients = { iron_ore = 3, stick = 2 }
+station = "forge"
 
 [[recipe]]
 output = "iron_shovel"
 ingredients = { iron_ore = 1, stick = 2 }
+station = "forge"
 
 [[recipe]]
 output = "iron_sword"
 ingredients = { iron_ore = 2, stick = 1 }
+station = "forge"
 
 # Shears: the only way to harvest leaf blocks.
 [[recipe]]
 output = "shears"
 ingredients = { cobblestone = 2, oak_log = 1 }
+station = "workbench"
 
-# Stand-in for smelting until furnaces exist.
+# Smelted at the forge.
 [[recipe]]
 output = "glass"
 ingredients = { sand = 1 }
+station = "forge"
 
 # Stand-in for farming until wheat exists.
 [[recipe]]
@@ -98,28 +133,33 @@ ingredients = { apple = 2 }
 [[recipe]]
 output = "stone"
 ingredients = { gravel = 4 }
+station = "workbench"
 
-# Smelting stand-ins. Coal is the fuel in every one of them, so it reads as a
-# furnace even though the craft is shapeless.
+# Smelting and cooking. Coal is the fuel in every one of them.
 [[recipe]]
 output = "copper_ingot"
 ingredients = { copper_ore = 1, coal = 1 }
+station = "forge"
 
 [[recipe]]
 output = "cooked_beef"
 ingredients = { raw_beef = 1, coal = 1 }
+station = "forge"
 
 [[recipe]]
 output = "cooked_mutton"
 ingredients = { mutton = 1, coal = 1 }
+station = "forge"
 
 [[recipe]]
 output = "cooked_chicken"
 ingredients = { raw_chicken = 1, coal = 1 }
+station = "forge"
 
 [[recipe]]
 output = "cooked_porkchop"
 ingredients = { raw_porkchop = 1, coal = 1 }
+station = "forge"
 
 # Knap a shard off a handful of gravel. Drops have no chance roll, so this is
 # where flint comes from rather than off the block itself.
@@ -132,20 +172,45 @@ ingredients = { gravel = 3 }
 output = "arrow"
 count = 4
 ingredients = { flint = 1, stick = 1, feather = 1 }
+station = "workbench"
 
 # Armor. The plate pieces are the copper tier, beaten from ingots.
 [[recipe]]
 output = "copper_helmet"
 ingredients = { copper_ingot = 5 }
+station = "forge"
 
 [[recipe]]
 output = "copper_chestplate"
 ingredients = { copper_ingot = 8 }
+station = "forge"
 
 [[recipe]]
 output = "copper_leggings"
 ingredients = { copper_ingot = 7 }
+station = "forge"
 
 [[recipe]]
 output = "copper_boots"
 ingredients = { copper_ingot = 4 }
+station = "forge"
+
+# ---- The Meadows' progression loop ------------------------------------------
+
+# The offering the elder altar takes to summon the Elder Stag.
+[[recipe]]
+output = "stag_effigy"
+ingredients = { antler_shard = 4, oak_log = 2, flint = 1 }
+station = "workbench"
+
+# The Elder Stag's reward: the first pickaxe that can mine Darkwood's ore.
+[[recipe]]
+output = "antler_pickaxe"
+ingredients = { elder_antler = 1, stick = 2 }
+station = "workbench"
+
+[[recipe]]
+output = "cooked_venison"
+ingredients = { raw_venison = 1, coal = 1 }
+station = "forge"
+

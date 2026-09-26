@@ -1,0 +1,447 @@
+//! The [`GameState`] implementation: the per-frame update, the egui HUD /
+//! inventory / death UI, and the scene render frame.
+
+use winit::event::MouseButton;
+
+use super::panels::draw_death_screen;
+use super::{AUTOSAVE_INTERVAL, DOUBLE_TAP_WINDOW, InGameState};
+use crate::domain::entity::MovementInput;
+use crate::presentation::config::Keybinds;
+use crate::presentation::screens::{
+    GameState, PauseMenuState, StateContext, Transition, Wyvencraft,
+};
+use crate::presentation::ui::hud;
+use crate::presentation::ui::nameplate::{self, Nameplate};
+use wyven_render::SceneFrame;
+
+impl InGameState {
+    /// Paint every visible player's username above their model.
+    ///
+    /// The camera is rebuilt here rather than threaded through, and it is
+    /// bit-identical to the one the world pass will use: both go through
+    /// [`InGameState::world_camera`], `update` has already run this frame and
+    /// set `render_alpha`, and nothing it reads changes in between.
+    ///
+    /// `aspect` is the runner's, the same value the world pass is given —
+    /// **not** egui's screen rect. The two agree to within rounding, but
+    /// `world_camera` derives its clearance from `near_radius()`, which depends
+    /// on the aspect, so a disagreement can resolve to a different clamped
+    /// distance: a different camera *position*, not merely a different
+    /// projection, and nameplates that drift off their players.
+    pub(super) fn draw_nameplates(&self, egui_ctx: &egui::Context, aspect: f32) {
+        if self
+            .sim
+            .ecs
+            .count::<crate::application::ecs::components::RemotePlayer>()
+            == 0
+        {
+            return;
+        }
+
+        let screen = egui_ctx.screen_rect();
+        if screen.height() <= 0.0 {
+            return;
+        }
+        let camera = self.world_camera(aspect);
+
+        let alpha = self.view.render_alpha;
+        let plates: Vec<Nameplate<'_>> = self
+            .sim
+            .ecs
+            .query::<(&crate::application::ecs::components::RemotePlayer,)>()
+            .map(|(_, (remote,))| {
+                let position = remote.interpolated_position(alpha);
+                Nameplate {
+                    name: remote.name.as_str(),
+                    position,
+                    occluded: self.nameplate_occluded(&camera, position),
+                }
+            })
+            .collect();
+
+        nameplate::draw_nameplates(egui_ctx, &camera, plates);
+    }
+
+    /// Whether solid world sits between the eye and a player's nameplate.
+    ///
+    /// egui paints after the world pass with no depth information, so without
+    /// this a name reads straight through terrain. The march uses `is_solid` and
+    /// `Target::Cell` — the same predicate mob line-of-sight uses — so a flower
+    /// or a pane of glass never hides someone.
+    fn nameplate_occluded(&self, camera: &wyven_render::Camera, position: glam::Vec3) -> bool {
+        let anchor = position + glam::Vec3::Y * nameplate::ANCHOR_HEIGHT;
+        let to_anchor = anchor - camera.position;
+        let distance = to_anchor.length();
+        if distance <= f32::EPSILON {
+            return false;
+        }
+
+        crate::domain::world::raycast(camera.position, to_anchor, distance, |at| {
+            self.sim
+                .world
+                .is_solid(at)
+                .then_some(crate::domain::world::Target::Cell)
+        })
+        .is_some()
+    }
+}
+
+impl GameState<Wyvencraft> for InGameState {
+    fn name(&self) -> &'static str {
+        "InGame"
+    }
+
+    fn on_enter(&mut self, ctx: &mut StateContext) {
+        // Begins fading the menu theme out — this is the one place the game
+        // actually leaves the menu flow, as opposed to the menu screens
+        // themselves, which all keep it playing. The fade itself is driven
+        // by `update`'s own `tick_menu_music` call below, for as long as
+        // `menu_music_active` says it is still going. Fires again,
+        // harmlessly (a no-op once already fading or already silent), every
+        // time the pause menu is dismissed and this screen is exposed as the
+        // top of the stack once more (see `on_exit` below).
+        ctx.shared.stop_menu_music();
+    }
+
+    fn on_exit(&mut self, _ctx: &mut StateContext) {
+        // Fires when pausing (Push), quitting to the menu (ReplaceAll), and on
+        // app shutdown (Quit / window close) — every path that leaves the world.
+        self.save_world();
+    }
+
+    fn update(&mut self, ctx: &mut StateContext) -> Transition {
+        // Drives the menu theme's fade-out to completion after joining a
+        // world, then stops touching it — see `Shared::menu_music_active`.
+        if ctx.shared.menu_music_active() {
+            ctx.shared.tick_menu_music(ctx.dt);
+        }
+        let kb = ctx.shared.settings.controls.keybinds.clone();
+
+        // The frame, in order. Each step is a method below; the order is the
+        // contract, so it is spelled out here once.
+        if let Some(transition) = self.handle_screen_keys(ctx, &kb) {
+            return transition;
+        }
+        // One tick per frame, here rather than in `ui`: `scene_frame` is `&self`
+        // and reads the same progress, so it must already be advanced by the
+        // time the world camera is derived.
+        self.inventory_anim.tick(ctx.dt);
+        let in_control = self.take_controls(ctx);
+        if in_control {
+            self.handle_player_keys(ctx, &kb);
+        }
+        let dt = ctx.dt.min(0.05);
+        self.step_local_player(ctx, &kb, in_control, dt);
+        if in_control {
+            self.interact(ctx, &kb, dt);
+        }
+        self.tick_session(ctx);
+        // Drops, arrows and every animation keep simulating even with the
+        // inventory or death screen open.
+        self.sim
+            .tick_entities(dt, self.view.render_alpha, super::REMOTE_MAX_SPEED);
+        // Simulation for this frame is settled; bring the GPU state in line.
+        self.refresh_view(&ctx.shared.render);
+        Transition::None
+    }
+
+    fn ui(&mut self, egui_ctx: &egui::Context, ctx: &mut StateContext) -> Transition {
+        // Carried across to the world camera, which is derived after this pass
+        // but is only given an aspect ratio. Recorded before anything else so
+        // the nameplates below see this frame's rect, not the last one's.
+        self.screen = egui_ctx.screen_rect();
+
+        // Death screen takes over everything else.
+        if self.sim.dead {
+            if draw_death_screen(egui_ctx) {
+                self.sim.respawn();
+            }
+            return Transition::None;
+        }
+
+        // Before the inventory's early return, though the two can never both be
+        // up: the editor is a window of its own and belongs on top of whatever
+        // the frame is showing.
+        self.draw_editor_panel(egui_ctx);
+
+        // The panel is drawn for the whole sweep, not just while open, because
+        // the close animation runs after `inventory_open` has already gone
+        // false. It takes over from the HUD hotbar rather than covering it: the
+        // two are the same nine slots and at progress 0 they coincide exactly,
+        // so exactly one of them is drawn and the swap is invisible.
+        if self.inventory_anim.active() {
+            self.draw_inventory_panel(egui_ctx, ctx);
+            return Transition::None;
+        }
+
+        self.draw_hud(egui_ctx, ctx);
+        if self.show_debug {
+            hud::draw_debug(egui_ctx, &self.debug_lines(ctx));
+        }
+        Transition::None
+    }
+
+    fn scene_frame(&self, aspect: f32) -> Option<SceneFrame<'_>> {
+        Some(self.view.scene_frame(
+            &self.sim.player,
+            &self.sim.day_cycle,
+            self.sim.clock,
+            self.world_camera(aspect),
+        ))
+    }
+}
+
+/// Format a normalized time-of-day `[0,1)` (0.0 = midnight) as a 24-hour clock.
+pub(super) fn format_time_of_day(t: f32) -> String {
+    let minutes = (t.rem_euclid(1.0) * 24.0 * 60.0) as u32;
+    format!("{:02}:{:02}", (minutes / 60) % 24, minutes % 60)
+}
+
+impl InGameState {
+    /// Keys that open, close or leave this screen's panels — chat, inventory,
+    /// editor, pause. Work in every state but typing; a transition away from
+    /// the screen is returned rather than taken.
+    fn handle_screen_keys(&mut self, ctx: &mut StateContext, kb: &Keybinds) -> Option<Transition> {
+        // Ungated on purpose: a screenshot taken while dead, typing, or with the
+        // inventory up still deserves its line. Taking it from the mailbox is
+        // what marks it delivered.
+        if let Some(path) = ctx.screenshot.take() {
+            self.note_screenshot(&path);
+        }
+        // While the chat bar is open, egui owns the keyboard and gameplay keys
+        // never reach `InputState` at all. These guards cover the one frame
+        // between opening the bar and the widget taking focus.
+        let typing = self.chat.composer.open;
+
+        if !typing && !self.sim.dead && !self.inventory_open {
+            if ctx.input.just_pressed(kb.chat) {
+                self.chat.composer.begin("");
+            } else if ctx.input.just_pressed(kb.chat_command) {
+                self.chat.composer.begin("/");
+            }
+        }
+
+        // Not while the editor is up: its third-person view and the inventory's
+        // camera sweep would fight each other for the same camera.
+        if !typing && !self.sim.dead && !self.editor_open() && ctx.input.just_pressed(kb.inventory)
+        {
+            self.toggle_inventory();
+        }
+        // Outside the `in_control` block below, unlike the other function keys:
+        // the editor takes the controls itself, so a toggle gated on having them
+        // could open the panel and never close it.
+        if !typing && !self.sim.dead && ctx.input.just_pressed(kb.toggle_editor) {
+            self.toggle_editor();
+        }
+        self.update_editor(ctx.dt);
+        // Esc closes the inventory if open, otherwise opens the pause overlay.
+        if !typing && ctx.input.just_pressed(kb.pause) {
+            if self.editor_open() {
+                self.toggle_editor();
+            } else if self.inventory_open {
+                self.toggle_inventory();
+            } else {
+                return Some(Transition::Push(Box::new(PauseMenuState::new())));
+            }
+        }
+
+        None
+    }
+
+    /// Whether the player is driving this frame. Keyed off the inventory's
+    /// *animation*, so control comes back only once the camera is home on the
+    /// eye — where there is nothing left to blend and the hand-back is
+    /// seamless. The editor is the fourth thing that takes the controls away:
+    /// its panel needs a cursor, and mouse-look would fight every drag.
+    ///
+    /// This gates input, and deliberately **not** the physics — see
+    /// [`Self::step_local_player`].
+    fn take_controls(&mut self, ctx: &mut StateContext) -> bool {
+        let in_control = !self.inventory_anim.active()
+            && !self.sim.dead
+            && !self.chat.composer.open
+            && !self.editor_open();
+        ctx.grab_cursor = in_control;
+        if !in_control {
+            // Whatever was being mined is abandoned — that one *is* an input.
+            self.sim.breaking = None;
+        }
+        in_control
+    }
+
+    /// Keys that only mean something while the player is driving: camera,
+    /// debug overlay, game mode, flight, mouse look, hotbar, drop.
+    fn handle_player_keys(&mut self, ctx: &mut StateContext, kb: &Keybinds) {
+        if ctx.input.just_pressed(kb.toggle_perspective) {
+            self.sim.player.toggle_perspective();
+        }
+        if ctx.input.just_pressed(kb.toggle_debug) {
+            self.show_debug = !self.show_debug;
+        }
+
+        // Live game-mode toggle (F4).
+        if ctx.input.just_pressed(kb.toggle_gamemode) {
+            self.sim.player.set_mode(self.sim.player.mode.toggled());
+            self.sim.breaking = None;
+            self.broadcast_mode_change();
+        }
+
+        // Creative flight: double-tap the jump key within the window.
+        self.jump_tap_timer += ctx.dt;
+        if ctx.input.just_pressed(kb.jump) {
+            if self.sim.player.mode.can_fly() && self.jump_tap_timer < DOUBLE_TAP_WINDOW {
+                self.sim.player.flying = !self.sim.player.flying;
+            }
+            self.jump_tap_timer = 0.0;
+        }
+
+        // Mouse look.
+        let sens = ctx.shared.settings.controls.mouse_sensitivity * 0.0025;
+        let pitch_sign = if ctx.shared.settings.controls.invert_y {
+            1.0
+        } else {
+            -1.0
+        };
+        let delta = ctx.input.mouse_delta();
+        self.sim
+            .player
+            .rotate(delta.x * sens, pitch_sign * delta.y * sens);
+
+        // Hotbar selection via scroll.
+        let scroll = ctx.input.scroll_delta();
+        if scroll != 0.0 {
+            self.sim.inventory.scroll_selected(-scroll.signum() as i32);
+        }
+        // Hotbar selection via the number keys.
+        for (i, key) in kb.hotbar.iter().enumerate() {
+            if ctx.input.just_pressed(*key) {
+                self.sim.inventory.set_selected(i);
+            }
+        }
+
+        // Toss one item from the selected slot onto the ground.
+        if ctx.input.just_pressed(kb.drop_item) {
+            self.drop_selected_item();
+        }
+    }
+
+    /// Step the local player's physics and vitals.
+    ///
+    /// Physics runs whether or not the player is driving. Opening the
+    /// inventory releases the *controls*, not the simulation: momentum,
+    /// friction and gravity carry on, so a player who was walking when they
+    /// pressed E coasts to a stop instead of stopping dead in mid-stride,
+    /// and one who was falling still lands — and still takes the fall.
+    ///
+    /// Death is the one real freeze. There is nothing left to simulate, and
+    /// a corpse sliding to a halt under the respawn dialog reads as a bug.
+    fn step_local_player(
+        &mut self,
+        ctx: &mut StateContext,
+        kb: &Keybinds,
+        in_control: bool,
+        dt: f32,
+    ) {
+        // No input while the controls are released — the player coasts on the
+        // velocity they already had rather than walking on for ever.
+        let movement = if in_control {
+            crate::presentation::config::movement(ctx.input, kb)
+        } else {
+            MovementInput::default()
+        };
+        if let Some(alpha) = self.sim.step_player(movement, ctx.dt, dt) {
+            self.view.render_alpha = alpha;
+        }
+    }
+
+    /// Mouse on the world: swing, fight, mine, break, place and use.
+    fn interact(&mut self, ctx: &mut StateContext, kb: &Keybinds, dt: f32) {
+        // Block interaction. The main-hand swing fires on every left click,
+        // even when punching air (no block hit).
+        if ctx.input.mouse_just_pressed(MouseButton::Left) {
+            self.sim.player_anim.trigger_swing();
+        }
+        // A mob in the crosshair takes the hit (and blocks mining on the
+        // block behind it); otherwise the click falls through to blocks.
+        let mob_target = self.targeted_mob();
+        if self.sim.player.mode.instant_break() {
+            // Creative: instant break on click.
+            self.sim.breaking = None;
+            if ctx.input.mouse_just_pressed(MouseButton::Left) {
+                match mob_target {
+                    Some(index) => self.attack_mob(index),
+                    None => {
+                        if let Some(hit) = self.targeted_block() {
+                            self.break_block_at(hit.block);
+                        }
+                    }
+                }
+            }
+        } else if let Some(index) = mob_target {
+            // Survival with a mob in reach: swing on click, don't mine.
+            self.sim.breaking = None;
+            if ctx.input.mouse_just_pressed(MouseButton::Left) {
+                self.attack_mob(index);
+            }
+        } else {
+            // Survival: progressive mining while the dig button is held.
+            let digging = ctx.input.mouse_held(MouseButton::Left);
+            self.update_mining(digging, dt);
+        }
+        if ctx.input.mouse_just_pressed(MouseButton::Right) {
+            // A crafting station opens the panel, unless the player is
+            // sneaking to place a block against it.
+            let sneaking = ctx.input.is_held(kb.sneak);
+            if sneaking || !self.open_targeted_station() {
+                self.use_selected();
+            }
+        }
+    }
+
+    /// Everything that ticks once per frame regardless of input: clocks,
+    /// chat, discovery, autosave, the network pump, the authority's world
+    /// simulation (fluids, mobs, bosses, spawning), and chunk streaming.
+    fn tick_session(&mut self, ctx: &mut StateContext) {
+        self.view.fov_degrees = ctx.shared.settings.render.fov_degrees;
+        // Wrap the animation clock so f32 precision never degrades over long
+        // sessions. The period must stay a whole multiple of every animated
+        // texture's loop or the wrap skips a frame: `voxel_array.frag` steps a
+        // layer at `fps`, so what has to divide 3600 * fps is the frame count
+        // (water's `[block.fluid.texture]` is 64 frames at 8 fps, and the
+        // blocks loader refuses a pairing that does not divide evenly).
+        self.sim.tick_clock(ctx.dt);
+        // Ages the chat lines so old ones fade off the HUD.
+        self.chat.log.tick(ctx.dt);
+        // Learn from whatever arrived this frame, and look for stations.
+        self.tick_crafting();
+        self.sim.day_cycle.advance(ctx.dt);
+        // Periodic autosave for persistent worlds (also fires on pause/exit).
+        if self.save.is_persistent() {
+            self.save.autosave_timer += ctx.dt;
+            if self.save.autosave_timer >= AUTOSAVE_INTERVAL {
+                self.save.autosave_timer = 0.0;
+                self.save_world();
+            }
+        }
+        self.pump_network(ctx.dt);
+        // Water flow: singleplayer/host simulate authoritatively and broadcast
+        // each change; clients receive them as ordinary BlockChanged edits.
+        if self.net.session.is_authority() {
+            for (pos, block) in
+                self.sim
+                    .fluids
+                    .tick(&mut self.sim.world, &self.content.rules.blocks, ctx.dt)
+            {
+                self.broadcast_local_edit(pos, block);
+            }
+            // Mobs are host-authoritative like fluids; clients only render
+            // the replicated copies.
+            self.update_mobs(ctx.dt.min(0.05));
+            self.update_boss_fight(ctx.dt);
+            self.sim.update_spawning(ctx.dt);
+        } else {
+            self.tick_remote_telegraph(ctx.dt);
+        }
+        self.update_streaming(ctx.shared.settings.render.render_distance);
+    }
+}

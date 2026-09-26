@@ -1,0 +1,654 @@
+//! Tests for [`super`]: `chat.rs`.
+
+use super::*;
+use crate::application::session::{FakeHandle, FakeSession, Inbound};
+use crate::domain::chat::OpsList;
+use crate::domain::core::GameMode;
+use crate::presentation::content::GameContent;
+
+/// An in-game state driven by a fake session, plus the handle to script it.
+fn host_session() -> (InGameState, FakeHandle) {
+    let mut state = InGameState::new(GameContent::builtin(), 5, GameMode::Creative);
+    let session = FakeSession::host();
+    let handle = session.handle();
+    state.set_session(Box::new(session));
+    (state, handle)
+}
+
+fn client_session(local: PlayerId) -> (InGameState, FakeHandle) {
+    let mut state = InGameState::new(GameContent::builtin(), 5, GameMode::Creative);
+    let session = FakeSession::client(local);
+    let handle = session.handle();
+    state.set_session(Box::new(session));
+    (state, handle)
+}
+
+/// A stable test account, so a uuid does not have to be spelled out at
+/// every call site.
+fn account(n: u128) -> wyven_auth::AccountIdentity {
+    wyven_auth::AccountIdentity {
+        account_id: uuid::Uuid::from_u128(n),
+        username: format!("player{n}"),
+    }
+}
+
+/// Register `pid` as a joined client, the way `welcome_player` does, so the
+/// ops lookup has something to match against.
+///
+/// The account is what carries authorization now; `identity` is only the
+/// save-record key.
+fn join(state: &mut InGameState, handle: &FakeHandle, pid: PlayerId, identity: u64) {
+    join_as(
+        state,
+        handle,
+        pid,
+        identity,
+        Some(account(u128::from(identity))),
+    );
+}
+
+/// Join with an explicit account — or with `None`, for an unverified peer.
+fn join_as(
+    state: &mut InGameState,
+    handle: &FakeHandle,
+    pid: PlayerId,
+    identity: u64,
+    account: Option<wyven_auth::AccountIdentity>,
+) {
+    handle.deliver(Inbound::Joined {
+        player: pid,
+        identity,
+        account,
+    });
+    // A real client asks for the world on its first connected frame, and
+    // that request is what promotes a connected peer to an announced player
+    // — see `Peers::announced`.
+    handle.deliver(Inbound::Request {
+        player: pid,
+        msg: ClientMessage::RequestWorldState,
+    });
+    state.pump_network(1.0 / 60.0);
+}
+
+fn count_of(state: &InGameState, name: &str) -> u32 {
+    let id = state
+        .content
+        .rules
+        .items
+        .find(name)
+        .expect("the item exists");
+    state.sim.inventory.count_of(id)
+}
+
+#[test]
+fn a_singleplayer_give_fills_the_inventory() {
+    let mut state = InGameState::new(GameContent::builtin(), 5, GameMode::Creative);
+    state.submit_chat("/give bread 12".to_string());
+    assert_eq!(count_of(&state, "bread"), 12);
+    assert!(
+        state.chat.log.lines().any(|l| l.text.contains("gave 12")),
+        "the runner is told what happened"
+    );
+}
+
+/// The item registry names things with spaces, so this is the case a naive
+/// "first token is the item" parser would break on.
+#[test]
+fn a_multi_word_item_can_be_given() {
+    let mut state = InGameState::new(GameContent::builtin(), 5, GameMode::Creative);
+    state.submit_chat("/give cooked beef 3".to_string());
+    assert_eq!(count_of(&state, "cooked_beef"), 3);
+}
+
+/// A tool has durability, so five of them are five stacks of one — not one
+/// stack of five, which the inventory could not represent meaningfully.
+#[test]
+fn giving_tools_hands_over_one_fresh_tool_per_stack() {
+    let mut state = InGameState::new(GameContent::builtin(), 5, GameMode::Creative);
+    state.submit_chat("/give wooden pickaxe 3".to_string());
+
+    let id = state.content.rules.items.find("wooden_pickaxe").unwrap();
+    let full = state.content.rules.items.max_durability(id).unwrap();
+    let picks: Vec<_> = state
+        .sim
+        .inventory
+        .slots()
+        .iter()
+        .flatten()
+        .filter(|s| s.item == id)
+        .collect();
+    assert_eq!(picks.len(), 3, "one slot each");
+    assert!(
+        picks
+            .iter()
+            .all(|s| s.count == 1 && s.durability == Some(full))
+    );
+}
+
+#[test]
+fn a_typo_gets_a_suggestion_and_no_items() {
+    let mut state = InGameState::new(GameContent::builtin(), 5, GameMode::Creative);
+    state.submit_chat("/give brea 5".to_string());
+    assert_eq!(count_of(&state, "bread"), 0, "nothing was given");
+    let last = state.chat.log.lines().next_back().expect("an error line");
+    assert_eq!(last.kind, ChatKind::Error);
+    assert!(
+        last.text.contains("did you mean 'bread'"),
+        "got {:?}",
+        last.text
+    );
+}
+
+/// More than fits must not vanish: the overflow lands on the ground, the
+/// same rule crafting already follows.
+#[test]
+fn a_granted_stack_that_does_not_fit_lands_on_the_ground() {
+    let mut state = InGameState::new(GameContent::builtin(), 5, GameMode::Creative);
+    let stone = state.content.rules.items.find("stone").unwrap();
+    let max = state.content.rules.items.max_stack(stone);
+
+    // Fill every storage slot, so nothing can be absorbed.
+    for slot in 0..crate::domain::inventory::INVENTORY_SIZE {
+        state
+            .sim
+            .inventory
+            .set_slot(slot, Some(ItemStack::new(stone, max)));
+    }
+    let before = state.sim.inventory.count_of(stone);
+
+    state.submit_chat("/give bread 5".to_string());
+
+    assert_eq!(
+        state.sim.inventory.count_of(stone),
+        before,
+        "nothing displaced"
+    );
+    assert_eq!(count_of(&state, "bread"), 0, "no room for it");
+    let bread = state.content.rules.items.find("bread").unwrap();
+    let dropped: u32 = state
+        .sim
+        .drops()
+        .map(|(d, _)| d)
+        .filter(|d| d.stack.item == bread)
+        .map(|d| u32::from(d.stack.count))
+        .sum();
+    assert_eq!(dropped, 5, "all five are on the floor instead");
+}
+
+#[test]
+fn a_singleplayer_tp_moves_the_player() {
+    let mut state = InGameState::new(GameContent::builtin(), 5, GameMode::Creative);
+    state.submit_chat("/tp 10 70 -20".to_string());
+    assert_eq!(state.sim.player.position, Vec3::new(10.0, 70.0, -20.0));
+}
+
+/// Relative coordinates anchor on the runner, which is the whole reason the
+/// port exposes `position()`.
+#[test]
+fn a_relative_tp_is_measured_from_where_the_player_stands() {
+    let mut state = InGameState::new(GameContent::builtin(), 5, GameMode::Creative);
+    state.sim.player.position = Vec3::new(4.0, 65.0, 8.0);
+    state.submit_chat("/tp ~ ~30 ~".to_string());
+    assert_eq!(state.sim.player.position, Vec3::new(4.0, 95.0, 8.0));
+}
+
+/// Arriving mid-plunge must not carry the descent into the destination.
+/// (That the trip itself isn't charged as a fall is `Player::teleport`'s
+/// job, pinned by `teleporting_down_does_not_land_as_a_fall`.)
+#[test]
+fn teleporting_drops_the_momentum_you_arrived_with() {
+    let mut state = InGameState::new(GameContent::builtin(), 5, GameMode::Creative);
+    state.sim.player.position = Vec3::new(0.0, 200.0, 0.0);
+    state.sim.player.velocity = Vec3::new(0.0, -40.0, 0.0);
+
+    state.submit_chat("/tp 0 20 0".to_string());
+
+    assert_eq!(state.sim.player.position, Vec3::new(0.0, 20.0, 0.0));
+    assert_eq!(state.sim.player.velocity, Vec3::ZERO);
+}
+
+#[test]
+fn a_tp_outside_the_world_is_refused_and_the_player_stays_put() {
+    let mut state = InGameState::new(GameContent::builtin(), 5, GameMode::Creative);
+    let before = state.sim.player.position;
+    state.submit_chat("/tp 0 -5 0".to_string());
+    assert_eq!(state.sim.player.position, before);
+    let last = state.chat.log.lines().next_back().expect("an error line");
+    assert_eq!(last.kind, ChatKind::Error);
+}
+
+/// The host resolving a client's `/tp <player>`: it knows everyone's
+/// position, and the client owns its own, so the answer is an instruction.
+#[test]
+fn an_op_client_is_told_to_teleport_to_the_host() {
+    let (mut state, handle) = host_session();
+    let pid = PlayerId(1);
+    state.set_ops(
+        OpsList::from_toml(&format!("ops = [{{ id = \"{}\" }}]", account(5).account_id)).unwrap(),
+    );
+    join(&mut state, &handle, pid, 5);
+    state.sim.player.position = Vec3::new(64.0, 71.0, -8.0);
+
+    handle.deliver(Inbound::Request {
+        player: pid,
+        msg: ClientMessage::Chat("/tp Player 0".to_string()),
+    });
+    state.pump_network(1.0 / 60.0);
+
+    let net = handle.lock();
+    assert!(
+        net.messages_to(pid).iter().any(|m| matches!(
+            m,
+            ServerMessage::Teleport { to, position }
+                if *to == pid && *position == [64.0, 71.0, -8.0]
+        )),
+        "the client is told where to go, got {:?}",
+        net.messages_to(pid)
+    );
+    drop(net);
+    assert_eq!(
+        state.sim.player.position,
+        Vec3::new(64.0, 71.0, -8.0),
+        "and the host itself does not move"
+    );
+}
+
+#[test]
+fn a_client_applies_a_teleport_addressed_to_it() {
+    let local = PlayerId(2);
+    let (mut state, handle) = client_session(local);
+
+    handle.deliver(Inbound::Update(ServerMessage::Teleport {
+        to: local,
+        position: [1.0, 80.0, 2.0],
+    }));
+    state.pump_network(1.0 / 60.0);
+
+    assert_eq!(state.sim.player.position, Vec3::new(1.0, 80.0, 2.0));
+}
+
+#[test]
+fn a_client_ignores_a_teleport_addressed_to_someone_else() {
+    let (mut state, handle) = client_session(PlayerId(2));
+    let before = state.sim.player.position;
+
+    handle.deliver(Inbound::Update(ServerMessage::Teleport {
+        to: PlayerId(9),
+        position: [1.0, 80.0, 2.0],
+    }));
+    state.pump_network(1.0 / 60.0);
+
+    assert_eq!(state.sim.player.position, before);
+}
+
+/// Registry-driven, so a command added to `chat::COMMANDS` is covered here
+/// the day it lands: *every* op-only command must be refused to a client
+/// who isn't in `ops.toml`, and the refusal must come before the command
+/// parses its arguments (so nothing it does can happen).
+#[test]
+fn every_op_only_command_is_refused_to_an_unauthorized_client() {
+    for command in chat::COMMANDS
+        .iter()
+        .filter(|c| c.permission() == Permission::Op)
+    {
+        let (mut state, handle) = host_session();
+        let pid = PlayerId(1);
+        join(&mut state, &handle, pid, 999);
+
+        handle.deliver(Inbound::Request {
+            player: pid,
+            // Deliberately unparseable arguments: the gate must fire first.
+            msg: ClientMessage::Chat(format!("/{} !!!", command.name())),
+        });
+        state.pump_network(1.0 / 60.0);
+
+        let net = handle.lock();
+        assert!(
+            net.messages_to(pid).iter().any(|m| matches!(
+                m,
+                ServerMessage::Chat { kind: ChatKind::Error, text, .. }
+                    if text.contains("not authorized")
+            )),
+            "/{} must be refused, got {:?}",
+            command.name(),
+            net.messages_to(pid)
+        );
+    }
+}
+
+/// The authorization boundary. A client who isn't in `ops.toml` gets a
+/// refusal and, crucially, *no* items — if this ever regressed, every
+/// connected player could spawn anything.
+#[test]
+fn an_unauthorized_client_is_refused_and_gets_nothing() {
+    let (mut state, handle) = host_session();
+    let pid = PlayerId(1);
+    join(&mut state, &handle, pid, 999);
+
+    handle.deliver(Inbound::Request {
+        player: pid,
+        msg: ClientMessage::Chat("/give bread 5".to_string()),
+    });
+    state.pump_network(1.0 / 60.0);
+
+    let net = handle.lock();
+    assert!(
+        net.messages_to(pid).iter().any(|m| matches!(
+            m,
+            ServerMessage::Chat {
+                kind: ChatKind::Error,
+                text,
+                ..
+            } if text.contains("not authorized")
+        )),
+        "they are told why, got {:?}",
+        net.messages_to(pid)
+    );
+    assert!(
+        !net.sent.iter().any(|s| matches!(
+            s,
+            crate::application::session::Sent::To(_, ServerMessage::GrantItems { .. }, _)
+                | crate::application::session::Sent::Broadcast(ServerMessage::GrantItems { .. }, _)
+        )),
+        "and nothing is granted, to them or anyone"
+    );
+}
+
+/// The other half of the boundary: an identity listed in `ops.toml` does get
+/// the items, delivered as an instruction they apply themselves.
+#[test]
+fn an_op_client_is_granted_the_items() {
+    let (mut state, handle) = host_session();
+    let pid = PlayerId(1);
+    let identity = 4242;
+    let op = account(u128::from(identity));
+    state
+        .set_ops(OpsList::from_toml(&format!("ops = [{{ id = \"{}\" }}]", op.account_id)).unwrap());
+    join(&mut state, &handle, pid, identity);
+
+    handle.deliver(Inbound::Request {
+        player: pid,
+        msg: ClientMessage::Chat("/give bread 5".to_string()),
+    });
+    state.pump_network(1.0 / 60.0);
+
+    let net = handle.lock();
+    let granted = net
+        .messages_to(pid)
+        .into_iter()
+        .find_map(|m| match m {
+            ServerMessage::GrantItems { stacks, .. } => Some(stacks.clone()),
+            _ => None,
+        })
+        .expect("an op's /give is granted");
+    drop(net);
+
+    let bread = state.content.rules.items.find("bread").unwrap();
+    assert_eq!(granted.len(), 1);
+    assert_eq!(granted[0].item, bread.0);
+    assert_eq!(granted[0].count, 5);
+    assert_eq!(
+        state.sim.inventory.count_of(bread),
+        0,
+        "the host's own inventory is untouched"
+    );
+}
+
+/// Authorization requires a *verified* account, not merely a connection.
+///
+/// A host on a real socket refuses joins it cannot verify, so this state
+/// should be unreachable in production — which is exactly why it is worth
+/// pinning. If a future change ever admits an unverified peer, this catches
+/// it before that peer can also become an op.
+#[test]
+fn a_player_with_no_verified_account_is_never_an_op() {
+    let (mut state, handle) = host_session();
+    let pid = PlayerId(1);
+    // Every account in the file is an op...
+    state.set_ops(
+        OpsList::from_toml(&format!("ops = [{{ id = \"{}\" }}]", account(7).account_id)).unwrap(),
+    );
+    // ...but this peer arrived without one.
+    join_as(&mut state, &handle, pid, 7, None);
+
+    handle.deliver(Inbound::Request {
+        player: pid,
+        msg: ClientMessage::Chat("/give bread 5".to_string()),
+    });
+    state.pump_network(1.0 / 60.0);
+
+    let net = handle.lock();
+    assert!(
+        !net.messages_to(pid)
+            .iter()
+            .any(|m| matches!(m, ServerMessage::GrantItems { .. })),
+        "an unverified peer must not be authorized"
+    );
+    assert!(
+        net.messages_to(pid).iter().any(|m| matches!(
+            m,
+            ServerMessage::Chat { kind: ChatKind::Error, text, .. }
+                if text.contains("not authorized")
+        )),
+        "and should be told why"
+    );
+}
+
+/// Ops are keyed by account, so a *different* account holding the same save
+/// slot is not authorized. This is the escalation the rewrite closes: the
+/// old key was a number the client asserted for itself.
+#[test]
+fn a_different_account_on_the_same_identity_is_not_an_op() {
+    let (mut state, handle) = host_session();
+    let pid = PlayerId(1);
+    state.set_ops(
+        OpsList::from_toml(&format!("ops = [{{ id = \"{}\" }}]", account(7).account_id)).unwrap(),
+    );
+    // Same save-record identity, a different account.
+    join_as(&mut state, &handle, pid, 7, Some(account(8)));
+
+    handle.deliver(Inbound::Request {
+        player: pid,
+        msg: ClientMessage::Chat("/give bread 5".to_string()),
+    });
+    state.pump_network(1.0 / 60.0);
+
+    assert!(
+        !handle
+            .lock()
+            .messages_to(pid)
+            .iter()
+            .any(|m| matches!(m, ServerMessage::GrantItems { .. })),
+    );
+}
+
+/// The username on the wire is the one from the verified ticket — not
+/// something the host made up, and not something the client typed.
+#[test]
+fn a_joining_player_is_announced_under_their_verified_username() {
+    let (mut state, handle) = host_session();
+    let pid = PlayerId(1);
+    join_as(
+        &mut state,
+        &handle,
+        pid,
+        42,
+        Some(wyven_auth::AccountIdentity {
+            account_id: uuid::Uuid::from_u128(42),
+            username: "gustav".to_string(),
+        }),
+    );
+
+    let net = handle.lock();
+    assert!(
+        net.broadcasts().iter().any(|m| matches!(
+            m,
+            ServerMessage::PlayerJoined { id, name } if *id == pid && name == "gustav"
+        )),
+        "expected a join announcing 'gustav', got {:?}",
+        net.broadcasts()
+    );
+}
+
+/// A rejoining player brings a new `PlayerId` but the same account, which
+/// is exactly why the ops list is keyed by account rather than by session.
+#[test]
+fn authorization_follows_the_account_not_the_player_id() {
+    let (mut state, handle) = host_session();
+    let identity = 77;
+    state.set_ops(
+        OpsList::from_toml(&format!(
+            "ops = [{{ id = \"{}\" }}]",
+            account(u128::from(identity)).account_id
+        ))
+        .unwrap(),
+    );
+    // Same person, a different session id than last time.
+    join(&mut state, &handle, PlayerId(3), identity);
+
+    handle.deliver(Inbound::Request {
+        player: PlayerId(3),
+        msg: ClientMessage::Chat("/give bread".to_string()),
+    });
+    state.pump_network(1.0 / 60.0);
+
+    assert!(
+        handle
+            .lock()
+            .messages_to(PlayerId(3))
+            .iter()
+            .any(|m| matches!(m, ServerMessage::GrantItems { .. })),
+    );
+}
+
+#[test]
+fn a_plain_message_is_shown_locally_and_relayed_to_everyone() {
+    let (mut state, handle) = host_session();
+    let pid = PlayerId(1);
+    join(&mut state, &handle, pid, 1);
+
+    handle.deliver(Inbound::Request {
+        player: pid,
+        msg: ClientMessage::Chat("hello everyone".to_string()),
+    });
+    state.pump_network(1.0 / 60.0);
+
+    assert!(
+        state
+            .chat
+            .log
+            .lines()
+            .any(|l| l.text.contains("hello everyone")),
+        "the host sees it — a broadcast never loops back"
+    );
+    assert!(
+        handle.lock().broadcasts().iter().any(|m| matches!(
+            m,
+            ServerMessage::Chat { from: Some(id), text, .. }
+                if *id == pid && text == "hello everyone"
+        )),
+        "and so does everyone else"
+    );
+}
+
+/// The client half of the authorization property: it must not evaluate the
+/// command itself, even though `chat::parse` is right there.
+#[test]
+fn a_client_asks_the_host_rather_than_running_the_command_itself() {
+    let (mut state, handle) = client_session(PlayerId(2));
+    state.submit_chat("/give bread 64".to_string());
+
+    let net = handle.lock();
+    assert!(
+        net.requests()
+            .iter()
+            .any(|m| matches!(m, ClientMessage::Chat(text) if text == "/give bread 64")),
+        "the raw line goes to the host, got {:?}",
+        net.requests()
+    );
+    drop(net);
+    assert_eq!(count_of(&state, "bread"), 0, "nothing happens locally");
+    assert!(
+        state.chat.log.is_empty(),
+        "not even an echo: the host's reply is the only copy"
+    );
+}
+
+/// The receiving end of a `/give` run on the host's behalf.
+#[test]
+fn a_client_applies_the_items_the_host_grants_it() {
+    let local = PlayerId(2);
+    let (mut state, handle) = client_session(local);
+    let bread = state.content.rules.items.find("bread").unwrap();
+
+    handle.deliver(Inbound::Update(ServerMessage::GrantItems {
+        to: local,
+        stacks: vec![NetItemStack {
+            item: bread.0,
+            count: 7,
+            durability: None,
+        }],
+    }));
+    state.pump_network(1.0 / 60.0);
+
+    assert_eq!(state.sim.inventory.count_of(bread), 7);
+}
+
+/// A grant addressed to someone else arrives on the wire only by accident,
+/// but must never land in our inventory if it does.
+#[test]
+fn a_client_ignores_a_grant_addressed_to_someone_else() {
+    let (mut state, handle) = client_session(PlayerId(2));
+    let bread = state.content.rules.items.find("bread").unwrap();
+
+    handle.deliver(Inbound::Update(ServerMessage::GrantItems {
+        to: PlayerId(9),
+        stacks: vec![NetItemStack {
+            item: bread.0,
+            count: 7,
+            durability: None,
+        }],
+    }));
+    state.pump_network(1.0 / 60.0);
+
+    assert_eq!(state.sim.inventory.count_of(bread), 0);
+}
+
+/// The content hash gates divergent builds, but a malformed message still
+/// must not index past the registry and panic.
+#[test]
+fn an_unknown_granted_item_id_is_skipped_not_fatal() {
+    let local = PlayerId(2);
+    let (mut state, handle) = client_session(local);
+
+    handle.deliver(Inbound::Update(ServerMessage::GrantItems {
+        to: local,
+        stacks: vec![NetItemStack {
+            item: u16::MAX,
+            count: 4,
+            durability: None,
+        }],
+    }));
+    state.pump_network(1.0 / 60.0);
+
+    assert!(state.sim.inventory.slots().iter().all(Option::is_none));
+}
+
+#[test]
+fn help_lists_more_for_an_op_than_for_everyone_else() {
+    let mut state = InGameState::new(GameContent::builtin(), 5, GameMode::Creative);
+    state.submit_chat("/help".to_string());
+    assert!(
+        state.chat.log.lines().any(|l| l.text.contains("/give")),
+        "the local player of a singleplayer world is always an op"
+    );
+}
+
+#[test]
+fn an_unparseable_command_reports_itself_without_side_effects() {
+    let mut state = InGameState::new(GameContent::builtin(), 5, GameMode::Creative);
+    state.submit_chat("/weather clear".to_string());
+    let last = state.chat.log.lines().next_back().expect("an error line");
+    assert_eq!(last.kind, ChatKind::Error);
+    assert!(last.text.contains("unknown command"), "got {:?}", last.text);
+}

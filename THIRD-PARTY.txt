@@ -12,7 +12,7 @@ Listed for every platform this is built for, so one file covers every release
 artifact. A crate with no text below vendors no license file of its own; its
 declared license and source are named instead.
 
-507 components.
+508 components.
 
 SUMMARY
 ------------------------------------------------------------------------------
@@ -499,6 +499,7 @@ SUMMARY
   wit-bindgen 0.57.1 — Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
   writeable 0.6.4 — Unicode-3.0
   wyven-audio 0.1.0 — MIT OR Apache-2.0
+  wyven-ecs 0.1.0 — MIT OR Apache-2.0
   x11-dl 2.21.0 — MIT
   x11rb 0.13.2 — MIT OR Apache-2.0
   x11rb-protocol 0.13.2 — MIT OR Apache-2.0
@@ -68905,6 +68906,16 @@ ICU 1.8.1 to ICU 57.1 © 1995-2016 International Business Machines Corporation a
 
 ------------------------------------------------------------------------------
 wyven-audio 0.1.0
+License: MIT OR Apache-2.0
+Source:  https://github.com/gustaavik/wyvencraft
+------------------------------------------------------------------------------
+
+No license file is vendored with this crate. Its declared license is
+MIT OR Apache-2.0; see the source repository above for the full text.
+
+
+------------------------------------------------------------------------------
+wyven-ecs 0.1.0
 License: MIT OR Apache-2.0
 Source:  https://github.com/gustaavik/wyvencraft
 ------------------------------------------------------------------------------

@@ -1,0 +1,157 @@
+# Structures: shrines and boss altars, stamped into the terrain as it
+# generates.
+#
+# ⚠ Like worldgen.toml, structures are regenerated from the world seed —
+# editing this file moves, reshapes or removes structures in EXISTING worlds'
+# unexplored terrain. Unknown block, biome or structure names reject the whole
+# file (the game falls back to its builtin copy).
+#
+# The progression loop (Valheim style): every biome has SHRINES scattered
+# through it; using a shrine's wayrune reveals where that biome's BOSS ALTAR
+# stands (a compass marker for everyone on the server). At the altar, an
+# offering crafted from the biome's materials summons its boss.
+#
+# Fields:
+#   id           the name other files use (a shrine's `reveals`, /locate)
+#   biome        a [[biome]] id from worldgen.toml; instances only appear there
+#   placement    the world is cut into `grid` × `grid` cells, each holding at
+#                most one instance, rolled at `chance_per_mille`. The site is
+#                jittered inside its cell, never across the edge.
+#   max_slope    largest height difference across the footprint a site may
+#                have (default 4); steeper candidates are skipped
+#   above_sea    refuse sites at or below sea level (default true)
+#   reveals      the structure a player is pointed to on using this one
+#   guarantee    { within = N }: if no instance landed within N blocks of
+#                spawn, one is placed there anyway, so every world has one
+#   arena        { radius, floor, fill, clearance }: level and clear a disc
+#                around the structure — room to fight a boss in
+#   [structure.template]
+#     palette    one character → one block id ("air" forces a void). A space
+#                is not in the palette: it always means "leave the terrain".
+#     layers     bottom to top; each is a list of rows (z) of characters (x).
+#                The footprint must be odd on both axes (it has a centre, the
+#                anchor), and every layer the same size.
+#     floor      which layer sits at ground level (default 0)
+#     foundation fills the gap under the lowest layer down to the ground, so
+#                a structure on a slope stands on a plinth instead of floating
+
+# ---- Meadows ----------------------------------------------------------------
+
+# A ring of mossy pillars around a wayrune. Common, and one is always near
+# spawn so a new player finds the loop before they find the boss.
+[[structure]]
+id = "meadows_shrine"
+biome = "meadows"
+placement = { grid = 256, chance_per_mille = 650 }
+reveals = "meadows_altar"
+guarantee = { within = 250 }
+
+[structure.template]
+palette = { "#" = "mossy_cobblestone", "c" = "cobblestone", "R" = "wayrune", "." = "air" }
+foundation = "cobblestone"
+layers = [
+    [
+        " ##### ",
+        "#######",
+        "#######",
+        "#######",
+        "#######",
+        "#######",
+        " ##### ",
+    ],
+    [
+        " ..... ",
+        ".c...c.",
+        ".......",
+        "...R...",
+        ".......",
+        ".c...c.",
+        " ..... ",
+    ],
+    [
+        " ..... ",
+        ".c...c.",
+        ".......",
+        ".......",
+        ".......",
+        ".c...c.",
+        " ..... ",
+    ],
+    [
+        " ..... ",
+        ".#...#.",
+        ".......",
+        ".......",
+        ".......",
+        ".#...#.",
+        " ..... ",
+    ],
+    [
+        "  ...  ",
+        " ..... ",
+        ".......",
+        ".......",
+        ".......",
+        " ..... ",
+        "  ...  ",
+    ],
+]
+
+# The Elder Stag's altar: eight standing stones around the altar block, in a
+# levelled clearing wide enough to fight in.
+[[structure]]
+id = "meadows_altar"
+biome = "meadows"
+placement = { grid = 512, chance_per_mille = 600 }
+guarantee = { within = 500 }
+arena = { radius = 14, floor = "grass", fill = "dirt", clearance = 16 }
+
+[structure.template]
+palette = { "#" = "mossy_cobblestone", "c" = "cobblestone", "A" = "elder_altar", "." = "air" }
+foundation = "cobblestone"
+layers = [
+    [
+        "  #####  ",
+        " ####### ",
+        "###ccc###",
+        "##ccccc##",
+        "##ccccc##",
+        "##ccccc##",
+        "###ccc###",
+        " ####### ",
+        "  #####  ",
+    ],
+    [
+        "  #...#  ",
+        " ....... ",
+        "#.......#",
+        ".........",
+        "....A....",
+        ".........",
+        "#.......#",
+        " ....... ",
+        "  #...#  ",
+    ],
+    [
+        "  #...#  ",
+        " ....... ",
+        "#.......#",
+        ".........",
+        ".........",
+        ".........",
+        "#.......#",
+        " ....... ",
+        "  #...#  ",
+    ],
+    [
+        "  c...c  ",
+        " ....... ",
+        "c.......c",
+        ".........",
+        ".........",
+        ".........",
+        "c.......c",
+        " ....... ",
+        "  c...c  ",
+    ],
+]
