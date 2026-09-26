@@ -1,4 +1,4 @@
-//! Tests for [`super`]: `net.rs`.
+//! Tests for [`super`]: the in-game screen's networking.
 
 use std::net::UdpSocket;
 use std::sync::Arc;
@@ -7,12 +7,14 @@ use std::time::Instant;
 use wyven_auth::{AccountState, AuthClient, FakeAuthClient, KeyCache};
 
 use super::*;
+use crate::application::protocol::NetItemStack;
 use crate::application::session::{FakeHandle, FakeSession};
 use crate::domain::core::GameMode;
-use crate::domain::inventory::ARMOR_SIZE;
+use crate::domain::inventory::{ARMOR_SIZE, ARMOR_START, Inventory};
 use crate::domain::world::block::blocks;
 use crate::infrastructure::net::status::{NetStatusProbe, StatusOutcome, StatusProbe};
 use crate::infrastructure::net::{Client, Host, TicketJoin, host_config};
+use crate::infrastructure::save::{ItemStackData, PlayerData};
 use crate::presentation::content::GameContent;
 
 /// A client reports its slots and which one it has selected, and that is

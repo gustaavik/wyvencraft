@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod mapping;
+
 pub use crate::domain::chat::ChatKind;
 use crate::domain::core::{BlockId, BlockPos, GameMode};
 use crate::domain::inventory::ARMOR_SIZE;

@@ -163,8 +163,8 @@ impl InGameState {
 mod tests {
     use glam::Vec3;
 
-    use super::net::{recipes_from_wire, recipes_to_wire};
     use super::*;
+    use crate::application::protocol::mapping::{recipes_from_wire, recipes_to_wire};
     use crate::domain::core::BlockPos;
     use crate::domain::core::GameMode;
     use crate::domain::inventory::ItemRegistry;

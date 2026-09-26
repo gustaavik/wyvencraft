@@ -21,6 +21,7 @@
 //! an existing save.
 
 pub mod data;
+pub mod records;
 pub mod repository;
 
 use std::fs;

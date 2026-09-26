@@ -6,13 +6,13 @@ use std::sync::Arc;
 use glam::Vec3;
 
 use super::crafting::CraftingState;
-use super::net::recipes_from_wire;
 use super::persistence::Persistence;
 use super::view::SceneCache;
 use super::{DOUBLE_TAP_WINDOW, InGameState};
 use crate::application::boot_plan;
 use crate::application::networking::Networking;
 use crate::application::peers::Peers;
+use crate::application::protocol::mapping::recipes_from_wire;
 use crate::application::session::Session;
 use crate::application::simulation::{Simulation, SimulationStart};
 use crate::domain::chat::{ChatState, OpsList};

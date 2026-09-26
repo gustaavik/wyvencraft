@@ -7,7 +7,7 @@
 
 use super::InGameState;
 use super::block_use::describe_way;
-use super::net::inventory_to_wire;
+use crate::application::protocol::mapping::inventory_to_wire;
 use crate::domain::core::BlockPos;
 use crate::domain::core::ident::title_case;
 use crate::domain::inventory::{ARMOR_START, ItemStack};

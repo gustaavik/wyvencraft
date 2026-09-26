@@ -4,11 +4,11 @@
 use glam::Vec3;
 
 use super::InGameState;
-use super::net::record_remote;
 use crate::application::ecs::systems::players;
 use crate::domain::inventory::crafting::KnownItems;
 use crate::domain::inventory::{ItemId, ItemStack, TOTAL_SLOTS};
 use crate::infrastructure::net::{PlayerId, PlayerRestore};
+use crate::infrastructure::save::records::record_remote;
 use crate::infrastructure::save::{DiscoveryData, MobsData, PlayerData, WorldData, WorldSnapshot};
 
 impl InGameState {
