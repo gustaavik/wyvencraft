@@ -4903,6 +4903,7 @@ dependencies = [
  "wyven-audio",
  "wyven-auth",
  "wyven-core",
+ "wyven-ecs",
  "wyven-input",
  "wyven-model",
  "wyven-net",

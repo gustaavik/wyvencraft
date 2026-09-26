@@ -27,7 +27,6 @@ use crate::domain::chat::{
     self, ChatKind, ChatState, CommandContext, Invocation, ItemName, Permission, Position,
 };
 use crate::domain::core::BlockPos;
-use crate::domain::entity::DroppedItem;
 use crate::domain::inventory::{ItemId, ItemRegistry, ItemStack};
 use crate::domain::progression::WorldProgression;
 use crate::infrastructure::net::{
@@ -277,15 +276,10 @@ impl InGameState {
         for stack in stacks {
             let leftover = self.inventory.add(stack, &self.content.rules.items);
             if leftover > 0 {
-                self.drops.push(DroppedItem::thrown(
-                    ItemStack {
-                        count: leftover,
-                        ..stack
-                    },
-                    self.player.eye_position(),
-                    self.player.look_direction(),
-                    self.content.rules.entities.dropped_item(),
-                ));
+                self.throw(ItemStack {
+                    count: leftover,
+                    ..stack
+                });
             }
         }
     }
@@ -654,8 +648,8 @@ mod tests {
         assert_eq!(count_of(&state, "bread"), 0, "no room for it");
         let bread = state.content.rules.items.find("bread").unwrap();
         let dropped: u32 = state
-            .drops
-            .iter()
+            .drops()
+            .map(|(d, _)| d)
             .filter(|d| d.stack.item == bread)
             .map(|d| u32::from(d.stack.count))
             .sum();

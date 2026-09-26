@@ -11,7 +11,7 @@ use super::{HOST_PLAYER_ID, InGameState};
 use crate::domain::core::{Aabb, BlockPos, Rng64};
 use crate::domain::entity::kind::VisualSpec;
 use crate::domain::entity::{
-    AnimationState, Arrow, Mob, MobAction, MobId, Motion, Perception, PlayerSighting,
+    AnimationState, Mob, MobAction, MobId, Motion, Perception, PlayerSighting,
 };
 use crate::domain::inventory::{ItemStack, Tool};
 use crate::domain::world::Target;
@@ -373,9 +373,14 @@ impl InGameState {
                 gravity,
                 lifetime,
             });
-            self.mobs
-                .arrows
-                .push(Arrow::new(origin, velocity, damage, gravity, lifetime));
+            crate::application::ecs::spawn::arrow(
+                &mut self.ecs,
+                origin,
+                velocity,
+                damage,
+                gravity,
+                lifetime,
+            );
         }
 
         for (target, damage) in melee_hits {
@@ -455,13 +460,13 @@ impl InGameState {
                 (count as u8).min(self.content.rules.items.max_stack(item)),
             );
             let angle = self.view.elapsed * 9.73 + rng.range_f32(0.0, std::f32::consts::TAU);
-            self.drops
-                .push(crate::domain::entity::DroppedItem::block_drop(
-                    stack,
-                    block,
-                    angle,
-                    self.content.rules.entities.dropped_item(),
-                ));
+            let drop = crate::domain::entity::ItemDrop::block_drop(
+                stack,
+                block,
+                angle,
+                self.content.rules.entities.dropped_item(),
+            );
+            self.spawn_drop(drop);
         }
     }
 
@@ -569,23 +574,19 @@ impl InGameState {
             Vec::new()
         };
 
-        let mut hits: Vec<(Option<PlayerId>, f32)> = Vec::new();
+        // The local player first: where boxes overlap, it takes the hit.
+        let targets: Vec<(Option<PlayerId>, Aabb)> = local_box
+            .map(|b| (None, b))
+            .into_iter()
+            .chain(remote_boxes.into_iter().map(|(id, b)| (Some(id), b)))
+            .collect();
         let world = &self.world;
-        self.mobs.arrows.retain_mut(|arrow| {
-            if !arrow.update(dt, |p| world.is_solid_for_collision(p)) {
-                return false;
-            }
-            let hitbox = arrow.aabb();
-            if local_box.is_some_and(|b| b.intersects(hitbox)) {
-                hits.push((None, arrow.damage));
-                return false;
-            }
-            if let Some((id, _)) = remote_boxes.iter().find(|(_, b)| b.intersects(hitbox)) {
-                hits.push((Some(*id), arrow.damage));
-                return false;
-            }
-            true
-        });
+        let hits = crate::application::ecs::systems::projectiles::fly(
+            &mut self.ecs,
+            dt,
+            |p| world.is_solid_for_collision(p),
+            &targets,
+        );
         for (target, damage) in hits {
             match target {
                 None => self.damage_local_player(damage),

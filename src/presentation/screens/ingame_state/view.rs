@@ -21,10 +21,11 @@ use glam::{Mat4, Vec3};
 
 use super::mobs::{RemoteMob, mob_mesh};
 use super::{INSPECT_MODEL_FROM, OUTLINE_COLOR, REMOTE_MAX_SPEED, THIRD_PERSON_DISTANCE};
+use crate::application::ecs::components::{Body, ItemDrop, Projectile, Transform, Velocity};
 use crate::domain::core::{Aabb, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, ChunkPos, DayCycle};
 use crate::domain::entity::camera::Shot;
 use crate::domain::entity::kind::{EntityRegistry, VisualSpec};
-use crate::domain::entity::{AnimationState, Arrow, DroppedItem, Mob, Motion, Player, camera};
+use crate::domain::entity::{AnimationState, Mob, Motion, Player, camera};
 use crate::domain::inventory::{Inventory, ItemId, Placeable};
 use crate::domain::world::World;
 use crate::domain::world::meshing::{
@@ -52,6 +53,26 @@ use wyven_voxel::FaceTextures;
 struct RemoteAnim {
     anim: AnimationState,
     last_pos: Vec3,
+}
+
+/// A dropped item, as the view needs it: what it is and where to draw it.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct DropSprite {
+    pub item: ItemId,
+    /// Centre of the drawn box, bob and ground lift included.
+    pub center: Vec3,
+    /// Edge length of the drawn box.
+    pub size: f32,
+    /// Spin about Y.
+    pub yaw: f32,
+}
+
+/// An arrow in flight, as the view needs it.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ArrowSprite {
+    pub position: Vec3,
+    pub yaw: f32,
+    pub size: f32,
 }
 
 /// Everything the view needs to draw an item: the parsed models and which one
@@ -846,12 +867,12 @@ impl SceneCache {
     pub fn update_arrows_mesh(
         &mut self,
         ctx: &Arc<RenderContext>,
-        arrows: &[Arrow],
+        arrows: impl IntoIterator<Item = ArrowSprite>,
         shaft: FaceTextures,
     ) {
         let mut mesh = CpuMesh::new();
         for arrow in arrows {
-            push_item_cube(&mut mesh, arrow.position, 0.15, arrow.yaw(), &shaft);
+            push_item_cube(&mut mesh, arrow.position, arrow.size, arrow.yaw, &shaft);
         }
         self.arrows_mesh = GpuMesh::upload(&ctx.memory_allocator, &mesh).ok().flatten();
     }
@@ -861,14 +882,14 @@ impl SceneCache {
     /// Rebuild the combined drop meshes (opaque + transparent passes). Drops are
     /// few and tiny, so a per-frame rebuild stays cheap, like remote players.
     ///
-    /// Takes an iterator rather than a slice so the item placement editor can
-    /// chain a still preview drop onto the real ones without cloning them — and
-    /// so that preview goes down this exact path rather than an approximation of
-    /// it.
-    pub fn update_drops_mesh<'a>(
+    /// Takes an iterator of plain [`DropSprite`]s rather than entities, so the
+    /// view never learns where drops are stored — and so the item placement
+    /// editor can chain a still preview drop onto the real ones, down this exact
+    /// path rather than an approximation of it.
+    pub fn update_drops_mesh(
         &mut self,
         ctx: &Arc<RenderContext>,
-        drops: impl IntoIterator<Item = &'a DroppedItem>,
+        drops: impl IntoIterator<Item = DropSprite>,
         content: ModelContent<'_>,
     ) {
         let (shape, tiles) = (content.shape, content.tiles);
@@ -880,42 +901,32 @@ impl SceneCache {
         // mesh per model however many drops share it.
         let mut by_model: HashMap<ModelId, CpuMesh> = HashMap::new();
         for item in drops {
-            if let Some(model) = content.of(item.stack.item)
+            if let Some(model) = content.of(item.item)
                 && let Some(loaded) = content.models.get(model.id)
             {
-                let transform = model_mesh::anchor(item.render_center(), item.spin_yaw(), 0.0)
-                    * content.local(item.stack.item, model, DisplayContext::Ground);
+                let transform = model_mesh::anchor(item.center, item.yaw, 0.0)
+                    * content.local(item.item, model, DisplayContext::Ground);
                 let mesh = loaded.mesh.bake(transform);
                 let entry = by_model.entry(model.id).or_default();
                 entry.push_indexed(mesh.vertices, mesh.indices);
                 continue;
             }
-            let (shape, is_transparent) = shape(item.stack.item);
+            let (shape, is_transparent) = shape(item.item);
             let target = if is_transparent {
                 &mut transparent
             } else {
                 &mut opaque
             };
             match shape {
-                ItemShape::Cube(faces) => push_item_cube(
-                    target,
-                    item.render_center(),
-                    item.render_size(),
-                    item.spin_yaw(),
-                    &faces,
-                ),
+                ItemShape::Cube(faces) => {
+                    push_item_cube(target, item.center, item.size, item.yaw, &faces)
+                }
                 ItemShape::Sprite(tile) => {
                     let sprite = self
                         .item_sprites
                         .entry(tile)
                         .or_insert_with(|| ItemSprite::new(tile, tiles.art(tile)));
-                    push_item_sprite(
-                        target,
-                        sprite,
-                        item.render_center(),
-                        item.render_size(),
-                        item.spin_yaw(),
-                    );
+                    push_item_sprite(target, sprite, item.center, item.size, item.yaw);
                 }
             }
         }
@@ -1331,12 +1342,28 @@ impl super::InGameState {
         // The editor's ground preview, when it has one, rides along with the
         // real drops so it is drawn by exactly the same code.
         let preview = self.editor_ground_preview();
+        let drops = self.ecs.query::<(&ItemDrop, &Transform, &Body)>().map(
+            |(_, (drop, transform, body))| DropSprite {
+                item: drop.stack.item,
+                center: drop.render_center(transform.position, &body.0),
+                size: drop.render_size(&body.0),
+                yaw: drop.spin_yaw(),
+            },
+        );
         self.view
-            .update_drops_mesh(ctx, self.drops.iter().chain(preview.iter()), content);
+            .update_drops_mesh(ctx, drops.chain(preview), content);
         self.view
             .update_mob_meshes(ctx, &self.mobs.live, &mut self.mobs.remote, models, dt);
+        let arrows = self
+            .ecs
+            .query::<(&Projectile, &Transform, &Velocity)>()
+            .map(|(_, (_, transform, velocity))| ArrowSprite {
+                position: transform.position,
+                yaw: Projectile::yaw(velocity.0),
+                size: Projectile::SIZE,
+            });
         self.view
-            .update_arrows_mesh(ctx, &self.mobs.arrows, loaded.visuals.arrow_faces);
+            .update_arrows_mesh(ctx, arrows, loaded.visuals.arrow_faces);
 
         // Animated humanoids. The local player's legs follow their actual
         // horizontal speed even with the inventory open: physics keeps running

@@ -13,7 +13,7 @@ use super::InGameState;
 use super::block_use::UseAt;
 use crate::domain::core::{BlockPos, Rng64};
 use crate::domain::entity::boss::{AttackEffect, BossParams};
-use crate::domain::entity::{Arrow, Mob, MobId};
+use crate::domain::entity::{Mob, MobId};
 use crate::domain::inventory::ItemStack;
 use crate::infrastructure::net::{ChatKind, PlayerId, ServerMessage};
 use crate::presentation::ui::boss_bar::BossBarView;
@@ -232,9 +232,14 @@ impl InGameState {
                         gravity,
                         lifetime,
                     });
-                    self.mobs
-                        .arrows
-                        .push(Arrow::new(origin, velocity, damage, gravity, lifetime));
+                    crate::application::ecs::spawn::arrow(
+                        &mut self.ecs,
+                        origin,
+                        velocity,
+                        damage,
+                        gravity,
+                        lifetime,
+                    );
                 }
             }
             AttackEffect::Summon { entity, count, cap } => {
@@ -597,8 +602,8 @@ mod tests {
         assert!(state.mobs.fight.is_none());
         let antler = state.content.rules.items.find("elder_antler").unwrap();
         let dropped: u32 = state
-            .drops
-            .iter()
+            .drops()
+            .map(|(d, _)| d)
             .filter(|d| d.stack.item == antler)
             .map(|d| u32::from(d.stack.count))
             .sum();

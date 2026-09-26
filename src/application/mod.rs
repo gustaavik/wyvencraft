@@ -6,6 +6,7 @@
 
 pub mod boot_plan;
 pub mod content;
+pub mod ecs;
 pub mod protocol;
 pub mod session;
 pub mod sync;

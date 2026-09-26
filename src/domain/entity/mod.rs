@@ -16,9 +16,9 @@ pub mod spawning;
 
 pub use animation::{AnimationState, Motion, Pose};
 pub use brain::{Perception, PlayerSighting};
-pub use dropped_item::DroppedItem;
+pub use dropped_item::{ItemDrop, Launch};
 pub use kind::{EntityKind, EntityRegistry};
 pub use mob::{Mob, MobAction, MobId};
 pub use player::{MovementInput, Perspective, Player};
-pub use projectile::Arrow;
+pub use projectile::Projectile;
 pub use spawning::{SpawnConfig, SpawnRequest, Spawner};

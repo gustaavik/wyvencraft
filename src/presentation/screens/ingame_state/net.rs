@@ -22,7 +22,6 @@ use super::{
 };
 use crate::application::session::Inbound;
 use crate::domain::core::{BlockId, BlockPos};
-use crate::domain::entity::Arrow;
 use crate::domain::inventory::crafting::{KnownItems, NamedRecipe, resolve_named};
 use crate::domain::inventory::{ARMOR_START, Inventory, ItemId, ItemRegistry, RecipeBook, Tool};
 use crate::infrastructure::net::{
@@ -537,13 +536,14 @@ impl InGameState {
             } => {
                 // Visual-only on clients: damage is host-side, so the local
                 // copy carries none.
-                self.mobs.arrows.push(Arrow::new(
+                crate::application::ecs::spawn::arrow(
+                    &mut self.ecs,
                     Vec3::from_array(position),
                     Vec3::from_array(velocity),
                     0.0,
                     gravity,
                     lifetime,
-                ));
+                );
             }
             ServerMessage::PlayerDamaged { id, amount } if id == local_id => {
                 self.damage_local_player(amount);

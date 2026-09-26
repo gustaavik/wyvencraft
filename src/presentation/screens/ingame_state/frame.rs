@@ -526,8 +526,10 @@ impl GameState<Wyvencraft> for InGameState {
                 format!(
                     "mobs: {} live / {} arrows / {} drops",
                     self.mobs.live.len() + self.mobs.remote.len(),
-                    self.mobs.arrows.len(),
-                    self.drops.len()
+                    self.ecs
+                        .count::<crate::application::ecs::components::Projectile>(),
+                    self.ecs
+                        .count::<crate::application::ecs::components::ItemDrop>()
                 ),
                 format!("net: {}", self.net_status()),
                 format!("time: {}", format_time_of_day(self.day_cycle.time_of_day())),

@@ -105,6 +105,7 @@ wyven-input.workspace = true
 wyven-auth.workspace = true
 wyven-app.workspace = true
 wyven-audio.workspace = true
+wyven-ecs.workspace = true
 
 vulkano.workspace = true
 vulkano-shaders.workspace = true

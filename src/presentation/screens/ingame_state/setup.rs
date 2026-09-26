@@ -13,6 +13,7 @@ use super::persistence::Persistence;
 use super::view::SceneCache;
 use super::{DOUBLE_TAP_WINDOW, InGameState, SPAWN_RADIUS};
 use crate::application::boot_plan;
+use crate::application::ecs::Ecs;
 use crate::application::session::Session;
 use crate::domain::chat::{ChatState, OpsList};
 use crate::domain::core::{BlockPos, CHUNK_HEIGHT, ChunkPos, DayCycle, GameMode};
@@ -286,7 +287,7 @@ impl InGameState {
             breaking: None,
             tier_hint: None,
             mobs: MobWorld::new(seed ^ 0x5EED_0F5B_A3B1_E5B0),
-            drops: Vec::new(),
+            ecs: Ecs::new(),
             dead: false,
             jump_tap_timer: DOUBLE_TAP_WINDOW * 2.0,
             physics_accum: 0.0,

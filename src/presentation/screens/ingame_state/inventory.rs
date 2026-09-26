@@ -431,7 +431,7 @@ mod interaction_tests {
 
         state.drop_one(SLOT);
         assert_eq!(state.inventory.slot(SLOT).expect("the rest").count, 4);
-        assert_eq!(state.drops.len(), 1);
+        assert_eq!(state.drops().count(), 1);
     }
 
     /// The last item empties the slot rather than leaving a zero-count stack
@@ -453,9 +453,9 @@ mod interaction_tests {
 
         state.drop_one(SLOT);
         assert!(state.inventory.slot(SLOT).is_none(), "the slot empties");
-        assert_eq!(state.drops.len(), 1);
+        assert_eq!(state.drops().count(), 1);
         assert_eq!(
-            state.drops[0].stack.durability,
+            state.drops().next().unwrap().0.stack.durability,
             Some(7),
             "a dropped tool keeps its wear"
         );
@@ -465,18 +465,18 @@ mod interaction_tests {
     fn the_drop_key_on_an_empty_slot_does_nothing() {
         let mut state = state();
         state.drop_one(SLOT);
-        assert!(state.drops.is_empty());
+        assert!(state.drops().next().is_none());
     }
 
     #[test]
     fn dragging_a_slot_out_of_the_panel_throws_the_whole_stack() {
         let mut state = state();
         stocked(&mut state, SLOT, "stone", 12);
-        assert!(state.drops.is_empty());
+        assert!(state.drops().next().is_none());
 
         state.drop_slot(SLOT);
         assert!(state.inventory.slot(SLOT).is_none(), "the slot empties");
-        assert_eq!(state.drops.len(), 1, "and it lands in the world");
+        assert_eq!(state.drops().count(), 1, "and it lands in the world");
     }
 
     #[test]
@@ -487,11 +487,11 @@ mod interaction_tests {
         state.held = Some(ItemStack::new(stone, 3));
         state.drop_held(false);
         assert_eq!(state.held.expect("two left").count, 2);
-        assert_eq!(state.drops.len(), 1);
+        assert_eq!(state.drops().count(), 1);
 
         state.drop_held(true);
         assert!(state.held.is_none(), "the cursor empties");
-        assert_eq!(state.drops.len(), 2);
+        assert_eq!(state.drops().count(), 2);
     }
 
     /// Nothing on the cursor means nothing to throw — a click on the world
@@ -501,6 +501,6 @@ mod interaction_tests {
         let mut state = state();
         state.drop_held(true);
         state.drop_held(false);
-        assert!(state.drops.is_empty());
+        assert!(state.drops().next().is_none());
     }
 }

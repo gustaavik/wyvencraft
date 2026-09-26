@@ -103,6 +103,7 @@ pub use wyven_assets;
 pub use wyven_audio;
 pub use wyven_auth;
 pub use wyven_core;
+pub use wyven_ecs;
 pub use wyven_input;
 pub use wyven_model;
 pub use wyven_net;

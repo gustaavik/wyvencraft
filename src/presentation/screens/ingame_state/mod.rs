@@ -38,10 +38,11 @@ use std::sync::Arc;
 
 use glam::Vec3;
 
+use crate::application::ecs::Ecs;
 use crate::application::session::Session;
 use crate::domain::chat::{ChatState, OpsList};
 use crate::domain::core::{BlockPos, DayCycle};
-use crate::domain::entity::{Arrow, DroppedItem, Mob, Player, Spawner};
+use crate::domain::entity::{Mob, Player, Spawner};
 use crate::domain::inventory::{HeldLabel, Inventory, ItemStack, RecipeBook};
 use crate::domain::progression::WorldProgression;
 use crate::domain::world::structure::Structures;
@@ -105,7 +106,6 @@ struct MobWorld {
     spawner: Spawner,
     /// Mobs a client knows about only from the host's snapshots.
     remote: HashMap<u64, mobs::RemoteMob>,
-    arrows: Vec<Arrow>,
     /// The boss fight in progress, if one is (authority only).
     fight: Option<bosses::BossFight>,
     /// The boss attack being wound up, shown on the boss bar.
@@ -120,7 +120,6 @@ impl MobWorld {
             next_id: 0,
             spawner: Spawner::new(seed),
             remote: HashMap::new(),
-            arrows: Vec::new(),
             fight: None,
             telegraph: None,
         }
@@ -190,8 +189,8 @@ pub struct InGameState {
     /// The last block the player was told is too hard for their tool, so the
     /// hint is said once per block rather than every frame of digging.
     tier_hint: Option<BlockPos>,
-    /// Everything alive that is not a player: the mobs this peer simulates,
-    /// the ones a host told it about, and the arrows in flight.
+    /// Everything alive that is not a player: the mobs this peer simulates
+    /// and the ones a host told it about.
     ///
     /// Grouped because they are one concern with one lifetime — a mob spawns,
     /// shoots, dies and drops together, and nothing outside `mobs` and `view`
@@ -200,8 +199,9 @@ pub struct InGameState {
     /// replace one honest `&mut self` with six borrows threaded through every
     /// call — not less coupling, only less visible coupling.
     mobs: MobWorld,
-    /// Item drops lying in the world. Local-only: not synced over the network.
-    drops: Vec<DroppedItem>,
+    /// The session's entities: item drops lying in the world (local-only, never
+    /// synced) and arrows in flight. See [`crate::application::ecs`].
+    ecs: Ecs,
     /// True while the player is dead and awaiting respawn (control frozen).
     dead: bool,
     /// Time (s) since the last jump press, for creative double-tap-to-fly.
@@ -338,11 +338,11 @@ mod tests {
         }
         state.update_mobs(1.0 / 60.0);
         assert!(state.mobs.live.is_empty(), "cow should be dead and reaped");
-        assert!(!state.drops.is_empty(), "death should drop loot");
+        assert!(state.drops().next().is_some(), "death should drop loot");
         let raw_beef = state.content.rules.items.find("raw_beef").unwrap();
         let dropped: u32 = state
-            .drops
-            .iter()
+            .drops()
+            .map(|(d, _)| d)
             .filter(|d| d.stack.item == raw_beef)
             .map(|d| u32::from(d.stack.count))
             .sum();
@@ -383,8 +383,8 @@ mod tests {
             .find("red_mushroom")
             .expect("shipped item");
         let dropped: u32 = state
-            .drops
-            .iter()
+            .drops()
+            .map(|(d, _)| d)
             .filter(|d| d.stack.item == expected)
             .map(|d| u32::from(d.stack.count))
             .sum();
@@ -427,8 +427,8 @@ mod tests {
                 .find("oak_leaves")
                 .expect("shipped item");
             state
-                .drops
-                .iter()
+                .drops()
+                .map(|(d, _)| d)
                 .filter(|d| d.stack.item == leaves)
                 .map(|d| u32::from(d.stack.count))
                 .sum::<u32>()

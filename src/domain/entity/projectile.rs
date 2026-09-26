@@ -5,6 +5,9 @@
 //! Every peer simulates arrows it knows about (they're cheap and purely
 //! visual off the authority); only the authority tests player hits and
 //! applies damage, mirroring how mobs work.
+//!
+//! [`Projectile`] is the arrow apart from where it is; position and velocity
+//! are the shared ECS components and are passed in.
 
 use glam::Vec3;
 
@@ -15,9 +18,8 @@ const ARROW_SIZE: f32 = 0.15;
 
 /// An arrow in flight. Tuning comes from the firing kind's
 /// `[entity.mob.ranged]` params, copied in at launch.
-pub struct Arrow {
-    pub position: Vec3,
-    pub velocity: Vec3,
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Projectile {
     /// Damage on a player hit (applied by the authority only).
     pub damage: f32,
     gravity: f32,
@@ -25,11 +27,9 @@ pub struct Arrow {
     lifetime: f32,
 }
 
-impl Arrow {
-    pub fn new(position: Vec3, velocity: Vec3, damage: f32, gravity: f32, lifetime: f32) -> Self {
+impl Projectile {
+    pub fn new(damage: f32, gravity: f32, lifetime: f32) -> Self {
         Self {
-            position,
-            velocity,
             damage,
             gravity,
             age: 0.0,
@@ -37,30 +37,39 @@ impl Arrow {
         }
     }
 
-    /// Hit-test box around the arrow head.
-    pub fn aabb(&self) -> Aabb {
-        Aabb::from_center_size(self.position, Vec3::splat(ARROW_SIZE))
+    /// Hit-test box around the arrow head at `position`.
+    pub fn aabb(position: Vec3) -> Aabb {
+        Aabb::from_center_size(position, Vec3::splat(ARROW_SIZE))
     }
+
+    /// Edge length the arrow is drawn at.
+    pub const SIZE: f32 = ARROW_SIZE;
 
     /// Advance one step. Returns `false` when the arrow is spent — it flew
     /// into a solid block or outlived its lifetime — and should despawn.
-    pub fn update(&mut self, dt: f32, is_solid: impl Fn(BlockPos) -> bool) -> bool {
+    pub fn step(
+        &mut self,
+        position: &mut Vec3,
+        velocity: &mut Vec3,
+        dt: f32,
+        is_solid: impl Fn(BlockPos) -> bool,
+    ) -> bool {
         self.age += dt;
         if self.age >= self.lifetime {
             return false;
         }
-        self.velocity.y -= self.gravity * dt;
-        let next = self.position + self.velocity * dt;
+        velocity.y -= self.gravity * dt;
+        let next = *position + *velocity * dt;
         if is_solid(BlockPos::from_world(next)) {
             return false;
         }
-        self.position = next;
+        *position = next;
         true
     }
 
     /// Facing for rendering: yaw along the horizontal flight direction.
-    pub fn yaw(&self) -> f32 {
-        self.velocity.x.atan2(-self.velocity.z)
+    pub fn yaw(velocity: Vec3) -> f32 {
+        velocity.x.atan2(-velocity.z)
     }
 }
 
@@ -68,9 +77,27 @@ impl Arrow {
 mod tests {
     use super::*;
 
-    fn arrow(velocity: Vec3) -> Arrow {
+    /// An arrow and the two components it flies with.
+    struct Flight {
+        arrow: Projectile,
+        position: Vec3,
+        velocity: Vec3,
+    }
+
+    impl Flight {
+        fn update(&mut self, dt: f32, is_solid: impl Fn(BlockPos) -> bool) -> bool {
+            self.arrow
+                .step(&mut self.position, &mut self.velocity, dt, is_solid)
+        }
+    }
+
+    fn arrow(velocity: Vec3) -> Flight {
         // Skeleton-like tuning: 18 blocks/s, 20 blocks/s² drop, 8 s life.
-        Arrow::new(Vec3::new(0.0, 70.0, 0.0), velocity, 3.0, 20.0, 8.0)
+        Flight {
+            arrow: Projectile::new(3.0, 20.0, 8.0),
+            position: Vec3::new(0.0, 70.0, 0.0),
+            velocity,
+        }
     }
 
     #[test]

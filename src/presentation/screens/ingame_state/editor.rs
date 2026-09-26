@@ -8,7 +8,7 @@
 use glam::Vec3;
 
 use super::InGameState;
-use crate::domain::entity::{DroppedItem, Perspective};
+use crate::domain::entity::{ItemDrop, Perspective};
 use crate::infrastructure::net::ChatKind;
 use crate::presentation::content::ItemShape;
 use crate::presentation::editor::{EditorAction, FsStamps, PlacementKey};
@@ -75,7 +75,7 @@ impl InGameState {
     /// cannot otherwise see without tossing the item and chasing it. It goes
     /// down the *real* drops path in `refresh_view`, so what it shows is what a
     /// dropped item will look like, not an approximation of one.
-    pub(super) fn editor_ground_preview(&self) -> Option<DroppedItem> {
+    pub(super) fn editor_ground_preview(&self) -> Option<super::view::DropSprite> {
         if !self.editor.is_open() || self.editor.context() != DisplayContext::Ground {
             return None;
         }
@@ -88,11 +88,14 @@ impl InGameState {
         let look = self.player.look_direction();
         let at = eye + Vec3::new(look.x, 0.0, look.z).normalize_or_zero() * PREVIEW_DISTANCE
             - Vec3::Y * PREVIEW_DROP;
-        Some(DroppedItem::preview(
-            self.content.rules.items.full_stack(item),
-            at,
-            self.content.rules.entities.dropped_item(),
-        ))
+        let kind = self.content.rules.entities.dropped_item();
+        let preview = ItemDrop::preview(self.content.rules.items.full_stack(item), kind);
+        Some(super::view::DropSprite {
+            item,
+            center: preview.render_center(at, &kind.physics),
+            size: preview.render_size(&kind.physics),
+            yaw: preview.spin_yaw(),
+        })
     }
 
     /// Point the camera at whatever is being edited.
