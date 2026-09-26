@@ -317,101 +317,25 @@ impl GameState<Wyvencraft> for ConnectingState {
             self.status = "Entering the world...".to_string();
         }
 
-        // Wait for the Welcome message carrying the world seed + our id + mode
-        // + the host's crafting recipes + any saved state it remembers for us.
-        let mut welcome = None;
-        // Recorded rather than acted on: `fail` needs `&mut self`, and `client`
-        // is borrowed out of it for as long as this loop runs.
-        let mut mismatch = None;
-        for msg in client.receive() {
-            if let ServerMessage::Welcome {
-                seed,
-                your_id,
-                spawn,
-                time_of_day,
-                game_mode,
-                content_hash,
-                recipes,
-                restored,
-            } = msg
-            {
-                // Raw block/item ids cross the wire, so divergent content
-                // definitions would silently corrupt the session. Refuse.
-                if content_hash != ctx.shared.content.rules.hash() {
-                    log::warn!(
-                        "content mismatch: host {content_hash:#018x} vs ours {:#018x}; refusing to join",
-                        ctx.shared.content.rules.hash()
-                    );
-                    mismatch = Some((content_hash, ctx.shared.content.rules.hash()));
-                    break;
-                }
-                welcome = Some((
-                    seed,
-                    your_id,
-                    spawn,
-                    time_of_day,
-                    game_mode,
-                    recipes,
-                    restored,
-                ));
-            }
-        }
+        let ours = ctx.shared.content.rules.hash();
+        let outcome = read_welcome(client, ours);
         let _ = client.flush();
-
-        if let Some((theirs, ours)) = mismatch {
-            self.fail(
-                "This server is running different content.",
-                Some(format!(
-                    "Its blocks and items do not match yours (server {theirs:#018x}, you {ours:#018x}). Both sides have to be on the same version."
-                )),
-            );
-            return Transition::None;
-        }
-
-        if let Some((seed, your_id, spawn, time_of_day, game_mode, recipes, restored)) = welcome {
-            log::info!(
-                "connected; world seed {seed}, player id {}, spawn {spawn:?}, time {time_of_day:.3}, game_mode {}, saved state: {}",
-                your_id.0,
-                game_mode.label(),
-                if restored.is_some() {
-                    "restored"
-                } else {
-                    "none"
-                },
-            );
-            let client = self.client.take().expect("client present");
-            return Transition::Replace(Box::new(InGameState::new_client(
-                ctx.shared.content.clone(),
-                seed,
-                client,
-                your_id,
-                spawn,
-                time_of_day,
-                game_mode,
-                recipes,
-                restored,
-            )));
-        }
-
-        if self.elapsed > TIMEOUT_SECS {
-            if self.reached {
+        match outcome {
+            WelcomeOutcome::Mismatch { theirs } => {
                 self.fail(
-                    format!("{} never sent the world.", self.target),
-                    Some(
-                        "The connection is open but the server did not finish letting you in."
-                            .to_string(),
-                    ),
-                );
-            } else {
-                self.fail(
-                    format!("Could not reach {}", self.target),
+                    "This server is running different content.",
                     Some(format!(
-                        "No answer after {TIMEOUT_SECS:.0} seconds. Check the address, and that the server is running."
+                        "Its blocks and items do not match yours (server {theirs:#018x}, you {ours:#018x}). Both sides have to be on the same version."
                     )),
                 );
+                Transition::None
+            }
+            WelcomeOutcome::Welcome(welcome) => self.enter_world(ctx, welcome),
+            WelcomeOutcome::Waiting => {
+                self.check_timeout();
+                Transition::None
             }
         }
-        Transition::None
     }
 
     fn ui(&mut self, egui_ctx: &egui::Context, ctx: &mut StateContext) -> Transition {
@@ -454,6 +378,129 @@ impl GameState<Wyvencraft> for ConnectingState {
             return self.cancel(ctx);
         }
         Transition::None
+    }
+}
+
+/// What a host's `Welcome` carries: the world seed, our id, where and when we
+/// are, the mode, the host's recipes and any saved state it kept for us.
+struct Welcome {
+    seed: u64,
+    your_id: crate::infrastructure::net::PlayerId,
+    spawn: crate::infrastructure::net::NetVec3,
+    time_of_day: f32,
+    game_mode: crate::domain::core::GameMode,
+    recipes: Vec<crate::infrastructure::net::RecipeData>,
+    restored: Option<crate::infrastructure::net::PlayerRestore>,
+}
+
+/// Whether this frame's messages let us in.
+enum WelcomeOutcome {
+    /// No `Welcome` yet.
+    Waiting,
+    Welcome(Welcome),
+    /// The host's content differs from ours. Raw block/item ids cross the
+    /// wire, so divergent definitions would silently corrupt the session.
+    Mismatch {
+        theirs: u64,
+    },
+}
+
+/// Drain this frame's messages looking for the `Welcome`, and check its
+/// content fingerprint against `ours`.
+fn read_welcome(client: &mut Client, ours: u64) -> WelcomeOutcome {
+    let mut outcome = WelcomeOutcome::Waiting;
+    for msg in client.receive() {
+        if let ServerMessage::Welcome {
+            seed,
+            your_id,
+            spawn,
+            time_of_day,
+            game_mode,
+            content_hash,
+            recipes,
+            restored,
+        } = msg
+        {
+            if content_hash != ours {
+                log::warn!(
+                    "content mismatch: host {content_hash:#018x} vs ours {ours:#018x}; refusing to join"
+                );
+                return WelcomeOutcome::Mismatch {
+                    theirs: content_hash,
+                };
+            }
+            outcome = WelcomeOutcome::Welcome(Welcome {
+                seed,
+                your_id,
+                spawn,
+                time_of_day,
+                game_mode,
+                recipes,
+                restored,
+            });
+        }
+    }
+    outcome
+}
+
+impl ConnectingState {
+    /// Hand the connection to a new in-game screen built from `welcome`.
+    fn enter_world(&mut self, ctx: &mut StateContext, welcome: Welcome) -> Transition {
+        let Welcome {
+            seed,
+            your_id,
+            spawn,
+            time_of_day,
+            game_mode,
+            recipes,
+            restored,
+        } = welcome;
+        log::info!(
+            "connected; world seed {seed}, player id {}, spawn {spawn:?}, time {time_of_day:.3}, game_mode {}, saved state: {}",
+            your_id.0,
+            game_mode.label(),
+            if restored.is_some() {
+                "restored"
+            } else {
+                "none"
+            },
+        );
+        let client = self.client.take().expect("client present");
+        Transition::Replace(Box::new(InGameState::new_client(
+            ctx.shared.content.clone(),
+            seed,
+            client,
+            your_id,
+            spawn,
+            time_of_day,
+            game_mode,
+            recipes,
+            restored,
+        )))
+    }
+
+    /// Give up once the wait has gone on too long, saying which half of it
+    /// never finished.
+    fn check_timeout(&mut self) {
+        if self.elapsed <= TIMEOUT_SECS {
+            return;
+        }
+        if self.reached {
+            self.fail(
+                format!("{} never sent the world.", self.target),
+                Some(
+                    "The connection is open but the server did not finish letting you in."
+                        .to_string(),
+                ),
+            );
+        } else {
+            self.fail(
+                format!("Could not reach {}", self.target),
+                Some(format!(
+                    "No answer after {TIMEOUT_SECS:.0} seconds. Check the address, and that the server is running."
+                )),
+            );
+        }
     }
 }
 

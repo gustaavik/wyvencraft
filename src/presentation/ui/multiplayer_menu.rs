@@ -303,7 +303,6 @@ fn ping_color(ping_ms: u32) -> Color32 {
 fn draw_buttons(ui: &mut egui::Ui, view: &BrowserView<'_>) -> Option<MpAction> {
     let mut action = None;
     let selected = view.selected.filter(|index| *index < view.rows.len());
-    let joinable = selected.is_some_and(|index| view.rows[index].joinable);
 
     // Both rows span the same distance: N buttons and N-1 gaps, solved for the
     // one unknown. Read from `spacing` rather than assumed, so a restyled gap
@@ -316,71 +315,87 @@ fn draw_buttons(ui: &mut egui::Ui, view: &BrowserView<'_>) -> Option<MpAction> {
     ];
 
     ui.allocate_ui(egui::vec2(row_width, 0.0), |ui| {
-        ui.horizontal(|ui| {
-            ui.add_enabled_ui(joinable, |ui| {
-                if ui
-                    .add_sized(BUTTON, egui::Button::new("Join Server"))
-                    .clicked()
-                    && let Some(index) = selected
-                {
-                    action = Some(MpAction::Join(index));
-                }
-            });
-            if ui
-                .add_sized(BUTTON, egui::Button::new("Direct Connect"))
-                .clicked()
-            {
-                action = Some(MpAction::OpenDirect);
-            }
-            ui.add_enabled_ui(!view.refreshing, |ui| {
-                let label = if view.refreshing {
-                    "Refreshing..."
-                } else {
-                    "Refresh"
-                };
-                if ui.add_sized(BUTTON, egui::Button::new(label)).clicked() {
-                    action = Some(MpAction::Refresh);
-                }
-            });
-        });
-
+        ui.horizontal(|ui| draw_connect_row(ui, view, selected, &mut action));
         ui.add_space(6.0);
-
-        ui.horizontal(|ui| {
-            if ui
-                .add_sized(small_button, egui::Button::new("Add Server"))
-                .clicked()
-            {
-                action = Some(MpAction::OpenAdd);
-            }
-            ui.add_enabled_ui(selected.is_some(), |ui| {
-                if ui
-                    .add_sized(small_button, egui::Button::new("Edit"))
-                    .clicked()
-                    && let Some(index) = selected
-                {
-                    action = Some(MpAction::OpenEdit(index));
-                }
-                let confirming = selected.is_some() && view.confirming_delete == selected;
-                let label = if confirming { "Confirm?" } else { "Delete" };
-                if ui
-                    .add_sized(small_button, egui::Button::new(label))
-                    .clicked()
-                    && let Some(index) = selected
-                {
-                    action = Some(MpAction::Delete(index));
-                }
-            });
-            if ui
-                .add_sized(small_button, egui::Button::new("Back"))
-                .clicked()
-            {
-                action = Some(MpAction::Back);
-            }
-        });
+        ui.horizontal(|ui| draw_manage_row(ui, view, selected, small_button, &mut action));
     });
 
     action
+}
+
+/// Join, Direct Connect, Refresh.
+fn draw_connect_row(
+    ui: &mut egui::Ui,
+    view: &BrowserView<'_>,
+    selected: Option<usize>,
+    action: &mut Option<MpAction>,
+) {
+    let joinable = selected.is_some_and(|index| view.rows[index].joinable);
+    ui.add_enabled_ui(joinable, |ui| {
+        if ui
+            .add_sized(BUTTON, egui::Button::new("Join Server"))
+            .clicked()
+            && let Some(index) = selected
+        {
+            *action = Some(MpAction::Join(index));
+        }
+    });
+    if ui
+        .add_sized(BUTTON, egui::Button::new("Direct Connect"))
+        .clicked()
+    {
+        *action = Some(MpAction::OpenDirect);
+    }
+    ui.add_enabled_ui(!view.refreshing, |ui| {
+        let label = if view.refreshing {
+            "Refreshing..."
+        } else {
+            "Refresh"
+        };
+        if ui.add_sized(BUTTON, egui::Button::new(label)).clicked() {
+            *action = Some(MpAction::Refresh);
+        }
+    });
+}
+
+/// Add Server, Edit, a two-click Delete, Back.
+fn draw_manage_row(
+    ui: &mut egui::Ui,
+    view: &BrowserView<'_>,
+    selected: Option<usize>,
+    small_button: [f32; 2],
+    action: &mut Option<MpAction>,
+) {
+    if ui
+        .add_sized(small_button, egui::Button::new("Add Server"))
+        .clicked()
+    {
+        *action = Some(MpAction::OpenAdd);
+    }
+    ui.add_enabled_ui(selected.is_some(), |ui| {
+        if ui
+            .add_sized(small_button, egui::Button::new("Edit"))
+            .clicked()
+            && let Some(index) = selected
+        {
+            *action = Some(MpAction::OpenEdit(index));
+        }
+        let confirming = selected.is_some() && view.confirming_delete == selected;
+        let label = if confirming { "Confirm?" } else { "Delete" };
+        if ui
+            .add_sized(small_button, egui::Button::new(label))
+            .clicked()
+            && let Some(index) = selected
+        {
+            *action = Some(MpAction::Delete(index));
+        }
+    });
+    if ui
+        .add_sized(small_button, egui::Button::new("Back"))
+        .clicked()
+    {
+        *action = Some(MpAction::Back);
+    }
 }
 
 fn draw_dialog(ctx: &Context, dialog: Dialog, fields: &mut DialogFields) -> Option<MpAction> {
