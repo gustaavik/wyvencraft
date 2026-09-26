@@ -203,6 +203,13 @@ application/       use cases and their ports
   protocol                        the wire messages (ClientMessage/ServerMessage) — the contract between peers
   session                         the Session port, Authority/Inbound, HOST_PLAYER_ID, FakeSession
   sync                            remote-player snapshot smoothing
+  simulation                      Simulation: the world, its ECS, the local player + inventory, fluids, streaming loader,
+                                  progression, day cycle, MobDirector (spawner, boss fight, telegraph), a play clock, and an
+                                  `outbox` of ServerMessages for peers (drained by the pump; broadcast only by a host).
+                                  Simulation::new(rules, seed, start) builds a world with no screen. Use cases live on it:
+                                  step_player, tick_mobs + resolve_mob_attacks, settle_kill, pop_loot, fly_arrows,
+                                  update_spawning, throw/spawn_drop/update_drops, tick_entities (every peer's entity passes)
+  networking, peers               Networking { session, peers, ops }: the session's role and who else is here
   boot_plan                       pure env → BootPlan (the Environment port, SystemEnv, MapEnv)
   content                         load_registries: assets/*.toml → Registries through the AssetSource port, visual specs out of band
   ecs                             the session's entities in a wyven_ecs::Ecs. Components: Transform, Velocity, Body (centre- or
@@ -231,6 +238,14 @@ presentation/      everything that draws or reads input
 boot/, app.rs                     the composition root: boot::start turns a BootPlan into the first screen;
                                   app.rs hands that to Wyvencraft as its FirstScreen factory
 ```
+
+> **The in-game screen is glue.** `InGameState` is `{ sim: Simulation, net: Networking, content,
+> save, ..presentation state }`. `frame.rs::update` spells the frame's order once —
+> screen keys → controls → player keys → `step_local_player` → `interact` →
+> `tick_session` (clocks, chat, discovery, autosave, network pump, the authority's fluids /
+> mobs / boss fight / spawning, streaming) → `sim.tick_entities` → `refresh_view` — and each
+> step is a method. What stays on the screen is what chats, draws, or talks to the session
+> mid-use-case (boss beats announce, a client's attack is a request).
 
 > The where-to-change table below still spells many paths the old flat way
 > (`state::ingame_state::view` is now `presentation::screens::ingame_state::view`,

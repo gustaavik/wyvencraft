@@ -242,8 +242,6 @@ pub(super) struct SceneCache {
     /// Fraction `[0,1)` through the current physics step, for camera
     /// interpolation between fixed steps.
     pub render_alpha: f32,
-    /// Seconds since entering the state; drives shader animation (water frames).
-    pub elapsed: f32,
 }
 
 impl SceneCache {
@@ -278,7 +276,6 @@ impl SceneCache {
             item_sprites: HashMap::new(),
             fov_degrees: 70.0,
             render_alpha: 0.0,
-            elapsed: 0.0,
         }
     }
 
@@ -952,6 +949,7 @@ impl SceneCache {
         &self,
         player: &Player,
         day_cycle: &DayCycle,
+        clock: f32,
         camera: Camera,
     ) -> SceneFrame<'_> {
         let aspect = camera.aspect;
@@ -1083,7 +1081,7 @@ impl SceneCache {
                 light_color: atmo.light_color,
                 ambient: atmo.ambient,
             },
-            time: self.elapsed,
+            time: clock,
             opaque,
             transparent,
             array_opaque,

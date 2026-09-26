@@ -183,6 +183,7 @@ mod tests {
         state.sim.world.set_block(edit, blocks::STONE);
         state.sim.player.position = Vec3::new(1.0, 70.0, 2.0);
         state
+            .sim
             .spawn_mob("zombie", Vec3::new(4.0, 70.0, 4.0))
             .expect("zombie spawns");
 

@@ -33,25 +33,7 @@ const MUZZLE: f32 = 0.8;
 
 pub(super) use crate::application::simulation::{BossFight, Telegraph};
 
-/// One beat of a boss fight, collected during the mob tick and resolved once
-/// the mobs are no longer borrowed.
-pub(super) enum BossBeat {
-    Windup {
-        mob: MobId,
-        attack: usize,
-        seconds: f32,
-    },
-    Release {
-        mob: MobId,
-        attack: usize,
-        /// Who it was fighting: `None` inside is the local player.
-        target: Option<(Option<PlayerId>, Vec3)>,
-    },
-    Phase {
-        mob: MobId,
-        phase: u8,
-    },
-}
+pub(super) use crate::application::simulation::BossBeat;
 
 impl InGameState {
     /// Authority: `at.actor` offers at an altar that summons `boss`.
@@ -93,9 +75,10 @@ impl InGameState {
         );
         let spot = at_altar + Vec3::Z * SUMMON_DISTANCE;
         let ground = self
+            .sim
             .find_ground(spot.x, spot.z, at.pos.y + 8)
             .unwrap_or(spot.y);
-        let Some(mob) = self.spawn_mob(boss, Vec3::new(spot.x, ground, spot.z)) else {
+        let Some(mob) = self.sim.spawn_mob(boss, Vec3::new(spot.x, ground, spot.z)) else {
             return;
         };
         self.sim.mobs.fight = Some(BossFight {
@@ -152,7 +135,7 @@ impl InGameState {
             name: crate::domain::core::ident::title_case(&attack_id),
             remaining: seconds,
         });
-        self.emit_mob_event(ServerMessage::BossTelegraph {
+        self.sim.emit(ServerMessage::BossTelegraph {
             id: id.0,
             attack: attack_id,
             windup: seconds,
@@ -164,7 +147,7 @@ impl InGameState {
             return;
         };
         let title = params.title.clone();
-        self.emit_mob_event(ServerMessage::BossPhase { id: id.0, phase });
+        self.sim.emit(ServerMessage::BossPhase { id: id.0, phase });
         if phase > 0 {
             self.announce(format!("{title} is enraged!"));
         }
@@ -198,7 +181,7 @@ impl InGameState {
                 radius,
                 knockback,
             } => {
-                for t in self.mob_targets() {
+                for t in self.sim.mob_targets() {
                     let offset = t.eye - position;
                     if Vec3::new(offset.x, 0.0, offset.z).length() <= radius {
                         let away = Vec3::new(offset.x, 0.0, offset.z).normalize_or_zero();
@@ -230,7 +213,7 @@ impl InGameState {
                     let turned = glam::Quat::from_rotation_y((spread_deg * t).to_radians()) * dir;
                     let velocity = turned * speed + Vec3::Y * lift;
                     let origin = eye + turned * MUZZLE;
-                    self.emit_mob_event(ServerMessage::ArrowSpawned {
+                    self.sim.emit(ServerMessage::ArrowSpawned {
                         position: origin.to_array(),
                         velocity: velocity.to_array(),
                         gravity,
@@ -261,9 +244,11 @@ impl InGameState {
                     let angle = i as f32 * 2.1 + rng.range_f32(0.0, 1.0);
                     let spot = position + Vec3::new(angle.cos(), 0.0, angle.sin()) * 3.0;
                     let ground = self
+                        .sim
                         .find_ground(spot.x, spot.z, position.y as i32 + 6)
                         .unwrap_or(position.y);
-                    self.spawn_mob(&entity, Vec3::new(spot.x, ground, spot.z));
+                    self.sim
+                        .spawn_mob(&entity, Vec3::new(spot.x, ground, spot.z));
                 }
             }
         }
@@ -274,10 +259,12 @@ impl InGameState {
     fn hit_player(&mut self, player: Option<PlayerId>, damage: f32, push: Vec3) {
         match player {
             None => {
-                self.damage_local_player(damage);
+                self.sim.damage_local_player(damage);
                 self.sim.player.velocity += push;
             }
-            Some(id) => self.emit_mob_event(ServerMessage::PlayerDamaged { id, amount: damage }),
+            Some(id) => self
+                .sim
+                .emit(ServerMessage::PlayerDamaged { id, amount: damage }),
         }
     }
 
@@ -312,7 +299,7 @@ impl InGameState {
         if let Some(entity) = mob_systems::find(&self.sim.ecs, id) {
             self.sim.ecs.despawn(entity);
         }
-        self.emit_mob_event(ServerMessage::MobDespawned {
+        self.sim.emit(ServerMessage::MobDespawned {
             id: id.0,
             killed_by: None,
         });
@@ -351,14 +338,15 @@ impl InGameState {
             .collect();
         let local_id = self.net.session.local_id();
         let wire: Vec<PlayerId> = participants.iter().map(|p| p.unwrap_or(local_id)).collect();
-        self.emit_mob_event(ServerMessage::BossDefeated {
+        self.sim.emit(ServerMessage::BossDefeated {
             id: mob.id.0,
             kind: mob.kind.clone(),
             position: mob.position.to_array(),
             participants: wire,
         });
         if participants.contains(&None) {
-            self.pop_drops_for(&mob.kind, loot_seed(mob.id.0, local_id), mob.position);
+            self.sim
+                .pop_loot(&mob.kind, loot_seed(mob.id.0, local_id), mob.position);
         }
         let first = self.sim.progression.defeat(&mob.kind);
         if self
@@ -416,7 +404,7 @@ impl InGameState {
             } => {
                 if participants.contains(&local_id) {
                     let at = Vec3::from_array(position);
-                    self.pop_drops_for(&kind, loot_seed(id, local_id), at);
+                    self.sim.pop_loot(&kind, loot_seed(id, local_id), at);
                 }
                 if self
                     .sim
@@ -643,6 +631,7 @@ mod tests {
         assert!(state.sim.mobs.fight.is_none());
         let antler = state.content.rules.items.find("elder_antler").unwrap();
         let dropped: u32 = state
+            .sim
             .drops()
             .map(|(d, _)| d)
             .filter(|d| d.stack.item == antler)

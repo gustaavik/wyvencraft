@@ -6,10 +6,8 @@ use glam::Vec3;
 
 use super::InGameState;
 use crate::application::ecs::components::ItemDrop;
-use crate::application::ecs::{spawn, systems};
 use crate::application::simulation::BreakState;
 use crate::domain::core::{Aabb, BlockId, BlockPos};
-use crate::domain::entity::Launch;
 use crate::domain::inventory::{Consumable, ItemId, ItemStack, Placeable, Tool};
 use crate::domain::world::Target;
 use crate::domain::world::block::Drops;
@@ -86,14 +84,14 @@ impl InGameState {
             && let Some(stack) = self.block_drop_stack(prev)
         {
             // Scatter direction varies with the animation clock — cheap pseudo-random.
-            let angle = self.view.elapsed * 9.73;
+            let angle = self.sim.clock * 9.73;
             let drop = ItemDrop::block_drop(
                 stack,
                 pos,
                 angle,
                 self.content.rules.entities.dropped_item(),
             );
-            self.spawn_drop(drop);
+            self.sim.spawn_drop(drop);
         }
         self.broadcast_local_edit(pos, BlockId::AIR);
         true
@@ -153,52 +151,7 @@ impl InGameState {
         let Some(stack) = self.sim.inventory.take_one_selected() else {
             return;
         };
-        self.throw(stack);
-    }
-
-    /// Throw `stack` out in front of the player.
-    ///
-    /// The one place that spells this, so every route an item takes out of the
-    /// inventory — the drop key, and a held stack that no longer fits when the
-    /// panel closes — lands the same way.
-    pub(super) fn throw(&mut self, stack: ItemStack) {
-        let drop = ItemDrop::thrown(
-            stack,
-            self.sim.player.eye_position(),
-            self.sim.player.look_direction(),
-            self.content.rules.entities.dropped_item(),
-        );
-        self.spawn_drop(drop);
-    }
-
-    /// Put a dropped item into the world, colliding as the "dropped item" kind.
-    pub(super) fn spawn_drop(&mut self, drop: (ItemDrop, Launch)) {
-        spawn::drop_item(
-            &mut self.sim.ecs,
-            drop,
-            self.content.rules.entities.dropped_item(),
-        );
-    }
-
-    /// Advance drop physics, collect drops the player walks over, cull expired ones.
-    pub(super) fn update_drops(&mut self, dt: f32) {
-        let world = &self.sim.world;
-        systems::drops::fall(&mut self.sim.ecs, dt, |p| world.is_solid_for_collision(p));
-        // A dead player walks over drops without collecting them.
-        let collector = (!self.sim.dead).then(|| self.sim.player.aabb());
-        let (inventory, items) = (&mut self.sim.inventory, &self.content.rules.items);
-        systems::drops::pick_up(&mut self.sim.ecs, collector, |stack| {
-            inventory.add(stack, items)
-        });
-    }
-
-    /// Every drop lying in the world, with where it is.
-    #[cfg(test)]
-    pub(super) fn drops(&self) -> impl Iterator<Item = (&ItemDrop, glam::Vec3)> {
-        self.sim
-            .ecs
-            .query::<(&ItemDrop, &crate::application::ecs::components::Transform)>()
-            .map(|(_, (drop, transform))| (drop, transform.position))
+        self.sim.throw(stack);
     }
 
     /// Survival timed mining: accumulate break progress on the targeted block

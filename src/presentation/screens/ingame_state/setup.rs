@@ -9,20 +9,16 @@ use super::crafting::CraftingState;
 use super::net::recipes_from_wire;
 use super::persistence::Persistence;
 use super::view::SceneCache;
-use super::{DOUBLE_TAP_WINDOW, InGameState, SPAWN_RADIUS};
+use super::{DOUBLE_TAP_WINDOW, InGameState};
 use crate::application::boot_plan;
-use crate::application::ecs::Ecs;
 use crate::application::networking::Networking;
 use crate::application::peers::Peers;
 use crate::application::session::Session;
-use crate::application::simulation::{MobDirector, Simulation};
+use crate::application::simulation::{Simulation, SimulationStart};
 use crate::domain::chat::{ChatState, OpsList};
-use crate::domain::core::{BlockPos, CHUNK_HEIGHT, ChunkPos, DayCycle, GameMode};
-use crate::domain::entity::Player;
+use crate::domain::core::{DayCycle, GameMode};
+use crate::domain::inventory::HeldLabel;
 use crate::domain::inventory::crafting::{KnownItems, station_ids};
-use crate::domain::inventory::{HeldLabel, Inventory};
-use crate::domain::progression::WorldProgression;
-use crate::domain::world::{ChunkLoader, FluidSim, NoiseGenerator, World, WorldGenerator};
 use crate::infrastructure::net::session::{ClientSession, HostSession, SingleplayerSession};
 use crate::infrastructure::net::{Client, Host, NetVec3, PlayerId, PlayerRestore, RecipeData};
 use crate::infrastructure::recipes::load_recipe_book;
@@ -119,8 +115,8 @@ impl InGameState {
         let saved_mobs = mobs.mobs.len();
         for data in mobs.mobs {
             let position = Vec3::from_array(data.position);
-            match state.spawn_mob(&data.kind, position) {
-                Some(id) => state.restore_mob(id, data.health, data.night_spawned),
+            match state.sim.spawn_mob(&data.kind, position) {
+                Some(id) => state.sim.restore_mob(id, data.health, data.night_spawned),
                 None => log::warn!(
                     "save references unknown mob kind '{}'; dropping it",
                     data.kind
@@ -215,74 +211,27 @@ impl InGameState {
             None => load_recipe_book(&items, &stations),
         };
 
-        let noise = Arc::new(NoiseGenerator::with_config(
-            seed,
-            content.rules.worldgen.clone(),
-            content.rules.structures.clone(),
-        ));
-        let structures = noise.structures().clone();
-        let generator: Arc<dyn WorldGenerator> = noise;
-        let mut world = World::new(generator.clone(), content.rules.blocks.clone());
-
-        // Worker pool sized to leave headroom for the main + render threads.
-        let workers = std::thread::available_parallelism()
-            .map(|n| n.get().saturating_sub(2).max(1))
-            .unwrap_or(4);
-        let loader = ChunkLoader::new(generator, workers);
-
-        // Synchronously generate the immediate spawn area so the player lands on
-        // solid ground; the rest streams in via the loader. Anchor on the override
-        // (the host-assigned spawn for clients) so there's ground under the player.
-        let center = spawn_override
-            .map(|p| BlockPos::from_world(p).chunk())
-            .unwrap_or_else(|| ChunkPos::new(0, 0));
-        for dx in -SPAWN_RADIUS..=SPAWN_RADIUS {
-            for dz in -SPAWN_RADIUS..=SPAWN_RADIUS {
-                world.ensure_chunk(ChunkPos::new(center.x + dx, center.z + dz));
-            }
-        }
-        let spawn = spawn_override.unwrap_or_else(|| find_spawn(&world));
-
-        // Creative starts empty (items come from the palette); survival gets the
-        // starter kit declared in assets/items.toml so mining, durability, and
-        // eating are usable without crafting.
-        let mut inventory = Inventory::new();
-        if !mode.is_creative() {
-            for (slot, stack) in items.starter_kit_survival().iter().enumerate() {
-                inventory.set_slot(slot, Some(*stack));
-            }
-        }
-
         // Read before `session` is moved into the struct below.
-        let session_is_authority = session.is_authority();
+        let authoritative = session.is_authority();
+        let sim = Simulation::new(
+            content.rules.clone(),
+            seed,
+            SimulationStart {
+                spawn: spawn_override,
+                day_cycle,
+                mode,
+                recipes,
+                authoritative,
+            },
+        );
 
         let mut state = Self {
-            sim: Simulation {
-                rules: content.rules.clone(),
-                world,
-                loader,
-                fluids: FluidSim::new(),
-                structures,
-                progression: WorldProgression::default(),
-                day_cycle,
-                ecs: Ecs::new(),
-                mobs: MobDirector::new(seed ^ 0x5EED_0F5B_A3B1_E5B0),
-                player: Player::new(spawn, mode, content.rules.entities.player()),
-                player_anim: crate::domain::entity::AnimationState::new(),
-                physics_accum: 0.0,
-                inventory,
-                held: None,
-                recipes,
-                spawn,
-                dead: false,
-                breaking: None,
-                tier_hint: None,
-            },
+            sim,
             net: Networking {
                 session,
                 peers: Peers::default(),
                 // A client never authorizes anything, so it never reads the file.
-                ops: if session_is_authority {
+                ops: if authoritative {
                     crate::infrastructure::ops::load_ops()
                 } else {
                     OpsList::default()
@@ -341,14 +290,4 @@ impl InGameState {
         }
         state
     }
-}
-
-/// Find a safe spawn (top solid block at the origin column + 1).
-fn find_spawn(world: &World) -> Vec3 {
-    for y in (0..CHUNK_HEIGHT).rev() {
-        if world.is_solid(BlockPos::new(0, y, 0)) {
-            return Vec3::new(0.5, (y + 1) as f32, 0.5);
-        }
-    }
-    Vec3::new(0.5, 80.0, 0.5)
 }

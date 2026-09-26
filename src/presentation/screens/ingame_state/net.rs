@@ -56,6 +56,8 @@ impl InGameState {
         if self.net.session.is_authority() {
             self.broadcast_authority_state(send_stats);
         } else {
+            // A client decides nothing, so it has nothing to tell anyone.
+            self.sim.outbox.clear();
             self.report_to_host(dt, send_stats);
         }
         self.net.session.flush();
@@ -444,10 +446,7 @@ impl InGameState {
             else {
                 return;
             };
-            self.net
-                .peers
-                .mob_events
-                .push(ServerMessage::MobHurt { id: mob_id, health });
+            self.sim.emit(ServerMessage::MobHurt { id: mob_id, health });
         }
     }
 
@@ -560,7 +559,7 @@ impl InGameState {
                     && killed_by == Some(local_id)
                 {
                     // This player made the kill: roll the loot locally.
-                    self.pop_drops_for(&kind, id, position);
+                    self.sim.pop_loot(&kind, id, position);
                 }
             }
             ServerMessage::ArrowSpawned {
@@ -581,7 +580,7 @@ impl InGameState {
                 );
             }
             ServerMessage::PlayerDamaged { id, amount } if id == local_id => {
-                self.damage_local_player(amount);
+                self.sim.damage_local_player(amount);
             }
             ServerMessage::Chat { from, kind, text } => self.show_remote_chat(from, kind, text),
             ServerMessage::GrantItems { to, stacks } if to == local_id => {
@@ -663,8 +662,13 @@ impl InGameState {
         // Mob lifecycle events queued by this frame's simulation (spawns,
         // hurts, deaths, arrows, remote-player damage), then one batched
         // unreliable movement snapshot for all live mobs.
-        for msg in std::mem::take(&mut self.net.peers.mob_events) {
-            self.net.session.broadcast(&msg, Channel::Reliable);
+        // Only a host has anyone to tell; elsewhere the events are dropped
+        // here, exactly where they used to be dropped at the moment of emission.
+        let events = std::mem::take(&mut self.sim.outbox);
+        if self.net.session.serves_peers() {
+            for msg in events {
+                self.net.session.broadcast(&msg, Channel::Reliable);
+            }
         }
         if self.sim.ecs.count::<Mob>() > 0 {
             let states = ServerMessage::MobStates {
@@ -772,6 +776,7 @@ impl InGameState {
     /// `setup`.
     #[cfg(test)]
     pub(super) fn set_session(&mut self, session: Box<dyn crate::application::session::Session>) {
+        self.sim.authoritative = session.is_authority();
         self.net.session = session;
     }
 }
@@ -1108,22 +1113,22 @@ mod tests {
         let (mut state, _handle) = host_session();
 
         hold(&mut state, "iron_sword");
-        assert_eq!(state.melee_damage(), 6.0, "iron_sword");
+        assert_eq!(state.sim.melee_damage(), 6.0, "iron_sword");
         hold(&mut state, "wooden_sword");
-        assert_eq!(state.melee_damage(), 4.0, "wooden_sword");
+        assert_eq!(state.sim.melee_damage(), 4.0, "wooden_sword");
         hold(&mut state, "iron_axe");
-        assert_eq!(state.melee_damage(), 5.0, "iron_axe");
+        assert_eq!(state.sim.melee_damage(), 5.0, "iron_axe");
 
         hold(&mut state, "iron_pickaxe");
         assert_eq!(
-            state.melee_damage(),
+            state.sim.melee_damage(),
             mobs::PLAYER_ATTACK_DAMAGE,
             "a pickaxe is no better than a fist"
         );
 
         state.sim.inventory.set_slot(0, None);
         assert_eq!(
-            state.melee_damage(),
+            state.sim.melee_damage(),
             mobs::PLAYER_ATTACK_DAMAGE,
             "an empty hand is a fist"
         );
@@ -1173,7 +1178,7 @@ mod tests {
             "the client's iron sword"
         );
         assert_eq!(
-            state.melee_damage(),
+            state.sim.melee_damage(),
             mobs::PLAYER_ATTACK_DAMAGE,
             "the host's own swing is unaffected"
         );
@@ -1588,7 +1593,7 @@ mod tests {
         let attacker = players::get(&state.sim.ecs, pid).unwrap().position();
 
         // In reach: the swing lands.
-        let near = state.spawn_mob("cow", attacker).expect("cow spawns");
+        let near = state.sim.spawn_mob("cow", attacker).expect("cow spawns");
         let full_health = state.simulated_mobs()[0].health;
         handle.deliver(Inbound::Request {
             player: pid,
@@ -1676,7 +1681,10 @@ mod tests {
         }));
         state.pump_network(1.0 / 60.0);
         assert!(!state.sim.ecs.is_alive(cow), "the replica is gone");
-        assert!(state.drops().next().is_some(), "the killer rolls the loot");
+        assert!(
+            state.sim.drops().next().is_some(),
+            "the killer rolls the loot"
+        );
     }
 
     /// A client tells the host where it is, so other players see it move.

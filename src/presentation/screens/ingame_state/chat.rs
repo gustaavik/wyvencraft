@@ -278,7 +278,7 @@ impl InGameState {
         for stack in stacks {
             let leftover = self.sim.inventory.add(stack, &self.content.rules.items);
             if leftover > 0 {
-                self.throw(ItemStack {
+                self.sim.throw(ItemStack {
                     count: leftover,
                     ..stack
                 });
@@ -651,6 +651,7 @@ mod tests {
         assert_eq!(count_of(&state, "bread"), 0, "no room for it");
         let bread = state.content.rules.items.find("bread").unwrap();
         let dropped: u32 = state
+            .sim
             .drops()
             .map(|(d, _)| d)
             .filter(|d| d.stack.item == bread)

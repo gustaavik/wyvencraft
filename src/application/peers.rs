@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use crate::domain::inventory::Inventory;
 use wyven_net::PlayerId;
 
-use crate::application::protocol::{Equipment, NetItemStack, ServerMessage};
+use crate::application::protocol::{Equipment, NetItemStack};
 
 /// Everything the session knows about the other peers.
 #[derive(Default)]
@@ -49,7 +49,6 @@ pub struct Peers {
     /// Host: reliable mob events queued by this frame's simulation, drained
     /// into the broadcast by the network pump. A field rather than a return
     /// value so mob code never has to reach the session.
-    pub mob_events: Vec<ServerMessage>,
 
     /// Throttle for outgoing survival stats.
     pub stats_timer: f32,

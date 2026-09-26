@@ -46,8 +46,6 @@ use view::SceneCache;
 /// The host's own player always has this id; clients are numbered from 1.
 pub(crate) use crate::application::session::HOST_PLAYER_ID;
 
-/// Chunks generated synchronously at startup so the player has ground to stand on.
-const SPAWN_RADIUS: i32 = 1;
 /// Keep chunks loaded this many chunks beyond the render distance before unloading.
 const UNLOAD_MARGIN: i32 = 2;
 /// Max new generation requests issued per frame (nearest-first).
@@ -125,15 +123,6 @@ pub struct InGameState {
     chat: ChatState,
     /// Time (s) since the last jump press, for creative double-tap-to-fly.
     jump_tap_timer: f32,
-}
-
-impl InGameState {
-    /// Reset the player at the world spawn after death.
-    fn respawn(&mut self) {
-        self.sim.player.respawn_at(self.sim.spawn);
-        self.sim.dead = false;
-        self.sim.breaking = None;
-    }
 }
 
 /// One simulated mob, read out of the ECS for a test to assert on.
@@ -256,9 +245,11 @@ mod tests {
         let look = state.sim.player.look_direction();
         let pos = state.sim.player.position + Vec3::new(look.x, 0.0, look.z).normalize() * 2.0;
         let ground = state
+            .sim
             .find_ground(pos.x, pos.z, crate::domain::core::CHUNK_HEIGHT - 2)
             .expect("ground near spawn");
         state
+            .sim
             .spawn_mob("cow", Vec3::new(pos.x, ground, pos.z))
             .expect("cow spawns");
 
@@ -280,9 +271,10 @@ mod tests {
             state.simulated_mobs().is_empty(),
             "cow should be dead and reaped"
         );
-        assert!(state.drops().next().is_some(), "death should drop loot");
+        assert!(state.sim.drops().next().is_some(), "death should drop loot");
         let raw_beef = state.content.rules.items.find("raw_beef").unwrap();
         let dropped: u32 = state
+            .sim
             .drops()
             .map(|(d, _)| d)
             .filter(|d| d.stack.item == raw_beef)
@@ -325,6 +317,7 @@ mod tests {
             .find("red_mushroom")
             .expect("shipped item");
         let dropped: u32 = state
+            .sim
             .drops()
             .map(|(d, _)| d)
             .filter(|d| d.stack.item == expected)
@@ -369,6 +362,7 @@ mod tests {
                 .find("oak_leaves")
                 .expect("shipped item");
             state
+                .sim
                 .drops()
                 .map(|(d, _)| d)
                 .filter(|d| d.stack.item == leaves)
@@ -560,10 +554,11 @@ mod tests {
         );
         state.sim.inventory.set_selected(8);
         state
+            .sim
             .spawn_mob("zombie", Vec3::new(6.0, 80.0, 6.0))
             .expect("zombie spawns");
         let zombie = state.simulated_mobs()[0].id;
-        state.restore_mob(zombie, 11.0, true);
+        state.sim.restore_mob(zombie, 11.0, true);
         state.save_world();
         drop(state);
 
