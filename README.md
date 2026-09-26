@@ -1,9 +1,14 @@
 # Wyvencraft
 
-A Minecraft-style voxel sandbox written in **Rust** with **Vulkan** (via [`vulkano`](https://crates.io/crates/vulkano)).
+A voxel survival game written in **Rust** with **Vulkan** (via [`vulkano`](https://crates.io/crates/vulkano)):
+it looks like Minecraft, plays a Valheim-style progression loop, and digs
+Terraria-style into a layered underground.
 
-Procedurally generated, infinite-ish worlds you can walk around, mine, and build
-in — solo or with friends over the network.
+The world is a set of concentric **biome rings** around spawn, each harder than
+the last. Every biome hides **shrines**; reading one reveals where that biome's
+**boss altar** stands. Offer an effigy carved from the biome's materials at the altar, beat
+the boss, and its drops make the tool that can mine the next ring's ore —
+solo or with friends over the network.
 
 > Status: all core milestones complete (M0–M8). Builds and runs on macOS via
 > MoltenVK. See [Roadmap](#roadmap) for optional polish that remains.
@@ -22,10 +27,18 @@ Register at **[game.wyvencraft.com](https://game.wyvencraft.com)**.
 
 ## Features
 
-- **Procedural world generation** — seeded, multi-octave Perlin/Simplex noise for
-  terrain height, 3D cave carving, and temperature-based biomes (plains / desert /
-  snowy). Deterministic from a seed, so every multiplayer peer generates identical
-  terrain.
+- **Biome rings** — Meadows → Darkwood → Mire → Frostpeaks → Ashlands, as
+  noise-warped rings around spawn, each with its own terrain shape, surface,
+  vegetation and colours, blended at the borders. Deterministic from a seed, so
+  every multiplayer peer generates identical terrain.
+- **A layered underground** — a dirt-flecked surface layer, stone caverns, then
+  deepstone down to flooded depths, each with its own cave density; every
+  biome's metal lies only under that biome.
+- **Shrines, altars and bosses** — shrines and boss altars are stamped into the
+  terrain from the seed. Reading a wayrune reveals the altar on everyone's
+  compass; an offering there summons the boss — a phased fight with telegraphed
+  attacks, shared loot for everyone in the arena, and a drop that crafts the next
+  tier of pickaxe. The Meadows' **Elder Stag** is the first.
 - **Threaded chunk streaming** — terrain is generated on a worker pool and meshed
   on a per-frame budget, so the world streams in smoothly out to the render
   distance. Frustum culling skips off-screen chunks.
@@ -186,10 +199,21 @@ depends on `world`; the game state hands the renderer plain mesh data + a camera
 
 ## Roadmap
 
-Optional polish not yet implemented:
+The Minecraft × Terraria × Valheim loop is built in milestones. **Milestone 1 is
+done**: biome rings, the layered underground, tiered ores, shrines and altars,
+world progression, and the Meadows boss. Next:
 
-- Mobs with AI
-- World save/load to disk (chunk types already derive `serde`)
+- **RPG gear** — item rarity, stat blocks (damage, crit, defense, speed),
+  random prefixes rolled at craft time, accessory slots
+- **Skills** — mining, woodcutting, weapons, running and jumping that level by use
+- **Boss powers** — trophies placed at a spawn shrine grant a timed,
+  re-activatable buff
+- **Bosses 2–5** — Darkwood, Mire, Frostpeaks and Ashlands, each with its shrines,
+  altar, offering, key drop and the next pickaxe tier (bronze, iron, silver);
+  cavern dungeons; lava; biome hazards
+
+Polish not yet implemented:
+
 - Real per-vertex ambient occlusion and greedy meshing
 - In-game settings screen (render distance / FOV / sensitivity)
 - NAT traversal / relay for internet play
@@ -203,7 +227,7 @@ The **code** is dual licensed under either of
   <https://www.apache.org/licenses/LICENSE-2.0>)
 - MIT license ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
 
-at your option. This covers `src/` and the nine `wyven-*` engine crates under
+at your option. This covers `src/` and the ten `wyven-*` engine crates under
 `crates/`, which are usable on their own — the engine knows nothing about
 Wyvencraft and depends on none of it.
 
