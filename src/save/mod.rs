@@ -8,6 +8,8 @@
 //! - `players.dat` — per-identity records for multiplayer clients, bincode.
 //! - `mobs.dat` — the mob population, by kind name, bincode.
 //! - `progression.dat` — shrines read, altars revealed, bosses beaten, bincode.
+//! - `discovery.dat` — which items each player has held (what reveals their
+//!   crafting recipes), by id, bincode. Fails soft to "nothing yet".
 //!
 //! Worlds regenerate terrain from the seed on load; only the divergence from
 //! generated terrain (the edit overlay) is stored — the same model the host
@@ -32,7 +34,9 @@ use crate::core::GameMode;
 use crate::core::day_cycle::DEFAULT_START;
 use crate::progression::WorldProgression;
 
-pub use data::{ItemStackData, MobData, MobsData, PlayerData, PlayerRecords, WorldData};
+pub use data::{
+    DiscoveryData, ItemStackData, MobData, MobsData, PlayerData, PlayerRecords, WorldData,
+};
 pub use repository::{
     FileWorldRepository, InMemoryWorldRepository, NullWorldRepository, SaveLog, WorldRepository,
     WorldSnapshot,
@@ -50,6 +54,7 @@ const PLAYER_FILE: &str = "player.dat";
 const PLAYERS_FILE: &str = "players.dat";
 const MOBS_FILE: &str = "mobs.dat";
 const PROGRESSION_FILE: &str = "progression.dat";
+const DISCOVERY_FILE: &str = "discovery.dat";
 /// Local player profile (stable multiplayer identity), next to `saves/`.
 use crate::paths::PROFILE_FILE;
 
@@ -115,6 +120,8 @@ pub struct SavedGame {
     pub mobs: MobsData,
     /// Shrines read, altars revealed, bosses beaten. Empty for a new world.
     pub progression: WorldProgression,
+    /// Items each player has held. Empty for a new or pre-crafting world.
+    pub discovery: DiscoveryData,
 }
 
 /// The `.dat` payloads of one save, borrowed from the running game.
@@ -124,6 +131,7 @@ pub struct SavePayload<'a> {
     pub players: &'a PlayerRecords,
     pub mobs: &'a MobsData,
     pub progression: &'a WorldProgression,
+    pub discovery: &'a DiscoveryData,
 }
 
 /// One row of the world list in the menus.
@@ -241,6 +249,14 @@ impl WorldSave {
                 None
             })
             .unwrap_or_default();
+        // Missing = a world from before crafting discovery; its players
+        // re-learn from what they carry on the first frame.
+        let discovery = read_dat::<DiscoveryData>(&self.dir.join(DISCOVERY_FILE))
+            .unwrap_or_else(|err| {
+                log::warn!("ignoring corrupt discovery.dat for '{}': {err}", self.slug);
+                None
+            })
+            .unwrap_or_default();
         Ok(SavedGame {
             save: self,
             world,
@@ -248,6 +264,7 @@ impl WorldSave {
             players,
             mobs,
             progression,
+            discovery,
         })
     }
 
@@ -260,6 +277,7 @@ impl WorldSave {
             players,
             mobs,
             progression,
+            discovery,
         } = payload;
         self.meta.last_played_unix = unix_now();
         self.write_level()?;
@@ -268,6 +286,7 @@ impl WorldSave {
         write_dat(&self.dir.join(PLAYERS_FILE), players)?;
         write_dat(&self.dir.join(MOBS_FILE), mobs)?;
         write_dat(&self.dir.join(PROGRESSION_FILE), progression)?;
+        write_dat(&self.dir.join(DISCOVERY_FILE), discovery)?;
         Ok(())
     }
 
@@ -651,12 +670,18 @@ mod tests {
             crate::core::BlockPos::new(300, 95, -80),
         );
         progression.defeat("elder stag");
+        let mut discovery = DiscoveryData {
+            owner: vec!["oak_log".into(), "coal".into()],
+            ..DiscoveryData::default()
+        };
+        discovery.players.insert(77, vec!["flint".into()]);
         save.write(&SavePayload {
             world: &world,
             player: &player,
             players: &players,
             mobs: &mobs,
             progression: &progression,
+            discovery: &discovery,
         })
         .unwrap();
 
@@ -677,6 +702,7 @@ mod tests {
         assert_eq!(game.players.0.get(&77).unwrap().slots, player.slots);
         assert_eq!(game.mobs, mobs, "mob population round-trips");
         assert_eq!(game.progression, progression, "progression round-trips");
+        assert_eq!(game.discovery, discovery, "discovery round-trips");
 
         // A save without mobs.dat (pre-mobs world) still loads, empty.
         fs::remove_file(root.join("test-world").join(MOBS_FILE)).unwrap();
@@ -693,6 +719,15 @@ mod tests {
             .load()
             .unwrap();
         assert_eq!(game.progression, WorldProgression::default());
+
+        // And discovery: a world from before crafting existed loads with
+        // nobody knowing anything yet.
+        fs::remove_file(root.join("test-world").join(DISCOVERY_FILE)).unwrap();
+        let game = WorldSave::open(&root, "test-world")
+            .unwrap()
+            .load()
+            .unwrap();
+        assert_eq!(game.discovery, DiscoveryData::default());
 
         // No temp files left behind by the atomic writes.
         let leftovers: Vec<_> = fs::read_dir(root.join("test-world"))

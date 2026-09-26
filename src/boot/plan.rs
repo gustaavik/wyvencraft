@@ -209,9 +209,32 @@ pub fn editor_opens_at_boot(env: &dyn Environment) -> bool {
         .is_some_and(|value| value.trim().eq_ignore_ascii_case("open"))
 }
 
+/// Whether `WYVEN_INVENTORY=open` asks for the inventory — and the crafting
+/// pane above it — to be up already.
+///
+/// E needs a human at the keyboard like F5 and F6 do, so this is what makes
+/// the panel checkable from an automated run, paired with
+/// `WYVEN_SCREENSHOT_AT`. Only `open` counts; any other value is ignored,
+/// since there is nothing else it could mean.
+pub fn inventory_opens_at_boot(env: &dyn Environment) -> bool {
+    env.get("WYVEN_INVENTORY")
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("open"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_inventory_opens_at_boot_only_when_asked_to() {
+        assert!(!inventory_opens_at_boot(&MapEnv::new()));
+        assert!(inventory_opens_at_boot(
+            &MapEnv::new().with("WYVEN_INVENTORY", " Open ")
+        ));
+        assert!(!inventory_opens_at_boot(
+            &MapEnv::new().with("WYVEN_INVENTORY", "1")
+        ));
+    }
 
     /// The gate: a player's build must not have an asset editor in it.
     #[test]

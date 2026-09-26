@@ -173,6 +173,9 @@ pub struct Block {
     pub fluid: Option<FluidInfo>,
     /// What right-clicking it does, for the blocks that do something.
     pub interact: Option<Interaction>,
+    /// The crafting station this block is (`station = "workbench"`), which
+    /// recipes naming it require within reach. Gameplay, so it is hashed.
+    pub station: Option<String>,
 }
 
 /// What right-clicking a block does (`[block.interact]` in
@@ -297,10 +300,12 @@ pub mod blocks {
     pub const CINDER_ORE: BlockId = BlockId(30);
     pub const WAYRUNE: BlockId = BlockId(31);
     pub const ELDER_ALTAR: BlockId = BlockId(32);
+    pub const WORKBENCH: BlockId = BlockId(33);
+    pub const FORGE: BlockId = BlockId(34);
     /// Flowing water levels 1 (shallowest) through 7: auto-registered after
     /// all declared blocks; the source block [`WATER`] is level 8.
-    pub const WATER_FLOW_1: BlockId = BlockId(33);
-    pub const WATER_FLOW_7: BlockId = BlockId(39);
+    pub const WATER_FLOW_1: BlockId = BlockId(35);
+    pub const WATER_FLOW_7: BlockId = BlockId(41);
 }
 
 // ---- TOML schema -----------------------------------------------------------
@@ -341,6 +346,8 @@ struct BlockDef {
     random_yaw: bool,
     /// `[block.interact]` — what right-clicking it does.
     interact: Option<Interaction>,
+    /// `station = "workbench"` — the crafting station this block is.
+    station: Option<String>,
 }
 
 /// `textures = "stone"`, the top/bottom/side shorthand, or all six faces.
@@ -566,6 +573,7 @@ impl BlockRegistry {
             drops: Drops::None,
             fluid: None,
             interact: None,
+            station: None,
         });
         models.push(None); // air
         json.push(None);
@@ -589,6 +597,16 @@ impl BlockRegistry {
             }
             if reg.find(&def.id).is_some() {
                 return Err(format!("duplicate block {:?}", def.id));
+            }
+            // A station name is what recipes spell, so it follows the id rule.
+            if let Some(station) = &def.station
+                && !is_valid_id(station)
+            {
+                return Err(format!(
+                    "block {:?}: station {station:?} must be lowercase letters, digits \
+                     and underscores",
+                    def.id
+                ));
             }
             let drops = match &def.drops {
                 Some(d) => d
@@ -696,6 +714,7 @@ impl BlockRegistry {
                 drops,
                 fluid,
                 interact: def.interact,
+                station: def.station,
             });
             models.push(model);
             if let Some(f) = &def.fluid {
@@ -733,6 +752,7 @@ impl BlockRegistry {
                             max_level: levels + 1,
                         }),
                         interact: None,
+                        station: None,
                     })
                 })
                 .collect();
@@ -858,7 +878,7 @@ mod tests {
         const CUTTERS: &[&str] = &["shears", "sword"];
         /// id, render, solid, hardness, the tools it asks for, whether it insists.
         type BlockRow = (&'static str, R, bool, f32, &'static [&'static str], bool);
-        let expected: [BlockRow; 40] = [
+        let expected: [BlockRow; 42] = [
             ("air", R::Invisible, false, 0.0, NONE, false),
             ("stone", R::Opaque, true, 1.5, PICK, false),
             ("dirt", R::Opaque, true, 0.5, SHOVEL, false),
@@ -893,6 +913,9 @@ mod tests {
             // Structure hearts: unbreakable, so no harvest table.
             ("wayrune", R::Opaque, true, INF, NONE, false),
             ("elder_altar", R::Opaque, true, INF, NONE, false),
+            // Crafting stations.
+            ("workbench", R::Opaque, true, 2.0, AXE, false),
+            ("forge", R::Opaque, true, 3.0, PICK, false),
             // A flowing block inherits its source's harvest rule, which for
             // water is "nothing is good at it".
             ("water_flow_1", R::Transparent, false, INF, NONE, false),

@@ -16,6 +16,12 @@
 //! ([`layout`] and [`hud::hotbar_rect`]) rather than read back from egui, which
 //! matters because the animation starts on a frame where egui has placed
 //! nothing yet.
+//!
+//! In survival the crafting pane ([`crate::ui::crafting`]) sits above the panel
+//! with the same width. It is laid out here, so the panel and the pane are
+//! centred as one stack. It fades in behind the unfold instead of growing out
+//! of the hotbar. It takes the width it needs from the panel, not from the
+//! model's stage beside it.
 
 use egui::{Align2, Color32, Context, FontId, Rect, pos2, vec2};
 
@@ -26,6 +32,7 @@ use crate::inventory::{
     ItemRegistry, ItemStack,
 };
 use crate::state::UiTextures;
+use crate::ui::crafting::{self, CRAFT_H, CraftAction, CraftingView};
 use crate::ui::hud;
 use crate::ui::icon::draw_item_icon;
 use crate::ui::ninepatch;
@@ -53,6 +60,8 @@ const HOTBAR_GAP: f32 = 10.0;
 const PALETTE_H: f32 = 118.0;
 /// Size of the stack riding on the cursor.
 const HELD_ICON: f32 = 40.0;
+/// Space between the crafting pane and the panel below it.
+const CRAFT_GAP: f32 = 10.0;
 
 /// What the player did in the inventory screen this frame.
 pub enum InvAction {
@@ -69,6 +78,8 @@ pub enum InvAction {
     DropHeld { all: bool },
     /// Pressed the drop key over a slot: throw one item out of it.
     DropOne(usize),
+    /// Something in the crafting pane.
+    Craft(CraftAction),
 }
 
 /// What a press landed on, remembered until the button comes back up.
@@ -106,6 +117,9 @@ pub struct InventoryLayout {
     pub hotbar_row: Rect,
     /// The creative palette strip; `Rect::NOTHING` in survival.
     pub palette: Rect,
+    /// The crafting pane above the panel; `Rect::NOTHING` in creative, where
+    /// the palette hands out everything and there is nothing to craft.
+    pub crafting: Rect,
     /// Centre of the column left clear for the player model, as a fraction of
     /// the screen's width.
     pub stage_center_x: f32,
@@ -133,11 +147,18 @@ pub fn layout(screen: Rect, creative: bool) -> InventoryLayout {
     );
     let panel_size = body + vec2(2.0 * PANEL_PAD, 2.0 * PANEL_PAD);
 
-    // Flush right, vertically centred. Clamped to the screen so a window
-    // narrower than the panel shows the panel rather than half of it.
+    // Flush right, and the stack — crafting pane over panel — vertically
+    // centred. Clamped to the screen so a window narrower than the panel shows
+    // the panel rather than half of it.
+    let above = if creative { 0.0 } else { CRAFT_H + CRAFT_GAP };
     let left = (screen.right() - SCREEN_MARGIN - panel_size.x).max(screen.left());
-    let top = (screen.center().y - panel_size.y * 0.5).max(screen.top());
-    let panel = Rect::from_min_size(pos2(left, top), panel_size);
+    let stack_top = (screen.center().y - (panel_size.y + above) * 0.5).max(screen.top());
+    let panel = Rect::from_min_size(pos2(left, stack_top + above), panel_size);
+    let crafting = if creative {
+        Rect::NOTHING
+    } else {
+        Rect::from_min_size(pos2(left, stack_top), vec2(panel_size.x, CRAFT_H))
+    };
 
     let armor = Rect::from_min_size(panel.min + vec2(PANEL_PAD, PANEL_PAD), armor_size);
     let grid = Rect::from_min_size(
@@ -174,6 +195,7 @@ pub fn layout(screen: Rect, creative: bool) -> InventoryLayout {
         storage,
         hotbar_row,
         palette,
+        crafting,
         stage_center_x,
     }
 }
@@ -211,6 +233,8 @@ pub fn draw_inventory(
     // binding is the game's, and egui's key enum is not winit's.
     drop_pressed: bool,
     tex: UiTextures,
+    // The crafting pane's contents; `None` draws no pane (creative).
+    crafting_view: Option<&CraftingView<'_>>,
 ) -> Option<InvAction> {
     let view = View {
         inventory,
@@ -265,22 +289,35 @@ pub fn draw_inventory(
             }
         });
 
+    // The crafting pane rides the same translation, and fades in behind the
+    // unfold rather than growing out of the hotbar: it has no row down there
+    // to grow from.
+    let crafting_rect = l.crafting.translate(shift);
+    let mut action = crafting_view
+        .and_then(|cv| {
+            let opacity = smoothstep(0.35, 1.0, t);
+            crafting::draw_crafting(ctx, cv, crafting_rect, opacity, interactive)
+        })
+        .map(InvAction::Craft);
+
     // Interaction is resolved from the raw pointer rather than from egui
     // `Response`s — see `gesture` — so it is decided here rather than inside
     // the painting closure.
-    let mut action = interactive
-        .then(|| {
-            gesture(
-                ctx,
-                &view,
-                &l,
-                shift,
-                panel,
-                held.is_some(),
-                mode.is_creative(),
-            )
-        })
-        .flatten();
+    if action.is_none() && interactive {
+        let bounds = Bounds {
+            panel,
+            crafting: crafting_rect,
+        };
+        action = gesture(
+            ctx,
+            &view,
+            &l,
+            shift,
+            bounds,
+            held.is_some(),
+            mode.is_creative(),
+        );
+    }
 
     // The drop key acts on whatever the player is dealing with: the stack on
     // the cursor if they are carrying one, otherwise the slot under it. One
@@ -502,6 +539,22 @@ fn slot_under(l: &InventoryLayout, shift: egui::Vec2, cursor: egui::Pos2) -> Opt
         .map(|(index, _)| index)
 }
 
+/// What counts as "on the panel" for a gesture: the panel itself, and the
+/// crafting pane above it. The pane handles its own clicks, but a press there
+/// must not read as clicking the world behind, and a stack carried over it
+/// must not be thrown.
+#[derive(Clone, Copy)]
+struct Bounds {
+    panel: Rect,
+    crafting: Rect,
+}
+
+impl Bounds {
+    fn contains(self, p: egui::Pos2) -> bool {
+        self.panel.contains(p) || self.crafting.contains(p)
+    }
+}
+
 /// Resolve this frame's pointer into an action, by hand.
 ///
 /// Press remembers what it landed on; release decides. Anything between —
@@ -512,7 +565,7 @@ fn gesture(
     view: &View<'_>,
     l: &InventoryLayout,
     shift: egui::Vec2,
-    panel: Rect,
+    panel: Bounds,
     holding: bool,
     creative: bool,
 ) -> Option<InvAction> {
@@ -828,6 +881,7 @@ mod tests {
                     1.0,
                     false,
                     self.tex(),
+                    None,
                 );
             });
             action
@@ -943,6 +997,63 @@ mod tests {
         assert!(h.frame(vec![release(outside, true)], None).is_none());
 
         let carrying = Some(ItemStack::new(stone, 4));
+        h.frame(vec![press(outside, true)], carrying);
+        assert!(matches!(
+            h.frame(vec![release(outside, true)], carrying),
+            Some(InvAction::DropHeld { all: true })
+        ));
+    }
+
+    /// The crafting pane sits over the panel, the same width, on screen, and
+    /// out of the model's column. In creative there is none.
+    #[test]
+    fn the_crafting_pane_sits_above_the_panel_in_survival_only() {
+        for (w, h) in [(1280.0, 720.0), (1920.0, 1080.0), (2560.0, 1080.0)] {
+            let s = screen(w, h);
+            let l = layout(s, false);
+            assert!(
+                s.contains_rect(l.crafting),
+                "at {w}x{h} the pane is off screen"
+            );
+            assert!(
+                s.contains_rect(l.panel),
+                "at {w}x{h} the panel is off screen"
+            );
+            assert!(
+                l.crafting.bottom() <= l.panel.top(),
+                "at {w}x{h} they overlap"
+            );
+            assert_eq!(l.crafting.left(), l.panel.left());
+            assert_eq!(l.crafting.width(), l.panel.width());
+            assert!(l.stage_center_x * 2.0 * w <= l.crafting.left() + 1e-3);
+        }
+        assert!(!layout(screen(1920.0, 1080.0), true).crafting.is_positive());
+    }
+
+    /// The pane handles its own clicks, but for the grid's gestures it is part
+    /// of the panel: carrying a stack over it must not throw the stack.
+    #[test]
+    fn a_stack_carried_onto_the_crafting_pane_is_not_thrown() {
+        let h = Harness::new();
+        let pane = layout(h.screen, false).crafting.center();
+        let outside = pos2(80.0, 540.0);
+        let stone = h.items.find("stone").expect("stone");
+        let carrying = Some(ItemStack::new(stone, 4));
+
+        // From a slot, released on the pane: an ordinary click on that slot,
+        // exactly as a release on the panel's chrome is — never a throw.
+        h.frame(vec![press(h.slot_centre(12), true)], None);
+        h.frame(vec![egui::Event::PointerMoved(pane)], None);
+        assert!(matches!(
+            h.frame(vec![release(pane, true)], None),
+            Some(InvAction::Slot(12))
+        ));
+
+        // Pressed on the pane with a stack on the cursor.
+        h.frame(vec![press(pane, true)], carrying);
+        assert!(h.frame(vec![release(pane, true)], carrying).is_none());
+
+        // And the world beyond both still takes a throw.
         h.frame(vec![press(outside, true)], carrying);
         assert!(matches!(
             h.frame(vec![release(outside, true)], carrying),

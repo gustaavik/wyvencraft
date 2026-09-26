@@ -6,6 +6,7 @@ use std::sync::Arc;
 use glam::Vec3;
 
 use super::MobWorld;
+use super::crafting::CraftingState;
 use super::net::recipes_from_wire;
 use super::peers::Peers;
 use super::persistence::Persistence;
@@ -17,6 +18,7 @@ use crate::content::GameContent;
 use crate::core::{BlockPos, CHUNK_HEIGHT, ChunkPos, DayCycle, GameMode};
 use crate::editor::EditorSession;
 use crate::entity::Player;
+use crate::inventory::crafting::{KnownItems, station_ids};
 use crate::inventory::{HeldLabel, Inventory, RecipeBook};
 use crate::net::{Client, Host, NetVec3, PlayerId, PlayerRestore, RecipeData};
 use crate::progression::WorldProgression;
@@ -73,6 +75,7 @@ impl InGameState {
             players,
             mobs,
             progression,
+            discovery,
         } = game;
         // Anchor spawn-area generation at the saved player position (or the
         // world's recorded spawn) so there's ground under a restored player.
@@ -143,7 +146,9 @@ impl InGameState {
                 "fresh"
             },
         );
+        state.crafting.known = KnownItems::from_ids(&discovery.owner, &state.content.items);
         state.save.records = players;
+        state.save.discovery = discovery;
         state.save.repository = Box::new(FileWorldRepository::new(save));
         state
     }
@@ -198,13 +203,14 @@ impl InGameState {
         // deep-cloned into `Arc`s the state held separately, which was a copy of
         // the whole item/block model tables per session for no reason.
         let items = content.items.clone();
+        let stations = station_ids(&content.blocks);
         let recipes = match recipe_data {
             Some(data) => {
-                let book = recipes_from_wire(&data, &items);
+                let book = recipes_from_wire(&data, &items, &stations);
                 log::info!("using {} crafting recipes from host", book.recipes().len());
                 book
             }
-            None => RecipeBook::load(&items),
+            None => RecipeBook::load(&items, &stations),
         };
 
         let noise = Arc::new(NoiseGenerator::with_config(
@@ -254,6 +260,7 @@ impl InGameState {
             inventory,
             held_label: HeldLabel::default(),
             recipes,
+            crafting: CraftingState::new(stations),
             show_debug: false,
             editor: EditorSession::disabled(),
             view: SceneCache::new(),
@@ -316,6 +323,12 @@ impl InGameState {
             if boot::plan::editor_opens_at_boot(&boot::plan::SystemEnv) {
                 state.toggle_editor();
             }
+        }
+        // Ignored if the editor already took the screen: the two fight over
+        // the camera, which is why E is refused while the editor is up.
+        if boot::plan::inventory_opens_at_boot(&boot::plan::SystemEnv) && !state.editor_open() {
+            log::info!("WYVEN_INVENTORY: opening the inventory at boot");
+            state.toggle_inventory();
         }
         state
     }

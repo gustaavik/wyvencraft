@@ -10,8 +10,11 @@ use wyven_net::{HostConfig, JoinVerifier, Protocol, UserData};
 
 use crate::net::protocol::{ClientMessage, ServerMessage};
 
-/// Application/protocol id — clients must match to connect.
-pub const PROTOCOL_ID: u64 = 0x5759_564E_0001; // "WYVN" v1
+/// Application/protocol id — clients must match to connect. Bumped whenever a
+/// message changes shape, so a mismatched build is refused at the handshake
+/// rather than failing to decode mid-session. v2: crafting stations and
+/// recipe discovery.
+pub const PROTOCOL_ID: u64 = 0x5759_564E_0002; // "WYVN" v2
 
 /// How many peers a host admits.
 pub const MAX_CLIENTS: usize = 16;

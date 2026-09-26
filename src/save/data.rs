@@ -164,6 +164,21 @@ impl PlayerData {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PlayerRecords(pub HashMap<u64, PlayerData>);
 
+/// Which items each player has held — what reveals their crafting recipes
+/// (`discovery.dat`). String ids, like every other save file.
+///
+/// Its own file rather than a field on [`PlayerData`]: bincode is positional,
+/// so a new field there would need a `SAVE_VERSION` bump, and that refuses
+/// every existing world. This one fails soft instead — a world without it
+/// simply re-learns from whatever its players are carrying.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DiscoveryData {
+    /// The save owner's (singleplayer player's, or host's).
+    pub owner: Vec<String>,
+    /// Remote players', keyed like [`PlayerRecords`] by stable identity.
+    pub players: HashMap<u64, Vec<String>>,
+}
+
 /// One saved mob (`mobs.dat`). Kind by name (the save convention); transient
 /// state (velocity, brain, cooldowns, mob ids) deliberately resets on load.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

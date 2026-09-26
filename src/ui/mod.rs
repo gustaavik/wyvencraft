@@ -9,6 +9,7 @@
 pub mod boss_bar;
 pub mod chat;
 pub mod compass;
+pub mod crafting;
 pub mod editor;
 pub mod hud;
 pub mod icon;

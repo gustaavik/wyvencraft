@@ -13,7 +13,10 @@ use std::sync::{Arc, Mutex};
 
 use crate::core::GameMode;
 
-use super::{MobsData, PlayerData, PlayerRecords, SaveError, SavePayload, WorldData, WorldSave};
+use super::{
+    DiscoveryData, MobsData, PlayerData, PlayerRecords, SaveError, SavePayload, WorldData,
+    WorldSave,
+};
 use crate::progression::WorldProgression;
 
 /// Everything one save call persists. Bundling it keeps [`WorldRepository`] to
@@ -25,6 +28,7 @@ pub struct WorldSnapshot<'a> {
     pub players: &'a PlayerRecords,
     pub mobs: &'a MobsData,
     pub progression: &'a WorldProgression,
+    pub discovery: &'a DiscoveryData,
     pub game_mode: GameMode,
     pub spawn: [f32; 3],
     pub time_of_day: f32,
@@ -71,6 +75,7 @@ impl WorldRepository for FileWorldRepository {
             players: snapshot.players,
             mobs: snapshot.mobs,
             progression: snapshot.progression,
+            discovery: snapshot.discovery,
         })
     }
 
@@ -133,6 +138,7 @@ pub struct StoredWorld {
     pub players: PlayerRecords,
     pub mobs: MobsData,
     pub progression: WorldProgression,
+    pub discovery: DiscoveryData,
     pub game_mode: GameMode,
     pub spawn: [f32; 3],
     pub time_of_day: f32,
@@ -155,6 +161,7 @@ impl WorldRepository for InMemoryWorldRepository {
             players: snapshot.players.clone(),
             mobs: snapshot.mobs.clone(),
             progression: snapshot.progression.clone(),
+            discovery: snapshot.discovery.clone(),
             game_mode: snapshot.game_mode,
             spawn: snapshot.spawn,
             time_of_day: snapshot.time_of_day,

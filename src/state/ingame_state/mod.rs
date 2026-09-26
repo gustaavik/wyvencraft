@@ -10,13 +10,15 @@
 //! - [`interaction`] — block break/place, mining, drops, target outline.
 //! - [`mobs`] — mob spawning, AI perception/updates, and their attacks.
 //! - [`view`] — every GPU resource, the camera, and the animation clocks.
-//! - [`inventory`] — the inventory-screen click/craft handlers.
+//! - [`inventory`] — the inventory-screen click handlers.
+//! - [`crafting`] — recipe discovery, stations in reach, and crafting.
 //! - [`persistence`] — world save + restore.
 //! - [`frame`] — the [`GameState`] impl (update/ui/scene_frame).
 
 mod block_use;
 mod bosses;
 mod chat;
+mod crafting;
 mod editor;
 mod frame;
 mod interaction;
@@ -141,6 +143,9 @@ pub struct InGameState {
     held_label: HeldLabel,
     /// Crafting recipes, loaded from `assets/recipes.toml` at world start.
     pub recipes: RecipeBook,
+    /// What this player has discovered, the stations in reach, and the
+    /// crafting panel's selection.
+    crafting: crafting::CraftingState,
     pub show_debug: bool,
     /// The item placement editor. Inert unless `WYVEN_EDITOR=1` asked for it,
     /// and even then it costs one hash lookup per held item per frame until
@@ -238,6 +243,7 @@ mod tests {
     use crate::content::GameContent;
     use crate::core::GameMode;
     use crate::inventory::ItemRegistry;
+    use crate::inventory::crafting::station_ids;
     use crate::net::RecipeData;
     use crate::world::BlockRegistry;
 
@@ -245,18 +251,14 @@ mod tests {
     fn recipe_book_survives_the_wire_roundtrip() {
         let blocks = BlockRegistry::with_builtins();
         let items = ItemRegistry::from_blocks(&blocks);
-        let book = RecipeBook::load(&items);
+        let stations = station_ids(&blocks);
+        let book = RecipeBook::load(&items, &stations);
         assert!(!book.recipes().is_empty());
 
         let wire = recipes_to_wire(&book, &items);
-        let back = recipes_from_wire(&wire, &items);
+        let back = recipes_from_wire(&wire, &items, &stations);
 
-        assert_eq!(back.recipes().len(), book.recipes().len());
-        for (a, b) in book.recipes().iter().zip(back.recipes()) {
-            assert_eq!(a.output, b.output);
-            assert_eq!(a.count, b.count);
-            assert_eq!(a.ingredients, b.ingredients);
-        }
+        assert_eq!(back.recipes(), book.recipes(), "stations included");
     }
 
     #[test]
@@ -268,14 +270,16 @@ mod tests {
                 output: "modded item this build lacks".to_string(),
                 count: 1,
                 ingredients: vec![("wood".to_string(), 1)],
+                station: None,
             },
             RecipeData {
                 output: "glass".to_string(),
                 count: 1,
                 ingredients: vec![("sand".to_string(), 1)],
+                station: None,
             },
         ];
-        let book = recipes_from_wire(&wire, &items);
+        let book = recipes_from_wire(&wire, &items, &station_ids(&blocks));
         assert_eq!(book.recipes().len(), 1);
         assert_eq!(book.recipes()[0].output, items.find("glass").unwrap());
     }
