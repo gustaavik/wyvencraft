@@ -13,8 +13,7 @@ use super::InGameState;
 use crate::domain::core::BlockPos;
 use crate::domain::core::ident::title_case;
 use crate::domain::inventory::crafting::{
-    Availability, CraftError, KnownItems, STATION_RADIUS, StationSet, availability, craft,
-    stations_near,
+    Availability, CraftError, STATION_RADIUS, StationSet, availability, craft, stations_near,
 };
 use crate::infrastructure::net::{Channel, ChatKind, ClientMessage};
 use crate::presentation::ui::crafting::{CraftAction, RecipeEntry};
@@ -25,8 +24,6 @@ const ANNOUNCE_NAMES: usize = 3;
 /// The crafting panel's state, and what the player has learned.
 #[derive(Default)]
 pub(super) struct CraftingState {
-    /// Every item this player has held; recipes are revealed from it.
-    pub known: KnownItems,
     /// Indices into the recipe book of the revealed recipes, in book order.
     pub revealed: Vec<usize>,
     /// Revealed since the player last looked — drawn with a NEW badge.
@@ -57,14 +54,14 @@ impl InGameState {
     /// Once a frame: learn from what the player carries, announce what that
     /// reveals, and look around for stations while the panel is up.
     pub(super) fn tick_crafting(&mut self) {
-        let mut learned = self.crafting.known.learn_from(&self.sim.inventory);
+        let mut learned = self.sim.known_items.learn_from(&self.sim.inventory);
         if let Some(held) = self.sim.held {
-            learned |= self.crafting.known.learn(held.item);
+            learned |= self.sim.known_items.learn(held.item);
         }
         if learned || !self.crafting.primed {
             self.refresh_revealed();
             if learned && !self.net.session.is_authority() {
-                let items = self.crafting.known.to_wire();
+                let items = self.sim.known_items.to_wire();
                 self.net
                     .session
                     .request(&ClientMessage::SyncKnown { items }, Channel::Reliable);
@@ -77,7 +74,7 @@ impl InGameState {
 
     /// Recompute the revealed recipes and announce the new ones.
     fn refresh_revealed(&mut self) {
-        let revealed = self.crafting.known.known_recipes(&self.sim.recipes);
+        let revealed = self.sim.known_items.known_recipes(&self.sim.recipes);
         let fresh: Vec<usize> = revealed
             .iter()
             .copied()

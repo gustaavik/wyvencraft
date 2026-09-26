@@ -34,7 +34,7 @@ impl InGameState {
             self.sim.inventory.set_slot(index, stack);
         }
         self.sim.inventory.set_selected(restore.selected as usize);
-        self.crafting.known =
+        self.sim.known_items =
             KnownItems::from_wire(&restore.known_items, &self.content.rules.items);
         // Don't immediately echo the restored inventory back to the host.
         self.net.peers.last_synced_inventory = Some(self.sim.inventory.clone());
@@ -72,7 +72,7 @@ impl InGameState {
         );
         let mobs = MobsData::from_ecs(&self.sim.ecs);
         let discovery = DiscoveryData {
-            owner: self.crafting.known.to_ids(&self.content.rules.items),
+            owner: self.sim.known_items.to_ids(&self.content.rules.items),
             players: self.save.discovery.players.clone(),
         };
         let snapshot = WorldSnapshot {

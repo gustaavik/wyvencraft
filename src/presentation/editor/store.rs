@@ -154,13 +154,7 @@ impl PlacementStore for FileStore {
     }
 }
 
-fn read_file(path: &str) -> Result<String, String> {
-    std::fs::read_to_string(path).map_err(|err| format!("{path}: {err}"))
-}
-
-fn write_file(path: &str, text: &str) -> Result<(), String> {
-    std::fs::write(path, text).map_err(|err| format!("{path}: {err}"))
-}
+pub(super) use crate::infrastructure::fs::{read_text as read_file, write_text as write_file};
 
 /// The test double. Holds what a file would, without being one.
 #[derive(Default)]

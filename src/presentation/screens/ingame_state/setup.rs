@@ -112,7 +112,7 @@ impl InGameState {
                 "fresh"
             },
         );
-        state.crafting.known = KnownItems::from_ids(&discovery.owner, &state.content.rules.items);
+        state.sim.known_items = KnownItems::from_ids(&discovery.owner, &state.content.rules.items);
         state.save.records = players;
         state.save.discovery = discovery;
         state.save.repository = Box::new(FileWorldRepository::new(save));

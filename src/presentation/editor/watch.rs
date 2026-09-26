@@ -30,7 +30,7 @@ pub struct FsStamps;
 
 impl Stamps for FsStamps {
     fn modified(&self, path: &str) -> Option<SystemTime> {
-        std::fs::metadata(path).ok()?.modified().ok()
+        crate::infrastructure::fs::modified(path)
     }
 }
 

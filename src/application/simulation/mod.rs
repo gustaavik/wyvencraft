@@ -25,6 +25,7 @@ pub use mobs::{
 use crate::domain::content::Registries;
 use crate::domain::core::{BlockPos, CHUNK_HEIGHT, ChunkPos, DayCycle, GameMode};
 use crate::domain::entity::{AnimationState, MobId, Player, Spawner};
+use crate::domain::inventory::crafting::KnownItems;
 use crate::domain::inventory::{Inventory, ItemStack, RecipeBook};
 use crate::domain::progression::WorldProgression;
 use crate::domain::world::structure::Structures;
@@ -153,6 +154,9 @@ pub struct Simulation {
     pub held: Option<ItemStack>,
     /// Crafting recipes this session crafts from.
     pub recipes: RecipeBook,
+    /// Every item this player has held; recipes are revealed from it. Saved in
+    /// `discovery.dat`, and reported to a host by a client.
+    pub known_items: KnownItems,
     /// Where the player (re)spawns on death.
     pub spawn: Vec3,
     /// True while the player is dead and awaiting respawn (control frozen).
@@ -226,6 +230,7 @@ impl Simulation {
             inventory,
             held: None,
             recipes: start.recipes,
+            known_items: KnownItems::default(),
             spawn,
             dead: false,
             breaking: None,
