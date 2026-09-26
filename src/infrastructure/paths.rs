@@ -11,7 +11,7 @@
 //!   so an update cannot take a world with it.
 //!
 //! Only the second is resolved here. `assets/` stays working-directory relative
-//! (see [`crate::infrastructure::content`]) precisely because it belongs to the install.
+//! (see [`crate::presentation::content`]) precisely because it belongs to the install.
 //!
 //! Resolution order, decided once per process:
 //!

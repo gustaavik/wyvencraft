@@ -4,7 +4,7 @@
 use egui::{Align2, Color32, Context, Stroke};
 
 use crate::domain::inventory::{HOTBAR_SIZE, Inventory, ItemRegistry};
-use crate::infrastructure::content::ItemIcon;
+use crate::presentation::content::ItemIcon;
 use crate::presentation::ui::UiTextures;
 use crate::presentation::ui::slot;
 

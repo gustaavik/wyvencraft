@@ -1,7 +1,7 @@
 //! Drawing item icons into egui.
 //!
 //! The textures are registered with egui once (see [`crate::app`]) to get the
-//! [`egui::TextureId`]s these helpers sample. A [`crate::infrastructure::content::ItemIcon`] is
+//! [`egui::TextureId`]s these helpers sample. A [`crate::presentation::content::ItemIcon`] is
 //! one of three things — a flat atlas tile (tools, food, armor, fluids), an
 //! isometric cube built from a block's own face tiles, or a cell of the
 //! pre-rendered 3D sheet (items with a model file) — and each emits a single
@@ -11,7 +11,7 @@
 use egui::epaint::{Mesh, Vertex};
 use egui::{Color32, Painter, Pos2, Rect, Shape, pos2};
 
-use crate::infrastructure::content::ItemIcon;
+use crate::presentation::content::ItemIcon;
 use crate::presentation::ui::UiTextures;
 use wyven_render::icons;
 use wyven_render::texture::{ATLAS_COLUMNS, ATLAS_SIZE};

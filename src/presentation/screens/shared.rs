@@ -20,8 +20,8 @@ use wyven_model::{DisplayContext, ModelRegistry};
 use wyven_render::{GpuMesh, RenderContext, Renderer, Texture, TexturedMesh, icons};
 
 use crate::application::boot_plan::{SystemEnv, screenshot_at};
-use crate::infrastructure::content::GameContent;
 use crate::presentation::config::Settings;
+use crate::presentation::content::GameContent;
 pub use crate::presentation::ui::UiTextures;
 
 /// Everything Wyvencraft's screens read and write.
@@ -124,8 +124,8 @@ impl Game for Wyvencraft {
 
     fn textures(&self) -> RendererTextures<'_> {
         RendererTextures {
-            atlas: self.content.tiles.atlas_rgba(),
-            blocks: &self.content.block_textures,
+            atlas: self.content.visuals.tiles.atlas_rgba(),
+            blocks: &self.content.visuals.block_textures,
         }
     }
 
@@ -134,7 +134,7 @@ impl Game for Wyvencraft {
         let icon_sheet = build_icon_sheet(
             boot.render,
             boot.renderer,
-            &self.content.models,
+            &self.content.visuals.models,
             boot.color_format,
         );
 
@@ -172,7 +172,7 @@ impl Game for Wyvencraft {
             ui_tex: UiTextures {
                 atlas,
                 model_icons,
-                model_count: self.content.models.len() as u32,
+                model_count: self.content.visuals.models.len() as u32,
                 gui,
             },
             audio,

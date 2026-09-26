@@ -13,9 +13,9 @@ use super::{
     GameState, InGameState, LoadingState, MainMenuState, StateContext, Transition, Wyvencraft,
 };
 use crate::domain::core::GameMode;
-use crate::infrastructure::content::GameContent;
 use crate::infrastructure::net::{DEFAULT_PORT, Host};
 use crate::infrastructure::save::{self, WorldEntry, WorldSave};
+use crate::presentation::content::GameContent;
 
 pub struct SingleplayerMenuState {
     worlds: Vec<WorldEntry>,

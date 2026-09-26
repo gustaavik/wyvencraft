@@ -40,7 +40,7 @@ impl MultiplayerMenuState {
         Self::with(ServerBrowser::new(
             Box::new(FileServerStore::new()),
             Box::new(NetStatusProbe::new(&ctx.shared.account)),
-            ctx.shared.content.hash,
+            ctx.shared.content.rules.hash(),
         ))
     }
 

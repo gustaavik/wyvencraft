@@ -98,9 +98,10 @@ impl InGameState {
     /// The stations within reach of the player's eye.
     pub(super) fn refresh_stations(&mut self) {
         let center = BlockPos::from_world(self.player.eye_position());
-        self.crafting.nearby = stations_near(center, STATION_RADIUS, &self.content.blocks, |p| {
-            self.world.block_at(p)
-        });
+        self.crafting.nearby =
+            stations_near(center, STATION_RADIUS, &self.content.rules.blocks, |p| {
+                self.world.block_at(p)
+            });
     }
 
     /// Right-click on a station opens the crafting panel. Returns whether the
@@ -110,7 +111,11 @@ impl InGameState {
         let Some(hit) = self.targeted_block() else {
             return false;
         };
-        let block = self.content.blocks.get(self.world.block_at(hit.block));
+        let block = self
+            .content
+            .rules
+            .blocks
+            .get(self.world.block_at(hit.block));
         if block.station.is_none() || self.player.mode.is_creative() {
             return false;
         }
@@ -133,7 +138,7 @@ impl InGameState {
         Some(availability(
             recipe,
             &self.inventory,
-            &self.content.items,
+            &self.content.rules.items,
             &self.crafting.nearby,
         ))
     }
@@ -150,7 +155,7 @@ impl InGameState {
         let Some(recipe) = self.recipes.get(index) else {
             return;
         };
-        let items = &self.content.items;
+        let items = &self.content.rules.items;
         match craft(
             recipe,
             &mut self.inventory,
@@ -211,10 +216,11 @@ impl InGameState {
     /// An item's display name, falling back to its id.
     pub(super) fn item_name(&self, item: crate::domain::inventory::ItemId) -> &str {
         self.content
+            .visuals
             .item_display_names
             .get(item.0 as usize)
             .map(String::as_str)
-            .unwrap_or_else(|| &self.content.items.get(item).id)
+            .unwrap_or_else(|| &self.content.rules.items.get(item).id)
     }
 }
 
@@ -237,7 +243,7 @@ mod tests {
     use crate::domain::core::GameMode;
     use crate::domain::inventory::{Inventory, ItemStack};
     use crate::domain::world::block::blocks;
-    use crate::infrastructure::content::GameContent;
+    use crate::presentation::content::GameContent;
 
     fn state() -> InGameState {
         let mut state = InGameState::new(GameContent::builtin(), 7, GameMode::Survival);
@@ -246,14 +252,14 @@ mod tests {
     }
 
     fn give(state: &mut InGameState, id: &str, count: u8) {
-        let item = state.content.items.find(id).expect("builtin item");
+        let item = state.content.rules.items.find(id).expect("builtin item");
         state
             .inventory
-            .add(ItemStack::new(item, count), &state.content.items);
+            .add(ItemStack::new(item, count), &state.content.rules.items);
     }
 
     fn index_of(state: &InGameState, output: &str) -> usize {
-        let item = state.content.items.find(output).unwrap();
+        let item = state.content.rules.items.find(output).unwrap();
         state
             .recipes
             .recipes()
@@ -308,12 +314,12 @@ mod tests {
         let mut state = state();
         give(&mut state, "oak_log", 4);
         state.handle_craft(index_of(&state, "workbench"), false);
-        let bench = state.content.items.find("workbench").unwrap();
+        let bench = state.content.rules.items.find("workbench").unwrap();
         assert_eq!(state.inventory.count_of(bench), 1);
         assert_eq!(
             state
                 .inventory
-                .count_of(state.content.items.find("oak_log").unwrap()),
+                .count_of(state.content.rules.items.find("oak_log").unwrap()),
             0
         );
     }
@@ -326,7 +332,7 @@ mod tests {
         give(&mut state, "cobblestone", 3);
         give(&mut state, "stick", 2);
         let pick = index_of(&state, "stone_pickaxe");
-        let pick_item = state.content.items.find("stone_pickaxe").unwrap();
+        let pick_item = state.content.rules.items.find("stone_pickaxe").unwrap();
 
         state.handle_craft(pick, false);
         assert_eq!(state.inventory.count_of(pick_item), 0);
@@ -353,7 +359,7 @@ mod tests {
         let mut state = state();
         give(&mut state, "oak_log", 5);
         state.handle_craft(index_of(&state, "stick"), true);
-        let stick = state.content.items.find("stick").unwrap();
+        let stick = state.content.rules.items.find("stick").unwrap();
         assert_eq!(state.inventory.count_of(stick), 20);
     }
 

@@ -45,7 +45,7 @@ impl InGameState {
             return false;
         };
         let block = self.world.block_at(hit.block);
-        if self.content.blocks.get(block).interact.is_none() {
+        if self.content.rules.blocks.get(block).interact.is_none() {
             return false;
         }
         self.view.trigger_swing();
@@ -85,7 +85,7 @@ impl InGameState {
             );
             return;
         };
-        let Some(interaction) = self.content.blocks.get(block).interact.clone() else {
+        let Some(interaction) = self.content.rules.blocks.get(block).interact.clone() else {
             return;
         };
         let at = UseAt {
@@ -159,8 +159,8 @@ mod tests {
     use crate::application::session::FakeSession;
     use crate::domain::core::GameMode;
     use crate::domain::world::block::blocks;
-    use crate::infrastructure::content::GameContent;
     use crate::infrastructure::net::ServerMessage;
+    use crate::presentation::content::GameContent;
 
     #[test]
     fn directions_follow_the_compass() {

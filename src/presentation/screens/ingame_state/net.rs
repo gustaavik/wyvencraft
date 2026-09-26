@@ -88,7 +88,7 @@ impl InGameState {
             record_to_restore(
                 record,
                 known.map_or(&[], Vec::as_slice),
-                &self.content.items,
+                &self.content.rules.items,
             )
         });
         let spawn = restored
@@ -105,8 +105,8 @@ impl InGameState {
             spawn,
             time_of_day: self.day_cycle.time_of_day(),
             game_mode: self.player.mode,
-            content_hash: self.content.hash,
-            recipes: recipes_to_wire(&self.recipes, &self.content.items),
+            content_hash: self.content.rules.hash(),
+            recipes: recipes_to_wire(&self.recipes, &self.content.rules.items),
             restored,
         };
         self.session.send_to(pid, &welcome, Channel::Reliable);
@@ -182,7 +182,7 @@ impl InGameState {
             // (nor the other probes refreshing their lists at the same moment).
             online: (self.peers.announced.len() + 1) as u32,
             max: (crate::infrastructure::net::MAX_CLIENTS + 1) as u32,
-            content_hash: self.content.hash,
+            content_hash: self.content.rules.hash(),
         };
         self.session.send_to(pid, &status, Channel::Reliable);
     }
@@ -196,7 +196,7 @@ impl InGameState {
         let Some(&identity) = self.peers.identities.get(&pid) else {
             return;
         };
-        let items = &self.content.items;
+        let items = &self.content.rules.items;
         let entry = self.save.discovery.players.entry(identity).or_default();
         let mut known = KnownItems::from_ids(entry, items);
         if known.merge(&KnownItems::from_wire(wire, items)) {
@@ -222,7 +222,7 @@ impl InGameState {
             &self.peers.identities,
             &self.peers.players,
             &self.peers.inventories,
-            &self.content.items,
+            &self.content.rules.items,
             pid,
         );
         self.peers.remove(pid);
@@ -310,13 +310,18 @@ impl InGameState {
     /// edit optimistically.
     fn client_may_break(&mut self, pid: PlayerId, pos: BlockPos) -> bool {
         let existing = self.world.block_at(pos);
-        let harvest = self.content.blocks.get(existing).harvest.as_ref();
+        let harvest = self.content.rules.blocks.get(existing).harvest.as_ref();
         let tool = self
             .peers
             .inventories
             .get(&pid)
             .and_then(|(slots, selected)| slots.get(*selected as usize)?.as_ref())
-            .and_then(|stack| self.content.items.component::<Tool>(ItemId(stack.item)));
+            .and_then(|stack| {
+                self.content
+                    .rules
+                    .items
+                    .component::<Tool>(ItemId(stack.item))
+            });
         if crate::domain::inventory::meets_tier(harvest, tool) {
             return true;
         }
@@ -389,7 +394,12 @@ impl InGameState {
             .inventories
             .get(&pid)
             .and_then(|(slots, selected)| slots.get(*selected as usize)?.as_ref())
-            .and_then(|stack| self.content.items.component::<Tool>(ItemId(stack.item)))
+            .and_then(|stack| {
+                self.content
+                    .rules
+                    .items
+                    .component::<Tool>(ItemId(stack.item))
+            })
             .and_then(|tool| tool.damage)
             .unwrap_or(mobs::PLAYER_ATTACK_DAMAGE)
     }
@@ -482,7 +492,7 @@ impl InGameState {
                 self.peers.entry(id, Vec3::ZERO).equipment = equipment;
             }
             ServerMessage::MobSpawned { id, kind, position } => {
-                match self.content.entities.find(&kind) {
+                match self.content.rules.entities.find(&kind) {
                     Some(k) if k.mob.is_some() => {
                         log::debug!("replicating mob {id} ({kind}) from host");
                         self.mobs
@@ -920,9 +930,9 @@ mod tests {
     use crate::domain::core::GameMode;
     use crate::domain::inventory::ARMOR_SIZE;
     use crate::domain::world::block::blocks;
-    use crate::infrastructure::content::GameContent;
     use crate::infrastructure::net::status::{NetStatusProbe, StatusOutcome, StatusProbe};
     use crate::infrastructure::net::{Client, Host, TicketJoin, host_config};
+    use crate::presentation::content::GameContent;
 
     /// A client reports its slots and which one it has selected, and that is
     /// enough — the host is never told separately what a client is holding, so
@@ -980,7 +990,12 @@ mod tests {
         });
         state.pump_network(1.0 / 60.0);
 
-        let sword = state.content.items.find("iron_sword").expect("iron_sword");
+        let sword = state
+            .content
+            .rules
+            .items
+            .find("iron_sword")
+            .expect("iron_sword");
         let mut slots = vec![None; 3];
         slots[2] = Some(NetItemStack {
             item: sword.0,
@@ -1045,12 +1060,13 @@ mod tests {
     fn hold(state: &mut InGameState, name: &str) {
         let id = state
             .content
+            .rules
             .items
             .find(name)
             .unwrap_or_else(|| panic!("{name}"));
         state
             .inventory
-            .set_slot(0, Some(state.content.items.full_stack(id)));
+            .set_slot(0, Some(state.content.rules.items.full_stack(id)));
         state.inventory.set_selected(0);
     }
 
@@ -1102,12 +1118,17 @@ mod tests {
             "nothing reported yet, so a fist"
         );
 
-        let sword = state.content.items.find("iron_sword").expect("iron_sword");
+        let sword = state
+            .content
+            .rules
+            .items
+            .find("iron_sword")
+            .expect("iron_sword");
         let mut slots = vec![None; 3];
         slots[2] = Some(NetItemStack {
             item: sword.0,
             count: 1,
-            durability: state.content.items.max_durability(sword),
+            durability: state.content.rules.items.max_durability(sword),
         });
         handle.deliver(Inbound::Request {
             player: pid,
@@ -1210,7 +1231,7 @@ mod tests {
         };
         assert_eq!(*online, 1, "the host itself is on the server");
         assert_eq!(*max, (crate::infrastructure::net::MAX_CLIENTS + 1) as u32);
-        assert_eq!(*content_hash, state.content.hash);
+        assert_eq!(*content_hash, state.content.rules.hash());
         assert!(
             !net.broadcasts()
                 .iter()
@@ -1271,7 +1292,7 @@ mod tests {
     #[test]
     fn a_returning_player_gets_their_saved_state_back() {
         let (mut state, handle) = host_session();
-        let bread = state.content.items.find("bread").unwrap();
+        let bread = state.content.rules.items.find("bread").unwrap();
         let identity = 7;
 
         // This world remembers them from a previous session.
@@ -1330,7 +1351,7 @@ mod tests {
     #[test]
     fn a_clients_discoveries_are_kept_and_handed_back_on_rejoin() {
         let (mut state, handle) = host_session();
-        let items = state.content.items.clone();
+        let items = state.content.rules.items.clone();
         let wire = |names: &[&str]| -> Vec<u16> {
             names.iter().map(|n| items.find(n).unwrap().0).collect()
         };
@@ -1652,7 +1673,7 @@ mod tests {
         // gate a live server runs behind.
         let port = free_port();
         let content = GameContent::builtin();
-        let ours = content.hash;
+        let ours = content.rules.hash();
         let host = Host::bind(port, 4242, host_config(), TicketJoin::at(&keys_path))
             .expect("binds loopback");
         assert!(host.can_verify(), "the host must be able to check tickets");

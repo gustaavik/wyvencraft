@@ -4,6 +4,7 @@
 //! this layer; it depends on nothing but engine primitives.
 
 pub mod chat;
+pub mod content;
 pub mod core;
 pub mod entity;
 pub mod inventory;

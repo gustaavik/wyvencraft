@@ -46,7 +46,7 @@ use crate::domain::inventory::{HeldLabel, Inventory, ItemStack, RecipeBook};
 use crate::domain::progression::WorldProgression;
 use crate::domain::world::structure::Structures;
 use crate::domain::world::{ChunkLoader, FluidSim, World};
-use crate::infrastructure::content::GameContent;
+use crate::presentation::content::GameContent;
 use crate::presentation::editor::EditorSession;
 use peers::Peers;
 use persistence::Persistence;
@@ -244,15 +244,15 @@ mod tests {
     use crate::domain::inventory::ItemRegistry;
     use crate::domain::inventory::crafting::station_ids;
     use crate::domain::world::BlockRegistry;
-    use crate::infrastructure::content::GameContent;
     use crate::infrastructure::net::RecipeData;
+    use crate::presentation::content::GameContent;
 
     #[test]
     fn recipe_book_survives_the_wire_roundtrip() {
         let blocks = BlockRegistry::with_builtins();
         let items = ItemRegistry::from_blocks(&blocks);
         let stations = station_ids(&blocks);
-        let book = crate::infrastructure::content::recipes::load_recipe_book(&items, &stations);
+        let book = crate::infrastructure::recipes::load_recipe_book(&items, &stations);
         assert!(!book.recipes().is_empty());
 
         let wire = recipes_to_wire(&book, &items);
@@ -308,7 +308,7 @@ mod tests {
     #[test]
     fn killing_a_cow_drops_beef() {
         let mut state = InGameState::new(GameContent::builtin(), 7, GameMode::Survival);
-        let cow_kind = state.content.entities.find("cow").expect("cow kind");
+        let cow_kind = state.content.rules.entities.find("cow").expect("cow kind");
         let max_health = cow_kind.mob.as_ref().unwrap().max_health;
 
         // Stand the cow on the ground right in front of the player, on a pad
@@ -339,7 +339,7 @@ mod tests {
         state.update_mobs(1.0 / 60.0);
         assert!(state.mobs.live.is_empty(), "cow should be dead and reaped");
         assert!(!state.drops.is_empty(), "death should drop loot");
-        let raw_beef = state.content.items.find("raw_beef").unwrap();
+        let raw_beef = state.content.rules.items.find("raw_beef").unwrap();
         let dropped: u32 = state
             .drops
             .iter()
@@ -378,6 +378,7 @@ mod tests {
 
         let expected = state
             .content
+            .rules
             .items
             .find("red_mushroom")
             .expect("shipped item");
@@ -409,8 +410,8 @@ mod tests {
             state.inventory.set_slot(
                 hotbar,
                 held.map(|name| {
-                    let id = state.content.items.find(name).expect("shipped item");
-                    state.content.items.full_stack(id)
+                    let id = state.content.rules.items.find(name).expect("shipped item");
+                    state.content.rules.items.full_stack(id)
                 }),
             );
 
@@ -421,6 +422,7 @@ mod tests {
 
             let leaves = state
                 .content
+                .rules
                 .items
                 .find("oak_leaves")
                 .expect("shipped item");
@@ -560,7 +562,7 @@ mod tests {
         let probe = BlockPos::new(0, 200, 0); // empty sky, nothing generated
         assert!(!state.world.is_targetable(probe), "air");
 
-        let registry = &state.content.blocks;
+        let registry = &state.content.rules.blocks;
         assert!(registry.get(blocks::STONE).solid);
         for (id, name) in [
             (blocks::WATER, "water"),
@@ -604,7 +606,7 @@ mod tests {
         state.inventory.set_slot(
             8,
             Some(ItemStack::new(
-                state.content.items.find("bread").unwrap(),
+                state.content.rules.items.find("bread").unwrap(),
                 2,
             )),
         );
@@ -629,7 +631,7 @@ mod tests {
         assert_eq!(
             state.inventory.slot(8),
             Some(ItemStack::new(
-                state.content.items.find("bread").unwrap(),
+                state.content.rules.items.find("bread").unwrap(),
                 2
             ))
         );

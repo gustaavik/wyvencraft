@@ -21,11 +21,11 @@ use crate::domain::inventory::crafting::{KnownItems, station_ids};
 use crate::domain::inventory::{HeldLabel, Inventory};
 use crate::domain::progression::WorldProgression;
 use crate::domain::world::{ChunkLoader, FluidSim, NoiseGenerator, World, WorldGenerator};
-use crate::infrastructure::content::GameContent;
-use crate::infrastructure::content::recipes::load_recipe_book;
 use crate::infrastructure::net::session::{ClientSession, HostSession, SingleplayerSession};
 use crate::infrastructure::net::{Client, Host, NetVec3, PlayerId, PlayerRestore, RecipeData};
+use crate::infrastructure::recipes::load_recipe_book;
 use crate::infrastructure::save::{FileWorldRepository, SavedGame};
+use crate::presentation::content::GameContent;
 use crate::presentation::editor::EditorSession;
 
 impl InGameState {
@@ -95,7 +95,7 @@ impl InGameState {
             None,
         );
         if let Some(world) = &world {
-            let resolved = world.resolve(&state.content.blocks);
+            let resolved = world.resolve(&state.content.rules.blocks);
             let count = resolved.len();
             for (pos, block) in resolved {
                 state.world.apply_edit(pos, block);
@@ -109,7 +109,7 @@ impl InGameState {
             player.apply(
                 &mut state.player,
                 &mut state.inventory,
-                &state.content.items,
+                &state.content.rules.items,
             );
         }
         // Respawn the saved mob population. Fresh ids and brains (both are
@@ -148,7 +148,7 @@ impl InGameState {
                 "fresh"
             },
         );
-        state.crafting.known = KnownItems::from_ids(&discovery.owner, &state.content.items);
+        state.crafting.known = KnownItems::from_ids(&discovery.owner, &state.content.rules.items);
         state.save.records = players;
         state.save.discovery = discovery;
         state.save.repository = Box::new(FileWorldRepository::new(save));
@@ -204,8 +204,8 @@ impl InGameState {
         // Everything below reads through `content`; four of these used to be
         // deep-cloned into `Arc`s the state held separately, which was a copy of
         // the whole item/block model tables per session for no reason.
-        let items = content.items.clone();
-        let stations = station_ids(&content.blocks);
+        let items = content.rules.items.clone();
+        let stations = station_ids(&content.rules.blocks);
         let recipes = match recipe_data {
             Some(data) => {
                 let book = recipes_from_wire(&data, &items, &stations);
@@ -217,12 +217,12 @@ impl InGameState {
 
         let noise = Arc::new(NoiseGenerator::with_config(
             seed,
-            content.worldgen.clone(),
-            content.structures.clone(),
+            content.rules.worldgen.clone(),
+            content.rules.structures.clone(),
         ));
         let structures = noise.structures().clone();
         let generator: Arc<dyn WorldGenerator> = noise;
-        let mut world = World::new(generator.clone(), content.blocks.clone());
+        let mut world = World::new(generator.clone(), content.rules.blocks.clone());
 
         // Worker pool sized to leave headroom for the main + render threads.
         let workers = std::thread::available_parallelism()
@@ -258,7 +258,7 @@ impl InGameState {
 
         let mut state = Self {
             world,
-            player: Player::new(spawn, mode, content.entities.player()),
+            player: Player::new(spawn, mode, content.rules.entities.player()),
             inventory,
             held_label: HeldLabel::default(),
             recipes,

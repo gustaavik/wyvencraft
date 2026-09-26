@@ -3,6 +3,7 @@
 
 pub mod art;
 pub mod config;
+pub mod content;
 pub mod editor;
 pub mod render;
 pub mod screens;

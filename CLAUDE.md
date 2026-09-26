@@ -198,19 +198,21 @@ domain/            the rules — pure
   entity           ← inventory    player, swept-AABB physics, drops, mobs, brains, bosses, animation (incl. Pose), camera shots
   progression      ← core         shrines read, structures revealed, bosses beaten; compass bearings
   chat             ← core         message log, ChatKind, commands (one per file), the ops list's rules
+  content                         Registries: every hashed definition + the content hash (computed in Registries::new), reference checks
 application/       use cases and their ports
   protocol                        the wire messages (ClientMessage/ServerMessage) — the contract between peers
   session                         the Session port, Authority/Inbound, HOST_PLAYER_ID, FakeSession
   sync                            remote-player snapshot smoothing
   boot_plan                       pure env → BootPlan (the Environment port, SystemEnv, MapEnv)
+  content                         load_registries: assets/*.toml → Registries through the AssetSource port, visual specs out of band
 infrastructure/    adapters
-  content          ← all domain   GameContent: registries loaded from assets/*.toml (recipes.rs: the recipe file read)
   save                            world/player persistence (saves/ dir)
   net                             transports + net::session::{Singleplayer,Host,Client}Session, join gate, server list, status probe
   audio            ← wyven-audio  sound/music registry (assets/audio.toml), AudioManager, and the menu-music fade/restart state machine
-  paths, fs, profile, ops, desktop   the data dir; write_atomic; profile.toml; ops.toml; handing a file to the OS
+  paths, fs, profile, ops, recipes, desktop   the data dir; write_atomic; profile.toml; ops.toml; recipes.toml; handing a file to the OS
 presentation/      everything that draws or reads input
   screens                         the Screen impls (was `state`), and the Game impl that starts them
+  content                         GameContent { rules: Registries, visuals: Visuals, sounds } — Visuals::load resolves textures/models/icons/labels
   ui                              egui views, UiTextures, the server-list rows
   render                          box + rigged entity meshes, the first-person view model, Shot → Camera (ShotCamera)
   art              ← render       PNG tiles: atlas layout for the skin, armor, mob and crack sheets
@@ -224,8 +226,10 @@ boot/, app.rs                     the composition root: boot::start turns a Boot
 > (`state::ingame_state::view` is now `presentation::screens::ingame_state::view`,
 > `entity::rigged` is `presentation::render::rigged`, and so on). The mapping is
 > mechanical: domain = core/world/inventory/entity/progression/chat;
-> infrastructure = content/save/net/audio/paths/desktop; presentation =
-> ui/config/art/editor and `state` → `screens`.
+> infrastructure = save/net/audio/paths/desktop; presentation =
+> ui/config/art/editor/content and `state` → `screens`. On `GameContent`,
+> hashed registries are `content.rules.{blocks,items,…}` and `content.rules.hash()`;
+> everything visual is `content.visuals.{models,tiles,item_icons,…}`.
 
 Key rule, unchanged in spirit and now enforced by the crate graph: **`render`
 never depends on `world`.** The active screen builds plain `CpuMesh` data and

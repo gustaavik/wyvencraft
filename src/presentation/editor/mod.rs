@@ -54,20 +54,21 @@ pub use watch::{FsStamps, Stamps};
 /// itself rather than guessed from the file extension, so the panel edits
 /// whichever layer is actually placing each context — the same choice
 /// `wyven_model::mesh::local_transform` makes at draw time.
-pub fn targets_from(content: &crate::infrastructure::content::GameContent) -> Vec<EditorTarget> {
+pub fn targets_from(content: &crate::presentation::content::GameContent) -> Vec<EditorTarget> {
     let mut targets: Vec<EditorTarget> = content
+        .visuals
         .item_models
         .iter()
         .enumerate()
         .filter_map(|(index, model)| {
             let model = model.as_ref()?;
             let item = crate::domain::inventory::ItemId(u16::try_from(index).ok()?);
-            let loaded = content.models.get(model.id)?;
+            let loaded = content.visuals.models.get(model.id)?;
             Some(EditorTarget {
                 key: PlacementKey::Item(item),
-                id: content.items.get(item).id.clone(),
+                id: content.rules.items.get(item).id.clone(),
                 name: content.item_display_name(item).to_string(),
-                model: content.models.path_of(model.id)?.to_string(),
+                model: content.visuals.models.path_of(model.id)?.to_string(),
                 offers: CONTEXTS.to_vec(),
                 declared: CONTEXTS
                     .into_iter()
@@ -102,7 +103,7 @@ fn block_item_target() -> EditorTarget {
         key: PlacementKey::BlockItem,
         id: "block".to_string(),
         name: "▣ Block items (all)".to_string(),
-        model: crate::infrastructure::content::BLOCK_ITEM_MODEL.to_string(),
+        model: crate::presentation::content::BLOCK_ITEM_MODEL.to_string(),
         offers: hands.clone(),
         declared: hands,
     }
@@ -111,7 +112,7 @@ fn block_item_target() -> EditorTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infrastructure::content::{FsSource, GameContent};
+    use crate::presentation::content::{FsSource, GameContent};
 
     /// The real shipped content, models included. `GameContent::builtin()` is
     /// not enough here: it reads the embedded TOMLs but no model *files*, so
@@ -128,7 +129,7 @@ mod tests {
         let content = shipped();
         let targets = targets_from(&content);
 
-        let with_models = content.item_models.iter().flatten().count();
+        let with_models = content.visuals.item_models.iter().flatten().count();
         assert_eq!(
             targets.len(),
             with_models + 1,
@@ -183,10 +184,7 @@ mod tests {
     fn block_items_are_one_shared_target_with_only_the_hand_contexts() {
         let block = &targets_from(&shipped())[0];
         assert_eq!(block.key, PlacementKey::BlockItem);
-        assert_eq!(
-            block.model,
-            crate::infrastructure::content::BLOCK_ITEM_MODEL
-        );
+        assert_eq!(block.model, crate::presentation::content::BLOCK_ITEM_MODEL);
 
         assert!(block.offers(DisplayContext::FirstPersonRightHand));
         assert!(block.offers(DisplayContext::ThirdPersonRightHand));
@@ -207,7 +205,7 @@ mod tests {
                 block.kind(context),
                 PlacementKind::Display,
                 "saved into {}, not items.toml",
-                crate::infrastructure::content::BLOCK_ITEM_MODEL
+                crate::presentation::content::BLOCK_ITEM_MODEL
             );
         }
     }
@@ -224,9 +222,9 @@ mod tests {
             DisplayContext::ThirdPersonRightHand,
         ] {
             assert!(
-                content.block_item_display.get(context).is_some(),
+                content.visuals.block_item_display.get(context).is_some(),
                 "{} declares no {context:?}",
-                crate::infrastructure::content::BLOCK_ITEM_MODEL
+                crate::presentation::content::BLOCK_ITEM_MODEL
             );
         }
     }
@@ -236,7 +234,7 @@ mod tests {
     /// you are holding at the origin at full size.
     #[test]
     fn a_missing_entry_falls_back_per_context_rather_than_wholesale() {
-        use crate::infrastructure::content::{BLOCK_ITEM_MODEL, GameContent, MapSource};
+        use crate::presentation::content::{BLOCK_ITEM_MODEL, GameContent, MapSource};
 
         let builtin = crate::presentation::render::viewmodel::default_block_display();
         let only_first = r#"{ "display": { "firstperson_righthand": { "scale": [2, 2, 2] } } }"#;
@@ -246,6 +244,7 @@ mod tests {
 
         assert_eq!(
             content
+                .visuals
                 .block_item_display
                 .get(DisplayContext::FirstPersonRightHand)
                 .map(|t| t.scale),
@@ -254,6 +253,7 @@ mod tests {
         );
         assert_eq!(
             content
+                .visuals
                 .block_item_display
                 .get(DisplayContext::ThirdPersonRightHand),
             builtin.get(DisplayContext::ThirdPersonRightHand),
@@ -264,11 +264,11 @@ mod tests {
     /// A file that cannot be read at all still leaves blocks holdable.
     #[test]
     fn no_file_at_all_is_the_builtin_placement() {
-        use crate::infrastructure::content::GameContent;
+        use crate::presentation::content::GameContent;
 
-        let content = GameContent::from_source(&crate::infrastructure::content::MapSource::new());
+        let content = GameContent::from_source(&crate::presentation::content::MapSource::new());
         assert_eq!(
-            content.block_item_display,
+            content.visuals.block_item_display,
             crate::presentation::render::viewmodel::default_block_display()
         );
     }

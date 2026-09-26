@@ -516,7 +516,7 @@ pub struct BlockRegistry {
 impl BlockRegistry {
     /// Build the registry from the embedded copy of `assets/blocks.toml`,
     /// with a private tile registry (tests and fallbacks; the app path shares
-    /// one via [`crate::infrastructure::content::GameContent`]). Infallible: the shipped file
+    /// one via [`crate::presentation::content::GameContent`]). Infallible: the shipped file
     /// is validated by the golden tests.
     pub fn with_builtins() -> Self {
         Self::from_toml(BUILTIN_BLOCKS).expect("embedded blocks.toml must parse")

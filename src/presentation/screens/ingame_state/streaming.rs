@@ -141,8 +141,8 @@ mod tests {
     use super::*;
     use crate::application::session::FakeSession;
     use crate::domain::core::GameMode;
-    use crate::infrastructure::content::GameContent;
     use crate::infrastructure::net::PlayerId;
+    use crate::presentation::content::GameContent;
 
     fn anchor(x: i32, z: i32, radius: i32) -> Anchor {
         Anchor {

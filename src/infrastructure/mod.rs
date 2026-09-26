@@ -3,11 +3,11 @@
 //! inner layers consume.
 
 pub mod audio;
-pub mod content;
 pub mod desktop;
 pub mod fs;
 pub mod net;
 pub mod ops;
 pub mod paths;
 pub mod profile;
+pub mod recipes;
 pub mod save;

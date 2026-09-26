@@ -26,11 +26,13 @@ impl InGameState {
         // one. A block with neither is an ordinary cube and fills its cell.
         let hitbox = self
             .content
+            .visuals
             .baked_models
             .get(block.0 as usize)
             .and_then(|m| m.as_ref().and_then(|m| m.hitbox))
             .or_else(|| {
                 self.content
+                    .visuals
                     .block_models
                     .get(block.0 as usize)
                     .and_then(|m| m.map(|m| m.hitbox))
@@ -86,7 +88,7 @@ impl InGameState {
                 stack,
                 pos,
                 angle,
-                self.content.entities.dropped_item(),
+                self.content.rules.entities.dropped_item(),
             ));
         }
         self.broadcast_local_edit(pos, BlockId::AIR);
@@ -96,7 +98,7 @@ impl InGameState {
     /// The `kind` of the tool in the selected hotbar slot, if it is a tool.
     fn held_tool(&self) -> Option<&Tool> {
         let id = self.inventory.item_in_selected()?;
-        self.content.items.component::<Tool>(id)
+        self.content.rules.items.component::<Tool>(id)
     }
 
     /// Whether what the player is holding satisfies the block's
@@ -104,7 +106,7 @@ impl InGameState {
     /// them — are harvestable bare-handed, which is the rule the game is built
     /// on: a better tool means a faster one, not the only one.
     fn can_harvest(&self, block: BlockId) -> bool {
-        let Some(harvest) = &self.content.blocks.get(block).harvest else {
+        let Some(harvest) = &self.content.rules.blocks.get(block).harvest else {
             return true;
         };
         !harvest.required
@@ -124,18 +126,19 @@ impl InGameState {
         if !self.can_harvest(block) {
             return None;
         }
-        match &self.content.blocks.get(block).drops {
+        match &self.content.rules.blocks.get(block).drops {
             Drops::SelfItem => self
                 .content
+                .rules
                 .items
                 .item_for_block(block)
                 .map(ItemStack::single),
             Drops::None => None,
             Drops::Item { id: drop, count } => {
-                let id = self.content.items.find(drop)?;
+                let id = self.content.rules.items.find(drop)?;
                 Some(ItemStack::new(
                     id,
-                    (*count).clamp(1, self.content.items.max_stack(id)),
+                    (*count).clamp(1, self.content.rules.items.max_stack(id)),
                 ))
             }
         }
@@ -159,7 +162,7 @@ impl InGameState {
             stack,
             self.player.eye_position(),
             self.player.look_direction(),
-            self.content.entities.dropped_item(),
+            self.content.rules.entities.dropped_item(),
         ));
     }
 
@@ -178,7 +181,7 @@ impl InGameState {
             if dead || !item.can_pickup() || !reach.intersects(item.aabb()) {
                 return true;
             }
-            let leftover = self.inventory.add(item.stack, &self.content.items);
+            let leftover = self.inventory.add(item.stack, &self.content.rules.items);
             if leftover == 0 {
                 false
             } else {
@@ -200,7 +203,11 @@ impl InGameState {
             self.breaking = None;
             return;
         };
-        let block = self.content.blocks.get(self.world.block_at(hit.block));
+        let block = self
+            .content
+            .rules
+            .blocks
+            .get(self.world.block_at(hit.block));
         if !block.is_breakable() {
             self.breaking = None;
             return;
@@ -248,7 +255,7 @@ impl InGameState {
             return;
         }
         self.tier_hint = Some(pos);
-        let block = self.content.blocks.get(self.world.block_at(pos));
+        let block = self.content.rules.blocks.get(self.world.block_at(pos));
         let Some(harvest) = &block.harvest else {
             return;
         };
@@ -279,7 +286,7 @@ impl InGameState {
     /// Eat the held item, if it is edible and the player has room for it.
     fn try_consume(&mut self, item_id: ItemId) -> bool {
         let Some(&Consumable { hunger, saturation }) =
-            self.content.items.component::<Consumable>(item_id)
+            self.content.rules.items.component::<Consumable>(item_id)
         else {
             return false;
         };
@@ -295,7 +302,8 @@ impl InGameState {
     /// Place the selected item's block against the targeted face. Consumes from
     /// the inventory only in survival (creative has infinite blocks).
     fn try_place(&mut self, item_id: ItemId) -> bool {
-        let Some(&Placeable { block }) = self.content.items.component::<Placeable>(item_id) else {
+        let Some(&Placeable { block }) = self.content.rules.items.component::<Placeable>(item_id)
+        else {
             return false;
         };
         // Every exit below reports the click handled: holding a block *is* a
@@ -344,13 +352,13 @@ const USE_HOOKS: &[fn(&mut InGameState, ItemId) -> bool] =
 mod tests {
     use super::*;
     use crate::domain::core::GameMode;
-    use crate::infrastructure::content::GameContent;
+    use crate::presentation::content::GameContent;
 
     /// Put `item` in the selected hotbar slot of a fresh survival session.
     fn holding(item: &str) -> InGameState {
         let mut state = InGameState::new(GameContent::builtin(), 7, GameMode::Survival);
-        let id = state.content.items.find(item).expect("shipped item");
-        let stack = state.content.items.full_stack(id);
+        let id = state.content.rules.items.find(item).expect("shipped item");
+        let stack = state.content.rules.items.full_stack(id);
         state.inventory.set_selected(0);
         state.inventory.set_slot(0, Some(stack));
         state
@@ -404,6 +412,7 @@ mod tests {
         let before = state.inventory.slot(0).expect("cobblestone").count;
         let cobblestone = state
             .content
+            .rules
             .blocks
             .find("cobblestone")
             .expect("shipped block");
@@ -448,10 +457,10 @@ mod tests {
         let look = state.player.look_direction();
         let at = BlockPos::from_world(state.player.eye_position() + look * 2.0);
         state.world.set_block(at, blocks::TIN_ORE);
-        let pick = state.content.items.find("stone_pickaxe").unwrap();
+        let pick = state.content.rules.items.find("stone_pickaxe").unwrap();
         state
             .inventory
-            .set_slot(0, Some(state.content.items.full_stack(pick)));
+            .set_slot(0, Some(state.content.rules.items.full_stack(pick)));
         state.inventory.set_selected(0);
         for _ in 0..600 {
             state.update_mining(true, 1.0 / 60.0);
@@ -465,10 +474,10 @@ mod tests {
             .count();
         assert_eq!(hints, 1, "said once, not every frame");
 
-        let antler = state.content.items.find("antler_pickaxe").unwrap();
+        let antler = state.content.rules.items.find("antler_pickaxe").unwrap();
         state
             .inventory
-            .set_slot(0, Some(state.content.items.full_stack(antler)));
+            .set_slot(0, Some(state.content.rules.items.full_stack(antler)));
         for _ in 0..600 {
             state.update_mining(true, 1.0 / 60.0);
         }

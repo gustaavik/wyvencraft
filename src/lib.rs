@@ -32,7 +32,7 @@
 //! | Trait | Declared by | Implemented here by |
 //! |---|---|---|
 //! | [`wyven_render::TileSource`] | render | [`presentation::art::WyvencraftArt`] |
-//! | [`wyven_voxel::BlockCatalog`] | voxel | [`infrastructure::content::BlockAppearance`] |
+//! | [`wyven_voxel::BlockCatalog`] | voxel | [`presentation::content::BlockAppearance`] |
 //! | [`wyven_voxel::BlockProperties`] | voxel | [`domain::world::BlockRegistry`] |
 //! | [`wyven_voxel::WorldGenerator`] | voxel | [`domain::world::NoiseGenerator`] |
 //! | [`wyven_net::Protocol`] / [`wyven_net::JoinVerifier`] | net | [`infrastructure::net::WyvenProtocol`] / [`infrastructure::net::TicketJoin`] |
@@ -57,19 +57,21 @@
 //!   entity          player, physics, mobs, brains, bosses, projectiles, animation
 //!   progression     shrines read, altars revealed, bosses beaten; compass bearings
 //!   chat            message log, commands, the ops list's rules
+//!   content         Registries: every hashed definition, the content hash, reference checks
 //! application       use cases and the ports they need
 //!   protocol        the wire messages: the contract between peers
 //!   session         the Session port (who decides, what arrived) + FakeSession
 //!   sync            remote-player snapshot smoothing
 //!   boot_plan       pure env -> BootPlan
+//!   content         loading the Registries from assets/*.toml through the asset port
 //! infrastructure    adapters: files, sockets, audio devices, assets/
-//!   content         registries and visuals loaded from assets/*.toml
 //!   save            world/player persistence under saves/
 //!   net             transports, sessions, the join gate, server list, status probe
 //!   audio           sound registry, AudioManager, menu-music timing
-//!   paths/fs/profile/ops/desktop   the data dir and what lives in it
+//!   paths/fs/profile/ops/recipes/desktop   the data dir and what lives in it
 //! presentation      everything that draws or reads input
 //!   screens         the Screen impls, and the Game impl that starts them
+//!   content         GameContent = Registries + Visuals (textures, models, icons, labels) + sounds
 //!   ui              egui views
 //!   render          entity meshes, the view model, the camera
 //!   art             PNG tiles; atlas layout for skin, armor, mob and crack sheets
@@ -80,7 +82,7 @@
 //! ```
 //!
 //! I/O boundaries are crossed through ports, each with a real implementation and
-//! a test double: [`infrastructure::content::ContentSource`],
+//! a test double: [`presentation::content::ContentSource`],
 //! [`infrastructure::save::WorldRepository`], [`application::session::Session`],
 //! [`application::boot_plan::Environment`], [`wyven_audio::AudioBackend`]
 //! (`RodioBackend`/`NullAudioBackend`, chosen once in

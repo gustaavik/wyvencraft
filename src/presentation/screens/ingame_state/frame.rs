@@ -248,7 +248,7 @@ impl GameState<Wyvencraft> for InGameState {
             };
             // Refresh the worn defense first: `step_fixed` can raise fall damage
             // internally, and it must be mitigated by whatever is worn *now*.
-            self.player.defense = self.inventory.total_defense(&self.content.items);
+            self.player.defense = self.inventory.total_defense(&self.content.rules.items);
             let health_before = self.player.health;
             // Player physics is stepped at a fixed rate, not on the frame delta,
             // so jump height is the same at every framerate.
@@ -341,9 +341,9 @@ impl GameState<Wyvencraft> for InGameState {
         // Water flow: singleplayer/host simulate authoritatively and broadcast
         // each change; clients receive them as ordinary BlockChanged edits.
         if self.session.is_authority() {
-            for (pos, block) in self
-                .fluids
-                .tick(&mut self.world, &self.content.blocks, ctx.dt)
+            for (pos, block) in
+                self.fluids
+                    .tick(&mut self.world, &self.content.rules.blocks, ctx.dt)
             {
                 self.broadcast_local_edit(pos, block);
             }
@@ -423,18 +423,18 @@ impl GameState<Wyvencraft> for InGameState {
                     selected: self.crafting.selected,
                     craftable_only: self.crafting.craftable_only,
                     inventory: &self.inventory,
-                    items: &self.content.items,
-                    icons: &ctx.shared.content.item_icons,
-                    names: &ctx.shared.content.item_display_names,
+                    items: &self.content.rules.items,
+                    icons: &ctx.shared.content.visuals.item_icons,
+                    names: &ctx.shared.content.visuals.item_display_names,
                     tex: ctx.shared.ui_tex,
                 }
             });
             let out = crate::presentation::ui::inventory::draw_inventory(
                 egui_ctx,
                 &self.inventory,
-                &self.content.items,
-                &ctx.shared.content.item_icons,
-                &ctx.shared.content.item_display_names,
+                &self.content.rules.items,
+                &ctx.shared.content.visuals.item_icons,
+                &ctx.shared.content.visuals.item_display_names,
                 self.held,
                 self.player.mode,
                 self.inventory_anim.progress(),
@@ -449,7 +449,9 @@ impl GameState<Wyvencraft> for InGameState {
                 match action {
                     InvAction::Slot(index) => self.handle_slot_click(index),
                     InvAction::Split(index) => self.handle_slot_split(index),
-                    InvAction::Pick(id) => self.held = Some(self.content.items.full_stack(id)),
+                    InvAction::Pick(id) => {
+                        self.held = Some(self.content.rules.items.full_stack(id))
+                    }
                     InvAction::DropSlot(index) => self.drop_slot(index),
                     InvAction::DropHeld { all } => self.drop_held(all),
                     InvAction::DropOne(index) => self.drop_one(index),
@@ -469,8 +471,8 @@ impl GameState<Wyvencraft> for InGameState {
         hud::draw_hotbar(
             egui_ctx,
             &self.inventory,
-            &self.content.items,
-            &ctx.shared.content.item_icons,
+            &self.content.rules.items,
+            &ctx.shared.content.visuals.item_icons,
             ctx.shared.ui_tex,
         );
         // Name whatever is in hand, until it fades. Observing here rather than

@@ -17,8 +17,8 @@ use crate::domain::world::meshing::{
     ChunkMeshOutput, mesh_block_overlay, mesh_chunk, push_item_cube,
 };
 use crate::domain::world::{BlockCatalog, Chunk, FaceTextures};
-use crate::infrastructure::content::{BlockAppearance, FluidTexture, GameContent};
 use crate::presentation::art::cracks;
+use crate::presentation::content::{BlockAppearance, FluidTexture, GameContent};
 use wyven_render::block_textures::AnimatedLayers;
 use wyven_render::vertex::{ANIM_FIELD_MASK, ANIM_FPS_SHIFT, ANIM_FRAMES_SHIFT};
 use wyven_render::{CpuMesh, NO_OVERLAY, NO_TINT, texture::atlas_uv};
@@ -315,7 +315,11 @@ fn adjacent_water_levels_connect_at_shared_corners() {
 fn a_model_block_meshes_into_its_own_bucket_and_emits_no_cube_faces() {
     let content = GameContent::load();
     let catalog = content.appearance();
-    let plant = content.blocks.find("blue_bells").expect("shipped block");
+    let plant = content
+        .rules
+        .blocks
+        .find("blue_bells")
+        .expect("shipped block");
     let (placement, _) = catalog
         .placed_model(plant)
         .expect("blue bells declares a model");
@@ -350,7 +354,7 @@ fn a_model_block_meshes_into_its_own_bucket_and_emits_no_cube_faces() {
 fn a_blockbench_block_meshes_into_the_array_buffers() {
     let content = GameContent::load();
     let catalog = content.appearance();
-    let grass = content.blocks.find("grass").expect("shipped block");
+    let grass = content.rules.blocks.find("grass").expect("shipped block");
     assert!(catalog.baked(grass).is_some(), "grass should be modelled");
 
     let mut chunk = Chunk::new(ChunkPos::new(0, 0));
@@ -391,7 +395,7 @@ fn a_blockbench_block_meshes_into_the_array_buffers() {
 fn stacked_blockbench_blocks_cull_the_face_they_share() {
     let content = GameContent::load();
     let catalog = content.appearance();
-    let dirt = content.blocks.find("dirt").expect("shipped block");
+    let dirt = content.rules.blocks.find("dirt").expect("shipped block");
 
     let mut chunk = Chunk::new(ChunkPos::new(0, 0));
     chunk.set(LocalPos { x: 4, y: 10, z: 6 }, dirt);
@@ -413,8 +417,12 @@ fn stacked_blockbench_blocks_cull_the_face_they_share() {
 fn a_blockbench_block_and_an_atlas_block_cull_each_other() {
     let content = GameContent::load();
     let catalog = content.appearance();
-    let dirt = content.blocks.find("dirt").expect("modelled");
-    let atlas = content.blocks.find("bedrock").expect("still on the atlas");
+    let dirt = content.rules.blocks.find("dirt").expect("modelled");
+    let atlas = content
+        .rules
+        .blocks
+        .find("bedrock")
+        .expect("still on the atlas");
     assert!(
         catalog.baked(atlas).is_none(),
         "bedrock must not be modelled"
@@ -436,7 +444,7 @@ fn only_tinted_faces_take_the_biome_colour() {
     const BIOME: [u8; 4] = [10, 200, 30, 255];
     let content = GameContent::load();
     let catalog = content.appearance();
-    let grass = content.blocks.find("grass").expect("shipped block");
+    let grass = content.rules.blocks.find("grass").expect("shipped block");
 
     let mut chunk = Chunk::new(ChunkPos::new(0, 0));
     chunk.set(LocalPos { x: 4, y: 10, z: 6 }, grass);
@@ -477,7 +485,11 @@ fn only_tinted_faces_take_the_biome_colour() {
 fn stacked_leaves_cull_the_face_they_share() {
     let content = GameContent::load();
     let catalog = content.appearance();
-    let leaves = content.blocks.find("oak_leaves").expect("shipped block");
+    let leaves = content
+        .rules
+        .blocks
+        .find("oak_leaves")
+        .expect("shipped block");
     let baked = catalog.baked(leaves).expect("modelled");
     assert_eq!(
         baked.occludes, [false; 6],
@@ -502,7 +514,11 @@ fn stacked_leaves_cull_the_face_they_share() {
 fn a_random_yaw_block_turns_with_its_position() {
     let content = GameContent::load();
     let catalog = content.appearance();
-    let flower = content.blocks.find("cornflower").expect("shipped block");
+    let flower = content
+        .rules
+        .blocks
+        .find("cornflower")
+        .expect("shipped block");
     assert!(catalog.baked(flower).expect("modelled").random_yaw);
 
     let mesh_at = |x: u8, z: u8| {
@@ -538,7 +554,7 @@ fn a_random_yaw_block_turns_with_its_position() {
 fn the_grass_overlay_rides_on_the_face_it_covers() {
     let content = GameContent::load();
     let catalog = content.appearance();
-    let grass = content.blocks.find("grass").expect("shipped block");
+    let grass = content.rules.blocks.find("grass").expect("shipped block");
 
     let mut chunk = Chunk::new(ChunkPos::new(0, 0));
     chunk.set(LocalPos { x: 0, y: 10, z: 0 }, grass);

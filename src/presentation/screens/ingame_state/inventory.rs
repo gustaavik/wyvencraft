@@ -88,7 +88,7 @@ impl InGameState {
         if !self.inventory_open
             && let Some(held) = self.held.take()
         {
-            let leftover = self.inventory.add(held, &self.content.items);
+            let leftover = self.inventory.add(held, &self.content.rules.items);
             if leftover > 0 {
                 self.throw(ItemStack {
                     count: leftover,
@@ -106,7 +106,7 @@ impl InGameState {
         if let Some(held) = self.held
             && !self
                 .inventory
-                .can_equip(index, held.item, &self.content.items)
+                .can_equip(index, held.item, &self.content.rules.items)
         {
             return;
         }
@@ -127,7 +127,7 @@ impl InGameState {
             (Some(mut held), slot) => {
                 match slot {
                     Some(mut stack) if stack.item == held.item => {
-                        if stack.count >= self.content.items.max_stack(stack.item) {
+                        if stack.count >= self.content.rules.items.max_stack(stack.item) {
                             return;
                         }
                         stack.count += 1;
@@ -188,7 +188,7 @@ impl InGameState {
         if let Some(held) = self.held
             && !self
                 .inventory
-                .can_equip(index, held.item, &self.content.items)
+                .can_equip(index, held.item, &self.content.rules.items)
         {
             return;
         }
@@ -203,7 +203,7 @@ impl InGameState {
             }
             (Some(mut held), Some(mut stack)) => {
                 if held.item == stack.item {
-                    let max = self.content.items.max_stack(stack.item);
+                    let max = self.content.rules.items.max_stack(stack.item);
                     let leftover = stack.merge(held, max);
                     self.inventory.set_slot(index, Some(stack));
                     self.held = if leftover == 0 {
@@ -329,7 +329,7 @@ mod interaction_tests {
     use super::*;
     use crate::domain::core::GameMode;
     use crate::domain::inventory::{ArmorSlot, Inventory, ItemStack};
-    use crate::infrastructure::content::GameContent;
+    use crate::presentation::content::GameContent;
 
     fn state() -> InGameState {
         InGameState::new(GameContent::builtin(), 7, GameMode::Survival)
@@ -337,7 +337,7 @@ mod interaction_tests {
 
     /// A stack, in a storage slot that starts empty.
     fn stocked(state: &mut InGameState, index: usize, id: &str, count: u8) {
-        let item = state.content.items.find(id).expect("builtin item");
+        let item = state.content.rules.items.find(id).expect("builtin item");
         state
             .inventory
             .set_slot(index, Some(ItemStack::new(item, count)));
@@ -375,7 +375,7 @@ mod interaction_tests {
     #[test]
     fn right_click_while_holding_places_one_item_at_a_time() {
         let mut state = state();
-        let stone = state.content.items.find("stone").expect("stone");
+        let stone = state.content.rules.items.find("stone").expect("stone");
         state.held = Some(ItemStack::new(stone, 3));
 
         state.handle_slot_split(SLOT);
@@ -398,7 +398,7 @@ mod interaction_tests {
     fn right_click_onto_a_different_item_does_nothing() {
         let mut state = state();
         stocked(&mut state, SLOT, "dirt", 5);
-        let stone = state.content.items.find("stone").expect("stone");
+        let stone = state.content.rules.items.find("stone").expect("stone");
         state.held = Some(ItemStack::new(stone, 3));
 
         state.handle_slot_split(SLOT);
@@ -415,7 +415,7 @@ mod interaction_tests {
     #[test]
     fn right_click_cannot_put_the_wrong_thing_in_an_armor_slot() {
         let mut state = state();
-        let stone = state.content.items.find("stone").expect("stone");
+        let stone = state.content.rules.items.find("stone").expect("stone");
         state.held = Some(ItemStack::new(stone, 4));
 
         let helmet = Inventory::armor_slot_index(ArmorSlot::Helmet);
@@ -441,6 +441,7 @@ mod interaction_tests {
         let mut state = state();
         let pick = state
             .content
+            .rules
             .items
             .find("wooden_pickaxe")
             .expect("builtin pickaxe");
@@ -481,7 +482,7 @@ mod interaction_tests {
     #[test]
     fn a_held_stack_can_be_thrown_whole_or_one_at_a_time() {
         let mut state = state();
-        let stone = state.content.items.find("stone").expect("stone");
+        let stone = state.content.rules.items.find("stone").expect("stone");
 
         state.held = Some(ItemStack::new(stone, 3));
         state.drop_held(false);

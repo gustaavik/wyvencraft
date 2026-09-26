@@ -57,7 +57,7 @@ impl BlockCatalog for BlockAppearance<'_> {
             .get(id.0 as usize)
             .copied()
             .flatten()
-            .unwrap_or(crate::infrastructure::content::MISSING_FACES)
+            .unwrap_or(super::MISSING_FACES)
     }
 
     #[inline]

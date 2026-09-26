@@ -70,6 +70,7 @@ impl InGameState {
     pub(super) fn offer_at_altar(&mut self, at: &UseAt, boss: &str) {
         let Some(params) = self
             .content
+            .rules
             .entities
             .find(boss)
             .and_then(|kind| kind.boss.clone())
@@ -82,7 +83,7 @@ impl InGameState {
             self.reply(at.actor, ChatKind::System, text);
             return;
         }
-        let Some(item) = self.content.items.find(&params.offering.item) else {
+        let Some(item) = self.content.rules.items.find(&params.offering.item) else {
             log::warn!(
                 "boss {boss:?} asks for unknown item {:?}",
                 params.offering.item
@@ -427,7 +428,7 @@ impl InGameState {
             ))
         });
         let remote = self.mobs.remote.iter().filter_map(|(&id, m)| {
-            let kind = self.content.entities.find(m.kind_name())?;
+            let kind = self.content.rules.entities.find(m.kind_name())?;
             let params = kind.boss.as_ref()?;
             let max = kind.mob.as_ref()?.max_health;
             Some((id, m.position(), params, m.health / max, m.phase))
@@ -463,8 +464,8 @@ mod tests {
     use crate::domain::core::GameMode;
     use crate::domain::world::block::blocks;
     use crate::domain::world::structure::Cell;
-    use crate::infrastructure::content::GameContent;
     use crate::infrastructure::net::NetItemStack;
+    use crate::presentation::content::GameContent;
 
     /// A survival world with the altar nearest spawn, and that altar block.
     fn at_the_altar() -> (InGameState, BlockPos) {
@@ -489,7 +490,7 @@ mod tests {
     }
 
     fn give_local(state: &mut InGameState, item: &str, count: u8) {
-        let id = state.content.items.find(item).unwrap();
+        let id = state.content.rules.items.find(item).unwrap();
         state.inventory.set_slot(0, Some(ItemStack::new(id, count)));
     }
 
@@ -531,7 +532,7 @@ mod tests {
         give_local(&mut state, "stag_effigy", 2);
         use_altar(&mut state, altar);
         assert_eq!(bosses(&state), 1);
-        let effigy = state.content.items.find("stag_effigy").unwrap();
+        let effigy = state.content.rules.items.find("stag_effigy").unwrap();
         assert_eq!(state.inventory.count_of(effigy), 1, "exactly one offered");
 
         // A second offering while it lives is refused and costs nothing.
@@ -551,7 +552,7 @@ mod tests {
         let pid = PlayerId(1);
         let beside = Vec3::new(altar.x as f32 + 2.5, altar.y as f32, altar.z as f32 + 0.5);
         state.peers.entry(pid, beside);
-        let effigy = state.content.items.find("stag_effigy").unwrap();
+        let effigy = state.content.rules.items.find("stag_effigy").unwrap();
         let mut slots = vec![None; 4];
         slots[3] = Some(NetItemStack {
             item: effigy.0,
@@ -594,7 +595,7 @@ mod tests {
         assert_eq!(bosses(&state), 0);
         assert!(state.progression.is_defeated("elder stag"));
         assert!(state.mobs.fight.is_none());
-        let antler = state.content.items.find("elder_antler").unwrap();
+        let antler = state.content.rules.items.find("elder_antler").unwrap();
         let dropped: u32 = state
             .drops
             .iter()

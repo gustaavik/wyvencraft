@@ -5,6 +5,7 @@
 //! `infrastructure` or `presentation` (`tests/architecture.rs`).
 
 pub mod boot_plan;
+pub mod content;
 pub mod protocol;
 pub mod session;
 pub mod sync;

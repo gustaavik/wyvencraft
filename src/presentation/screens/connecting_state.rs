@@ -337,12 +337,12 @@ impl GameState<Wyvencraft> for ConnectingState {
             {
                 // Raw block/item ids cross the wire, so divergent content
                 // definitions would silently corrupt the session. Refuse.
-                if content_hash != ctx.shared.content.hash {
+                if content_hash != ctx.shared.content.rules.hash() {
                     log::warn!(
                         "content mismatch: host {content_hash:#018x} vs ours {:#018x}; refusing to join",
-                        ctx.shared.content.hash
+                        ctx.shared.content.rules.hash()
                     );
-                    mismatch = Some((content_hash, ctx.shared.content.hash));
+                    mismatch = Some((content_hash, ctx.shared.content.rules.hash()));
                     break;
                 }
                 welcome = Some((

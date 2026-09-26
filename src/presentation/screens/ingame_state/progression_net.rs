@@ -163,7 +163,7 @@ impl InGameState {
             ServerMessage::ConsumeItems { to, stacks } if to == local_id => {
                 for stack in stacks {
                     let item = crate::domain::inventory::ItemId(stack.item);
-                    if (stack.item as usize) < self.content.items.len() {
+                    if (stack.item as usize) < self.content.rules.items.len() {
                         self.inventory.remove(item, u32::from(stack.count));
                     }
                 }
@@ -244,7 +244,7 @@ mod tests {
     use crate::application::session::{FakeSession, Inbound};
     use crate::domain::core::GameMode;
     use crate::domain::world::block::blocks;
-    use crate::infrastructure::content::GameContent;
+    use crate::presentation::content::GameContent;
 
     fn hosting() -> (InGameState, crate::application::session::FakeHandle) {
         let mut state = InGameState::new(GameContent::builtin(), 5, GameMode::Survival);
@@ -255,7 +255,7 @@ mod tests {
     }
 
     fn holding(state: &InGameState, item: &str) -> Vec<Option<NetItemStack>> {
-        let id = state.content.items.find(item).unwrap();
+        let id = state.content.rules.items.find(item).unwrap();
         vec![Some(NetItemStack {
             item: id.0,
             count: 1,

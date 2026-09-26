@@ -36,7 +36,7 @@ pub enum PlacementKey {
 /// Where a held item's placement comes from for one draw.
 ///
 /// `None` means "the shipped value" — the caller falls back to
-/// [`crate::infrastructure::content::ItemModel::local`], which is what it did before this
+/// [`crate::presentation::content::ItemModel::local`], which is what it did before this
 /// existed. An override is therefore never able to *break* a placement it does
 /// not mention.
 pub trait PlacementSource {

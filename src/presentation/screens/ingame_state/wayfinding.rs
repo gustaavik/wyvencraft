@@ -85,7 +85,7 @@ impl InGameState {
 mod tests {
     use super::*;
     use crate::domain::core::GameMode;
-    use crate::infrastructure::content::GameContent;
+    use crate::presentation::content::GameContent;
 
     #[test]
     fn every_revealed_structure_gets_a_marker() {

@@ -22,7 +22,7 @@ use egui::{
 use crate::domain::core::ident::title_case;
 use crate::domain::inventory::crafting::{Availability, Recipe, StationSet};
 use crate::domain::inventory::{Inventory, ItemId, ItemRegistry, ItemStack};
-use crate::infrastructure::content::ItemIcon;
+use crate::presentation::content::ItemIcon;
 use crate::presentation::ui::UiTextures;
 use crate::presentation::ui::icon::draw_item_icon;
 use crate::presentation::ui::ninepatch;

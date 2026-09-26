@@ -116,14 +116,46 @@ pub fn unreachable_tiers<'a>(
         .collect()
 }
 
+/// Blocks whose `[block.harvest] tool` names a kind no item declares, as
+/// `(block id, unknown kind)` pairs.
+///
+/// The one cross-registry check the tool inversion needs: a block names the
+/// tool it wants, so nothing in `blocks.toml` can tell on its own whether that
+/// tool exists. Separated from the logging so it can be asserted — the shipped
+/// data must report none, which is what catches a tool kind renamed on one side
+/// only.
+pub fn unknown_harvest_tools<'a>(
+    blocks: &'a BlockRegistry,
+    items: &ItemRegistry,
+) -> Vec<(&'a str, &'a str)> {
+    let declared: std::collections::HashSet<&str> = items
+        .iter()
+        .filter_map(|(_, item)| item.get::<Tool>())
+        .map(|tool| tool.kind.as_str())
+        .collect();
+    let mut unknown = Vec::new();
+    for (_, block) in blocks.iter() {
+        let Some(harvest) = &block.harvest else {
+            continue;
+        };
+        for kind in &harvest.tools {
+            if !declared.contains(kind.as_str()) {
+                unknown.push((block.id.as_str(), kind.as_str()));
+            }
+        }
+    }
+    unknown
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infrastructure::content::GameContent;
+    use crate::domain::content::Registries;
+    use crate::domain::world::block::BUILTIN_BLOCKS;
 
     #[test]
     fn the_shipped_content_has_no_dangling_references() {
-        let content = GameContent::builtin();
+        let content = Registries::builtin();
         let problems = dangling_references(
             &content.blocks,
             &content.items,
@@ -138,7 +170,7 @@ mod tests {
     /// *other* ore left out of reach fails here.
     #[test]
     fn only_the_ashlands_tier_waits_for_its_tool() {
-        let content = GameContent::builtin();
+        let content = Registries::builtin();
         assert_eq!(
             unreachable_tiers(&content.blocks, &content.items),
             [("cinder_ore", 5)]
@@ -150,7 +182,7 @@ mod tests {
         let text = crate::domain::world::block::BUILTIN_BLOCKS
             .replace("boss = \"elder stag\"", "boss = \"x\"");
         let blocks = BlockRegistry::from_toml(&text).unwrap();
-        let content = GameContent::builtin();
+        let content = Registries::builtin();
         let problems = dangling_references(
             &blocks,
             &content.items,
@@ -173,5 +205,33 @@ mod tests {
         let items = ItemRegistry::from_toml(&text, &blocks).unwrap();
         let unreachable = unreachable_tiers(&blocks, &items);
         assert!(unreachable.contains(&("silver_ore", 4)), "{unreachable:?}");
+    }
+
+    /// Now that a block names the tool it wants, nothing in `blocks.toml` can
+    /// tell on its own whether that tool exists — a typo would leave the block
+    /// slow for everyone, and if it insisted, undroppable forever.
+    #[test]
+    fn every_shipped_block_asks_for_a_tool_some_item_is() {
+        let blocks = BlockRegistry::with_builtins();
+        let items = ItemRegistry::from_blocks(&blocks);
+        assert_eq!(
+            unknown_harvest_tools(&blocks, &items),
+            Vec::new(),
+            "a block wants a tool kind no item declares"
+        );
+    }
+
+    /// The other half of the same rule: a bad reference *is* reported, so the
+    /// check above is not passing vacuously.
+    #[test]
+    fn a_block_wanting_an_unknown_tool_is_reported() {
+        let text = BUILTIN_BLOCKS.replace(r#"tool = "shears""#, r#"tool = "snippers""#);
+        assert!(text != BUILTIN_BLOCKS, "the fixture substitution missed");
+        let blocks = BlockRegistry::from_toml(&text).expect("still a valid file");
+        let items = ItemRegistry::from_blocks(&blocks);
+        assert_eq!(
+            unknown_harvest_tools(&blocks, &items),
+            [("oak_leaves", "snippers")]
+        );
     }
 }

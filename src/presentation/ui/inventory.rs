@@ -30,7 +30,7 @@ use crate::domain::inventory::{
     ARMOR_SIZE, ARMOR_START, ArmorSlot, Equippable, HOTBAR_SIZE, INVENTORY_SIZE, Inventory, ItemId,
     ItemRegistry, ItemStack,
 };
-use crate::infrastructure::content::ItemIcon;
+use crate::presentation::content::ItemIcon;
 use crate::presentation::ui::UiTextures;
 use crate::presentation::ui::crafting::{self, CRAFT_H, CraftAction, CraftingView};
 use crate::presentation::ui::hud;

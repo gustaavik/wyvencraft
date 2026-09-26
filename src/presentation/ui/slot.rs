@@ -14,7 +14,7 @@
 use egui::{Align2, Color32, FontId, Painter, Rect, TextureId, vec2};
 
 use crate::domain::inventory::{ItemRegistry, ItemStack};
-use crate::infrastructure::content::ItemIcon;
+use crate::presentation::content::ItemIcon;
 use crate::presentation::ui::UiTextures;
 use crate::presentation::ui::icon::draw_item_icon;
 use crate::presentation::ui::ninepatch::{self, SLOT, SLOT_SELECTED};

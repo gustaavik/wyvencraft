@@ -23,7 +23,7 @@ impl InGameState {
         for index in 0..TOTAL_SLOTS {
             let stack = restore.slots.get(index).and_then(|slot| {
                 slot.and_then(|s| {
-                    ((s.item as usize) < self.content.items.len()).then_some(ItemStack {
+                    ((s.item as usize) < self.content.rules.items.len()).then_some(ItemStack {
                         item: ItemId(s.item),
                         count: s.count,
                         durability: s.durability,
@@ -33,7 +33,8 @@ impl InGameState {
             self.inventory.set_slot(index, stack);
         }
         self.inventory.set_selected(restore.selected as usize);
-        self.crafting.known = KnownItems::from_wire(&restore.known_items, &self.content.items);
+        self.crafting.known =
+            KnownItems::from_wire(&restore.known_items, &self.content.rules.items);
         // Don't immediately echo the restored inventory back to the host.
         self.peers.last_synced_inventory = Some(self.inventory.clone());
         log::info!("restored player state from host at {:?}", restore.position);
@@ -58,15 +59,15 @@ impl InGameState {
                 &self.peers.identities,
                 &self.peers.players,
                 &self.peers.inventories,
-                &self.content.items,
+                &self.content.rules.items,
                 pid,
             );
         }
-        let world = WorldData::from_world(&self.world, &self.content.blocks);
-        let player = PlayerData::capture(&self.player, &self.inventory, &self.content.items);
+        let world = WorldData::from_world(&self.world, &self.content.rules.blocks);
+        let player = PlayerData::capture(&self.player, &self.inventory, &self.content.rules.items);
         let mobs = MobsData::from_mobs(&self.mobs.live);
         let discovery = DiscoveryData {
-            owner: self.crafting.known.to_ids(&self.content.items),
+            owner: self.crafting.known.to_ids(&self.content.rules.items),
             players: self.save.discovery.players.clone(),
         };
         let snapshot = WorldSnapshot {
@@ -148,8 +149,8 @@ mod tests {
     use super::*;
     use crate::domain::core::{BlockPos, GameMode};
     use crate::domain::world::block::blocks;
-    use crate::infrastructure::content::GameContent;
     use crate::infrastructure::save::InMemoryWorldRepository;
+    use crate::presentation::content::GameContent;
 
     /// The null repository is what clients and ephemeral worlds hold: calling
     /// `save_world` on one must be a silent no-op, not a panic or a write.

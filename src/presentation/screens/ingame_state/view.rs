@@ -30,10 +30,10 @@ use crate::domain::world::World;
 use crate::domain::world::meshing::{
     ItemSprite, mesh_block_overlay, mesh_chunk, push_item_cube, push_item_sprite,
 };
-use crate::infrastructure::content::BlockAppearance;
-use crate::infrastructure::content::{ItemModel, ItemShape};
 use crate::infrastructure::net::{PlayerId, RemotePlayer};
 use crate::presentation::art::{cracks, mobskin, skin};
+use crate::presentation::content::BlockAppearance;
+use crate::presentation::content::{ItemModel, ItemShape};
 use crate::presentation::editor::{PlacementKey, PlacementSource};
 use crate::presentation::render::camera::ShotCamera;
 use crate::presentation::render::viewmodel::{self, HandPose};
@@ -1296,12 +1296,12 @@ impl super::InGameState {
             ctx,
             &self.world,
             BlockAppearance {
-                blocks: &self.content.blocks,
-                face_tiles: &self.content.block_face_tiles,
-                models: &self.content.models,
-                placed: &self.content.block_models,
-                baked: &self.content.baked_models,
-                fluids: &self.content.fluid_textures,
+                blocks: &self.content.rules.blocks,
+                face_tiles: &self.content.visuals.block_face_tiles,
+                models: &self.content.visuals.models,
+                placed: &self.content.visuals.block_models,
+                baked: &self.content.visuals.baked_models,
+                fluids: &self.content.visuals.fluid_textures,
             },
             super::MESH_BUDGET,
         );
@@ -1309,8 +1309,8 @@ impl super::InGameState {
         // Loose entities. One `Arc` clone releases the borrow on `self` for
         // the closure below, where three deep `Vec` clones used to.
         let loaded = self.content.clone();
-        let (items, blocks) = (&loaded.items, &loaded.blocks);
-        let models = &loaded.models;
+        let (items, blocks) = (&loaded.rules.items, &loaded.rules.blocks);
+        let models = &loaded.visuals.models;
         // What shape an item is, and which pass it belongs in. Shared by the
         // drops and by every hand that has to fall back to a cube or a sprite.
         let shape = |item| {
@@ -1322,11 +1322,11 @@ impl super::InGameState {
         };
         let content = ModelContent {
             models,
-            item_models: &loaded.item_models,
-            tiles: &loaded.tiles,
+            item_models: &loaded.visuals.item_models,
+            tiles: &loaded.visuals.tiles,
             shape: &shape,
             placement: &self.editor,
-            block_display: &loaded.block_item_display,
+            block_display: &loaded.visuals.block_item_display,
         };
         // The editor's ground preview, when it has one, rides along with the
         // real drops so it is drawn by exactly the same code.
@@ -1336,7 +1336,7 @@ impl super::InGameState {
         self.view
             .update_mob_meshes(ctx, &self.mobs.live, &mut self.mobs.remote, models, dt);
         self.view
-            .update_arrows_mesh(ctx, &self.mobs.arrows, loaded.arrow_faces);
+            .update_arrows_mesh(ctx, &self.mobs.arrows, loaded.visuals.arrow_faces);
 
         // Animated humanoids. The local player's legs follow their actual
         // horizontal speed even with the inventory open: physics keeps running
@@ -1362,7 +1362,7 @@ impl super::InGameState {
         );
         // Cheap after the first call, and this is the only place the entity
         // registry and the model registry are both in reach.
-        self.view.bind_player_rig(&loaded.entities, models);
+        self.view.bind_player_rig(&loaded.rules.entities, models);
         self.view
             .update_remote_meshes(ctx, &self.peers.players, content, dt);
     }

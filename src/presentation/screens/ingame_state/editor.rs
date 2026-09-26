@@ -9,8 +9,8 @@ use glam::Vec3;
 
 use super::InGameState;
 use crate::domain::entity::{DroppedItem, Perspective};
-use crate::infrastructure::content::ItemShape;
 use crate::infrastructure::net::ChatKind;
+use crate::presentation::content::ItemShape;
 use crate::presentation::editor::{EditorAction, FsStamps, PlacementKey};
 use wyven_model::display::DisplayContext;
 
@@ -49,13 +49,15 @@ impl InGameState {
     /// that from an item with a model of its own needs the content registries.
     fn held_placement_key(&self) -> Option<PlacementKey> {
         let item = self.inventory.selected_stack()?.item;
-        Some(match self.content.item_models.get(item.0 as usize) {
-            Some(Some(_)) => PlacementKey::Item(item),
-            _ => match self.content.item_shape(item) {
-                ItemShape::Cube(_) => PlacementKey::BlockItem,
-                ItemShape::Sprite(_) => PlacementKey::Item(item),
+        Some(
+            match self.content.visuals.item_models.get(item.0 as usize) {
+                Some(Some(_)) => PlacementKey::Item(item),
+                _ => match self.content.item_shape(item) {
+                    ItemShape::Cube(_) => PlacementKey::BlockItem,
+                    ItemShape::Sprite(_) => PlacementKey::Item(item),
+                },
             },
-        })
+        )
     }
 
     pub(super) fn draw_editor_panel(&mut self, egui_ctx: &egui::Context) {
@@ -87,9 +89,9 @@ impl InGameState {
         let at = eye + Vec3::new(look.x, 0.0, look.z).normalize_or_zero() * PREVIEW_DISTANCE
             - Vec3::Y * PREVIEW_DROP;
         Some(DroppedItem::preview(
-            self.content.items.full_stack(item),
+            self.content.rules.items.full_stack(item),
             at,
-            self.content.entities.dropped_item(),
+            self.content.rules.entities.dropped_item(),
         ))
     }
 
