@@ -305,7 +305,12 @@ impl GameState<Wyvencraft> for InGameState {
                 self.update_mining(digging, dt);
             }
             if ctx.input.mouse_just_pressed(MouseButton::Right) {
-                self.use_selected();
+                // A crafting station opens the panel, unless the player is
+                // sneaking to place a block against it.
+                let sneaking = ctx.input.is_held(kb.sneak);
+                if sneaking || !self.open_targeted_station() {
+                    self.use_selected();
+                }
             }
         }
 
@@ -319,6 +324,8 @@ impl GameState<Wyvencraft> for InGameState {
         self.view.elapsed = (self.view.elapsed + ctx.dt) % 3600.0;
         // Ages the chat lines so old ones fade off the HUD.
         self.chat.log.tick(ctx.dt);
+        // Learn from whatever arrived this frame, and look for stations.
+        self.tick_crafting();
         self.day_cycle.advance(ctx.dt);
         // Periodic autosave for persistent worlds (also fires on pause/exit).
         if self.save.is_persistent() {
@@ -403,6 +410,22 @@ impl GameState<Wyvencraft> for InGameState {
         // two are the same nine slots and at progress 0 they coincide exactly,
         // so exactly one of them is drawn and the swap is invisible.
         if self.inventory_anim.active() {
+            let entries = self.crafting_entries();
+            let crafting_view =
+                (!self.player.mode.is_creative()).then(|| crate::ui::crafting::CraftingView {
+                    entries: &entries,
+                    discovered: self.crafting.revealed.len(),
+                    total: self.recipes.recipes().len(),
+                    stations: &self.crafting.stations,
+                    nearby: &self.crafting.nearby,
+                    selected: self.crafting.selected,
+                    craftable_only: self.crafting.craftable_only,
+                    inventory: &self.inventory,
+                    items: &self.content.items,
+                    icons: &ctx.shared.content.item_icons,
+                    names: &ctx.shared.content.item_display_names,
+                    tex: ctx.shared.ui_tex,
+                });
             let out = crate::ui::inventory::draw_inventory(
                 egui_ctx,
                 &self.inventory,
@@ -417,6 +440,7 @@ impl GameState<Wyvencraft> for InGameState {
                 ctx.input
                     .just_pressed(ctx.shared.settings.controls.keybinds.drop_item),
                 ctx.shared.ui_tex,
+                crafting_view.as_ref(),
             );
             if let Some(action) = out {
                 match action {
@@ -426,6 +450,7 @@ impl GameState<Wyvencraft> for InGameState {
                     InvAction::DropSlot(index) => self.drop_slot(index),
                     InvAction::DropHeld { all } => self.drop_held(all),
                     InvAction::DropOne(index) => self.drop_one(index),
+                    InvAction::Craft(craft) => self.handle_craft_action(craft),
                 }
             }
             return Transition::None;

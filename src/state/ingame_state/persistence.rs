@@ -5,9 +5,10 @@ use glam::Vec3;
 
 use super::InGameState;
 use super::net::record_remote;
+use crate::inventory::crafting::KnownItems;
 use crate::inventory::{ItemId, ItemStack, TOTAL_SLOTS};
 use crate::net::{PlayerId, PlayerRestore};
-use crate::save::{MobsData, PlayerData, WorldData, WorldSnapshot};
+use crate::save::{DiscoveryData, MobsData, PlayerData, WorldData, WorldSnapshot};
 
 impl InGameState {
     /// Apply the saved state the host handed back in its `Welcome` (this client
@@ -32,6 +33,7 @@ impl InGameState {
             self.inventory.set_slot(index, stack);
         }
         self.inventory.set_selected(restore.selected as usize);
+        self.crafting.known = KnownItems::from_wire(&restore.known_items, &self.content.items);
         // Don't immediately echo the restored inventory back to the host.
         self.peers.last_synced_inventory = Some(self.inventory.clone());
         log::info!("restored player state from host at {:?}", restore.position);
@@ -63,12 +65,17 @@ impl InGameState {
         let world = WorldData::from_world(&self.world, &self.content.blocks);
         let player = PlayerData::capture(&self.player, &self.inventory, &self.content.items);
         let mobs = MobsData::from_mobs(&self.mobs.live);
+        let discovery = DiscoveryData {
+            owner: self.crafting.known.to_ids(&self.content.items),
+            players: self.save.discovery.players.clone(),
+        };
         let snapshot = WorldSnapshot {
             world: &world,
             player: &player,
             players: &self.save.records,
             mobs: &mobs,
             progression: &self.progression,
+            discovery: &discovery,
             game_mode: self.player.mode,
             spawn: self.spawn.to_array(),
             time_of_day: self.day_cycle.time_of_day(),
@@ -107,6 +114,10 @@ pub(super) struct Persistence {
     /// Host: saved per-identity player records for this world; handed back to
     /// returning clients and written to `players.dat`.
     pub records: crate::save::PlayerRecords,
+    /// Which items each player has held, for `discovery.dat`. The owner's
+    /// half is captured fresh from the live state at every save; the players'
+    /// half is kept here as clients report it (`SyncKnown`).
+    pub discovery: DiscoveryData,
 }
 
 impl Persistence {
@@ -116,6 +127,7 @@ impl Persistence {
             repository: Box::new(crate::save::NullWorldRepository),
             autosave_timer: 0.0,
             records: crate::save::PlayerRecords::default(),
+            discovery: DiscoveryData::default(),
         }
     }
 

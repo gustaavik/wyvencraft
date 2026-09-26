@@ -540,6 +540,8 @@ mod tests {
             "cinder_ore",
             "wayrune",
             "elder_altar",
+            "workbench",
+            "forge",
         ];
         /// One expected tool: name, kind, dig_speed, durability, damage.
         type ToolRow = (&'static str, &'static str, f32, u16, Option<f32>);

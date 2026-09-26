@@ -22,6 +22,7 @@ use super::{
 };
 use crate::core::{BlockId, BlockPos};
 use crate::entity::Arrow;
+use crate::inventory::crafting::{KnownItems, NamedRecipe, resolve_named};
 use crate::inventory::{ARMOR_START, Inventory, ItemId, ItemRegistry, RecipeBook, Tool};
 use crate::net::{
     Channel, ClientMessage, Equipment, NetItemStack, PlayerId, PlayerRestore, RecipeData,
@@ -82,12 +83,14 @@ impl InGameState {
         identity: u64,
         account: Option<wyven_auth::AccountIdentity>,
     ) {
-        let restored = self
-            .save
-            .records
-            .0
-            .get(&identity)
-            .map(|record| record_to_restore(record, &self.content.items));
+        let restored = self.save.records.0.get(&identity).map(|record| {
+            let known = self.save.discovery.players.get(&identity);
+            record_to_restore(
+                record,
+                known.map_or(&[], Vec::as_slice),
+                &self.content.items,
+            )
+        });
         let spawn = restored
             .as_ref()
             .map(|r| r.position)
@@ -184,6 +187,23 @@ impl InGameState {
         self.session.send_to(pid, &status, Channel::Reliable);
     }
 
+    /// Keep what a client has discovered, so its next `Welcome` hands it back.
+    ///
+    /// Merged rather than replaced: the set only ever grows, and merging means
+    /// two reports arriving out of order (`Channel::Reliable` is unordered)
+    /// cannot lose anything. Kept by stable identity, like the player records.
+    fn record_discovery(&mut self, pid: PlayerId, wire: &[u16]) {
+        let Some(&identity) = self.peers.identities.get(&pid) else {
+            return;
+        };
+        let items = &self.content.items;
+        let entry = self.save.discovery.players.entry(identity).or_default();
+        let mut known = KnownItems::from_ids(entry, items);
+        if known.merge(&KnownItems::from_wire(wire, items)) {
+            *entry = known.to_ids(items);
+        }
+    }
+
     /// Snapshot a leaving player so their state survives a rejoin, then drop
     /// every trace of them from this session.
     fn forget_player(&mut self, pid: PlayerId) {
@@ -253,6 +273,7 @@ impl InGameState {
                 }
                 self.peers.inventories.insert(pid, (slots, selected));
             }
+            ClientMessage::SyncKnown { items } => self.record_discovery(pid, &items),
             // The only place a command is ever parsed and run: the host knows
             // who is authorized, so the host decides.
             ClientMessage::Chat(text) => self.dispatch_chat(pid, text),
@@ -794,6 +815,7 @@ pub(super) fn recipes_to_wire(book: &RecipeBook, items: &ItemRegistry) -> Vec<Re
                 .iter()
                 .map(|&(item, n)| (items.get(item).id.clone(), n))
                 .collect(),
+            station: recipe.station.clone(),
         })
         .collect()
 }
@@ -834,9 +856,10 @@ fn wire_slots_to_ids(
         .collect()
 }
 
-/// Convert a saved record back to wire form for a returning client's `Welcome`.
-/// Item names this build no longer knows are dropped.
-fn record_to_restore(record: &PlayerData, items: &ItemRegistry) -> PlayerRestore {
+/// Convert a saved record back to wire form for a returning client's `Welcome`,
+/// with the items it had discovered (`known`, string ids). Item names this
+/// build no longer knows are dropped.
+fn record_to_restore(record: &PlayerData, known: &[String], items: &ItemRegistry) -> PlayerRestore {
     PlayerRestore {
         position: record.position,
         yaw: record.yaw,
@@ -858,16 +881,27 @@ fn record_to_restore(record: &PlayerData, items: &ItemRegistry) -> PlayerRestore
             })
             .collect(),
         selected: record.selected_slot,
+        known_items: KnownItems::from_ids(known, items).to_wire(),
     }
 }
 
 /// Rebuild a recipe book from a host's wire data. Recipes naming items this
 /// build doesn't know are skipped with a warning (mismatched versions).
-pub(super) fn recipes_from_wire(data: &[RecipeData], items: &ItemRegistry) -> RecipeBook {
+pub(super) fn recipes_from_wire(
+    data: &[RecipeData],
+    items: &ItemRegistry,
+    stations: &[String],
+) -> RecipeBook {
     let resolved = data
         .iter()
         .filter_map(|r| {
-            crate::inventory::crafting::resolve_named(&r.output, r.count, &r.ingredients, items)
+            let named = NamedRecipe {
+                output: &r.output,
+                count: r.count,
+                ingredients: &r.ingredients,
+                station: r.station.as_deref(),
+            };
+            resolve_named(&named, items, stations)
         })
         .collect();
     RecipeBook::from_recipes(resolved)
@@ -1289,6 +1323,92 @@ mod tests {
         let stack = restored.slots[3].expect("their bread survives the round trip");
         assert_eq!(stack.item, bread.0);
         assert_eq!(stack.count, 5);
+    }
+
+    /// What a client discovers is kept by the host, merged across reports that
+    /// may arrive in any order, and handed back when that identity returns.
+    #[test]
+    fn a_clients_discoveries_are_kept_and_handed_back_on_rejoin() {
+        let (mut state, handle) = host_session();
+        let items = state.content.items.clone();
+        let wire = |names: &[&str]| -> Vec<u16> {
+            names.iter().map(|n| items.find(n).unwrap().0).collect()
+        };
+        let identity = 7;
+        let pid = PlayerId(1);
+        handle.deliver(Inbound::Joined {
+            player: pid,
+            identity,
+            account: None,
+        });
+        handle.deliver(Inbound::Request {
+            player: pid,
+            msg: ClientMessage::RequestWorldState,
+        });
+        // A real client reports its inventory too, which is what gives the
+        // host a record to restore at all.
+        let (slots, selected) = inventory_to_wire(&Inventory::new());
+        handle.deliver(Inbound::Request {
+            player: pid,
+            msg: ClientMessage::SyncInventory { slots, selected },
+        });
+        // The later, larger set first, then a stale smaller one: nothing lost.
+        for names in [&["oak_log", "coal"][..], &["oak_log"][..]] {
+            handle.deliver(Inbound::Request {
+                player: pid,
+                msg: ClientMessage::SyncKnown { items: wire(names) },
+            });
+        }
+        state.pump_network(1.0 / 60.0);
+        let mut kept = state.save.discovery.players[&identity].clone();
+        kept.sort();
+        assert_eq!(kept, ["coal", "oak_log"]);
+
+        handle.deliver(Inbound::Left { player: pid });
+        state.pump_network(1.0 / 60.0);
+
+        let again = PlayerId(2);
+        handle.deliver(Inbound::Joined {
+            player: again,
+            identity,
+            account: None,
+        });
+        state.pump_network(1.0 / 60.0);
+        let net = handle.lock();
+        let Some(ServerMessage::Welcome {
+            restored: Some(restored),
+            ..
+        }) = net.messages_to(again).first()
+        else {
+            panic!("a returning player is restored");
+        };
+        let mut known = restored.known_items.clone();
+        known.sort();
+        let mut expected = wire(&["oak_log", "coal"]);
+        expected.sort();
+        assert_eq!(known, expected);
+    }
+
+    /// A client reports what it learns — once per new item, not every frame.
+    #[test]
+    fn a_client_reports_new_discoveries_once() {
+        let (mut state, handle) = client_session(PlayerId(4));
+        state.inventory = Inventory::new();
+        state.tick_crafting();
+        let reports = |handle: &FakeHandle| {
+            handle
+                .lock()
+                .requests()
+                .iter()
+                .filter(|m| matches!(m, ClientMessage::SyncKnown { .. }))
+                .count()
+        };
+        assert_eq!(reports(&handle), 0, "nothing learned, nothing to say");
+
+        hold(&mut state, "flint");
+        state.tick_crafting();
+        state.tick_crafting();
+        assert_eq!(reports(&handle), 1);
     }
 
     /// A leaving player is snapshotted into the persistent records (so a rejoin

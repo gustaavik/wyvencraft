@@ -1238,6 +1238,8 @@ mod tests {
                 "cinder_ore",
                 "wayrune",
                 "elder_altar",
+                "workbench",
+                "forge",
             ],
             "the blocks migrated to Blockbench so far"
         );

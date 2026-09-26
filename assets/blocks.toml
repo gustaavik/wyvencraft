@@ -93,6 +93,10 @@
 #             wayrune — reading it reveals the boss altar its shrine points to)
 #             or `kind = "altar"` with `boss = "<entity kind>"` (offer that
 #             boss's [entity.boss] offering here to summon it).
+#   station   `station = "workbench"` makes the block a crafting station:
+#             recipes in assets/recipes.toml that name it can only be crafted
+#             within a few blocks of one, and right-clicking it opens the
+#             crafting panel (sneak to place a block against it instead).
 #   random_yaw  turn each instance by a hash of its position, so a field of
 #             plants doesn't read as a grid of clones. Only meaningful
 #             alongside [block.model].
@@ -471,3 +475,28 @@ block_model = "assets/models/blocks/elder_altar.json"
 kind = "altar"
 boss = "elder stag"
 
+# ---- Crafting stations ------------------------------------------------------
+
+# Where tools, arrows and the forge itself are made. Crafted by hand.
+[[block]]
+id = "workbench"
+render = "opaque"
+solid = true
+hardness = 2.0
+block_model = "assets/models/blocks/workbench.json"
+station = "workbench"
+
+[block.harvest]
+tool = "axe"
+
+# Smelting and cooking. Built at a workbench.
+[[block]]
+id = "forge"
+render = "opaque"
+solid = true
+hardness = 3.0
+block_model = "assets/models/blocks/forge.json"
+station = "forge"
+
+[block.harvest]
+tool = "pickaxe"

@@ -23,6 +23,8 @@ pub struct RecipeData {
     pub count: u32,
     /// Item name -> count consumed from the inventory.
     pub ingredients: Vec<(String, u32)>,
+    /// The crafting station it needs within reach, `None` for a hand recipe.
+    pub station: Option<String>,
 }
 
 /// An item stack as it travels on the wire. Raw numeric ids (like block edits):
@@ -60,6 +62,8 @@ pub struct PlayerRestore {
     pub saturation: f32,
     pub slots: Vec<Option<NetItemStack>>,
     pub selected: u32,
+    /// Every item this player has held — what reveals their crafting recipes.
+    pub known_items: Vec<u16>,
 }
 
 /// Messages a client sends to the host.
@@ -123,6 +127,11 @@ pub enum ClientMessage {
         slots: Vec<Option<NetItemStack>>,
         selected: u32,
     },
+    /// Every item this client has held, sent whenever it learns a new one, so
+    /// the host can save which crafting recipes it has discovered and hand
+    /// them back in its next [`PlayerRestore`]. The whole set rather than a
+    /// delta: `Channel::Reliable` is unordered, and a set is idempotent.
+    SyncKnown { items: Vec<u16> },
 }
 
 /// Everything a remote player's body is drawn with, as one value.
@@ -361,6 +370,7 @@ mod tests {
             output: "wooden_pickaxe".to_string(),
             count: 1,
             ingredients: vec![("wood".to_string(), 3)],
+            station: Some("workbench".to_string()),
         };
         let msg = ServerMessage::Welcome {
             seed: 42,
@@ -384,6 +394,17 @@ mod tests {
                 assert_eq!(recipes, vec![recipe]);
             }
             _ => panic!("expected a creative-mode Welcome"),
+        }
+    }
+
+    #[test]
+    fn sync_known_roundtrips() {
+        let msg = ClientMessage::SyncKnown {
+            items: vec![1, 2, 300],
+        };
+        match decode::<ClientMessage>(&encode(&msg)).unwrap() {
+            ClientMessage::SyncKnown { items } => assert_eq!(items, vec![1, 2, 300]),
+            other => panic!("expected SyncKnown, got {other:?}"),
         }
     }
 
@@ -666,6 +687,7 @@ mod tests {
                 }),
             ],
             selected: 1,
+            known_items: vec![3, 5, 40],
         };
         let msg = ServerMessage::Welcome {
             seed: 7,
