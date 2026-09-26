@@ -33,7 +33,6 @@ mod streaming;
 mod view;
 mod wayfinding;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use glam::Vec3;
@@ -42,7 +41,7 @@ use crate::application::ecs::Ecs;
 use crate::application::session::Session;
 use crate::domain::chat::{ChatState, OpsList};
 use crate::domain::core::{BlockPos, DayCycle};
-use crate::domain::entity::{Mob, Player, Spawner};
+use crate::domain::entity::{Player, Spawner};
 use crate::domain::inventory::{HeldLabel, Inventory, ItemStack, RecipeBook};
 use crate::domain::progression::WorldProgression;
 use crate::domain::world::structure::Structures;
@@ -98,14 +97,10 @@ struct BreakState {
 
 /// The living population of a session.
 struct MobWorld {
-    /// Mobs this peer simulates (the authority) or renders from snapshots.
-    live: Vec<Mob>,
     next_id: u64,
     /// Seeded spawn planner — deterministic in (seed, tick), so a host and its
     /// clients agree without exchanging the decision.
     spawner: Spawner,
-    /// Mobs a client knows about only from the host's snapshots.
-    remote: HashMap<u64, mobs::RemoteMob>,
     /// The boss fight in progress, if one is (authority only).
     fight: Option<bosses::BossFight>,
     /// The boss attack being wound up, shown on the boss bar.
@@ -116,10 +111,8 @@ impl MobWorld {
     /// Empty, with a spawn planner seeded from the world.
     fn new(seed: u64) -> Self {
         Self {
-            live: Vec::new(),
             next_id: 0,
             spawner: Spawner::new(seed),
-            remote: HashMap::new(),
             fight: None,
             telegraph: None,
         }
@@ -236,6 +229,39 @@ impl InGameState {
     }
 }
 
+/// One simulated mob, read out of the ECS for a test to assert on.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+struct MobSnapshot {
+    id: crate::domain::entity::MobId,
+    entity: crate::application::ecs::Entity,
+    kind: String,
+    position: Vec3,
+    health: f32,
+    night_spawned: bool,
+    boss: bool,
+}
+
+#[cfg(test)]
+impl InGameState {
+    /// Every mob this peer simulates, in storage order.
+    fn simulated_mobs(&self) -> Vec<MobSnapshot> {
+        use crate::application::ecs::components::{Boss, Health, Kind, Mob, MobId, Transform};
+        self.ecs
+            .query::<(&MobId, &Kind, &Transform, &Health, &Mob, Option<&Boss>)>()
+            .map(|(entity, (id, kind, t, health, mob, boss))| MobSnapshot {
+                id: *id,
+                entity,
+                kind: kind.name.clone(),
+                position: t.position,
+                health: health.current,
+                night_spawned: mob.night_spawned,
+                boss: boss.is_some(),
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::net::{recipes_from_wire, recipes_to_wire};
@@ -337,7 +363,10 @@ mod tests {
             state.attack_mob(mobs::MobTargetRef::Local(index));
         }
         state.update_mobs(1.0 / 60.0);
-        assert!(state.mobs.live.is_empty(), "cow should be dead and reaped");
+        assert!(
+            state.simulated_mobs().is_empty(),
+            "cow should be dead and reaped"
+        );
         assert!(state.drops().next().is_some(), "death should drop loot");
         let raw_beef = state.content.rules.items.find("raw_beef").unwrap();
         let dropped: u32 = state
@@ -614,8 +643,8 @@ mod tests {
         state
             .spawn_mob("zombie", Vec3::new(6.0, 80.0, 6.0))
             .expect("zombie spawns");
-        state.mobs.live[0].health = 11.0;
-        state.mobs.live[0].night_spawned = true;
+        let zombie = state.simulated_mobs()[0].id;
+        state.restore_mob(zombie, 11.0, true);
         state.save_world();
         drop(state);
 
@@ -636,11 +665,12 @@ mod tests {
             ))
         );
         assert_eq!(state.inventory.selected_index(), 8);
-        assert_eq!(state.mobs.live.len(), 1, "the zombie survives the reload");
-        assert_eq!(state.mobs.live[0].kind_name, "zombie");
-        assert_eq!(state.mobs.live[0].position, Vec3::new(6.0, 80.0, 6.0));
-        assert_eq!(state.mobs.live[0].health, 11.0);
-        assert!(state.mobs.live[0].night_spawned, "daylight rule survives");
+        let mobs = state.simulated_mobs();
+        assert_eq!(mobs.len(), 1, "the zombie survives the reload");
+        assert_eq!(mobs[0].kind, "zombie");
+        assert_eq!(mobs[0].position, Vec3::new(6.0, 80.0, 6.0));
+        assert_eq!(mobs[0].health, 11.0);
+        assert!(mobs[0].night_spawned, "daylight rule survives");
 
         let _ = std::fs::remove_dir_all(&root);
     }

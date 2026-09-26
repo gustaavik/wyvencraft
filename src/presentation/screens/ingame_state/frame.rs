@@ -360,6 +360,13 @@ impl GameState<Wyvencraft> for InGameState {
         // screen open.
         self.update_drops(ctx.dt.min(0.05));
         self.update_arrows(ctx.dt.min(0.05));
+        // A client's mob replicas animate from the movement their snapshots
+        // show. Every peer runs it; the authority simply has none.
+        crate::application::ecs::systems::mobs::animate_replicas(
+            &mut self.ecs,
+            ctx.dt.min(0.05),
+            super::REMOTE_MAX_SPEED,
+        );
 
         // Simulation for this frame is settled; bring the GPU state in line.
         self.refresh_view(&ctx.shared.render, ctx.dt.min(0.05));
@@ -525,7 +532,8 @@ impl GameState<Wyvencraft> for InGameState {
                 self.biome_line(),
                 format!(
                     "mobs: {} live / {} arrows / {} drops",
-                    self.mobs.live.len() + self.mobs.remote.len(),
+                    self.ecs
+                        .count::<crate::application::ecs::components::MobId>(),
                     self.ecs
                         .count::<crate::application::ecs::components::Projectile>(),
                     self.ecs

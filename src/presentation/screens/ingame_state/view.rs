@@ -19,13 +19,15 @@ use std::sync::Arc;
 
 use glam::{Mat4, Vec3};
 
-use super::mobs::{RemoteMob, mob_mesh};
+use super::mobs::mob_mesh;
 use super::{INSPECT_MODEL_FROM, OUTLINE_COLOR, REMOTE_MAX_SPEED, THIRD_PERSON_DISTANCE};
-use crate::application::ecs::components::{Body, ItemDrop, Projectile, Transform, Velocity};
+use crate::application::ecs::components::{
+    Animation, Body, ItemDrop, Kind, MobId, Projectile, Transform, Velocity,
+};
 use crate::domain::core::{Aabb, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, ChunkPos, DayCycle};
 use crate::domain::entity::camera::Shot;
 use crate::domain::entity::kind::{EntityRegistry, VisualSpec};
-use crate::domain::entity::{AnimationState, Mob, Motion, Player, camera};
+use crate::domain::entity::{AnimationState, Motion, Player, camera};
 use crate::domain::inventory::{Inventory, ItemId, Placeable};
 use crate::domain::world::World;
 use crate::domain::world::meshing::{
@@ -53,6 +55,16 @@ use wyven_voxel::FaceTextures;
 struct RemoteAnim {
     anim: AnimationState,
     last_pos: Vec3,
+}
+
+/// A mob, simulated or replicated, as the view needs it.
+pub(super) struct MobSprite<'a> {
+    pub visual: &'a VisualSpec,
+    /// Feet.
+    pub position: Vec3,
+    /// The torso's yaw, which lags the look yaw.
+    pub yaw: f32,
+    pub pose: crate::domain::entity::Pose,
 }
 
 /// A dropped item, as the view needs it: what it is and where to draw it.
@@ -771,33 +783,17 @@ impl SceneCache {
     /// Rebuild one mesh per visible mob — the authority's own simulated mobs
     /// plus, on a client, the host's replicas (whose animation is driven from
     /// their rendered movement, like remote players).
-    pub fn update_mob_meshes(
+    pub fn update_mob_meshes<'a>(
         &mut self,
         ctx: &Arc<RenderContext>,
-        mobs: &[Mob],
-        remote_mobs: &mut HashMap<u64, RemoteMob>,
+        mobs: impl IntoIterator<Item = MobSprite<'a>>,
         models: &ModelRegistry,
-        dt: f32,
     ) {
         self.mob_meshes.clear();
-        let mut visuals = Vec::new();
-        for mob in mobs {
-            if let Some(visual) = mob_mesh(
-                &mob.visual,
-                mob.position,
-                mob.anim.body_yaw(),
-                &mob.anim.pose(0.0),
-                models,
-            ) {
-                visuals.push(visual);
-            }
-        }
-        for rm in remote_mobs.values_mut() {
-            let (visual, position, yaw, pose) = rm.animate(dt);
-            if let Some(visual) = mob_mesh(visual, position, yaw, &pose, models) {
-                visuals.push(visual);
-            }
-        }
+        let visuals: Vec<_> = mobs
+            .into_iter()
+            .filter_map(|mob| mob_mesh(mob.visual, mob.position, mob.yaw, &mob.pose, models))
+            .collect();
         for visual in visuals {
             if let Some(id) = visual.model {
                 self.ensure_model_texture(ctx, models, id);
@@ -1345,15 +1341,25 @@ impl super::InGameState {
         let drops = self.ecs.query::<(&ItemDrop, &Transform, &Body)>().map(
             |(_, (drop, transform, body))| DropSprite {
                 item: drop.stack.item,
-                center: drop.render_center(transform.position, &body.0),
-                size: drop.render_size(&body.0),
+                center: drop.render_center(transform.position, &body.physics),
+                size: drop.render_size(&body.physics),
                 yaw: drop.spin_yaw(),
             },
         );
         self.view
             .update_drops_mesh(ctx, drops.chain(preview), content);
-        self.view
-            .update_mob_meshes(ctx, &self.mobs.live, &mut self.mobs.remote, models, dt);
+        // Simulated and replicated mobs alike: a kind, a place and an
+        // animation. Replicas were animated in `update`, so this only reads.
+        let mobs = self
+            .ecs
+            .query::<(&Kind, &Transform, &Animation, &MobId)>()
+            .map(|(_, (kind, transform, anim, _))| MobSprite {
+                visual: &kind.visual,
+                position: transform.position,
+                yaw: anim.0.body_yaw(),
+                pose: anim.0.pose(0.0),
+            });
+        self.view.update_mob_meshes(ctx, mobs, models);
         let arrows = self
             .ecs
             .query::<(&Projectile, &Transform, &Velocity)>()

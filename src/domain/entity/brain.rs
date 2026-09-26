@@ -66,6 +66,14 @@ pub struct Intent {
     pub attack: bool,
 }
 
+impl Default for Intent {
+    /// Standing still, facing wherever it already faces — what a mob does
+    /// before its brain has been asked anything.
+    fn default() -> Self {
+        Self::stand()
+    }
+}
+
 impl Intent {
     fn stand() -> Self {
         Self {

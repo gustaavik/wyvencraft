@@ -8,13 +8,13 @@
 use glam::Vec3;
 
 use super::{HOST_PLAYER_ID, InGameState};
+use crate::application::ecs::components::{Body, Kind, Mob, Replica, Transform};
+use crate::application::ecs::systems::mobs::{self as mob_systems, MobStep, Reaped};
+use crate::application::ecs::{Entity, With, spawn};
 use crate::domain::core::{Aabb, BlockPos, Rng64};
 use crate::domain::entity::kind::VisualSpec;
-use crate::domain::entity::{
-    AnimationState, Mob, MobAction, MobId, Motion, Perception, PlayerSighting,
-};
+use crate::domain::entity::{MobAction, MobId, PlayerSighting};
 use crate::domain::inventory::{ItemStack, Tool};
-use crate::domain::world::Target;
 use crate::infrastructure::net::{Channel, ClientMessage, PlayerId, ServerMessage};
 use crate::presentation::art::{mobskin, skin};
 use crate::presentation::render::rigged;
@@ -43,100 +43,6 @@ const ATTACK_VALIDATE_RANGE: f32 = 7.0;
 pub(super) struct MobTarget {
     pub player: Option<PlayerId>,
     pub eye: Vec3,
-}
-
-/// A client's replica of a host-simulated mob: two position snapshots (the
-/// `RemotePlayer` pattern), the visual to render, and enough of the kind to
-/// target it and roll kill loot. Created from `MobSpawned`, moved by
-/// `MobStates`, removed by `MobDespawned`.
-pub(super) struct RemoteMob {
-    kind_name: String,
-    visual: VisualSpec,
-    /// Collision-box extents (for crosshair targeting).
-    width: f32,
-    height: f32,
-    position: Vec3,
-    yaw: f32,
-    /// Walk-animation state; speed is derived from the position delta each
-    /// frame, like remote players.
-    anim: AnimationState,
-    last_pos: Vec3,
-    /// Health as the host last reported it (`MobHurt`) — what a boss bar shows.
-    pub health: f32,
-    /// A boss's fight phase as the host last reported it (`BossPhase`).
-    pub phase: u8,
-}
-
-impl RemoteMob {
-    /// Build a replica from the kind named in `MobSpawned`.
-    pub(super) fn new(kind: &crate::domain::entity::EntityKind, position: Vec3) -> Self {
-        Self {
-            kind_name: kind.name.clone(),
-            visual: kind.visual.clone(),
-            width: kind.physics.width,
-            height: kind.physics.height,
-            position,
-            yaw: 0.0,
-            anim: AnimationState::new(),
-            last_pos: position,
-            health: kind.mob.as_ref().map_or(1.0, |m| m.max_health),
-            phase: 0,
-        }
-    }
-
-    /// Advance the walk animation from the movement observed since the last
-    /// frame (the remote-player trick), clamped so a teleport can't drive an
-    /// absurd cadence. Returns the mesh inputs for this frame.
-    pub(super) fn animate(
-        &mut self,
-        dt: f32,
-    ) -> (&VisualSpec, Vec3, f32, crate::domain::entity::Pose) {
-        let speed = if dt > 0.0 {
-            (Vec3::new(
-                self.position.x - self.last_pos.x,
-                0.0,
-                self.position.z - self.last_pos.z,
-            )
-            .length()
-                / dt)
-                .min(super::REMOTE_MAX_SPEED)
-        } else {
-            0.0
-        };
-        // A snapshot carries no grounded flag, so the vertical half is read off
-        // the movement itself — the same way the horizontal half already is.
-        let motion = Motion::observed(speed, self.position.y - self.last_pos.y, dt);
-        self.anim.advance(motion, self.yaw, dt);
-        self.last_pos = self.position;
-        // Drawn at the torso yaw, which follows the snapshot yaw the head keeps.
-        (
-            &self.visual,
-            self.position,
-            self.anim.body_yaw(),
-            self.anim.pose(0.0),
-        )
-    }
-
-    pub(super) fn push_snapshot(&mut self, position: Vec3, yaw: f32) {
-        self.position = position;
-        self.yaw = yaw;
-    }
-
-    pub(super) fn kind_name(&self) -> &str {
-        &self.kind_name
-    }
-
-    pub(super) fn position(&self) -> Vec3 {
-        self.position
-    }
-
-    fn aabb(&self) -> Aabb {
-        let half = self.width * 0.5;
-        Aabb::new(
-            self.position - Vec3::new(half, 0.0, half),
-            self.position + Vec3::new(half, self.height, half),
-        )
-    }
 }
 
 /// Renderable geometry for one entity, and which texture draws it.
@@ -217,10 +123,10 @@ pub(super) fn attack_in_range(attacker: Vec3, mob: Vec3) -> bool {
     (mob - attacker).length() <= ATTACK_VALIDATE_RANGE
 }
 
-/// What the crosshair is on: an index into the authority's own mob list, or
-/// a replica's wire id on a client.
+/// What the crosshair is on: one of the authority's own mobs, or a replica's
+/// wire id on a client.
 pub(super) enum MobTargetRef {
-    Local(usize),
+    Local(Entity),
     Remote(u64),
 }
 
@@ -240,15 +146,28 @@ impl InGameState {
         let kind = self.content.rules.entities.find(kind_name)?;
         let id = MobId(self.mobs.next_id);
         let seed = self.world.seed() ^ id.0.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-        let mob = Mob::spawn(kind, id, position, seed)?;
+        spawn::mob(&mut self.ecs, kind, id, position, seed)?;
         self.mobs.next_id += 1;
-        self.mobs.live.push(mob);
         self.emit_mob_event(ServerMessage::MobSpawned {
             id: id.0,
             kind: kind_name.to_string(),
             position: position.to_array(),
         });
         Some(id)
+    }
+
+    /// Put back what a save remembered about mob `id`: its health (never
+    /// above what its kind allows) and whether dawn should reap it.
+    pub(super) fn restore_mob(&mut self, id: MobId, health: f32, night_spawned: bool) {
+        let Some(entity) = mob_systems::find(&self.ecs, id) else {
+            return;
+        };
+        if let Some(current) = self.ecs.get_mut::<crate::domain::entity::Health>(entity) {
+            current.current = health.min(current.max);
+        }
+        if let Some(mob) = self.ecs.get_mut::<Mob>(entity) {
+            mob.night_spawned = night_spawned;
+        }
     }
 
     /// Every player a mob may attack right now: the local player (unless dead
@@ -285,63 +204,48 @@ impl InGameState {
     /// resolve the attacks they commit to.
     pub(super) fn update_mobs(&mut self, dt: f32) {
         let targets = self.mob_targets();
+        let world = &self.world;
+        let steps = mob_systems::simulate(
+            &mut self.ecs,
+            dt,
+            // Mobs straddling the streaming edge freeze until their chunk is
+            // back (unloaded chunks read as solid, which would trap them).
+            |feet| world.is_loaded(BlockPos::from_world(feet).chunk()),
+            |eye| nearest_sighting(world, &targets, eye),
+            |p| world.is_solid_for_collision(p),
+        );
+
         let mut melee_hits: Vec<(Option<PlayerId>, f32)> = Vec::new();
         // Arrows launched this tick: (origin eye, velocity, damage, gravity, lifetime).
         let mut fired: Vec<(Vec3, Vec3, f32, f32, f32)> = Vec::new();
         let mut beats: Vec<super::bosses::BossBeat> = Vec::new();
-
-        for mob in &mut self.mobs.live {
-            // Mobs straddling the streaming edge freeze until their chunk is
-            // back (unloaded chunks read as solid, which would trap them).
-            if !self
-                .world
-                .is_loaded(BlockPos::from_world(mob.position).chunk())
-            {
-                continue;
-            }
-
-            let eye = mob.eye_position();
-            let nearest = targets
-                .iter()
-                .map(|t| (t, (t.eye - eye).length()))
-                .min_by(|a, b| a.1.total_cmp(&b.1));
-            let sighting = nearest.map(|(t, distance)| {
-                let offset = t.eye - eye;
-                // Line of sight: no solid block between the two eye points.
-                // Solid blocks only, and always the whole cell: sight is about
-                // what blocks it, so ground cover you can walk through must not
-                // hide a player from a mob.
-                let visible = distance < 1.0e-3
-                    || crate::domain::world::raycast(eye, offset / distance, distance, |p| {
-                        self.world.is_solid(p).then_some(Target::Cell)
-                    })
-                    .is_none();
-                PlayerSighting {
-                    offset,
-                    distance,
-                    visible,
-                }
-            });
-            let perception = Perception {
-                on_ground: mob.on_ground,
-                target: sighting,
-                hurt: mob.take_hurt(),
-            };
-
-            let action = mob.update(dt, perception, |p| self.world.is_solid_for_collision(p));
-            if let Some(phase) = mob.take_phase_change() {
-                beats.push(super::bosses::BossBeat::Phase { mob: mob.id, phase });
+        for MobStep {
+            entity,
+            id,
+            action,
+            phase_change,
+            target,
+            eye,
+        } in steps
+        {
+            let target = target.map(|index| &targets[index]);
+            if let Some(phase) = phase_change {
+                beats.push(super::bosses::BossBeat::Phase { mob: id, phase });
             }
             match action {
                 MobAction::None => {}
                 MobAction::Melee { damage } => {
-                    melee_hits.push((nearest.map(|(t, _)| t.player).unwrap_or(None), damage));
+                    melee_hits.push((target.and_then(|t| t.player), damage));
                 }
                 MobAction::Fire { velocity, damage } => {
-                    let ranged = mob.params.ranged.as_ref().expect("ranged kinds fire");
+                    let ranged = self
+                        .ecs
+                        .get::<Mob>(entity)
+                        .and_then(|mob| mob.params.ranged)
+                        .expect("ranged kinds fire");
                     fired.push((
                         // Nock ahead of the face so the arrow clears the model.
-                        mob.eye_position() + velocity.normalize_or_zero() * 0.4,
+                        eye + velocity.normalize_or_zero() * 0.4,
                         velocity,
                         damage,
                         ranged.projectile_gravity,
@@ -350,16 +254,16 @@ impl InGameState {
                 }
                 MobAction::BossWindup { attack, seconds } => {
                     beats.push(super::bosses::BossBeat::Windup {
-                        mob: mob.id,
+                        mob: id,
                         attack,
                         seconds,
                     });
                 }
                 MobAction::BossRelease { attack } => {
                     beats.push(super::bosses::BossBeat::Release {
-                        mob: mob.id,
+                        mob: id,
                         attack,
-                        target: nearest.map(|(t, _)| (t.player, t.eye)),
+                        target: target.map(|t| (t.player, t.eye)),
                     });
                 }
             }
@@ -400,14 +304,8 @@ impl InGameState {
     /// drops): the host rolls for its own kills; a client killer learns via
     /// `MobDespawned { killed_by }` and rolls the identical table itself.
     fn reap_dead_mobs(&mut self) {
-        let mut i = 0;
-        while i < self.mobs.live.len() {
-            if !self.mobs.live[i].dead() {
-                i += 1;
-                continue;
-            }
-            let mob = self.mobs.live.swap_remove(i);
-            if mob.boss().is_some() {
+        for mob in mob_systems::reap(&mut self.ecs) {
+            if mob.boss.is_some() {
                 // Everyone in the arena shares a boss's loot, so it is handed
                 // out by the defeat rather than by kill credit. The defeat
                 // carries the position, so it does not matter which of the
@@ -419,13 +317,20 @@ impl InGameState {
                 });
                 continue;
             }
-            let killed_by = mob.last_attacker.map(PlayerId);
+            let Reaped {
+                id,
+                kind,
+                position,
+                last_attacker,
+                ..
+            } = mob;
+            let killed_by = last_attacker.map(PlayerId);
             self.emit_mob_event(ServerMessage::MobDespawned {
-                id: mob.id.0,
+                id: id.0,
                 killed_by,
             });
             if killed_by.is_none_or(|pid| pid == HOST_PLAYER_ID) {
-                self.pop_drops_for(&mob.kind_name, mob.id.0, mob.position);
+                self.pop_drops_for(&kind, id.0, position);
             }
         }
     }
@@ -500,21 +405,28 @@ impl InGameState {
                 .ray_hit(eye, look, reach)
             })
             .unwrap_or(reach);
+        let under = |(entity, (transform, body, id)): (Entity, (&Transform, &Body, &MobId))| {
+            Some((
+                entity,
+                *id,
+                body.aabb(transform.position).ray_hit(eye, look, max_t)?,
+            ))
+        };
+        let nearest = |a: &(Entity, MobId, f32), b: &(Entity, MobId, f32)| a.2.total_cmp(&b.2);
         if !self.session.is_authority() {
-            self.mobs
-                .remote
-                .iter()
-                .filter_map(|(id, mob)| Some((*id, mob.aabb().ray_hit(eye, look, max_t)?)))
-                .min_by(|a, b| a.1.total_cmp(&b.1))
-                .map(|(id, _)| MobTargetRef::Remote(id))
+            self.ecs
+                .query::<(&Transform, &Body, &MobId, With<Replica>)>()
+                .map(|(e, (t, b, id, ()))| (e, (t, b, id)))
+                .filter_map(under)
+                .min_by(nearest)
+                .map(|(_, id, _)| MobTargetRef::Remote(id.0))
         } else {
-            self.mobs
-                .live
-                .iter()
-                .enumerate()
-                .filter_map(|(i, mob)| Some((i, mob.aabb().ray_hit(eye, look, max_t)?)))
-                .min_by(|a, b| a.1.total_cmp(&b.1))
-                .map(|(i, _)| MobTargetRef::Local(i))
+            self.ecs
+                .query::<(&Transform, &Body, &MobId, With<Mob>)>()
+                .map(|(e, (t, b, id, ()))| (e, (t, b, id)))
+                .filter_map(under)
+                .min_by(nearest)
+                .map(|(entity, _, _)| MobTargetRef::Local(entity))
         }
     }
 
@@ -523,19 +435,17 @@ impl InGameState {
     /// the host validates and applies.
     pub(super) fn attack_mob(&mut self, target: MobTargetRef) {
         match target {
-            MobTargetRef::Local(index) => {
+            MobTargetRef::Local(entity) => {
                 let look = self.player.look_direction();
                 let push = Vec3::new(look.x, 0.0, look.z).normalize_or_zero() * KNOCKBACK_PUSH
                     + Vec3::Y * KNOCKBACK_LIFT;
                 let damage = self.melee_damage();
-                if let Some(mob) = self.mobs.live.get_mut(index) {
-                    mob.damage(damage, push);
-                    mob.last_attacker = Some(HOST_PLAYER_ID.0);
-                    let hurt = ServerMessage::MobHurt {
-                        id: mob.id.0,
-                        health: mob.health,
-                    };
-                    self.emit_mob_event(hurt);
+                let id = self.ecs.get::<MobId>(entity).copied();
+                if let Some(id) = id
+                    && let Some(health) =
+                        mob_systems::hit(&mut self.ecs, entity, damage, push, HOST_PLAYER_ID.0)
+                {
+                    self.emit_mob_event(ServerMessage::MobHurt { id: id.0, health });
                 }
             }
             MobTargetRef::Remote(id) => {
@@ -617,23 +527,30 @@ impl InGameState {
 
         let world = &self.world;
         let terrain = self.structures.terrain();
-        let mobs = &self.mobs.live;
+        let ecs = &self.ecs;
         let requests = self.mobs.spawner.tick(
             &cfg,
             dt,
             is_night,
             &anchors,
-            mobs.len(),
-            |name| mobs.iter().filter(|m| m.kind_name == name).count(),
+            ecs.count::<Mob>(),
+            |name| {
+                ecs.query::<(&Kind, With<Mob>)>()
+                    .filter(|(_, (kind, ()))| kind.name == name)
+                    .count()
+            },
             |x, z| ground_at(world, x, z, top),
             |x, z| terrain.biome_at(x.floor() as i32, z.floor() as i32),
         );
         for request in requests {
-            if self.spawn_mob(&request.entity, request.position).is_some() {
+            if let Some(id) = self.spawn_mob(&request.entity, request.position) {
                 let night_rule = cfg
                     .entry(&request.entity)
                     .is_some_and(|e| e.despawn_in_daylight);
-                if night_rule && let Some(mob) = self.mobs.live.last_mut() {
+                if night_rule
+                    && let Some(entity) = mob_systems::find(&self.ecs, id)
+                    && let Some(mob) = self.ecs.get_mut::<Mob>(entity)
+                {
                     mob.night_spawned = true;
                 }
                 log::debug!(
@@ -649,21 +566,23 @@ impl InGameState {
         // also tells clients (`MobDespawned` without a killer = no loot).
         let day = !is_night;
         let despawn_sq = cfg.limits.despawn_distance * cfg.limits.despawn_distance;
-        let mut index = 0;
-        while index < self.mobs.live.len() {
-            let mob = &self.mobs.live[index];
-            let stray = anchors
-                .iter()
-                .all(|a| (mob.position - *a).length_squared() > despawn_sq);
-            if stray || (day && mob.night_spawned) {
-                let id = self.mobs.live.swap_remove(index).id.0;
-                self.emit_mob_event(ServerMessage::MobDespawned {
-                    id,
-                    killed_by: None,
-                });
-            } else {
-                index += 1;
-            }
+        let leaving: Vec<(Entity, MobId)> = self
+            .ecs
+            .query::<(&Mob, &Transform, &MobId)>()
+            .filter(|(_, (mob, transform, _))| {
+                let stray = anchors
+                    .iter()
+                    .all(|a| (transform.position - *a).length_squared() > despawn_sq);
+                stray || (day && mob.night_spawned)
+            })
+            .map(|(entity, (_, _, id))| (entity, *id))
+            .collect();
+        for (entity, id) in leaving {
+            self.ecs.despawn(entity);
+            self.emit_mob_event(ServerMessage::MobDespawned {
+                id: id.0,
+                killed_by: None,
+            });
         }
     }
 
@@ -703,6 +622,40 @@ impl InGameState {
             self.breaking = None;
         }
     }
+}
+
+/// The nearest of `targets` to a mob's `eye`, as an index into `targets` and
+/// what the mob sees of it.
+///
+/// Line of sight is solid blocks only, and always the whole cell: sight is
+/// about what blocks it, so ground cover you can walk through must not hide a
+/// player from a mob.
+fn nearest_sighting(
+    world: &crate::domain::world::World,
+    targets: &[MobTarget],
+    eye: Vec3,
+) -> Option<(usize, PlayerSighting)> {
+    let (index, distance) = targets
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (i, (t.eye - eye).length()))
+        .min_by(|a, b| a.1.total_cmp(&b.1))?;
+    let offset = targets[index].eye - eye;
+    let visible = distance < 1.0e-3
+        || crate::domain::world::raycast(eye, offset / distance, distance, |p| {
+            world
+                .is_solid(p)
+                .then_some(crate::domain::world::Target::Cell)
+        })
+        .is_none();
+    Some((
+        index,
+        PlayerSighting {
+            offset,
+            distance,
+            visible,
+        },
+    ))
 }
 
 /// The walkable *surface* at `(x, z)`: the Y of the first space with solid

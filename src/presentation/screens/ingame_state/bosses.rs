@@ -11,9 +11,13 @@ use glam::Vec3;
 
 use super::InGameState;
 use super::block_use::UseAt;
+use crate::application::ecs::With;
+use crate::application::ecs::components::{Boss, Health, Kind, Mob, Replica, Transform};
+use crate::application::ecs::systems::mobs::{self as mob_systems, Reaped};
 use crate::domain::core::{BlockPos, Rng64};
+use crate::domain::entity::MobId;
 use crate::domain::entity::boss::{AttackEffect, BossParams};
-use crate::domain::entity::{Mob, MobId};
+use crate::domain::entity::mob::eye_position;
 use crate::domain::inventory::ItemStack;
 use crate::infrastructure::net::{ChatKind, PlayerId, ServerMessage};
 use crate::presentation::ui::boss_bar::BossBarView;
@@ -138,13 +142,23 @@ impl InGameState {
         }
     }
 
-    fn boss_mob(&self, id: MobId) -> Option<(&Mob, &BossParams)> {
-        let mob = self.mobs.live.iter().find(|m| m.id == id)?;
-        Some((mob, mob.boss()?))
+    /// A live boss by id: where it stands, where it sees from, and its move set.
+    fn boss_mob(&self, id: MobId) -> Option<(Vec3, Vec3, &BossParams)> {
+        let entity = mob_systems::find(&self.ecs, id)?;
+        let transform = self.ecs.get::<Transform>(entity)?;
+        let body = self
+            .ecs
+            .get::<crate::application::ecs::components::Body>(entity)?;
+        let boss = self.ecs.get::<Boss>(entity)?;
+        Some((
+            transform.position,
+            eye_position(transform.position, &body.physics),
+            &boss.params,
+        ))
     }
 
     fn telegraph(&mut self, id: MobId, attack: usize, seconds: f32) {
-        let Some((_, params)) = self.boss_mob(id) else {
+        let Some((_, _, params)) = self.boss_mob(id) else {
             return;
         };
         let attack_id = params.attacks[attack].id.clone();
@@ -161,7 +175,7 @@ impl InGameState {
     }
 
     fn enter_phase(&mut self, id: MobId, phase: u8) {
-        let Some((_, params)) = self.boss_mob(id) else {
+        let Some((_, _, params)) = self.boss_mob(id) else {
             return;
         };
         let title = params.title.clone();
@@ -173,11 +187,10 @@ impl InGameState {
 
     /// Apply one attack's effect as it lands.
     fn land_attack(&mut self, id: MobId, attack: usize, target: Option<(Option<PlayerId>, Vec3)>) {
-        let Some((mob, params)) = self.boss_mob(id) else {
+        let Some((position, eye, params)) = self.boss_mob(id) else {
             return;
         };
         let spec = params.attacks[attack].clone();
-        let (position, eye) = (mob.position, mob.eye_position());
         if self.mobs.telegraph.as_ref().is_some_and(|t| t.mob == id.0) {
             self.mobs.telegraph = None;
         }
@@ -244,10 +257,11 @@ impl InGameState {
             }
             AttackEffect::Summon { entity, count, cap } => {
                 let alive = self
-                    .mobs
-                    .live
-                    .iter()
-                    .filter(|m| m.kind_name == entity && m.position.distance(position) < 48.0)
+                    .ecs
+                    .query::<(&Kind, &Transform, With<Mob>)>()
+                    .filter(|(_, (kind, t, ()))| {
+                        kind.name == entity && t.position.distance(position) < 48.0
+                    })
                     .count() as u32;
                 let mut rng = Rng64::new(self.world.seed() ^ id.0 ^ self.mobs.next_id);
                 let want = rng.range_u32(u32::from(count[0]), u32::from(count[1]));
@@ -282,7 +296,7 @@ impl InGameState {
             return;
         };
         let (id, altar) = (fight.mob, fight.altar);
-        let Some((_, params)) = self.boss_mob(id) else {
+        let Some((_, _, params)) = self.boss_mob(id) else {
             // Killed (the defeat already cleared the fight) or gone some other
             // way: either way nothing is left to leash.
             self.mobs.fight = None;
@@ -303,7 +317,9 @@ impl InGameState {
         // Nobody stayed to fight: the boss returns whence it came, and takes
         // the offering with it.
         self.mobs.fight = None;
-        self.mobs.live.retain(|m| m.id != id);
+        if let Some(entity) = mob_systems::find(&self.ecs, id) {
+            self.ecs.despawn(entity);
+        }
         self.emit_mob_event(ServerMessage::MobDespawned {
             id: id.0,
             killed_by: None,
@@ -336,8 +352,8 @@ impl InGameState {
 
     /// Authority: a boss died. Record it, tell everyone, and hand out the
     /// loot to every player who was in the arena — not just the killer.
-    pub(super) fn on_boss_defeated(&mut self, mob: &Mob) {
-        let Some(params) = mob.boss() else {
+    pub(super) fn on_boss_defeated(&mut self, mob: &Reaped) {
+        let Some(params) = &mob.boss else {
             return;
         };
         let participants: Vec<Option<PlayerId>> = self
@@ -347,14 +363,14 @@ impl InGameState {
         let wire: Vec<PlayerId> = participants.iter().map(|p| p.unwrap_or(local_id)).collect();
         self.emit_mob_event(ServerMessage::BossDefeated {
             id: mob.id.0,
-            kind: mob.kind_name.clone(),
+            kind: mob.kind.clone(),
             position: mob.position.to_array(),
             participants: wire,
         });
         if participants.contains(&None) {
-            self.pop_drops_for(&mob.kind_name, loot_seed(mob.id.0, local_id), mob.position);
+            self.pop_drops_for(&mob.kind, loot_seed(mob.id.0, local_id), mob.position);
         }
-        let first = self.progression.defeat(&mob.kind_name);
+        let first = self.progression.defeat(&mob.kind);
         if self.mobs.fight.as_ref().is_some_and(|f| f.mob == mob.id) {
             self.mobs.fight = None;
         }
@@ -382,8 +398,10 @@ impl InGameState {
         let local_id = self.session.local_id();
         match msg {
             ServerMessage::BossPhase { id, phase } => {
-                if let Some(mob) = self.mobs.remote.get_mut(&id) {
-                    mob.phase = phase;
+                if let Some(entity) = mob_systems::find(&self.ecs, MobId(id))
+                    && let Some(replica) = self.ecs.get_mut::<Replica>(entity)
+                {
+                    replica.phase = phase;
                 }
             }
             ServerMessage::BossTelegraph { id, attack, windup } => {
@@ -422,24 +440,37 @@ impl InGameState {
     /// here or replicated from the host.
     pub(super) fn boss_bar(&self) -> Option<BossBarView> {
         let here = self.player.position;
-        let local = self.mobs.live.iter().filter_map(|m| {
-            let params = m.boss()?;
-            Some((
-                m.id.0,
-                m.position,
-                params,
-                m.health / m.params.max_health,
-                m.boss_phase(),
-            ))
-        });
-        let remote = self.mobs.remote.iter().filter_map(|(&id, m)| {
-            let kind = self.content.rules.entities.find(m.kind_name())?;
-            let params = kind.boss.as_ref()?;
-            let max = kind.mob.as_ref()?.max_health;
-            Some((id, m.position(), params, m.health / max, m.phase))
-        });
-        let (id, _, params, fraction, phase) = local
-            .chain(remote)
+        // Simulated here or replicated from the host, a boss is the same
+        // entity shape: a kind, a place, a health, and a phase — from its
+        // brain when simulated, from the host's last word when replicated.
+        let bosses = self
+            .ecs
+            .query::<(
+                &MobId,
+                &Kind,
+                &Transform,
+                &Health,
+                Option<&Boss>,
+                Option<&Replica>,
+            )>()
+            .filter_map(|(_, (id, kind, t, health, boss, replica))| {
+                let (params, phase) = match (boss, replica) {
+                    (Some(boss), _) => (&boss.params, boss.phase()),
+                    (None, Some(replica)) => {
+                        let params = self
+                            .content
+                            .rules
+                            .entities
+                            .find(&kind.name)?
+                            .boss
+                            .as_ref()?;
+                        (params, replica.phase)
+                    }
+                    (None, None) => return None,
+                };
+                Some((id.0, t.position, params, health.fraction(), phase))
+            });
+        let (id, _, params, fraction, phase) = bosses
             .filter(|(_, pos, params, _, _)| pos.distance(here) <= params.arena_radius * BAR_RANGE)
             .min_by(|a, b| a.1.distance(here).total_cmp(&b.1.distance(here)))?;
         Some(BossBarView {
@@ -513,12 +544,7 @@ mod tests {
     }
 
     fn bosses(state: &InGameState) -> usize {
-        state
-            .mobs
-            .live
-            .iter()
-            .filter(|m| m.boss().is_some())
-            .count()
+        state.simulated_mobs().iter().filter(|m| m.boss).count()
     }
 
     #[test]
@@ -586,14 +612,15 @@ mod tests {
         stand_beside(&mut state, altar);
         give_local(&mut state, "stag_effigy", 1);
         use_altar(&mut state, altar);
-        let boss = state
-            .mobs
-            .live
-            .iter_mut()
-            .find(|m| m.boss().is_some())
-            .unwrap();
+        let boss = state.simulated_mobs().into_iter().find(|m| m.boss).unwrap();
         let at = boss.position;
-        boss.damage(10_000.0, Vec3::ZERO);
+        crate::application::ecs::systems::mobs::hit(
+            &mut state.ecs,
+            boss.entity,
+            10_000.0,
+            Vec3::ZERO,
+            0,
+        );
         state.player.teleport(at + Vec3::X * 3.0);
         state.update_mobs(1.0 / 60.0);
 

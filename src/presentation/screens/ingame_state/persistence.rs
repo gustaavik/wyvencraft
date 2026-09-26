@@ -65,7 +65,7 @@ impl InGameState {
         }
         let world = WorldData::from_world(&self.world, &self.content.rules.blocks);
         let player = PlayerData::capture(&self.player, &self.inventory, &self.content.rules.items);
-        let mobs = MobsData::from_mobs(&self.mobs.live);
+        let mobs = MobsData::from_ecs(&self.ecs);
         let discovery = DiscoveryData {
             owner: self.crafting.known.to_ids(&self.content.rules.items),
             players: self.save.discovery.players.clone(),

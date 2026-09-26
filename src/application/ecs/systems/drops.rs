@@ -13,7 +13,7 @@ pub fn fall(ecs: &mut Ecs, dt: f32, is_solid: impl Fn(BlockPos) -> bool) {
             fall_step(
                 &mut transform.position,
                 &mut velocity.0,
-                &body.0,
+                &body.physics,
                 dt,
                 &is_solid,
             );

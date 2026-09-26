@@ -197,18 +197,19 @@ pub struct MobsData {
 }
 
 impl MobsData {
-    /// Snapshot the live mobs for the save.
-    pub fn from_mobs(mobs: &[crate::domain::entity::Mob]) -> Self {
+    /// Snapshot the simulated mobs in `ecs` for the save.
+    pub fn from_ecs(ecs: &crate::application::ecs::Ecs) -> Self {
+        use crate::application::ecs::Without;
+        use crate::application::ecs::components::{Boss, Health, Kind, Mob, Transform};
         Self {
             // A boss is a summoned fight, not part of the population: saving
             // one would replay the fight on every load without its offering.
-            mobs: mobs
-                .iter()
-                .filter(|mob| mob.boss().is_none())
-                .map(|mob| MobData {
-                    kind: mob.kind_name.clone(),
-                    position: mob.position.to_array(),
-                    health: mob.health,
+            mobs: ecs
+                .query::<(&Kind, &Transform, &Health, &Mob, Without<Boss>)>()
+                .map(|(_, (kind, transform, health, mob, ()))| MobData {
+                    kind: kind.name.clone(),
+                    position: transform.position.to_array(),
+                    health: health.current,
                     night_spawned: mob.night_spawned,
                 })
                 .collect(),

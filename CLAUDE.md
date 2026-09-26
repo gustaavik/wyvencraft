@@ -205,9 +205,12 @@ application/       use cases and their ports
   sync                            remote-player snapshot smoothing
   boot_plan                       pure env → BootPlan (the Environment port, SystemEnv, MapEnv)
   content                         load_registries: assets/*.toml → Registries through the AssetSource port, visual specs out of band
-  ecs                             the session's entities in a wyven_ecs::Ecs: components (Transform, Velocity, Body,
-                                  + domain ItemDrop/Projectile), spawn bundles, systems (drops::{fall,pick_up}, projectiles::fly).
-                                  Systems are plain functions; the view gets plain DropSprite/ArrowSprite values, never entities
+  ecs                             the session's entities in a wyven_ecs::Ecs. Components: Transform, Velocity, Body (centre- or
+                                  feet-anchored), Kind, Animation, + the domain types ItemDrop, Projectile, Mob, Health, Boss;
+                                  Replica marks a client's copy of a host mob. Spawn bundles in ecs::spawn. Systems are plain
+                                  functions: drops::{fall,pick_up}, projectiles::fly, mobs::{simulate,animate_replicas,reap,hit,find}.
+                                  mobs::simulate runs the five domain Mob steps (think/steer/integrate/animate/act) as passes.
+                                  Mobs are found by MobId with a linear scan. The view gets plain Drop/Arrow/MobSprite values
 infrastructure/    adapters
   save                            world/player persistence (saves/ dir)
   net                             transports + net::session::{Singleplayer,Host,Client}Session, join gate, server list, status probe

@@ -119,12 +119,7 @@ impl InGameState {
         for data in mobs.mobs {
             let position = Vec3::from_array(data.position);
             match state.spawn_mob(&data.kind, position) {
-                Some(_) => {
-                    if let Some(mob) = state.mobs.live.last_mut() {
-                        mob.health = data.health.min(mob.params.max_health);
-                        mob.night_spawned = data.night_spawned;
-                    }
-                }
+                Some(id) => state.restore_mob(id, data.health, data.night_spawned),
                 None => log::warn!(
                     "save references unknown mob kind '{}'; dropping it",
                     data.kind
@@ -135,7 +130,9 @@ impl InGameState {
         if saved_mobs > 0 {
             log::info!(
                 "restored {} of {saved_mobs} saved mobs",
-                state.mobs.live.len()
+                state
+                    .ecs
+                    .count::<crate::application::ecs::components::Mob>()
             );
         }
         log::info!(

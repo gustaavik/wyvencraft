@@ -16,12 +16,16 @@ use std::time::Duration;
 
 use glam::Vec3;
 
-use super::mobs::{self, RemoteMob};
+use super::mobs;
 use super::{
     HOST_PLAYER_ID, INVENTORY_SYNC_INTERVAL, InGameState, STATS_INTERVAL, WORLD_SYNC_BATCH,
 };
+use crate::application::ecs::components::{Health, Kind, Mob, Transform};
+use crate::application::ecs::systems::mobs as mob_systems;
+use crate::application::ecs::{With, spawn};
 use crate::application::session::Inbound;
 use crate::domain::core::{BlockId, BlockPos};
+use crate::domain::entity::MobId;
 use crate::domain::inventory::crafting::{KnownItems, NamedRecipe, resolve_named};
 use crate::domain::inventory::{ARMOR_START, Inventory, ItemId, ItemRegistry, RecipeBook, Tool};
 use crate::infrastructure::net::{
@@ -362,13 +366,12 @@ impl InGameState {
             );
         }
         let spawned: Vec<ServerMessage> = self
-            .mobs
-            .live
-            .iter()
-            .map(|mob| ServerMessage::MobSpawned {
-                id: mob.id.0,
-                kind: mob.kind_name.clone(),
-                position: mob.position.to_array(),
+            .ecs
+            .query::<(&MobId, &Kind, &Transform, With<Mob>)>()
+            .map(|(_, (id, kind, transform, ()))| ServerMessage::MobSpawned {
+                id: id.0,
+                kind: kind.name.clone(),
+                position: transform.position.to_array(),
             })
             .collect();
         for msg in spawned {
@@ -410,16 +413,20 @@ impl InGameState {
             return;
         };
         let damage = self.client_melee_damage(pid);
-        if let Some(mob) = self.mobs.live.iter_mut().find(|m| m.id.0 == mob_id)
-            && mobs::attack_in_range(attacker, mob.position)
+        let target = mob_systems::find(&self.ecs, MobId(mob_id)).and_then(|entity| {
+            let at = self.ecs.get::<Transform>(entity)?.position;
+            Some((entity, at))
+        });
+        if let Some((entity, at)) = target
+            && mobs::attack_in_range(attacker, at)
         {
-            let to_mob = mob.position - attacker;
+            let to_mob = at - attacker;
             let push = Vec3::new(to_mob.x, 0.0, to_mob.z).normalize_or_zero()
                 * mobs::KNOCKBACK_PUSH
                 + Vec3::Y * mobs::KNOCKBACK_LIFT;
-            mob.damage(damage, push);
-            mob.last_attacker = Some(pid.0);
-            let health = mob.health;
+            let Some(health) = mob_systems::hit(&mut self.ecs, entity, damage, push, pid.0) else {
+                return;
+            };
             self.peers
                 .mob_events
                 .push(ServerMessage::MobHurt { id: mob_id, health });
@@ -494,9 +501,7 @@ impl InGameState {
                 match self.content.rules.entities.find(&kind) {
                     Some(k) if k.mob.is_some() => {
                         log::debug!("replicating mob {id} ({kind}) from host");
-                        self.mobs
-                            .remote
-                            .insert(id, RemoteMob::new(k, Vec3::from_array(position)));
+                        spawn::replica(&mut self.ecs, k, MobId(id), Vec3::from_array(position));
                     }
                     // Shouldn't happen (the content hash gates divergent builds),
                     // but degrade gracefully.
@@ -507,24 +512,34 @@ impl InGameState {
                 for (id, position, yaw) in mobs {
                     // Unknown ids are fine: an unreliable snapshot can outrun
                     // its reliable MobSpawned.
-                    if let Some(mob) = self.mobs.remote.get_mut(&id) {
-                        mob.push_snapshot(Vec3::from_array(position), yaw);
+                    if let Some(entity) = mob_systems::find(&self.ecs, MobId(id))
+                        && let Some(transform) = self.ecs.get_mut::<Transform>(entity)
+                    {
+                        transform.position = Vec3::from_array(position);
+                        transform.yaw = yaw;
                     }
                 }
             }
             ServerMessage::MobHurt { id, health } => {
                 // Mirrored for the boss bar; the authoritative outcome of a
                 // killing blow still arrives as MobDespawned.
-                if let Some(mob) = self.mobs.remote.get_mut(&id) {
-                    mob.health = health;
+                if let Some(entity) = mob_systems::find(&self.ecs, MobId(id))
+                    && let Some(mirror) = self.ecs.get_mut::<Health>(entity)
+                {
+                    mirror.current = health;
                 }
             }
             ServerMessage::MobDespawned { id, killed_by } => {
-                if let Some(mob) = self.mobs.remote.remove(&id)
+                let gone = mob_systems::find(&self.ecs, MobId(id)).and_then(|entity| {
+                    let kind = self.ecs.get::<Kind>(entity)?.name.clone();
+                    let position = self.ecs.get::<Transform>(entity)?.position;
+                    self.ecs.despawn(entity);
+                    Some((kind, position))
+                });
+                if let Some((kind, position)) = gone
                     && killed_by == Some(local_id)
                 {
                     // This player made the kill: roll the loot locally.
-                    let (kind, position) = (mob.kind_name().to_string(), mob.position());
                     self.pop_drops_for(&kind, id, position);
                 }
             }
@@ -641,13 +656,12 @@ impl InGameState {
         for msg in std::mem::take(&mut self.peers.mob_events) {
             self.session.broadcast(&msg, Channel::Reliable);
         }
-        if !self.mobs.live.is_empty() {
+        if self.ecs.count::<Mob>() > 0 {
             let states = ServerMessage::MobStates {
                 mobs: self
-                    .mobs
-                    .live
-                    .iter()
-                    .map(|m| (m.id.0, m.position.to_array(), m.yaw))
+                    .ecs
+                    .query::<(&MobId, &Transform, With<Mob>)>()
+                    .map(|(_, (id, t, ()))| (id.0, t.position.to_array(), t.yaw))
                     .collect(),
             };
             self.session.broadcast(&states, Channel::Unreliable);
@@ -1558,27 +1572,33 @@ mod tests {
 
         // In reach: the swing lands.
         let near = state.spawn_mob("cow", attacker).expect("cow spawns");
-        let full_health = state.mobs.live[0].health;
+        let full_health = state.simulated_mobs()[0].health;
         handle.deliver(Inbound::Request {
             player: pid,
             msg: ClientMessage::Attack { id: near.0 },
         });
         state.pump_network(1.0 / 60.0);
         assert!(
-            state.mobs.live[0].health < full_health,
+            state.simulated_mobs()[0].health < full_health,
             "a swing from next to the mob lands"
         );
 
         // Out of reach: the same message does nothing.
-        let hurt_health = state.mobs.live[0].health;
-        state.mobs.live[0].position = attacker + Vec3::new(500.0, 0.0, 0.0);
+        let hurt_health = state.simulated_mobs()[0].health;
+        let cow = state.simulated_mobs()[0].entity;
+        state
+            .ecs
+            .get_mut::<crate::application::ecs::components::Transform>(cow)
+            .unwrap()
+            .position = attacker + Vec3::new(500.0, 0.0, 0.0);
         handle.deliver(Inbound::Request {
             player: pid,
             msg: ClientMessage::Attack { id: near.0 },
         });
         state.pump_network(1.0 / 60.0);
         assert_eq!(
-            state.mobs.live[0].health, hurt_health,
+            state.simulated_mobs()[0].health,
+            hurt_health,
             "the same swing from 500 blocks away is rejected"
         );
     }
@@ -1597,6 +1617,48 @@ mod tests {
         state.pump_network(1.0 / 60.0);
 
         assert_eq!(state.world.block_at(pos), blocks::STONE);
+    }
+
+    /// A client's copy of a host mob lives its whole life from messages: it
+    /// appears, moves, mirrors its health, and — killed by this player —
+    /// leaves loot behind as it goes.
+    #[test]
+    fn a_client_replicates_a_host_mob_from_spawn_to_kill() {
+        use crate::application::ecs::components::{Health, Replica, Transform};
+        use crate::application::ecs::systems::mobs::find;
+
+        let local = PlayerId(2);
+        let (mut state, handle) = client_session(local);
+        let id = 41;
+        handle.deliver(Inbound::Update(ServerMessage::MobSpawned {
+            id,
+            kind: "cow".to_string(),
+            position: [1.0, 70.0, 1.0],
+        }));
+        state.pump_network(1.0 / 60.0);
+        let cow = find(&state.ecs, MobId(id)).expect("the replica exists");
+        assert!(
+            state.ecs.has::<Replica>(cow),
+            "and is a replica, not simulated"
+        );
+        assert!(state.simulated_mobs().is_empty());
+
+        handle.deliver(Inbound::Update(ServerMessage::MobStates {
+            mobs: vec![(id, [4.0, 70.0, 1.0], 1.5)],
+        }));
+        handle.deliver(Inbound::Update(ServerMessage::MobHurt { id, health: 3.0 }));
+        state.pump_network(1.0 / 60.0);
+        let at = state.ecs.get::<Transform>(cow).unwrap();
+        assert_eq!((at.position, at.yaw), (Vec3::new(4.0, 70.0, 1.0), 1.5));
+        assert_eq!(state.ecs.get::<Health>(cow).unwrap().current, 3.0);
+
+        handle.deliver(Inbound::Update(ServerMessage::MobDespawned {
+            id,
+            killed_by: Some(local),
+        }));
+        state.pump_network(1.0 / 60.0);
+        assert!(!state.ecs.is_alive(cow), "the replica is gone");
+        assert!(state.drops().next().is_some(), "the killer rolls the loot");
     }
 
     /// A client tells the host where it is, so other players see it move.
