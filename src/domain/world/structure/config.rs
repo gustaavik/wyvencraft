@@ -84,90 +84,11 @@ impl StructureConfig {
                 .find(name)
                 .ok_or_else(|| format!("unknown block {name:?}"))
         };
-        let mut structures = Vec::with_capacity(file.structure.len());
-        for def in &file.structure {
-            let fail = |e: String| format!("structure {:?}: {e}", def.id);
-            if !is_valid_id(&def.id) {
-                return Err(fail(
-                    "id must be lowercase letters, digits and underscores".into(),
-                ));
-            }
-            if file.structure.iter().filter(|d| d.id == def.id).count() > 1 {
-                return Err(fail("declared twice".into()));
-            }
-            let biome = worldgen
-                .find_biome(&def.biome)
-                .ok_or_else(|| fail(format!("unknown biome {:?}", def.biome)))?;
-            let reveals = match &def.reveals {
-                Some(target) => Some(
-                    file.structure
-                        .iter()
-                        .position(|d| d.id == *target)
-                        .ok_or_else(|| fail(format!("reveals unknown structure {target:?}")))?,
-                ),
-                None => None,
-            };
-            let palette = def
-                .template
-                .palette
-                .iter()
-                .map(|(key, name)| {
-                    let mut chars = key.chars();
-                    match (chars.next(), chars.next()) {
-                        (Some(' '), None) => Err("a space always means \"keep\"".to_string()),
-                        (Some(ch), None) => Ok((ch, resolve(name)?)),
-                        _ => Err(format!("palette key {key:?} must be one character")),
-                    }
-                })
-                .collect::<Result<HashMap<_, _>, String>>()
-                .map_err(&fail)?;
-            let foundation = def
-                .template
-                .foundation
-                .as_deref()
-                .map(resolve)
-                .transpose()
-                .map_err(&fail)?;
-            let template = Template::parse(
-                &def.template.layers,
-                &palette,
-                def.template.floor,
-                foundation,
-            )
-            .map_err(&fail)?;
-            let arena = match &def.arena {
-                Some(a) => Some(Arena {
-                    radius: a.radius,
-                    floor: resolve(&a.floor).map_err(&fail)?,
-                    fill: resolve(&a.fill).map_err(&fail)?,
-                    clearance: a.clearance,
-                }),
-                None => None,
-            };
-            let structure = StructureDef {
-                id: def.id.clone(),
-                biome,
-                grid: def.placement.grid,
-                chance_per_mille: def.placement.chance_per_mille,
-                max_slope: def.max_slope,
-                above_sea: def.above_sea,
-                reveals,
-                guarantee_within: def.guarantee.as_ref().map(|g| g.within),
-                arena,
-                template,
-                salt: id_salt(&def.id),
-            };
-            // An instance is kept inside its own grid cell, so the cell must
-            // leave room for it on every side.
-            if structure.grid < 2 * structure.reach() + 8 {
-                return Err(fail(format!(
-                    "grid {} is too small for a structure reaching {} blocks",
-                    structure.grid,
-                    structure.reach()
-                )));
-            }
-            structures.push(structure);
-        }
+        let structures = file
+            .structure
+            .iter()
+            .map(|def| resolve_structure(def, &file.structure, worldgen, &resolve))
+            .collect::<Result<Vec<_>, String>>()?;
         Ok(Self { structures })
     }
 
@@ -259,6 +180,102 @@ struct TemplateDef {
     floor: i32,
     foundation: Option<String>,
     layers: Vec<Vec<String>>,
+}
+
+/// Resolve one `[[structure]]` against the blocks, the biomes and its sibling
+/// structures (`all`, which `reveals` names). Every error names the structure.
+fn resolve_structure(
+    def: &StructureFileDef,
+    all: &[StructureFileDef],
+    worldgen: &WorldGenConfig,
+    resolve: &dyn Fn(&str) -> Result<crate::domain::core::BlockId, String>,
+) -> Result<StructureDef, String> {
+    let fail = |e: String| format!("structure {:?}: {e}", def.id);
+    if !is_valid_id(&def.id) {
+        return Err(fail(
+            "id must be lowercase letters, digits and underscores".into(),
+        ));
+    }
+    if all.iter().filter(|d| d.id == def.id).count() > 1 {
+        return Err(fail("declared twice".into()));
+    }
+    let biome = worldgen
+        .find_biome(&def.biome)
+        .ok_or_else(|| fail(format!("unknown biome {:?}", def.biome)))?;
+    let reveals = match &def.reveals {
+        Some(target) => Some(
+            all.iter()
+                .position(|d| d.id == *target)
+                .ok_or_else(|| fail(format!("reveals unknown structure {target:?}")))?,
+        ),
+        None => None,
+    };
+    let palette = resolve_palette(&def.template.palette, resolve).map_err(&fail)?;
+    let foundation = def
+        .template
+        .foundation
+        .as_deref()
+        .map(resolve)
+        .transpose()
+        .map_err(&fail)?;
+    let template = Template::parse(
+        &def.template.layers,
+        &palette,
+        def.template.floor,
+        foundation,
+    )
+    .map_err(&fail)?;
+    let arena = match &def.arena {
+        Some(a) => Some(Arena {
+            radius: a.radius,
+            floor: resolve(&a.floor).map_err(&fail)?,
+            fill: resolve(&a.fill).map_err(&fail)?,
+            clearance: a.clearance,
+        }),
+        None => None,
+    };
+    let structure = StructureDef {
+        id: def.id.clone(),
+        biome,
+        grid: def.placement.grid,
+        chance_per_mille: def.placement.chance_per_mille,
+        max_slope: def.max_slope,
+        above_sea: def.above_sea,
+        reveals,
+        guarantee_within: def.guarantee.as_ref().map(|g| g.within),
+        arena,
+        template,
+        salt: id_salt(&def.id),
+    };
+    // An instance is kept inside its own grid cell, so the cell must leave
+    // room for it on every side.
+    if structure.grid < 2 * structure.reach() + 8 {
+        return Err(fail(format!(
+            "grid {} is too small for a structure reaching {} blocks",
+            structure.grid,
+            structure.reach()
+        )));
+    }
+    Ok(structure)
+}
+
+/// A template's palette: one character per block, a space being reserved for
+/// "keep whatever is there".
+fn resolve_palette(
+    palette: &HashMap<String, String>,
+    resolve: &dyn Fn(&str) -> Result<crate::domain::core::BlockId, String>,
+) -> Result<HashMap<char, crate::domain::core::BlockId>, String> {
+    palette
+        .iter()
+        .map(|(key, name)| {
+            let mut chars = key.chars();
+            match (chars.next(), chars.next()) {
+                (Some(' '), None) => Err("a space always means \"keep\"".to_string()),
+                (Some(ch), None) => Ok((ch, resolve(name)?)),
+                _ => Err(format!("palette key {key:?} must be one character")),
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

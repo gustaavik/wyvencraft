@@ -197,23 +197,9 @@ impl WorldGenConfig {
                 .find(name)
                 .ok_or_else(|| format!("unknown block {name:?}"))
         };
-
-        let trees: Vec<TreeDef> = file
-            .tree
-            .iter()
-            .map(|t| {
-                if t.trunk_height[0] < 1 || t.trunk_height[1] < t.trunk_height[0] {
-                    return Err(format!("tree {:?}: bad trunk_height", t.name));
-                }
-                Ok(TreeDef {
-                    shape: t.shape,
-                    trunk: resolve(&t.trunk)?,
-                    leaves: resolve(&t.leaves)?,
-                    trunk_height: (t.trunk_height[0], t.trunk_height[1]),
-                })
-            })
-            .collect::<Result<_, String>>()?;
-
+        // Resolved in this order, so a file wrong in several ways always
+        // reports the same first error.
+        let trees = resolve_trees(&file.tree, &resolve)?;
         let biomes = file
             .biome
             .iter()
@@ -226,60 +212,16 @@ impl WorldGenConfig {
             .map(|def| resolve_layer(def, &resolve))
             .collect::<Result<Vec<_>, String>>()?;
         validate_layers(&layers)?;
-
-        let biome_index = |name: &str| {
-            biomes
-                .iter()
-                .position(|b| b.id == name)
-                .map(|i| BiomeId(i as u8))
-                .ok_or_else(|| format!("unknown biome {name:?}"))
-        };
-        let layer_index = |name: &str| {
-            layers
-                .iter()
-                .position(|l| l.id == name)
-                .ok_or_else(|| format!("unknown layer {name:?}"))
-        };
-        let ores = file
-            .ore
-            .iter()
-            .map(|o| {
-                Ok(OreVein {
-                    block: resolve(&o.block)?,
-                    threshold: o.threshold,
-                    biomes: o
-                        .biomes
-                        .iter()
-                        .map(|b| biome_index(b))
-                        .collect::<Result<_, String>>()?,
-                    layers: o
-                        .layers
-                        .iter()
-                        .map(|l| layer_index(l))
-                        .collect::<Result<_, String>>()?,
-                })
-            })
-            .collect::<Result<_, String>>()?;
+        let ores = resolve_ores(&file.ore, &resolve, &biomes, &layers)?;
 
         let starts = biomes.iter().map(|b| b.start).collect();
-        Ok(Self {
+        let config = Self {
             bedrock: resolve(&file.terrain.bedrock)?,
             water: resolve(&file.terrain.water)?,
             sea_level: file.terrain.sea_level,
             ring_warp: file.terrain.ring_warp,
             ring_blend: file.terrain.ring_blend,
-            seabed: SeabedConfig {
-                shallow: resolve(&file.seabed.shallow)?,
-                default_block: resolve(&file.seabed.default)?,
-                gravel: resolve(&file.seabed.gravel.block)?,
-                gravel_above: file
-                    .seabed
-                    .gravel
-                    .above
-                    .ok_or("seabed.gravel needs `above`")?,
-                clay: resolve(&file.seabed.clay.block)?,
-                clay_below: file.seabed.clay.below.ok_or("seabed.clay needs `below`")?,
-            },
+            seabed: resolve_seabed(&file.seabed, &resolve)?,
             layers,
             ores,
             trees,
@@ -289,16 +231,14 @@ impl WorldGenConfig {
             },
             biomes,
             starts,
-        })
-        .and_then(|config| {
-            if !(1..CHUNK_HEIGHT).contains(&config.sea_level) {
-                return Err(format!(
-                    "sea_level {} is outside the world",
-                    config.sea_level
-                ));
-            }
-            Ok(config)
-        })
+        };
+        if !(1..CHUNK_HEIGHT).contains(&config.sea_level) {
+            return Err(format!(
+                "sea_level {} is outside the world",
+                config.sea_level
+            ));
+        }
+        Ok(config)
     }
 
     /// The generation choices for `biome`.
@@ -598,6 +538,76 @@ struct BiomeDef {
     /// [`DEFAULT_WATER_TINT`], not to `tint`.
     #[serde(default)]
     water_tint: Option<[u8; 3]>,
+}
+
+/// Every `[[tree]]`, with a sane trunk-height range and real blocks.
+fn resolve_trees(defs: &[TreeFileDef], resolve: &Resolve<'_>) -> Result<Vec<TreeDef>, String> {
+    defs.iter()
+        .map(|t| {
+            if t.trunk_height[0] < 1 || t.trunk_height[1] < t.trunk_height[0] {
+                return Err(format!("tree {:?}: bad trunk_height", t.name));
+            }
+            Ok(TreeDef {
+                shape: t.shape,
+                trunk: resolve(&t.trunk)?,
+                leaves: resolve(&t.leaves)?,
+                trunk_height: (t.trunk_height[0], t.trunk_height[1]),
+            })
+        })
+        .collect()
+}
+
+/// Every `[[ore]]`, its block resolved and its `biomes`/`layers` filters
+/// turned into indices into the lists already resolved.
+fn resolve_ores(
+    defs: &[OreDef],
+    resolve: &Resolve<'_>,
+    biomes: &[BiomeGen],
+    layers: &[Layer],
+) -> Result<Vec<OreVein>, String> {
+    let biome_index = |name: &str| {
+        biomes
+            .iter()
+            .position(|b| b.id == name)
+            .map(|i| BiomeId(i as u8))
+            .ok_or_else(|| format!("unknown biome {name:?}"))
+    };
+    let layer_index = |name: &str| {
+        layers
+            .iter()
+            .position(|l| l.id == name)
+            .ok_or_else(|| format!("unknown layer {name:?}"))
+    };
+    defs.iter()
+        .map(|o| {
+            Ok(OreVein {
+                block: resolve(&o.block)?,
+                threshold: o.threshold,
+                biomes: o
+                    .biomes
+                    .iter()
+                    .map(|b| biome_index(b))
+                    .collect::<Result<_, String>>()?,
+                layers: o
+                    .layers
+                    .iter()
+                    .map(|l| layer_index(l))
+                    .collect::<Result<_, String>>()?,
+            })
+        })
+        .collect()
+}
+
+/// The `[seabed]` table: what the sea floor is made of, and where.
+fn resolve_seabed(def: &SeabedDef, resolve: &Resolve<'_>) -> Result<SeabedConfig, String> {
+    Ok(SeabedConfig {
+        shallow: resolve(&def.shallow)?,
+        default_block: resolve(&def.default)?,
+        gravel: resolve(&def.gravel.block)?,
+        gravel_above: def.gravel.above.ok_or("seabed.gravel needs `above`")?,
+        clay: resolve(&def.clay.block)?,
+        clay_below: def.clay.below.ok_or("seabed.clay needs `below`")?,
+    })
 }
 
 #[cfg(test)]

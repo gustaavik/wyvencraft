@@ -228,10 +228,25 @@ impl Player {
         *accum / FIXED_DT
     }
 
-    /// Advance one fixed simulation step.
+    /// Advance one fixed simulation step: steer, apply gravity or flight,
+    /// move through the world, then settle falls and blocked motion.
     pub fn update(&mut self, input: MovementInput, dt: f32, is_solid: impl Fn(BlockPos) -> bool) {
         self.prev_position = self.position;
+        // Flight only takes effect in a mode that permits it.
+        let flying = self.flying && self.mode.can_fly();
+        self.steer(input, flying, dt);
+        self.apply_vertical(input, flying, dt);
 
+        let was_on_ground = self.on_ground;
+        let result = physics::move_and_collide(self.aabb(), self.velocity * dt, is_solid);
+        self.position += result.delta;
+        self.on_ground = result.on_ground;
+        self.track_fall(flying, was_on_ground);
+        self.stop_blocked(&result, flying);
+    }
+
+    /// Horizontal velocity toward what the input asks for.
+    fn steer(&mut self, input: MovementInput, flying: bool, dt: f32) {
         // Horizontal wish-direction relative to yaw (ignore pitch for walking).
         let (sy, cy) = self.yaw.sin_cos();
         let forward = Vec3::new(sy, 0.0, -cy);
@@ -240,9 +255,6 @@ impl Player {
         if wish.length_squared() > 1.0 {
             wish = wish.normalize();
         }
-
-        // Flight only takes effect in a mode that permits it.
-        let flying = self.flying && self.mode.can_fly();
 
         let speed = if flying {
             self.movement.fly_speed
@@ -288,7 +300,11 @@ impl Player {
             self.velocity.x += (target.x - self.velocity.x) * t;
             self.velocity.z += (target.z - self.velocity.z) * t;
         }
+    }
 
+    /// Vertical velocity: flight's up and down, or gravity, the jump, and the
+    /// variable-height cut when the jump is released early.
+    fn apply_vertical(&mut self, input: MovementInput, flying: bool, dt: f32) {
         if flying {
             let vertical = (input.jump as i32 - input.sneak as i32) as f32;
             self.velocity.y = vertical * self.movement.fly_speed;
@@ -308,14 +324,12 @@ impl Player {
                 self.velocity.y = self.velocity.y.min(floor);
             }
         }
+    }
 
-        let was_on_ground = self.on_ground;
-        let result = physics::move_and_collide(self.aabb(), self.velocity * dt, is_solid);
-        self.position += result.delta;
-        self.on_ground = result.on_ground;
-
-        // Fall-damage bookkeeping: track the peak height of an airborne arc and,
-        // on landing, hurt the player for the distance fallen beyond the safe margin.
+    /// Fall-damage bookkeeping: track the peak height of an airborne arc and,
+    /// on landing, hurt the player for the distance fallen beyond the safe
+    /// margin.
+    fn track_fall(&mut self, flying: bool, was_on_ground: bool) {
         if flying {
             self.fall_peak_y = self.position.y;
         } else if self.on_ground {
@@ -329,8 +343,10 @@ impl Player {
         } else {
             self.fall_peak_y = self.fall_peak_y.max(self.position.y);
         }
+    }
 
-        // Zero out velocity components that were blocked.
+    /// Zero out velocity components that were blocked.
+    fn stop_blocked(&mut self, result: &physics::CollisionResult, flying: bool) {
         if !flying {
             if result.on_ground && self.velocity.y < 0.0 {
                 self.velocity.y = 0.0;

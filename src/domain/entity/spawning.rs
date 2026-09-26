@@ -229,77 +229,129 @@ impl Spawner {
         if anchors.is_empty() {
             return Vec::new();
         }
+        let world = Surroundings {
+            anchors,
+            count_of: &count_of,
+            find_ground: &find_ground,
+            biome_at: &biome_at,
+        };
 
-        fn planned_of(planned: &[SpawnRequest], name: &str) -> usize {
-            planned.iter().filter(|r| r.entity == name).count()
-        }
-
-        let mut planned: Vec<SpawnRequest> = Vec::new();
-        let mut live = total;
+        let mut plan = Plan {
+            requests: Vec::new(),
+            live: total,
+        };
         for _ in 0..cfg.limits.attempts {
-            if live >= cfg.limits.max_mobs {
+            if plan.live >= cfg.limits.max_mobs {
                 break;
             }
-            // Eligible entries right now: night gate + per-type cap.
-            let eligible: Vec<&SpawnEntry> = cfg
-                .entries
-                .iter()
-                .filter(|e| !e.night_only || is_night)
-                .filter(|e| count_of(&e.entity) + planned_of(&planned, &e.entity) < e.cap)
-                .collect();
-            let weights: Vec<u32> = eligible.iter().map(|e| e.weight).collect();
-            let Some(pick) = self.rng.pick_weighted(&weights) else {
+            let Some(entry) = self.pick_entry(cfg, is_night, &world, &plan) else {
                 break; // nothing eligible; later attempts won't differ
             };
-            let entry = eligible[pick];
-
-            // A ring position around a random player.
-            let anchor = anchors[(self.rng.next_u64() % anchors.len() as u64) as usize];
-            let angle = self.rng.range_f32(0.0, std::f32::consts::TAU);
-            let radius = self.rng.range_f32(
-                cfg.limits.min_player_distance,
-                cfg.limits.max_player_distance,
-            );
-            let (cx, cz) = (
-                anchor.x + angle.cos() * radius,
-                anchor.z + angle.sin() * radius,
-            );
-
-            // Place the group, re-grounding each member near the center.
-            let group = self
-                .rng
-                .range_u32(entry.group.0.into(), entry.group.1.into());
-            for _ in 0..group {
-                if live >= cfg.limits.max_mobs
-                    || count_of(&entry.entity) + planned_of(&planned, &entry.entity) >= entry.cap
-                {
-                    break;
-                }
-                let x = cx + self.rng.range_f32(-3.0, 3.0);
-                let z = cz + self.rng.range_f32(-3.0, 3.0);
-                if !entry.lives_in(biome_at(x, z)) {
-                    continue;
-                }
-                let Some(y) = find_ground(x, z) else {
-                    continue;
-                };
-                // The ring bound is per-member: group scatter must not creep
-                // inside the minimum player distance.
-                let too_close = anchors.iter().any(|a| {
-                    let d = Vec3::new(x - a.x, 0.0, z - a.z).length();
-                    d < cfg.limits.min_player_distance
-                });
-                if too_close {
-                    continue;
-                }
-                planned.push(SpawnRequest {
-                    entity: entry.entity.clone(),
-                    position: Vec3::new(x, y, z),
-                });
-                live += 1;
-            }
+            let center = self.ring_center(cfg, anchors);
+            self.place_group(cfg, entry, center, &world, &mut plan);
         }
-        planned
+        plan.requests
+    }
+
+    /// A weighted pick among the entries eligible right now: the night gate,
+    /// and the per-type cap counting what this plan already adds.
+    fn pick_entry<'c>(
+        &mut self,
+        cfg: &'c SpawnConfig,
+        is_night: bool,
+        world: &Surroundings<'_>,
+        plan: &Plan,
+    ) -> Option<&'c SpawnEntry> {
+        let eligible: Vec<&SpawnEntry> = cfg
+            .entries
+            .iter()
+            .filter(|e| !e.night_only || is_night)
+            .filter(|e| (world.count_of)(&e.entity) + plan.of(&e.entity) < e.cap)
+            .collect();
+        let weights: Vec<u32> = eligible.iter().map(|e| e.weight).collect();
+        let pick = self.rng.pick_weighted(&weights)?;
+        Some(eligible[pick])
+    }
+
+    /// A point on the spawn ring around a random player.
+    fn ring_center(&mut self, cfg: &SpawnConfig, anchors: &[Vec3]) -> (f32, f32) {
+        let anchor = anchors[(self.rng.next_u64() % anchors.len() as u64) as usize];
+        let angle = self.rng.range_f32(0.0, std::f32::consts::TAU);
+        let radius = self.rng.range_f32(
+            cfg.limits.min_player_distance,
+            cfg.limits.max_player_distance,
+        );
+        (
+            anchor.x + angle.cos() * radius,
+            anchor.z + angle.sin() * radius,
+        )
+    }
+
+    /// Place a group of `entry` around `center`, re-grounding each member,
+    /// until the group, the population cap or the type's cap runs out.
+    fn place_group(
+        &mut self,
+        cfg: &SpawnConfig,
+        entry: &SpawnEntry,
+        (cx, cz): (f32, f32),
+        world: &Surroundings<'_>,
+        plan: &mut Plan,
+    ) {
+        let group = self
+            .rng
+            .range_u32(entry.group.0.into(), entry.group.1.into());
+        for _ in 0..group {
+            if plan.live >= cfg.limits.max_mobs
+                || (world.count_of)(&entry.entity) + plan.of(&entry.entity) >= entry.cap
+            {
+                break;
+            }
+            let x = cx + self.rng.range_f32(-3.0, 3.0);
+            let z = cz + self.rng.range_f32(-3.0, 3.0);
+            if !entry.lives_in((world.biome_at)(x, z)) {
+                continue;
+            }
+            let Some(y) = (world.find_ground)(x, z) else {
+                continue;
+            };
+            // The ring bound is per-member: group scatter must not creep
+            // inside the minimum player distance.
+            let too_close = world.anchors.iter().any(|a| {
+                let d = Vec3::new(x - a.x, 0.0, z - a.z).length();
+                d < cfg.limits.min_player_distance
+            });
+            if too_close {
+                continue;
+            }
+            plan.requests.push(SpawnRequest {
+                entity: entry.entity.clone(),
+                position: Vec3::new(x, y, z),
+            });
+            plan.live += 1;
+        }
+    }
+}
+
+/// What the planner may ask of the world, bundled so each step of a plan can
+/// be handed it whole.
+struct Surroundings<'a> {
+    anchors: &'a [Vec3],
+    count_of: &'a dyn Fn(&str) -> usize,
+    find_ground: &'a dyn Fn(f32, f32) -> Option<f32>,
+    biome_at: &'a dyn Fn(f32, f32) -> BiomeId,
+}
+
+/// A spawn plan in progress: what it asks for, and the population it would
+/// leave.
+struct Plan {
+    requests: Vec<SpawnRequest>,
+    live: usize,
+}
+
+impl Plan {
+    /// How many of `name` this plan already adds.
+    fn of(&self, name: &str) -> usize {
+        self.requests.iter().filter(|r| r.entity == name).count()
     }
 }
 

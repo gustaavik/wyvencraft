@@ -294,19 +294,7 @@ impl GameState<Wyvencraft> for ConnectingState {
         };
 
         if let Err(err) = client.pump(Duration::from_secs_f32(ctx.dt.max(1.0e-4))) {
-            log::warn!("connection error: {err}");
-            // The transport's own words as the detail. A refused join reads
-            // "disconnected: server denied connection" here, which is the
-            // closest thing to a reason a host can give: netcode turns an
-            // unverifiable ticket away before either side says anything at the
-            // application level, so there is no message to phrase it better
-            // with.
-            let headline = if self.reached {
-                format!("Lost the connection to {}", self.target)
-            } else {
-                format!("Could not join {}", self.target)
-            };
-            self.fail(headline, Some(err.to_string()));
+            self.on_transport_error(&err.to_string());
             return Transition::None;
         }
 
@@ -477,6 +465,21 @@ impl ConnectingState {
             recipes,
             restored,
         )))
+    }
+
+    /// The transport failed. Its own words are the detail: a refused join
+    /// reads "disconnected: server denied connection" here, which is the
+    /// closest thing to a reason a host can give — netcode turns an
+    /// unverifiable ticket away before either side says anything at the
+    /// application level, so there is no message to phrase it better with.
+    fn on_transport_error(&mut self, err: &str) {
+        log::warn!("connection error: {err}");
+        let headline = if self.reached {
+            format!("Lost the connection to {}", self.target)
+        } else {
+            format!("Could not join {}", self.target)
+        };
+        self.fail(headline, Some(err.to_string()));
     }
 
     /// Give up once the wait has gone on too long, saying which half of it

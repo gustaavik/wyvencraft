@@ -112,6 +112,38 @@ pub fn yaw_toward(offset: Vec3) -> f32 {
     offset.x.atan2(-offset.z)
 }
 
+/// What chasing `target` asks of the body. Ranged kinds hold the firing band —
+/// retreat when crowded, advance when out of range, otherwise stand and shoot;
+/// melee kinds close the gap and stop pushing once in reach.
+fn chase_intent(target: PlayerSighting, cfg: &MobParams) -> Intent {
+    let yaw = Some(yaw_toward(target.offset));
+    let attack = target.visible && target.distance <= cfg.attack_range;
+    if let Some(ranged) = &cfg.ranged {
+        let (gait, backward) = if target.distance < ranged.keep_distance {
+            (Gait::Walk, true)
+        } else if target.distance > cfg.attack_range {
+            (Gait::Run, false)
+        } else {
+            (Gait::Stand, false)
+        };
+        Intent {
+            yaw,
+            gait,
+            backward,
+            attack,
+        }
+    } else {
+        // Melee: close the gap, stop pushing once in reach.
+        let gait = if attack { Gait::Stand } else { Gait::Run };
+        Intent {
+            yaw,
+            gait,
+            backward: false,
+            attack,
+        }
+    }
+}
+
 impl MobBrain {
     pub fn new(seed: u64) -> Self {
         Self {
@@ -126,35 +158,8 @@ impl MobBrain {
         self.clock += dt;
 
         // Threat responses preempt whatever the mob was doing.
-        match cfg.behavior {
-            // A fixture, not a creature: it makes no decisions at all.
-            // Returning before the state machine runs is what keeps it from
-            // picking a wander heading or spinning to face whoever hit it —
-            // `Intent::stand` leaves `yaw` as `None`, so the body never turns
-            // it. Being immovable is a separate question, answered by
-            // `knockback_resistance`.
-            Behavior::Inert => return Intent::stand(),
-            Behavior::Hostile => {
-                // Aggro on a visible player in range, or on whoever just hit us.
-                let aggro = p
-                    .target
-                    .is_some_and(|t| (t.visible && t.distance <= cfg.aggro_range) || p.hurt);
-                if aggro && !matches!(self.state, BrainState::Chase { .. }) {
-                    self.state = BrainState::Chase { unseen: 0.0 };
-                }
-            }
-            Behavior::Passive if p.hurt => {
-                // Passive mobs bolt directly away from the attacker.
-                let yaw = match p.target {
-                    Some(t) => yaw_toward(-t.offset),
-                    None => self.rng.range_f32(0.0, std::f32::consts::TAU),
-                };
-                self.state = BrainState::Flee {
-                    yaw,
-                    until: self.clock + FLEE_SECONDS,
-                };
-            }
-            Behavior::Passive => {}
+        if let Some(intent) = self.react(p, cfg) {
+            return intent;
         }
 
         match self.state {
@@ -179,50 +184,7 @@ impl MobBrain {
                     attack: false,
                 }
             }
-            BrainState::Chase { unseen } => {
-                let Some(target) = p.target else {
-                    self.state = BrainState::Idle { until: self.clock };
-                    return Intent::stand();
-                };
-                // Track how long the target has been out of sight/range and
-                // give up once the memory window runs out.
-                let in_view = target.visible && target.distance <= cfg.aggro_range;
-                let unseen = if in_view { 0.0 } else { unseen + dt };
-                if unseen > CHASE_MEMORY {
-                    self.state = BrainState::Idle { until: self.clock };
-                    return Intent::stand();
-                }
-                self.state = BrainState::Chase { unseen };
-
-                let yaw = Some(yaw_toward(target.offset));
-                let attack = target.visible && target.distance <= cfg.attack_range;
-                if let Some(ranged) = &cfg.ranged {
-                    // Ranged: hold the firing band — retreat when crowded,
-                    // advance when out of range, otherwise stand and shoot.
-                    let (gait, backward) = if target.distance < ranged.keep_distance {
-                        (Gait::Walk, true)
-                    } else if target.distance > cfg.attack_range {
-                        (Gait::Run, false)
-                    } else {
-                        (Gait::Stand, false)
-                    };
-                    Intent {
-                        yaw,
-                        gait,
-                        backward,
-                        attack,
-                    }
-                } else {
-                    // Melee: close the gap, stop pushing once in reach.
-                    let gait = if attack { Gait::Stand } else { Gait::Run };
-                    Intent {
-                        yaw,
-                        gait,
-                        backward: false,
-                        attack,
-                    }
-                }
-            }
+            BrainState::Chase { unseen } => self.chase(unseen, p, cfg, dt),
             BrainState::Flee { yaw, until } => {
                 if self.clock >= until {
                     self.state = BrainState::Idle { until: self.clock };
@@ -236,6 +198,61 @@ impl MobBrain {
                 }
             }
         }
+    }
+
+    /// How the mob's disposition answers a threat: a hostile turns on a
+    /// visible player in range (or whoever just hit it), a hurt passive bolts,
+    /// and an inert fixture decides nothing at all — `Some` only then.
+    fn react(&mut self, p: &Perception, cfg: &MobParams) -> Option<Intent> {
+        match cfg.behavior {
+            // A fixture, not a creature: it makes no decisions at all.
+            // Returning before the state machine runs is what keeps it from
+            // picking a wander heading or spinning to face whoever hit it —
+            // `Intent::stand` leaves `yaw` as `None`, so the body never turns
+            // it. Being immovable is a separate question, answered by
+            // `knockback_resistance`.
+            Behavior::Inert => return Some(Intent::stand()),
+            Behavior::Hostile => {
+                // Aggro on a visible player in range, or on whoever just hit us.
+                let aggro = p
+                    .target
+                    .is_some_and(|t| (t.visible && t.distance <= cfg.aggro_range) || p.hurt);
+                if aggro && !matches!(self.state, BrainState::Chase { .. }) {
+                    self.state = BrainState::Chase { unseen: 0.0 };
+                }
+            }
+            Behavior::Passive if p.hurt => {
+                // Passive mobs bolt directly away from the attacker.
+                let yaw = match p.target {
+                    Some(t) => yaw_toward(-t.offset),
+                    None => self.rng.range_f32(0.0, std::f32::consts::TAU),
+                };
+                self.state = BrainState::Flee {
+                    yaw,
+                    until: self.clock + FLEE_SECONDS,
+                };
+            }
+            Behavior::Passive => {}
+        }
+        None
+    }
+
+    /// Pursue the target, giving up once it has been out of sight too long.
+    fn chase(&mut self, unseen: f32, p: &Perception, cfg: &MobParams, dt: f32) -> Intent {
+        let Some(target) = p.target else {
+            self.state = BrainState::Idle { until: self.clock };
+            return Intent::stand();
+        };
+        // Track how long the target has been out of sight/range and
+        // give up once the memory window runs out.
+        let in_view = target.visible && target.distance <= cfg.aggro_range;
+        let unseen = if in_view { 0.0 } else { unseen + dt };
+        if unseen > CHASE_MEMORY {
+            self.state = BrainState::Idle { until: self.clock };
+            return Intent::stand();
+        }
+        self.state = BrainState::Chase { unseen };
+        chase_intent(target, cfg)
     }
 }
 

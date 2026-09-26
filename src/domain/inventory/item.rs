@@ -315,95 +315,18 @@ impl ItemRegistry {
         visuals: &mut ItemVisuals,
     ) -> Result<Self, String> {
         let file: ItemFile = toml::from_str(text).map_err(|e| e.to_string())?;
-
-        let ItemVisuals {
-            models,
-            display_names,
-        } = visuals;
-        models.clear();
-        display_names.clear();
-        let mut items: Vec<Item> = Vec::new();
+        *visuals = ItemVisuals::default();
+        let (mut items, block_to_item) = block_items(blocks);
         // An authored `max_stack` wins over the one the capabilities imply, and
         // has to be remembered per item because the derived value is only
         // settled once every override has been merged.
-        let mut authored_stack: Vec<Option<u8>> = Vec::new();
-        let mut block_to_item = vec![None; blocks.len()];
-        for (block_id, block) in blocks.iter() {
-            // Flowing fluid is simulation state, not a placeable block.
-            if block_id.is_air() || blocks.is_flowing_fluid(block_id) {
-                continue;
-            }
-            let item_id = ItemId(items.len() as u16);
-            items.push(Item::block(block.id.clone(), block_id));
-            authored_stack.push(None);
-            block_to_item[block_id.0 as usize] = Some(item_id);
-        }
-
+        let mut authored_stack: Vec<Option<u8>> = vec![None; items.len()];
         for def in file.item {
-            // A malformed id fails the whole file: an id is the key recipes,
-            // drops, saves and `/give` all spell, so accepting one that cannot
-            // be typed as a single token would break those references silently.
-            if !is_valid_id(&def.id) {
-                return Err(format!(
-                    "item {:?}: an id must be lowercase letters, digits and underscores",
-                    def.id
-                ));
-            }
-            let ctx = ComponentCtx {
-                blocks,
-                item: &def.id,
-            };
-            let mut declared: Vec<Box<dyn ItemComponent>> = Vec::new();
-            for (key, value) in def.components {
-                let Some(parser) = component::parser_for(&key) else {
-                    return Err(format!("item {:?}: unknown component [item.{key}]", def.id));
-                };
-                if let Some(built) = parser.parse(value, &ctx)? {
-                    declared.push(built);
-                }
-            }
-
-            let index = match items.iter().position(|i| i.id == def.id) {
-                // Override an auto-generated block item, or an earlier entry:
-                // only the capabilities this entry declares are replaced, so an
-                // override that says nothing about placement keeps it.
-                Some(idx) => idx,
-                None => {
-                    items.push(Item::plain(def.id));
-                    authored_stack.push(None);
-                    items.len() - 1
-                }
-            };
-            for built in declared {
-                items[index].set(built);
-            }
-            if def.max_stack.is_some() {
-                authored_stack[index] = def.max_stack;
-            }
-            if let Some(model) = def.model {
-                models.resize(items.len().max(models.len()), None);
-                models[index] = Some(model);
-            }
-            if let Some(label) = def.display_name {
-                display_names.resize(items.len().max(display_names.len()), None);
-                display_names[index] = Some(label);
-            }
+            merge_item(&mut items, &mut authored_stack, visuals, def, blocks)?;
         }
-        models.resize(items.len(), None);
-        display_names.resize(items.len(), None);
-
-        // Stack sizes settle only now: an override may have added the very
-        // capability that caps them.
-        for (item, authored) in items.iter_mut().zip(&authored_stack) {
-            item.max_stack = authored.unwrap_or_else(|| item.derived_max_stack());
-            if item.wearing_capabilities() > 1 {
-                log::warn!(
-                    "item {:?}: more than one capability declares a durability; \
-                     the first in key order wins",
-                    item.id
-                );
-            }
-        }
+        visuals.models.resize(items.len(), None);
+        visuals.display_names.resize(items.len(), None);
+        settle_stack_sizes(&mut items, &authored_stack);
 
         let mut reg = Self {
             items,
@@ -411,20 +334,27 @@ impl ItemRegistry {
             starter_survival: Vec::new(),
         };
         if let Some(kit) = file.starter_kit {
-            for entry in kit.survival {
-                let Some(id) = reg.find(&entry.item) else {
-                    log::warn!("starter kit: unknown item {:?}", entry.item);
-                    continue;
-                };
-                // Tools spawn fresh; stackables spawn `count`.
-                let stack = match reg.max_durability(id) {
-                    Some(durability) => ItemStack::with_durability(id, durability),
-                    None => ItemStack::new(id, entry.count.clamp(1, reg.max_stack(id))),
-                };
-                reg.starter_survival.push(stack);
-            }
+            reg.starter_survival = reg.starter_kit(kit);
         }
         Ok(reg)
+    }
+
+    /// The survival starter kit's stacks. Tools spawn fresh; stackables spawn
+    /// `count`. Unknown items are skipped with a warning.
+    fn starter_kit(&self, kit: StarterKitDef) -> Vec<ItemStack> {
+        let mut stacks = Vec::new();
+        for entry in kit.survival {
+            let Some(id) = self.find(&entry.item) else {
+                log::warn!("starter kit: unknown item {:?}", entry.item);
+                continue;
+            };
+            let stack = match self.max_durability(id) {
+                Some(durability) => ItemStack::with_durability(id, durability),
+                None => ItemStack::new(id, entry.count.clamp(1, self.max_stack(id))),
+            };
+            stacks.push(stack);
+        }
+        stacks
     }
 
     /// What a fresh survival player spawns with, in hotbar order.
@@ -491,6 +421,110 @@ impl ItemRegistry {
 
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
+    }
+}
+
+/// One placeable item per block, in block order — flowing fluid excepted, since
+/// it is simulation state rather than something to place — and the reverse
+/// map from block to item.
+fn block_items(blocks: &BlockRegistry) -> (Vec<Item>, Vec<Option<ItemId>>) {
+    let mut items = Vec::new();
+    let mut block_to_item = vec![None; blocks.len()];
+    for (block_id, block) in blocks.iter() {
+        if block_id.is_air() || blocks.is_flowing_fluid(block_id) {
+            continue;
+        }
+        let item_id = ItemId(items.len() as u16);
+        items.push(Item::block(block.id.clone(), block_id));
+        block_to_item[block_id.0 as usize] = Some(item_id);
+    }
+    (items, block_to_item)
+}
+
+/// Fold one `[[item]]` entry in: a new item, or an override of an existing one
+/// (an auto-generated block item, or an earlier entry). Only the capabilities
+/// the entry declares are replaced, so an override that says nothing about
+/// placement keeps it.
+fn merge_item(
+    items: &mut Vec<Item>,
+    authored_stack: &mut Vec<Option<u8>>,
+    visuals: &mut ItemVisuals,
+    def: ItemDef,
+    blocks: &BlockRegistry,
+) -> Result<(), String> {
+    // A malformed id fails the whole file: an id is the key recipes, drops,
+    // saves and `/give` all spell, so accepting one that cannot be typed as a
+    // single token would break those references silently.
+    if !is_valid_id(&def.id) {
+        return Err(format!(
+            "item {:?}: an id must be lowercase letters, digits and underscores",
+            def.id
+        ));
+    }
+    let declared = parse_components(&def.id, def.components, blocks)?;
+    let index = match items.iter().position(|i| i.id == def.id) {
+        Some(idx) => idx,
+        None => {
+            items.push(Item::plain(def.id));
+            authored_stack.push(None);
+            items.len() - 1
+        }
+    };
+    for built in declared {
+        items[index].set(built);
+    }
+    if def.max_stack.is_some() {
+        authored_stack[index] = def.max_stack;
+    }
+    if let Some(model) = def.model {
+        visuals
+            .models
+            .resize(items.len().max(visuals.models.len()), None);
+        visuals.models[index] = Some(model);
+    }
+    if let Some(label) = def.display_name {
+        visuals
+            .display_names
+            .resize(items.len().max(visuals.display_names.len()), None);
+        visuals.display_names[index] = Some(label);
+    }
+    Ok(())
+}
+
+/// Every capability table an entry declares, parsed by the component that
+/// owns its key. A key nothing recognises rejects the file; a capability
+/// that parses to nothing (an unresolved reference) is dropped with a warning
+/// by its parser.
+fn parse_components(
+    item: &str,
+    components: toml::Table,
+    blocks: &BlockRegistry,
+) -> Result<Vec<Box<dyn ItemComponent>>, String> {
+    let ctx = ComponentCtx { blocks, item };
+    let mut declared: Vec<Box<dyn ItemComponent>> = Vec::new();
+    for (key, value) in components {
+        let Some(parser) = component::parser_for(&key) else {
+            return Err(format!("item {item:?}: unknown component [item.{key}]"));
+        };
+        if let Some(built) = parser.parse(value, &ctx)? {
+            declared.push(built);
+        }
+    }
+    Ok(declared)
+}
+
+/// Settle every stack size, now that every override has been merged — an
+/// override may have added the very capability that caps it.
+fn settle_stack_sizes(items: &mut [Item], authored_stack: &[Option<u8>]) {
+    for (item, authored) in items.iter_mut().zip(authored_stack) {
+        item.max_stack = authored.unwrap_or_else(|| item.derived_max_stack());
+        if item.wearing_capabilities() > 1 {
+            log::warn!(
+                "item {:?}: more than one capability declares a durability; \
+                 the first in key order wins",
+                item.id
+            );
+        }
     }
 }
 
