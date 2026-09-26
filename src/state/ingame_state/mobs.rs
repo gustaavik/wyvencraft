@@ -40,9 +40,9 @@ const ATTACK_VALIDATE_RANGE: f32 = 7.0;
 
 /// A player a mob could target, from the authority's point of view.
 /// `player` is `None` for the authority's own (local) player.
-struct MobTarget {
-    player: Option<PlayerId>,
-    eye: Vec3,
+pub(super) struct MobTarget {
+    pub player: Option<PlayerId>,
+    pub eye: Vec3,
 }
 
 /// A client's replica of a host-simulated mob: two position snapshots (the
@@ -61,6 +61,10 @@ pub(super) struct RemoteMob {
     /// frame, like remote players.
     anim: AnimationState,
     last_pos: Vec3,
+    /// Health as the host last reported it (`MobHurt`) — what a boss bar shows.
+    pub health: f32,
+    /// A boss's fight phase as the host last reported it (`BossPhase`).
+    pub phase: u8,
 }
 
 impl RemoteMob {
@@ -75,6 +79,8 @@ impl RemoteMob {
             yaw: 0.0,
             anim: AnimationState::new(),
             last_pos: position,
+            health: kind.mob.as_ref().map_or(1.0, |m| m.max_health),
+            phase: 0,
         }
     }
 
@@ -218,7 +224,7 @@ pub(super) enum MobTargetRef {
 impl InGameState {
     /// Queue a mob event for the host broadcast (dropped outside hosting; a
     /// singleplayer session has no listeners and clients never emit).
-    fn emit_mob_event(&mut self, msg: ServerMessage) {
+    pub(super) fn emit_mob_event(&mut self, msg: ServerMessage) {
         if self.session.serves_peers() {
             self.peers.mob_events.push(msg);
         }
@@ -244,7 +250,7 @@ impl InGameState {
 
     /// Every player a mob may attack right now: the local player (unless dead
     /// or in a protected mode) plus survival-mode remote players.
-    fn mob_targets(&self) -> Vec<MobTarget> {
+    pub(super) fn mob_targets(&self) -> Vec<MobTarget> {
         let mut targets = Vec::new();
         if !self.dead && self.player.mode.takes_damage() {
             targets.push(MobTarget {
@@ -278,6 +284,7 @@ impl InGameState {
         let mut melee_hits: Vec<(Option<PlayerId>, f32)> = Vec::new();
         // Arrows launched this tick: (origin eye, velocity, damage, gravity, lifetime).
         let mut fired: Vec<(Vec3, Vec3, f32, f32, f32)> = Vec::new();
+        let mut beats: Vec<super::bosses::BossBeat> = Vec::new();
 
         for mob in &mut self.mobs.live {
             // Mobs straddling the streaming edge freeze until their chunk is
@@ -318,6 +325,9 @@ impl InGameState {
             };
 
             let action = mob.update(dt, perception, |p| self.world.is_solid_for_collision(p));
+            if let Some(phase) = mob.take_phase_change() {
+                beats.push(super::bosses::BossBeat::Phase { mob: mob.id, phase });
+            }
             match action {
                 MobAction::None => {}
                 MobAction::Melee { damage } => {
@@ -334,8 +344,23 @@ impl InGameState {
                         ranged.lifetime,
                     ));
                 }
+                MobAction::BossWindup { attack, seconds } => {
+                    beats.push(super::bosses::BossBeat::Windup {
+                        mob: mob.id,
+                        attack,
+                        seconds,
+                    });
+                }
+                MobAction::BossRelease { attack } => {
+                    beats.push(super::bosses::BossBeat::Release {
+                        mob: mob.id,
+                        attack,
+                        target: nearest.map(|(t, _)| (t.player, t.eye)),
+                    });
+                }
             }
         }
+        self.land_boss_beats(beats);
 
         for (origin, velocity, damage, gravity, lifetime) in fired {
             self.emit_mob_event(ServerMessage::ArrowSpawned {
@@ -373,6 +398,18 @@ impl InGameState {
                 continue;
             }
             let mob = self.mobs.live.swap_remove(i);
+            if mob.boss().is_some() {
+                // Everyone in the arena shares a boss's loot, so it is handed
+                // out by the defeat rather than by kill credit. The defeat
+                // carries the position, so it does not matter which of the
+                // two messages a client's unordered channel delivers first.
+                self.on_boss_defeated(&mob);
+                self.emit_mob_event(ServerMessage::MobDespawned {
+                    id: mob.id.0,
+                    killed_by: None,
+                });
+                continue;
+            }
             let killed_by = mob.last_attacker.map(PlayerId);
             self.emit_mob_event(ServerMessage::MobDespawned {
                 id: mob.id.0,
@@ -570,6 +607,7 @@ impl InGameState {
         let top = (self.player.position.y + 24.0) as i32;
 
         let world = &self.world;
+        let terrain = self.structures.terrain();
         let mobs = &self.mobs.live;
         let requests = self.mobs.spawner.tick(
             &cfg,
@@ -579,6 +617,7 @@ impl InGameState {
             mobs.len(),
             |name| mobs.iter().filter(|m| m.kind_name == name).count(),
             |x, z| ground_at(world, x, z, top),
+            |x, z| terrain.biome_at(x.floor() as i32, z.floor() as i32),
         );
         for request in requests {
             if self.spawn_mob(&request.entity, request.position).is_some() {
@@ -626,12 +665,15 @@ impl InGameState {
         let Ok(kinds) = std::env::var("WYVEN_DEBUG_SPAWN") else {
             return;
         };
+        // Beside the player, not the spawn, so it composes with
+        // `WYVEN_DEBUG_GOTO` (which may have moved them to a far structure).
+        let near = self.player.position;
         for (i, kind) in kinds.split(',').map(str::trim).enumerate() {
-            let x = self.spawn.x + 3.0 + 2.0 * i as f32;
-            let z = self.spawn.z + 3.0;
+            let x = near.x + 3.0 + 2.0 * i as f32;
+            let z = near.z + 3.0;
             let y = self
                 .find_ground(x, z, crate::core::CHUNK_HEIGHT - 2)
-                .unwrap_or(self.spawn.y);
+                .unwrap_or(near.y);
             match self.spawn_mob(kind, Vec3::new(x, y, z)) {
                 Some(id) => log::info!("debug-spawned {kind:?} as {id:?} at ({x}, {y}, {z})"),
                 None => log::warn!("WYVEN_DEBUG_SPAWN: unknown mob kind {kind:?}"),

@@ -40,6 +40,12 @@ pub struct Harvest {
     /// pickaxe only means a *faster* one, and every block stays mineable by
     /// hand. Set it where the tool is the whole point (leaves and shears).
     pub required: bool,
+    /// The lowest `[item.tool] tier` of an accepted tool that can break this
+    /// block at all. `0` — the default — means anything can, by hand if need
+    /// be. Above zero the block is *too hard* for a lesser tool, the Valheim
+    /// gate: a biome's ore stays out of reach until the previous biome's boss
+    /// has given up the material for a better pickaxe.
+    pub tier: u8,
 }
 
 impl Harvest {
@@ -165,6 +171,28 @@ pub struct Block {
     pub drops: Drops,
     /// Set when the block is part of a fluid (source or flowing).
     pub fluid: Option<FluidInfo>,
+    /// What right-clicking it does, for the blocks that do something.
+    pub interact: Option<Interaction>,
+}
+
+/// What right-clicking a block does (`[block.interact]` in
+/// `assets/blocks.toml`). The *meaning* of each kind is code — one hook per
+/// variant in `state::ingame_state::block_use` — and the block only says which
+/// one it is, so a new shrine or altar is a content edit.
+///
+/// Gameplay, so it rides `Block`'s `Debug` into the content hash: peers
+/// disagreeing on what an altar summons must not share a world.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Interaction {
+    /// A shrine's wayrune: reading it reveals the structure its shrine points
+    /// to (`reveals` in `assets/structures.toml`).
+    Shrine,
+    /// A boss altar: offering the boss's `[entity.boss] offering` summons it.
+    Altar {
+        /// The entity kind (`assets/entities.toml`) this altar summons.
+        boss: String,
+    },
 }
 
 impl Block {
@@ -258,10 +286,21 @@ pub mod blocks {
     pub const RED_MUSHROOM: BlockId = BlockId(19);
     pub const BROWN_MUSHROOM: BlockId = BlockId(20);
     pub const CORNFLOWER: BlockId = BlockId(21);
+    pub const DEEPSTONE: BlockId = BlockId(22);
+    pub const MUD: BlockId = BlockId(23);
+    pub const PACKED_SNOW: BlockId = BlockId(24);
+    pub const BASALT: BlockId = BlockId(25);
+    pub const ASH: BlockId = BlockId(26);
+    pub const MOSSY_COBBLESTONE: BlockId = BlockId(27);
+    pub const TIN_ORE: BlockId = BlockId(28);
+    pub const SILVER_ORE: BlockId = BlockId(29);
+    pub const CINDER_ORE: BlockId = BlockId(30);
+    pub const WAYRUNE: BlockId = BlockId(31);
+    pub const ELDER_ALTAR: BlockId = BlockId(32);
     /// Flowing water levels 1 (shallowest) through 7: auto-registered after
     /// all declared blocks; the source block [`WATER`] is level 8.
-    pub const WATER_FLOW_1: BlockId = BlockId(22);
-    pub const WATER_FLOW_7: BlockId = BlockId(28);
+    pub const WATER_FLOW_1: BlockId = BlockId(33);
+    pub const WATER_FLOW_7: BlockId = BlockId(39);
 }
 
 // ---- TOML schema -----------------------------------------------------------
@@ -300,6 +339,8 @@ struct BlockDef {
     /// Only meaningful alongside `[block.model]`; see [`BlockModel::random_yaw`].
     #[serde(default)]
     random_yaw: bool,
+    /// `[block.interact]` — what right-clicking it does.
+    interact: Option<Interaction>,
 }
 
 /// `textures = "stone"`, the top/bottom/side shorthand, or all six faces.
@@ -330,6 +371,8 @@ struct HarvestDef {
     tool: ToolsDef,
     #[serde(default)]
     required: bool,
+    #[serde(default)]
+    tier: u8,
 }
 
 /// `tool = "pickaxe"`, or `tool = ["shears", "sword"]` when more than one shape
@@ -367,6 +410,7 @@ impl HarvestDef {
         Ok(Harvest {
             tools,
             required: self.required,
+            tier: self.tier,
         })
     }
 }
@@ -521,6 +565,7 @@ impl BlockRegistry {
             harvest: None,
             drops: Drops::None,
             fluid: None,
+            interact: None,
         });
         models.push(None); // air
         json.push(None);
@@ -650,6 +695,7 @@ impl BlockRegistry {
                 harvest,
                 drops,
                 fluid,
+                interact: def.interact,
             });
             models.push(model);
             if let Some(f) = &def.fluid {
@@ -686,6 +732,7 @@ impl BlockRegistry {
                             level,
                             max_level: levels + 1,
                         }),
+                        interact: None,
                     })
                 })
                 .collect();
@@ -811,7 +858,7 @@ mod tests {
         const CUTTERS: &[&str] = &["shears", "sword"];
         /// id, render, solid, hardness, the tools it asks for, whether it insists.
         type BlockRow = (&'static str, R, bool, f32, &'static [&'static str], bool);
-        let expected: [BlockRow; 29] = [
+        let expected: [BlockRow; 40] = [
             ("air", R::Invisible, false, 0.0, NONE, false),
             ("stone", R::Opaque, true, 1.5, PICK, false),
             ("dirt", R::Opaque, true, 0.5, SHOVEL, false),
@@ -834,6 +881,18 @@ mod tests {
             ("red_mushroom", R::Cutout, false, 0.0, CUTTERS, false),
             ("brown_mushroom", R::Cutout, false, 0.0, CUTTERS, false),
             ("cornflower", R::Cutout, false, 0.0, CUTTERS, false),
+            ("deepstone", R::Opaque, true, 3.0, PICK, false),
+            ("mud", R::Opaque, true, 0.5, SHOVEL, false),
+            ("packed_snow", R::Opaque, true, 0.8, SHOVEL, false),
+            ("basalt", R::Opaque, true, 2.0, PICK, false),
+            ("ash", R::Opaque, true, 0.5, SHOVEL, false),
+            ("mossy_cobblestone", R::Opaque, true, 2.0, PICK, false),
+            ("tin_ore", R::Opaque, true, 3.0, PICK, false),
+            ("silver_ore", R::Opaque, true, 4.0, PICK, false),
+            ("cinder_ore", R::Opaque, true, 5.0, PICK, false),
+            // Structure hearts: unbreakable, so no harvest table.
+            ("wayrune", R::Opaque, true, INF, NONE, false),
+            ("elder_altar", R::Opaque, true, INF, NONE, false),
             // A flowing block inherits its source's harvest rule, which for
             // water is "nothing is good at it".
             ("water_flow_1", R::Transparent, false, INF, NONE, false),

@@ -14,6 +14,8 @@
 //! - [`persistence`] — world save + restore.
 //! - [`frame`] — the [`GameState`] impl (update/ui/scene_frame).
 
+mod block_use;
+mod bosses;
 mod chat;
 mod editor;
 mod frame;
@@ -23,9 +25,11 @@ mod mobs;
 mod net;
 mod peers;
 mod persistence;
+mod progression_net;
 mod setup;
 mod streaming;
 mod view;
+mod wayfinding;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -38,7 +42,9 @@ use crate::core::{BlockPos, DayCycle};
 use crate::editor::EditorSession;
 use crate::entity::{Arrow, DroppedItem, Mob, Player, Spawner};
 use crate::inventory::{HeldLabel, Inventory, ItemStack, RecipeBook};
+use crate::progression::WorldProgression;
 use crate::state::session::Session;
+use crate::world::structure::Structures;
 use crate::world::{ChunkLoader, FluidSim, World};
 use peers::Peers;
 use persistence::Persistence;
@@ -98,6 +104,10 @@ struct MobWorld {
     /// Mobs a client knows about only from the host's snapshots.
     remote: HashMap<u64, mobs::RemoteMob>,
     arrows: Vec<Arrow>,
+    /// The boss fight in progress, if one is (authority only).
+    fight: Option<bosses::BossFight>,
+    /// The boss attack being wound up, shown on the boss bar.
+    telegraph: Option<bosses::Telegraph>,
 }
 
 impl MobWorld {
@@ -109,6 +119,8 @@ impl MobWorld {
             spawner: Spawner::new(seed),
             remote: HashMap::new(),
             arrows: Vec::new(),
+            fight: None,
+            telegraph: None,
         }
     }
 }
@@ -170,6 +182,9 @@ pub struct InGameState {
     fluids: FluidSim,
     /// Progressive block-break state for survival timed mining.
     breaking: Option<BreakState>,
+    /// The last block the player was told is too hard for their tool, so the
+    /// hint is said once per block rather than every frame of digging.
+    tier_hint: Option<BlockPos>,
     /// Everything alive that is not a player: the mobs this peer simulates,
     /// the ones a host told it about, and the arrows in flight.
     ///
@@ -198,6 +213,13 @@ pub struct InGameState {
     /// Where this session's world is persisted, and what it still owes the
     /// next save.
     save: Persistence,
+    /// This world's shrines and altars, and the terrain sampler they were
+    /// placed with — the generator's own, so the game locates exactly what
+    /// the chunks contain.
+    structures: Arc<Structures>,
+    /// How far through the biome/boss loop this world is. Authoritative on the
+    /// host and in singleplayer; a mirror of the host's on a client.
+    progression: WorldProgression,
 }
 
 impl InGameState {
@@ -258,6 +280,23 @@ mod tests {
         assert_eq!(book.recipes()[0].output, items.find("glass").unwrap());
     }
 
+    /// Clear a 9×9 pad of open air around the player, floored with stone
+    /// under their feet, so a test's line of sight never depends on terrain.
+    fn flatten_around_player(state: &mut InGameState) {
+        use crate::world::block::blocks;
+        let feet = BlockPos::from_world(state.player.position);
+        for dx in -4..=4 {
+            for dz in -4..=4 {
+                let floor = BlockPos::new(feet.x + dx, feet.y - 1, feet.z + dz);
+                state.world.set_block(floor, blocks::STONE);
+                for dy in 0..4 {
+                    let air = BlockPos::new(feet.x + dx, feet.y + dy, feet.z + dz);
+                    state.world.set_block(air, crate::core::BlockId::AIR);
+                }
+            }
+        }
+    }
+
     /// End-to-end combat: spawn a cow next to the player, punch it to death,
     /// and confirm its raw-raw_beef loot pops as dropped items.
     #[test]
@@ -266,7 +305,9 @@ mod tests {
         let cow_kind = state.content.entities.find("cow").expect("cow kind");
         let max_health = cow_kind.mob.as_ref().unwrap().max_health;
 
-        // Stand the cow on the ground right in front of the player.
+        // Stand the cow on the ground right in front of the player, on a pad
+        // carved flat so whatever the seed grew at spawn cannot hide it.
+        flatten_around_player(&mut state);
         let look = state.player.look_direction();
         let pos = state.player.position + Vec3::new(look.x, 0.0, look.z).normalize() * 2.0;
         let ground = state
@@ -276,8 +317,10 @@ mod tests {
             .spawn_mob("cow", Vec3::new(pos.x, ground, pos.z))
             .expect("cow spawns");
 
-        // The crosshair ray finds it (it may need to be exactly ahead: aim by
-        // construction, the player looks along `look` from the eye).
+        // The crosshair ray finds it: aim from the eye down at its body, which
+        // on flat ground sits below eye level.
+        let body = Vec3::new(pos.x, ground + 0.6, pos.z) - state.player.eye_position();
+        state.player.pitch = body.y.atan2(Vec3::new(body.x, 0.0, body.z).length());
         let Some(mobs::MobTargetRef::Local(index)) = state.targeted_mob() else {
             panic!("cow should be under the crosshair as a local mob");
         };

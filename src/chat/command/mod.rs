@@ -18,12 +18,16 @@ mod context;
 mod fake;
 mod give;
 mod help;
+mod locate;
+mod progress;
 mod tp;
 
 pub use context::{CommandContext, ItemName, Position};
 pub use fake::FakeContext;
 pub use give::GiveCommand;
 pub use help::HelpCommand;
+pub use locate::LocateCommand;
+pub use progress::ProgressCommand;
 pub use tp::TpCommand;
 
 use crate::net::ChatKind;
@@ -61,7 +65,13 @@ pub trait ChatCommand: Sync {
 
 /// Every command this build knows about. **Adding a command: a new module above
 /// and one entry here.**
-pub const COMMANDS: &[&dyn ChatCommand] = &[&GiveCommand, &HelpCommand, &TpCommand];
+pub const COMMANDS: &[&dyn ChatCommand] = &[
+    &GiveCommand,
+    &HelpCommand,
+    &LocateCommand,
+    &ProgressCommand,
+    &TpCommand,
+];
 
 /// What one submitted line turned out to be.
 pub enum Invocation<'a> {

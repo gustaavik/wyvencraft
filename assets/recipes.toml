@@ -149,3 +149,20 @@ ingredients = { copper_ingot = 7 }
 [[recipe]]
 output = "copper_boots"
 ingredients = { copper_ingot = 4 }
+
+# ---- The Meadows' progression loop ------------------------------------------
+
+# The offering the elder altar takes to summon the Elder Stag.
+[[recipe]]
+output = "stag_effigy"
+ingredients = { antler_shard = 4, oak_log = 2, flint = 1 }
+
+# The Elder Stag's reward: the first pickaxe that can mine Darkwood's ore.
+[[recipe]]
+output = "antler_pickaxe"
+ingredients = { elder_antler = 1, stick = 2 }
+
+[[recipe]]
+output = "cooked_venison"
+ingredients = { raw_venison = 1, coal = 1 }
+

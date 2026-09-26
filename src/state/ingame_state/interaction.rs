@@ -214,6 +214,11 @@ impl InGameState {
         // Effective tool: the held item, if it's a tool. Whether it is the
         // *right* one is the block's call, not the tool's.
         let tool = self.held_tool();
+        if !crate::inventory::meets_tier(block.harvest.as_ref(), tool) {
+            self.breaking = None;
+            self.hint_tier(hit.block);
+            return;
+        }
         let seconds = crate::inventory::break_seconds(block.hardness, block.harvest.as_ref(), tool);
 
         // Reset progress when the targeted block changes.
@@ -235,9 +240,29 @@ impl InGameState {
         }
     }
 
-    /// Right-click: offer the held item to each hook in turn, first one that
-    /// handles it wins.
+    /// Say — once per block — why a tiered ore will not give: the Valheim
+    /// gate is only fair if the player is told what opens it.
+    fn hint_tier(&mut self, pos: BlockPos) {
+        if self.tier_hint == Some(pos) {
+            return;
+        }
+        self.tier_hint = Some(pos);
+        let block = self.content.blocks.get(self.world.block_at(pos));
+        let Some(harvest) = &block.harvest else {
+            return;
+        };
+        let tool = harvest.tools.first().map_or("tool", String::as_str);
+        let text = format!("Too hard — it needs a tier {} {tool}.", harvest.tier);
+        self.chat.log.push(crate::net::ChatKind::System, text);
+    }
+
+    /// Right-click: a block that does something (a shrine, an altar) gets the
+    /// click first, with or without anything in hand; otherwise offer the held
+    /// item to each hook in turn, first one that handles it wins.
     pub(super) fn use_selected(&mut self) {
+        if self.use_targeted_block() {
+            return;
+        }
         let Some(item_id) = self.inventory.item_in_selected() else {
             return;
         };
@@ -409,5 +434,44 @@ mod tests {
         state.use_selected();
 
         assert_eq!(state.inventory.slot(0).expect("stick").count, before);
+    }
+
+    /// A tiered ore under a lesser pickaxe does not crack at all, and the
+    /// player is told once what it needs.
+    #[test]
+    fn a_tiered_ore_refuses_a_lesser_pickaxe_and_says_why() {
+        use crate::world::block::blocks;
+        let mut state = InGameState::new(GameContent::builtin(), 7, GameMode::Survival);
+        let look = state.player.look_direction();
+        let at = BlockPos::from_world(state.player.eye_position() + look * 2.0);
+        state.world.set_block(at, blocks::TIN_ORE);
+        let pick = state.content.items.find("stone_pickaxe").unwrap();
+        state
+            .inventory
+            .set_slot(0, Some(state.content.items.full_stack(pick)));
+        state.inventory.set_selected(0);
+        for _ in 0..600 {
+            state.update_mining(true, 1.0 / 60.0);
+        }
+        assert_eq!(state.world.block_at(at), blocks::TIN_ORE, "never breaks");
+        let hints = state
+            .chat
+            .log
+            .lines()
+            .filter(|l| l.text.contains("tier 2"))
+            .count();
+        assert_eq!(hints, 1, "said once, not every frame");
+
+        let antler = state.content.items.find("antler_pickaxe").unwrap();
+        state
+            .inventory
+            .set_slot(0, Some(state.content.items.full_stack(antler)));
+        for _ in 0..600 {
+            state.update_mining(true, 1.0 / 60.0);
+        }
+        assert!(
+            state.world.block_at(at).is_air(),
+            "the antler pickaxe breaks it"
+        );
     }
 }

@@ -135,6 +135,11 @@ host *asks* a client to take items or to move; it does not overwrite them.
 | Domain                  | Authority                          | Mechanism                                                                       |
 | ----------------------- | ---------------------------------- | ------------------------------------------------------------------------------- |
 | Terrain                 | Nobody                             | Regenerated from the seed on every peer. Terrain never crosses the wire.        |
+| Structures              | Nobody                             | Shrines and altars are terrain: every peer stamps the same ones from the seed   |
+| World progression       | Host only                          | Whole `Progression` snapshot on join and on every change; clients mirror it     |
+| Block uses (shrine, altar) | Host validates                  | `UseBlock` is reach-checked and confirmed against the **seed**, not the block   |
+| Boss fights             | Host only                          | Summon, attacks, phases, leash and defeat; clients get telegraphs and the bar   |
+| Boss loot               | **Every participant**, locally     | `BossDefeated` lists who was in the arena; each rolls with its own seed         |
 | Block edits             | Host applies and echoes            | Clients apply **optimistically first**, then request                            |
 | Fluids                  | Host only                          | Each change goes out as an ordinary `BlockChanged`                              |
 | Mobs — spawn, AI, death | Host only                          | Clients hold render-only `RemoteMob` replicas                                   |
@@ -152,14 +157,16 @@ host *asks* a client to take items or to move; it does not overwrite them.
 
 ### What the host actually checks
 
-`apply_request` (`src/state/ingame_state/net.rs:171`) is the authority's entire inbound
-surface. Of the nine client messages, exactly one is validated:
+`apply_request` (`src/state/ingame_state/net.rs`) is the authority's entire inbound
+surface. Of the ten client messages, three are validated:
 
 | `ClientMessage`     | Validation                                                                                                                                                                             |
 | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `Attack { id }`     | **Range-checked** — `attack_in_range` against `ATTACK_VALIDATE_RANGE = 7.0` (`src/state/ingame_state/mobs.rs:34`, "their reach plus lag slack")                                        |
+| `UseBlock { pos, slots, selected }` | **Reach-checked** from the client's last `Move`, then `Structures::instance_at` asks the *seed* what stands at `pos` — a hand-placed wayrune or a named position with no shrine does nothing. The message carries the client's inventory, which the host adopts first: a separate sync could be reordered behind it on the unordered channel. An offering is taken from that copy (`src/state/ingame_state/block_use.rs`) |
+| `Break { pos }` (tier) | The one check a break gets: the block's `[block.harvest] tier` against the client's last-reported held tool. Refused breaks are undone on the client with an addressed `BlockChanged` |
 | `Move`              | none — position accepted verbatim                                                                                                                                                      |
-| `Break` / `Place`   | only that `world.set_block` succeeded, i.e. in-bounds. **No reach check, no tool check, no inventory check**, and the block id is taken as given (`src/state/ingame_state/net.rs:215`) |
+| `Break` / `Place`   | that `world.set_block` succeeded, i.e. in-bounds, and — for `Break` — the tool tier (next row). **No reach check, no inventory check**, and the block id is taken as given (`src/state/ingame_state/net.rs:215`) |
 | `Stats`             | none — by design                                                                                                                                                                       |
 | `SyncInventory`     | none — by design                                                                                                                                                                       |
 | `SetMode`           | none                                                                                                                                                                                   |
@@ -205,6 +212,7 @@ Wyvencraft is a game you host for people you invited.
 | `RequestWorldState`                    | Reliable   | once, on the first connected frame                                |
 | `RequestStatus`                        | Reliable   | **only** by the server browser's probe, never by a playing client |
 | `Attack { id }`                        | Reliable   | on a melee click with a replica mob in the crosshair              |
+| `UseBlock { pos, slots, selected }`    | Reliable   | right-click on a shrine or altar; carries the inventory it is judged by |
 
 ### Host → clients
 
@@ -228,6 +236,12 @@ Wyvencraft is a game you host for people you invited.
 | `Chat { from, kind, text }`                                                                 | Reliable              | broadcast for speech, addressed for command replies. **Raw text**, so each peer renders names its own way |
 | `GrantItems { to, stacks }`                                                                 | Reliable, addressed   | result of `/give`                                                                                         |
 | `Teleport { to, position }`                                                                 | Reliable, addressed   | result of `/tp`                                                                                           |
+| `Progression(WorldProgression)`                                                             | Reliable              | addressed to a joiner in `replay_world_state`; broadcast whenever a shrine, reveal or defeat changes it  |
+| `Revealed { structure, anchor, by }`                                                        | Reliable, broadcast   | a shrine (or `/progress reveal`) revealed a structure — the chat line with directions                   |
+| `ConsumeItems { to, stacks }`                                                               | Reliable, addressed   | an altar took an offering. The mirror of `GrantItems`: an instruction to remove                          |
+| `BossTelegraph { id, attack, windup }`                                                      | Reliable, broadcast   | a boss commits to an attack; shown on the boss bar for `windup` seconds                                  |
+| `BossPhase { id, phase }`                                                                   | Reliable, broadcast   | a boss crosses into its next phase                                                                       |
+| `BossDefeated { id, kind, position, participants }`                                         | Reliable, broadcast   | a boss dies; carries where, since its `MobDespawned` may arrive first on the unordered channel             |
 
 Two encoding decisions run through the whole protocol. **Recipes and mob kinds travel by
 name**, so they survive registries that differ across builds; unknown names are skipped with

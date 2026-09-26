@@ -16,6 +16,7 @@ use glam::Vec3;
 
 use crate::core::Rng64;
 use crate::entity::EntityRegistry;
+use crate::world::generation::{BiomeId, WorldGenConfig};
 
 /// Embedded copy of the shipped spawn rules, used when
 /// `assets/spawning.toml` is missing or invalid.
@@ -50,6 +51,15 @@ pub struct SpawnEntry {
     pub cap: usize,
     pub night_only: bool,
     pub despawn_in_daylight: bool,
+    /// Biomes it spawns in. Empty means every biome.
+    pub biomes: Vec<BiomeId>,
+}
+
+impl SpawnEntry {
+    /// Whether this mob belongs in `biome`.
+    pub fn lives_in(&self, biome: BiomeId) -> bool {
+        self.biomes.is_empty() || self.biomes.contains(&biome)
+    }
 }
 
 /// The validated spawn configuration.
@@ -61,12 +71,17 @@ pub struct SpawnConfig {
 
 impl SpawnConfig {
     /// The embedded rules. Infallible: validated by tests.
-    pub fn builtin(entities: &EntityRegistry) -> Self {
-        Self::from_toml(BUILTIN_SPAWNING, entities).expect("embedded spawning.toml must parse")
+    pub fn builtin(entities: &EntityRegistry, worldgen: &WorldGenConfig) -> Self {
+        Self::from_toml(BUILTIN_SPAWNING, entities, worldgen)
+            .expect("embedded spawning.toml must parse")
     }
 
     /// Parse + strictly validate a spawning file against the entity registry.
-    pub fn from_toml(text: &str, entities: &EntityRegistry) -> Result<Self, String> {
+    pub fn from_toml(
+        text: &str,
+        entities: &EntityRegistry,
+        worldgen: &WorldGenConfig,
+    ) -> Result<Self, String> {
         let file: SpawningFile = toml::from_str(text).map_err(|e| e.to_string())?;
         let mut entries = Vec::with_capacity(file.spawn.len());
         for def in file.spawn {
@@ -86,6 +101,15 @@ impl SpawnConfig {
             if def.weight == 0 {
                 return Err(format!("spawn {:?}: weight must be positive", def.entity));
             }
+            let biomes = def
+                .biomes
+                .iter()
+                .map(|name| {
+                    worldgen
+                        .find_biome(name)
+                        .ok_or_else(|| format!("spawn {:?}: unknown biome {name:?}", def.entity))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
             entries.push(SpawnEntry {
                 entity: def.entity,
                 weight: def.weight,
@@ -93,6 +117,7 @@ impl SpawnConfig {
                 cap: def.cap as usize,
                 night_only: def.night_only,
                 despawn_in_daylight: def.despawn_in_daylight,
+                biomes,
             });
         }
         let l = file.limits;
@@ -150,6 +175,8 @@ struct SpawnDef {
     night_only: bool,
     #[serde(default)]
     despawn_in_daylight: bool,
+    #[serde(default)]
+    biomes: Vec<String>,
 }
 
 // --- The planner ---
@@ -191,6 +218,7 @@ impl Spawner {
         total: usize,
         count_of: impl Fn(&str) -> usize,
         find_ground: impl Fn(f32, f32) -> Option<f32>,
+        biome_at: impl Fn(f32, f32) -> BiomeId,
     ) -> Vec<SpawnRequest> {
         self.timer += dt;
         if self.timer < cfg.limits.spawn_interval {
@@ -248,6 +276,9 @@ impl Spawner {
                 }
                 let x = cx + self.rng.range_f32(-3.0, 3.0);
                 let z = cz + self.rng.range_f32(-3.0, 3.0);
+                if !entry.lives_in(biome_at(x, z)) {
+                    continue;
+                }
                 let Some(y) = find_ground(x, z) else {
                     continue;
                 };
@@ -279,8 +310,12 @@ mod tests {
         EntityRegistry::builtin()
     }
 
+    fn worldgen() -> WorldGenConfig {
+        WorldGenConfig::builtin(&crate::world::BlockRegistry::with_builtins())
+    }
+
     fn config() -> SpawnConfig {
-        SpawnConfig::builtin(&registry())
+        SpawnConfig::builtin(&registry(), &worldgen())
     }
 
     /// Run enough ticks to trigger exactly one spawn pass.
@@ -299,6 +334,7 @@ mod tests {
             total,
             count_of,
             |_, _| Some(64.0),
+            |_, _| BiomeId(0),
         )
     }
 
@@ -311,7 +347,7 @@ mod tests {
         assert_eq!(cfg.limits.min_player_distance, 16.0);
         assert_eq!(cfg.limits.max_player_distance, 48.0);
         assert_eq!(cfg.limits.despawn_distance, 96.0);
-        assert_eq!(cfg.entries.len(), 6);
+        assert_eq!(cfg.entries.len(), 7);
 
         let cow = cfg.entry("cow").expect("cow entry");
         assert_eq!((cow.weight, cow.group, cow.cap), (10, (1, 3), 10));
@@ -346,20 +382,20 @@ mod tests {
             group = [1, 1]
             cap = 1
         "#;
-        assert!(SpawnConfig::from_toml(bad_name, &reg).is_err());
+        assert!(SpawnConfig::from_toml(bad_name, &reg, &worldgen()).is_err());
 
         let not_a_mob = bad_name.replace("dragon", "player");
-        assert!(SpawnConfig::from_toml(&not_a_mob, &reg).is_err());
+        assert!(SpawnConfig::from_toml(&not_a_mob, &reg, &worldgen()).is_err());
 
         let bad_group = bad_name
             .replace("dragon", "cow")
             .replace("[1, 1]", "[3, 1]");
-        assert!(SpawnConfig::from_toml(&bad_group, &reg).is_err());
+        assert!(SpawnConfig::from_toml(&bad_group, &reg, &worldgen()).is_err());
 
         let typo = bad_name
             .replace("dragon", "cow")
             .replace("weight", "wieght");
-        assert!(SpawnConfig::from_toml(&typo, &reg).is_err());
+        assert!(SpawnConfig::from_toml(&typo, &reg, &worldgen()).is_err());
     }
 
     #[test]
@@ -386,6 +422,7 @@ mod tests {
             0,
             |_| 0,
             |_, _| Some(64.0),
+            |_, _| BiomeId(0),
         );
         assert!(plan.is_empty());
     }
@@ -398,8 +435,10 @@ mod tests {
         for _ in 0..20 {
             let plan = one_pass(&mut spawner, &cfg, false, |_| 0, 0);
             assert!(
-                plan.iter()
-                    .all(|r| matches!(r.entity.as_str(), "cow" | "sheep" | "pig" | "chicken")),
+                plan.iter().all(|r| matches!(
+                    r.entity.as_str(),
+                    "cow" | "sheep" | "pig" | "chicken" | "deer"
+                )),
                 "day plan contained a hostile: {plan:?}"
             );
         }
@@ -459,6 +498,7 @@ mod tests {
                 0,
                 |_| 0,
                 |x, z| Some(63.0 + (x + z).sin()), // varied "terrain"
+                |_, _| BiomeId(0),
             );
             for r in &plan {
                 let d = Vec3::new(r.position.x - anchor.x, 0.0, r.position.z - anchor.z).length();
@@ -485,7 +525,43 @@ mod tests {
             0,
             |_| 0,
             |_, _| None, // nothing walkable anywhere
+            |_, _| BiomeId(0),
         );
         assert!(plan.is_empty());
+    }
+
+    /// A spawn entry naming biomes places its mob only where the ground is one
+    /// of them.
+    #[test]
+    fn a_biome_bound_mob_spawns_only_in_its_biome() {
+        let cfg = config();
+        let deer = cfg.entry("deer").expect("deer spawn entry");
+        let meadows = worldgen().find_biome("meadows").unwrap();
+        assert!(deer.lives_in(meadows));
+        assert!(!deer.lives_in(BiomeId(3)));
+        let mut spawner = Spawner::new(9);
+        for _ in 0..30 {
+            let plan = spawner.tick(
+                &cfg,
+                cfg.limits.spawn_interval,
+                false,
+                &[Vec3::ZERO],
+                0,
+                |_| 0,
+                |_, _| Some(64.0),
+                |_, _| BiomeId(3),
+            );
+            assert!(
+                plan.iter().all(|r| r.entity != "deer"),
+                "deer outside the meadows"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_spawn_biome_rejects_the_file() {
+        let text = BUILTIN_SPAWNING.replace("biomes = [\"meadows\"]", "biomes = [\"moon\"]");
+        let err = SpawnConfig::from_toml(&text, &registry(), &worldgen()).unwrap_err();
+        assert!(err.contains("unknown biome"));
     }
 }

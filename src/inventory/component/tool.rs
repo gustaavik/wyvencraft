@@ -27,6 +27,11 @@ pub struct Tool {
     /// duplicated as a default here.
     #[serde(default)]
     pub damage: Option<f32>,
+    /// Progression tier: a block whose `[block.harvest] tier` is higher cannot
+    /// be broken with this tool at all. `0` by default, which is what a bare
+    /// hand counts as too.
+    #[serde(default)]
+    pub tier: u8,
 }
 
 impl ItemComponent for Tool {

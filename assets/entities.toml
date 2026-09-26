@@ -27,6 +27,25 @@
 #                      [entity.mob.ranged] (projectile_speed/damage,
 #                      keep_distance) makes the attack a projectile instead
 #                      of melee. Spawn rules live in spawning.toml.
+#   [entity.boss]      makes a mob a BOSS (needs [entity.mob]): title,
+#                      arena_radius (players within it are in the fight: they
+#                      see the bar, share the loot, and keep the boss from
+#                      leashing), leash_seconds (default 30: an empty arena
+#                      this long and the boss leaves, offering lost), and
+#                      offering = { item, count } — what its altar
+#                      (blocks.toml [block.interact] kind = "altar") takes.
+#                      [[entity.boss.attack]]: id, range (chosen only when
+#                      the target is this close), cooldown, windup (the
+#                      telegraph, seconds), weight, and effect =
+#                        { kind = "melee", damage }
+#                        { kind = "slam", damage, radius, knockback }
+#                        { kind = "volley", damage, count, spread_deg, speed,
+#                          gravity, lifetime }
+#                        { kind = "summon", entity, count = [min, max], cap }
+#                      [[entity.boss.phase]]: below (fraction of health this
+#                      phase starts at; the first says 1.0), attacks = [ids],
+#                      speed (walk/run multiplier). A phase naming an unknown
+#                      attack rejects the whole file.
 #   [entity.visual]    kind = "humanoid" (skinned box model; optional
 #                      skin = "<mob skin>", arms_forward = true),
 #                      kind = "quadruped" (skin + body/head/leg px sizes, plus
@@ -310,3 +329,148 @@ path = "assets/models/items/vine_sword.bbmodel"
 # Blockbench authors on a 0..1 block; re-centre it horizontally and lift the
 # hilt (which dips to y = -0.889) up to the entity's feet.
 offset = [-0.5, 0.889, -0.5]
+
+# ---- The Meadows (tier 1) ---------------------------------------------------
+
+# Shy grazers of the first ring. Their antler shards are what the Elder Stag's
+# effigy is carved from.
+[[entity]]
+name = "deer"
+
+[entity.physics]
+gravity = 28.0
+terminal_velocity = -60.0
+width = 0.8
+height = 1.3
+ground_friction = 10.0
+
+[entity.mob]
+max_health = 8.0
+walk_speed = 1.6
+run_speed = 4.2
+jump_speed = 9.0
+drops = [
+    { item = "raw_venison", min = 1, max = 2 },
+    { item = "antler_shard", min = 1, max = 2 },
+]
+
+[entity.visual]
+kind = "quadruped"
+skin = "deer"
+body = [10.0, 9.0, 16.0]
+head = [6.0, 6.0, 6.0]
+leg = [3.0, 12.0, 3.0]
+body_uv = [24, 0]
+
+# Brambly things the Elder Stag calls up from the earth. Never spawned by the
+# spawner — only summoned.
+[[entity]]
+name = "thornling"
+
+[entity.physics]
+gravity = 28.0
+terminal_velocity = -60.0
+width = 0.6
+height = 1.8
+ground_friction = 10.0
+
+[entity.mob]
+max_health = 10.0
+walk_speed = 1.4
+run_speed = 3.8
+jump_speed = 9.0
+behavior = "hostile"
+aggro_range = 32.0
+attack_range = 1.6
+attack_damage = 2.0
+attack_cooldown = 1.2
+
+[entity.visual]
+kind = "humanoid"
+skin = "thornling"
+arms_forward = true
+
+# THE MEADOWS BOSS. Summoned at an elder altar (revealed by the Meadows'
+# wayrunes) with a stag effigy. Drops the elder antler — the head of the
+# antler pickaxe, the first tool that can mine Darkwood's copper and tin.
+[[entity]]
+name = "elder stag"
+
+[entity.physics]
+gravity = 28.0
+terminal_velocity = -60.0
+width = 1.4
+height = 2.2
+ground_friction = 10.0
+
+[entity.mob]
+max_health = 160.0
+walk_speed = 2.2
+run_speed = 4.6
+jump_speed = 10.0
+behavior = "hostile"
+knockback_resistance = 0.9
+aggro_range = 48.0
+attack_range = 3.2
+drops = [
+    { item = "elder_antler", min = 3, max = 3 },
+    { item = "elder_stag_trophy", min = 1, max = 1 },
+]
+
+[entity.boss]
+title = "The Elder Stag"
+arena_radius = 32.0
+leash_seconds = 30.0
+offering = { item = "stag_effigy", count = 1 }
+
+[[entity.boss.attack]]
+id = "gore"
+range = 4.0
+cooldown = 1.8
+windup = 0.5
+weight = 3
+effect = { kind = "melee", damage = 6.0 }
+
+[[entity.boss.attack]]
+id = "stomp"
+range = 5.5
+cooldown = 7.0
+windup = 1.0
+weight = 2
+effect = { kind = "slam", damage = 5.0, radius = 6.0, knockback = 10.0 }
+
+[[entity.boss.attack]]
+id = "antler_lightning"
+range = 24.0
+cooldown = 8.0
+windup = 0.8
+weight = 2
+effect = { kind = "volley", damage = 3.0, count = 5, spread_deg = 40.0, speed = 22.0, gravity = 6.0, lifetime = 3.0 }
+
+[[entity.boss.attack]]
+id = "call_of_the_wild"
+range = 30.0
+cooldown = 22.0
+windup = 1.2
+weight = 1
+effect = { kind = "summon", entity = "thornling", count = [2, 3], cap = 4 }
+
+[[entity.boss.phase]]
+below = 1.0
+attacks = ["gore", "stomp", "antler_lightning"]
+
+[[entity.boss.phase]]
+below = 0.5
+attacks = ["gore", "stomp", "antler_lightning", "call_of_the_wild"]
+speed = 1.3
+
+[entity.visual]
+kind = "quadruped"
+skin = "elder_stag"
+body = [14.0, 13.0, 22.0]
+head = [8.0, 8.0, 9.0]
+leg = [5.0, 18.0, 5.0]
+head_uv = [0, 0]
+body_uv = [0, 24]
+leg_uv = [44, 0]
+

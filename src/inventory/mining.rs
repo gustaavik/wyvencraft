@@ -20,7 +20,7 @@ const MIN_BREAK_SECONDS: f32 = 0.05;
 /// everything, which is what it did before any tool was good at it. Returns
 /// `INFINITY` for unbreakable blocks.
 pub fn break_seconds(hardness: f32, harvest: Option<&Harvest>, tool: Option<&Tool>) -> f32 {
-    if !hardness.is_finite() {
+    if !hardness.is_finite() || !meets_tier(harvest, tool) {
         return f32::INFINITY;
     }
     let matched = match (harvest, tool) {
@@ -34,6 +34,21 @@ pub fn break_seconds(hardness: f32, harvest: Option<&Harvest>, tool: Option<&Too
     seconds.max(MIN_BREAK_SECONDS)
 }
 
+/// Whether `tool` is good enough to break a block at all. A block with no
+/// tier (or no `[block.harvest]`) takes anything, a bare hand included; a
+/// tiered one needs a tool of an accepted kind at that tier or above.
+///
+/// Lives here rather than on `Harvest` because `world` sits below `inventory`
+/// and cannot name a `Tool`.
+pub fn meets_tier(harvest: Option<&Harvest>, tool: Option<&Tool>) -> bool {
+    match harvest {
+        Some(harvest) if harvest.tier > 0 => {
+            tool.is_some_and(|tool| harvest.accepts(&tool.kind) && tool.tier >= harvest.tier)
+        }
+        _ => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -44,6 +59,7 @@ mod tests {
             dig_speed,
             durability: 60,
             damage: None,
+            tier: 0,
         }
     }
 
@@ -51,6 +67,7 @@ mod tests {
         Harvest {
             tools: tools.iter().map(|t| (*t).to_string()).collect(),
             required: false,
+            tier: 0,
         }
     }
 
@@ -126,5 +143,50 @@ mod tests {
     #[test]
     fn unbreakable_blocks_take_forever() {
         assert!(break_seconds(f32::INFINITY, None, None).is_infinite());
+    }
+
+    fn tiered(tier: u8) -> Harvest {
+        Harvest {
+            tier,
+            ..wants(&["pickaxe"])
+        }
+    }
+
+    fn pick(tier: u8) -> Tool {
+        Tool {
+            tier,
+            ..tool("pickaxe", 4.0)
+        }
+    }
+
+    /// The Valheim gate: a tiered ore is not slow for a lesser tool, it is
+    /// impossible — and so for a bare hand.
+    #[test]
+    fn a_tiered_block_refuses_anything_below_its_tier() {
+        let ore = tiered(2);
+        assert!(break_seconds(3.0, Some(&ore), None).is_infinite());
+        assert!(break_seconds(3.0, Some(&ore), Some(&pick(1))).is_infinite());
+        assert!(break_seconds(3.0, Some(&ore), Some(&pick(2))).is_finite());
+        assert!(break_seconds(3.0, Some(&ore), Some(&pick(5))).is_finite());
+    }
+
+    /// Tier is measured on an *accepted* tool: a tier-9 shovel is no key to a
+    /// pickaxe ore.
+    #[test]
+    fn a_high_tier_tool_of_the_wrong_kind_does_not_meet_the_tier() {
+        let shovel = Tool {
+            tier: 9,
+            ..tool("shovel", 4.0)
+        };
+        assert!(!meets_tier(Some(&tiered(1)), Some(&shovel)));
+    }
+
+    /// Tier zero is the rule the rest of the game keeps: everything stays
+    /// mineable by hand, just slowly.
+    #[test]
+    fn an_untiered_block_takes_anything() {
+        assert!(meets_tier(Some(&tiered(0)), None));
+        assert!(meets_tier(None, None));
+        assert!(break_seconds(1.5, Some(&wants(&["pickaxe"])), None).is_finite());
     }
 }

@@ -56,6 +56,11 @@
 #                 Defaults to false, which is the rule the game is built on:
 #                 a better tool means a faster one, and every block stays
 #                 mineable by hand. Only oak leaves set it.
+#       tier      the progression gate: the lowest `[item.tool] tier` of an
+#                 accepted tool that can break it AT ALL. Default 0 (anything,
+#                 even a hand). Biome ores use it — copper and tin need the
+#                 tier-2 pickaxe the Meadows boss unlocks — so each biome's
+#                 resources stay out of reach until the previous boss falls.
 #   [block.fluid] with `flow_levels = N` marks the block as a fluid source;
 #             the engine auto-registers "<id>_flow_1".."<id>_flow_N"
 #             blocks after all declared blocks, and the fluid simulation
@@ -84,6 +89,10 @@
 #             blocks emit no cube faces at all, and (like item models) are
 #             visual-only: they never affect gameplay and never take part in
 #             the multiplayer content check.
+#   [block.interact] what right-clicking it does: `kind = "shrine"` (a
+#             wayrune — reading it reveals the boss altar its shrine points to)
+#             or `kind = "altar"` with `boss = "<entity kind>"` (offer that
+#             boss's [entity.boss] offering here to summon it).
 #   random_yaw  turn each instance by a hash of its position, so a field of
 #             plants doesn't read as a grid of clones. Only meaningful
 #             alongside [block.model].
@@ -188,7 +197,7 @@ id = "snow"
 render = "opaque"
 solid = true
 hardness = 0.2
-textures = "blocks/snow"
+block_model = "assets/models/blocks/snow.json"
 
 [block.harvest]
 tool = "shovel"
@@ -234,6 +243,7 @@ block_model = "assets/models/blocks/iron_ore.json"
 
 [block.harvest]
 tool = "pickaxe"
+tier = 3
 
 [[block]]
 id = "copper_ore"
@@ -244,6 +254,7 @@ block_model = "assets/models/blocks/copper_ore.json"
 
 [block.harvest]
 tool = "pickaxe"
+tier = 2
 
 [[block]]
 id = "cobblestone"
@@ -328,3 +339,135 @@ block_model = "assets/models/blocks/cornflower.json"
 
 [block.harvest]
 tool = ["shears", "sword"]
+
+# ---- Biomes, underground layers and progression ----------------------------
+# Placeholder art: every block below is generated from existing textures by
+# scripts/gen-placeholder-blocks.py (replace a PNG with real art at any time
+# and drop its recipe from the script).
+
+# The deep layer's fill, under the caverns (see [[layer]] in worldgen.toml).
+[[block]]
+id = "deepstone"
+render = "opaque"
+solid = true
+hardness = 3.0
+block_model = "assets/models/blocks/deepstone.json"
+
+[block.harvest]
+tool = "pickaxe"
+
+# The Mire's topsoil and dirt layer.
+[[block]]
+id = "mud"
+render = "opaque"
+solid = true
+hardness = 0.5
+block_model = "assets/models/blocks/mud.json"
+
+[block.harvest]
+tool = "shovel"
+
+# The Frostpeaks' dirt layer.
+[[block]]
+id = "packed_snow"
+render = "opaque"
+solid = true
+hardness = 0.8
+block_model = "assets/models/blocks/packed_snow.json"
+
+[block.harvest]
+tool = "shovel"
+
+# The Ashlands' dirt layer and cliffs.
+[[block]]
+id = "basalt"
+render = "opaque"
+solid = true
+hardness = 2.0
+block_model = "assets/models/blocks/basalt.json"
+
+[block.harvest]
+tool = "pickaxe"
+
+# The Ashlands' surface.
+[[block]]
+id = "ash"
+render = "opaque"
+solid = true
+hardness = 0.5
+block_model = "assets/models/blocks/ash.json"
+
+[block.harvest]
+tool = "shovel"
+
+# What shrines and altars are built from.
+[[block]]
+id = "mossy_cobblestone"
+render = "opaque"
+solid = true
+hardness = 2.0
+block_model = "assets/models/blocks/mossy_cobblestone.json"
+
+[block.harvest]
+tool = "pickaxe"
+
+# Darkwood ore: with copper, the ingredients of bronze.
+[[block]]
+id = "tin_ore"
+render = "opaque"
+solid = true
+hardness = 3.0
+block_model = "assets/models/blocks/tin_ore.json"
+
+[block.harvest]
+tool = "pickaxe"
+tier = 2
+
+# Frostpeaks ore.
+[[block]]
+id = "silver_ore"
+render = "opaque"
+solid = true
+hardness = 4.0
+block_model = "assets/models/blocks/silver_ore.json"
+
+[block.harvest]
+tool = "pickaxe"
+tier = 4
+
+# Ashlands ore, found only in the deep layer.
+[[block]]
+id = "cinder_ore"
+render = "opaque"
+solid = true
+hardness = 5.0
+block_model = "assets/models/blocks/cinder_ore.json"
+
+[block.harvest]
+tool = "pickaxe"
+tier = 5
+
+# The heart of a shrine: using it reveals where the biome's boss altar stands.
+# Unbreakable, so a structure cannot be dismantled or carried off.
+[[block]]
+id = "wayrune"
+render = "opaque"
+solid = true
+hardness = inf
+block_model = "assets/models/blocks/wayrune.json"
+
+[block.interact]
+kind = "shrine"
+
+# The Meadows boss altar: offer a stag effigy here to summon the Elder Stag.
+[[block]]
+id = "elder_altar"
+render = "opaque"
+solid = true
+hardness = inf
+block_model = "assets/models/blocks/elder_altar.json"
+
+[block.interact]
+kind = "altar"
+boss = "elder stag"
+

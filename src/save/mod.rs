@@ -6,6 +6,8 @@
 //! - `world.dat` — the block-edit overlay (name-based palette), bincode.
 //! - `player.dat` — the save owner's player + inventory, bincode.
 //! - `players.dat` — per-identity records for multiplayer clients, bincode.
+//! - `mobs.dat` — the mob population, by kind name, bincode.
+//! - `progression.dat` — shrines read, altars revealed, bosses beaten, bincode.
 //!
 //! Worlds regenerate terrain from the seed on load; only the divergence from
 //! generated terrain (the edit overlay) is stored — the same model the host
@@ -28,6 +30,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::GameMode;
 use crate::core::day_cycle::DEFAULT_START;
+use crate::progression::WorldProgression;
 
 pub use data::{ItemStackData, MobData, MobsData, PlayerData, PlayerRecords, WorldData};
 pub use repository::{
@@ -36,7 +39,7 @@ pub use repository::{
 };
 
 /// On-disk format version, stamped into `level.toml` and every `.dat` header.
-pub const SAVE_VERSION: u32 = 1;
+pub const SAVE_VERSION: u32 = 2;
 /// Directory holding all world saves. A leaf name under
 /// [`crate::paths::data_dir`], not a path — see that module for where it sits.
 pub use crate::paths::SAVES_DIR;
@@ -46,6 +49,7 @@ const WORLD_FILE: &str = "world.dat";
 const PLAYER_FILE: &str = "player.dat";
 const PLAYERS_FILE: &str = "players.dat";
 const MOBS_FILE: &str = "mobs.dat";
+const PROGRESSION_FILE: &str = "progression.dat";
 /// Local player profile (stable multiplayer identity), next to `saves/`.
 use crate::paths::PROFILE_FILE;
 
@@ -109,6 +113,17 @@ pub struct SavedGame {
     pub player: Option<PlayerData>,
     pub players: PlayerRecords,
     pub mobs: MobsData,
+    /// Shrines read, altars revealed, bosses beaten. Empty for a new world.
+    pub progression: WorldProgression,
+}
+
+/// The `.dat` payloads of one save, borrowed from the running game.
+pub struct SavePayload<'a> {
+    pub world: &'a WorldData,
+    pub player: &'a PlayerData,
+    pub players: &'a PlayerRecords,
+    pub mobs: &'a MobsData,
+    pub progression: &'a WorldProgression,
 }
 
 /// One row of the world list in the menus.
@@ -215,30 +230,44 @@ impl WorldSave {
                 None
             })
             .unwrap_or_default();
+        // Fails soft like the mob population: losing it costs the players a
+        // walk back to a shrine, never the world.
+        let progression = read_dat::<WorldProgression>(&self.dir.join(PROGRESSION_FILE))
+            .unwrap_or_else(|err| {
+                log::warn!(
+                    "ignoring corrupt progression.dat for '{}': {err}",
+                    self.slug
+                );
+                None
+            })
+            .unwrap_or_default();
         Ok(SavedGame {
             save: self,
             world,
             player,
             players,
             mobs,
+            progression,
         })
     }
 
     /// Persist the world: metadata + edits + the local player + remote-player
-    /// records + the mob population. Bumps `last_played`.
-    pub fn write(
-        &mut self,
-        world: &WorldData,
-        player: &PlayerData,
-        players: &PlayerRecords,
-        mobs: &MobsData,
-    ) -> Result<(), SaveError> {
+    /// records + the mob population + progression. Bumps `last_played`.
+    pub fn write(&mut self, payload: &SavePayload<'_>) -> Result<(), SaveError> {
+        let SavePayload {
+            world,
+            player,
+            players,
+            mobs,
+            progression,
+        } = payload;
         self.meta.last_played_unix = unix_now();
         self.write_level()?;
         write_dat(&self.dir.join(WORLD_FILE), world)?;
         write_dat(&self.dir.join(PLAYER_FILE), player)?;
         write_dat(&self.dir.join(PLAYERS_FILE), players)?;
         write_dat(&self.dir.join(MOBS_FILE), mobs)?;
+        write_dat(&self.dir.join(PROGRESSION_FILE), progression)?;
         Ok(())
     }
 
@@ -615,7 +644,21 @@ mod tests {
         };
         save.meta.spawn = [0.5, 71.0, 0.5];
         save.meta.time_of_day = 0.42;
-        save.write(&world, &player, &players, &mobs).unwrap();
+        let mut progression = WorldProgression::default();
+        progression.read_shrine(
+            crate::core::BlockPos::new(40, 97, 12),
+            "meadows_altar",
+            crate::core::BlockPos::new(300, 95, -80),
+        );
+        progression.defeat("elder stag");
+        save.write(&SavePayload {
+            world: &world,
+            player: &player,
+            players: &players,
+            mobs: &mobs,
+            progression: &progression,
+        })
+        .unwrap();
 
         let game = WorldSave::open(&root, "test-world")
             .unwrap()
@@ -633,6 +676,7 @@ mod tests {
         assert_eq!(loaded_player.selected_slot, 4);
         assert_eq!(game.players.0.get(&77).unwrap().slots, player.slots);
         assert_eq!(game.mobs, mobs, "mob population round-trips");
+        assert_eq!(game.progression, progression, "progression round-trips");
 
         // A save without mobs.dat (pre-mobs world) still loads, empty.
         fs::remove_file(root.join("test-world").join(MOBS_FILE)).unwrap();
@@ -641,6 +685,14 @@ mod tests {
             .load()
             .unwrap();
         assert_eq!(game.mobs, MobsData::default(), "missing mobs.dat = empty");
+
+        // Likewise progression: missing means nothing achieved yet.
+        fs::remove_file(root.join("test-world").join(PROGRESSION_FILE)).unwrap();
+        let game = WorldSave::open(&root, "test-world")
+            .unwrap()
+            .load()
+            .unwrap();
+        assert_eq!(game.progression, WorldProgression::default());
 
         // No temp files left behind by the atomic writes.
         let leftovers: Vec<_> = fs::read_dir(root.join("test-world"))

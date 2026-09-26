@@ -28,15 +28,21 @@ pub enum MobSkin {
     Sheep,
     Pig,
     Chicken,
+    Deer,
+    Thornling,
+    ElderStag,
 }
 
-pub const ALL: [MobSkin; 6] = [
+pub const ALL: [MobSkin; 9] = [
     MobSkin::Zombie,
     MobSkin::Skeleton,
     MobSkin::Cow,
     MobSkin::Sheep,
     MobSkin::Pig,
     MobSkin::Chicken,
+    MobSkin::Deer,
+    MobSkin::Thornling,
+    MobSkin::ElderStag,
 ];
 
 impl MobSkin {
@@ -50,7 +56,10 @@ impl MobSkin {
     /// missing left limbs filled in. Quadrupeds have their own unwrap and no
     /// such notion.
     fn is_humanoid(self) -> bool {
-        matches!(self, MobSkin::Zombie | MobSkin::Skeleton)
+        matches!(
+            self,
+            MobSkin::Zombie | MobSkin::Skeleton | MobSkin::Thornling
+        )
     }
 
     /// The name entity kinds reference (and the PNG file stem).
@@ -62,6 +71,9 @@ impl MobSkin {
             MobSkin::Sheep => "sheep",
             MobSkin::Pig => "pig",
             MobSkin::Chicken => "chicken",
+            MobSkin::Deer => "deer",
+            MobSkin::Thornling => "thornling",
+            MobSkin::ElderStag => "elder_stag",
         }
     }
 }

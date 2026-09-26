@@ -529,6 +529,17 @@ mod tests {
             "red_mushroom",
             "brown_mushroom",
             "cornflower",
+            "deepstone",
+            "mud",
+            "packed_snow",
+            "basalt",
+            "ash",
+            "mossy_cobblestone",
+            "tin_ore",
+            "silver_ore",
+            "cinder_ore",
+            "wayrune",
+            "elder_altar",
         ];
         /// One expected tool: name, kind, dig_speed, durability, damage.
         type ToolRow = (&'static str, &'static str, f32, u16, Option<f32>);
@@ -583,6 +594,16 @@ mod tests {
 
         // Plain stackables with no components at all, declared after the armor.
         let plain = ["stick"];
+        // The Meadows' progression loot, last in the file.
+        let meadows = [
+            "antler_shard",
+            "raw_venison",
+            "cooked_venison",
+            "stag_effigy",
+            "elder_antler",
+            "elder_stag_trophy",
+            "antler_pickaxe",
+        ];
 
         assert_eq!(
             items.len(),
@@ -591,7 +612,8 @@ mod tests {
                 + foods.len()
                 + materials.len()
                 + armors.len()
-                + plain.len(),
+                + plain.len()
+                + meadows.len(),
             "item count changed"
         );
 
@@ -1037,5 +1059,24 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Each pickaxe's tier is what the ore gates are balanced against: the
+    /// starting tools cannot touch Darkwood's ore, the Elder Stag's antler
+    /// pickaxe can.
+    #[test]
+    fn pickaxe_tiers_climb_with_the_progression() {
+        let blocks = BlockRegistry::with_builtins();
+        let items = ItemRegistry::from_blocks(&blocks);
+        let tier = |name: &str| {
+            let id = items.find(name).unwrap_or_else(|| panic!("{name}"));
+            items.get(id).get::<Tool>().expect("a tool").tier
+        };
+        assert_eq!(tier("wooden_pickaxe"), 1);
+        assert_eq!(tier("stone_pickaxe"), 1);
+        assert_eq!(tier("antler_pickaxe"), 2);
+        assert_eq!(tier("iron_pickaxe"), 4);
+        let tin = blocks.get(blocks.find("tin_ore").unwrap());
+        assert_eq!(tin.harvest.as_ref().unwrap().tier, 2);
     }
 }

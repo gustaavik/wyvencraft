@@ -24,6 +24,7 @@ use crate::world::block::{
 };
 use crate::world::blockmodel::BakedBlockModel;
 use crate::world::generation::WorldGenConfig;
+use crate::world::structure::StructureConfig;
 pub use wyven_voxel::FluidTexture;
 use wyven_voxel::model_hitbox;
 use wyven_voxel::{BlockModel, FaceTextures};
@@ -35,6 +36,7 @@ use wyven_render::TileRegistry;
 use wyven_render::block_textures::{self, AnimatedLayers, BlockTextureSet, Strip};
 
 pub mod catalog;
+mod references;
 
 pub use catalog::BlockAppearance;
 
@@ -117,6 +119,10 @@ pub struct GameContent {
     pub items: Arc<ItemRegistry>,
     pub entities: Arc<EntityRegistry>,
     pub worldgen: Arc<WorldGenConfig>,
+    /// Shrines and boss altars (`assets/structures.toml`). Part of the terrain,
+    /// so part of [`content_hash`]: peers placing different structures would
+    /// be walking different worlds.
+    pub structures: Arc<StructureConfig>,
     /// Mob spawn rules (`assets/spawning.toml`).
     pub spawning: Arc<SpawnConfig>,
     /// Sound/music definitions from `assets/audio.toml`. Kept off
@@ -186,6 +192,7 @@ const BLOCKS_PATH: &str = "assets/blocks.toml";
 const ITEMS_PATH: &str = "assets/items.toml";
 const ENTITIES_PATH: &str = "assets/entities.toml";
 const WORLDGEN_PATH: &str = "assets/worldgen.toml";
+const STRUCTURES_PATH: &str = "assets/structures.toml";
 const SPAWNING_PATH: &str = "assets/spawning.toml";
 const AUDIO_PATH: &str = "assets/audio.toml";
 
@@ -291,15 +298,32 @@ impl GameContent {
             |_| WorldGenConfig::builtin(&blocks),
             |_| "worldgen config".to_string(),
         ));
+        let structures = Arc::new(load_or_builtin(
+            source,
+            STRUCTURES_PATH,
+            "structures",
+            &mut (),
+            |text, _| StructureConfig::from_toml(text, &blocks, &worldgen),
+            |_| StructureConfig::builtin(&blocks, &worldgen),
+            |config| format!("{} structures", config.all().len()),
+        ));
         let spawning = Arc::new(load_or_builtin(
             source,
             SPAWNING_PATH,
             "spawning",
             &mut (),
-            |text, _| SpawnConfig::from_toml(text, &entities),
-            |_| SpawnConfig::builtin(&entities),
+            |text, _| SpawnConfig::from_toml(text, &entities, &worldgen),
+            |_| SpawnConfig::builtin(&entities, &worldgen),
             |config| format!("{} spawn rules", config.entries.len()),
         ));
+        // The loop's references cross files that load in an order where their
+        // targets cannot yet be seen; this is the first point that sees all.
+        for problem in references::dangling_references(&blocks, &items, &entities, &structures) {
+            log::warn!("{problem}");
+        }
+        for (block, tier) in references::unreachable_tiers(&blocks, &items) {
+            log::warn!("block {block:?}: needs a tier {tier} tool, and no tool reaches it");
+        }
         let sounds = Arc::new(load_or_builtin(
             source,
             AUDIO_PATH,
@@ -432,7 +456,14 @@ impl GameContent {
             None => MISSING_FACES,
         };
         // `sounds` is excluded here on purpose — see its field doc on `GameContent`.
-        let hash = content_hash(&blocks, &items, &entities, &worldgen, &spawning);
+        let hash = content_hash(&HashedContent {
+            blocks: &blocks,
+            items: &items,
+            entities: &entities,
+            worldgen: &worldgen,
+            structures: &structures,
+            spawning: &spawning,
+        });
         Arc::new(Self {
             tiles,
             block_textures,
@@ -440,6 +471,7 @@ impl GameContent {
             items,
             entities,
             worldgen,
+            structures,
             spawning,
             sounds,
             models: Arc::new(models),
@@ -839,19 +871,32 @@ fn unknown_harvest_tools<'a>(
     unknown
 }
 
+/// Every definition that must match between peers for them to share a world.
+struct HashedContent<'a> {
+    blocks: &'a BlockRegistry,
+    items: &'a ItemRegistry,
+    entities: &'a EntityRegistry,
+    worldgen: &'a WorldGenConfig,
+    structures: &'a StructureConfig,
+    spawning: &'a SpawnConfig,
+}
+
 /// FNV-1a over a canonical rendering of the definitions. The `Debug`
 /// representations cover every gameplay-affecting field deterministically —
 /// all collections are ordered `Vec`s, and an item's capability components are
 /// held in key order for exactly this reason — which is the fidelity the
 /// mismatch check needs.
-fn content_hash(
-    blocks: &BlockRegistry,
-    items: &ItemRegistry,
-    entities: &EntityRegistry,
-    worldgen: &WorldGenConfig,
-    spawning: &SpawnConfig,
-) -> u64 {
-    let repr = format!("{blocks:?}|{items:?}|{entities:?}|{worldgen:?}|{spawning:?}");
+fn content_hash(content: &HashedContent<'_>) -> u64 {
+    let HashedContent {
+        blocks,
+        items,
+        entities,
+        worldgen,
+        structures,
+        spawning,
+    } = content;
+    let repr =
+        format!("{blocks:?}|{items:?}|{entities:?}|{worldgen:?}|{structures:?}|{spawning:?}");
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in repr.as_bytes() {
         hash ^= u64::from(*byte);
@@ -1175,12 +1220,24 @@ mod tests {
                 "sand",
                 "oak_log",
                 "oak_leaves",
+                "snow",
                 "gravel",
                 "coal_ore",
                 "iron_ore",
                 "copper_ore",
                 "cobblestone",
                 "cornflower",
+                "deepstone",
+                "mud",
+                "packed_snow",
+                "basalt",
+                "ash",
+                "mossy_cobblestone",
+                "tin_ore",
+                "silver_ore",
+                "cinder_ore",
+                "wayrune",
+                "elder_altar",
             ],
             "the blocks migrated to Blockbench so far"
         );
@@ -1292,10 +1349,11 @@ mod tests {
             declared.push(item.id.clone());
         }
 
-        // The twelve tiered tools, the vine sword, the four ground-cover blocks
-        // whose items are drawn as their own model, and the twenty-one flat
-        // items extruded from their sprites by `item/generated`.
-        assert_eq!(declared.len(), 38, "declared item models: {declared:?}");
+        // The thirteen tiered tools (the antler pickaxe among them), the vine
+        // sword, the four ground-cover blocks whose items are drawn as their
+        // own model, and the twenty-seven flat items extruded from their
+        // sprites by `item/generated`.
+        assert_eq!(declared.len(), 45, "declared item models: {declared:?}");
     }
 
     /// The shipped items file with every model path pointed somewhere else.
@@ -1605,9 +1663,24 @@ mod tests {
         let items = Arc::new(ItemRegistry::from_blocks(&blocks));
         let entities = Arc::new(EntityRegistry::builtin());
         let worldgen = Arc::new(WorldGenConfig::builtin(&blocks));
-        let spawning = Arc::new(SpawnConfig::builtin(&entities));
+        let structures = StructureConfig::builtin(&blocks, &worldgen);
+        let spawning = Arc::new(SpawnConfig::builtin(&entities, &worldgen));
+        let hashed = |blocks: &BlockRegistry,
+                      items: &ItemRegistry,
+                      worldgen: &WorldGenConfig,
+                      structures: &StructureConfig,
+                      spawning: &SpawnConfig| {
+            content_hash(&HashedContent {
+                blocks,
+                items,
+                entities: &entities,
+                worldgen,
+                structures,
+                spawning,
+            })
+        };
         assert_ne!(
-            content_hash(&blocks, &items, &entities, &worldgen, &spawning),
+            hashed(&blocks, &items, &worldgen, &structures, &spawning),
             a.hash,
             "a changed definition must change the hash"
         );
@@ -1615,16 +1688,28 @@ mod tests {
         // Spawn rules gate multiplayer too: divergent rules = divergent hash.
         use crate::entity::spawning::BUILTIN_SPAWNING;
         let tweaked = BUILTIN_SPAWNING.replace("max_mobs = 40", "max_mobs = 99");
-        let spawning = Arc::new(SpawnConfig::from_toml(&tweaked, &entities).unwrap());
+        let spawning = Arc::new(SpawnConfig::from_toml(&tweaked, &entities, &worldgen).unwrap());
         let blocks = Arc::new(builtin_blocks(&mut BlockCtx {
             visuals: BlockVisuals::default(),
         }));
         let items = Arc::new(ItemRegistry::from_blocks(&blocks));
         let worldgen = Arc::new(WorldGenConfig::builtin(&blocks));
+        let structures = StructureConfig::builtin(&blocks, &worldgen);
         assert_ne!(
-            content_hash(&blocks, &items, &entities, &worldgen, &spawning),
+            hashed(&blocks, &items, &worldgen, &structures, &spawning),
             a.hash,
             "changed spawn rules must change the hash"
+        );
+
+        // Structures are terrain: a moved shrine is a different world.
+        use crate::world::structure::BUILTIN_STRUCTURES;
+        let tweaked = BUILTIN_STRUCTURES.replace("chance_per_mille = 650", "chance_per_mille = 10");
+        let moved = StructureConfig::from_toml(&tweaked, &blocks, &worldgen).unwrap();
+        let spawning = Arc::new(SpawnConfig::builtin(&entities, &worldgen));
+        assert_ne!(
+            hashed(&blocks, &items, &worldgen, &structures, &spawning),
+            hashed(&blocks, &items, &worldgen, &moved, &spawning),
+            "changed structures must change the hash"
         );
     }
 }

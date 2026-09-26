@@ -341,7 +341,10 @@ impl GameState<Wyvencraft> for InGameState {
             // Mobs are host-authoritative like fluids; clients only render
             // the replicated copies.
             self.update_mobs(ctx.dt.min(0.05));
+            self.update_boss_fight(ctx.dt);
             self.update_spawning(ctx.dt);
+        } else {
+            self.tick_remote_telegraph(ctx.dt);
         }
         self.update_streaming(ctx.shared.settings.render.render_distance);
         // Drops and arrows keep simulating even with the inventory or death
@@ -453,6 +456,10 @@ impl GameState<Wyvencraft> for InGameState {
             hud::draw_held_label(egui_ctx, name, alpha, survival);
         }
         hud::draw_mode_indicator(egui_ctx, self.player.mode.label());
+        crate::ui::compass::draw_compass(egui_ctx, self.player.yaw, &self.waypoints());
+        if let Some(bar) = self.boss_bar() {
+            crate::ui::boss_bar::draw_boss_bar(egui_ctx, &bar);
+        }
 
         // Survival HUD: vitals and break progress.
         if survival {
@@ -481,6 +488,7 @@ impl GameState<Wyvencraft> for InGameState {
                     self.loader.pending_count()
                 ),
                 format!("on_ground: {}", self.player.on_ground),
+                self.biome_line(),
                 format!(
                     "mobs: {} live / {} arrows / {} drops",
                     self.mobs.live.len() + self.mobs.remote.len(),

@@ -7,9 +7,8 @@
 //! neighbouring chunks reproduce the same tree across their border with no
 //! cross-chunk communication — generation stays deterministic in `(seed, pos)`.
 
-use super::biome::Biome;
-use super::config::{TreeDef, TreeShape, WorldGenConfig};
-use super::noise::TerrainNoise;
+use super::config::{TreeDef, TreeShape};
+use super::terrain::Terrain;
 use crate::core::{BlockId, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, LocalPos};
 use crate::world::chunk::Chunk;
 
@@ -45,7 +44,7 @@ enum Overwrite {
 
 /// Scatter all surface features into `chunk`. Deterministic in `(seed, pos)`
 /// and independent of neighbouring chunks.
-pub fn populate(chunk: &mut Chunk, noise: &TerrainNoise, seed: u64, config: &WorldGenConfig) {
+pub fn populate(chunk: &mut Chunk, terrain: &Terrain, seed: u64) {
     let origin = chunk.pos.origin();
     for_each_anchor(
         origin,
@@ -54,11 +53,11 @@ pub fn populate(chunk: &mut Chunk, noise: &TerrainNoise, seed: u64, config: &Wor
         seed,
         BOULDER_SALT,
         |x, z, h| {
-            try_boulder(chunk, noise, origin, x, z, h, config);
+            try_boulder(chunk, terrain, origin, x, z, h);
         },
     );
     for_each_anchor(origin, TREE_CELL, TREE_REACH, seed, TREE_SALT, |x, z, h| {
-        try_tree(chunk, noise, origin, x, z, h, config);
+        try_tree(chunk, terrain, origin, x, z, h);
     });
     // Ground cover goes last, and only into air: trunks push through their own
     // leaves but not through anything else, so a plant placed first would punch
@@ -70,7 +69,7 @@ pub fn populate(chunk: &mut Chunk, noise: &TerrainNoise, seed: u64, config: &Wor
         seed,
         PLANT_SALT,
         |x, z, h| {
-            try_plant(chunk, noise, origin, x, z, h, config);
+            try_plant(chunk, terrain, origin, x, z, h);
         },
     );
 }
@@ -78,7 +77,7 @@ pub fn populate(chunk: &mut Chunk, noise: &TerrainNoise, seed: u64, config: &Wor
 /// Visit the anchor of every grid cell whose feature could reach this chunk.
 /// The anchor is jittered inside its cell by the cell hash, which is also
 /// passed on as the feature's source of randomness.
-fn for_each_anchor(
+pub(crate) fn for_each_anchor(
     origin: BlockPos,
     cell: i32,
     reach: i32,
@@ -102,7 +101,7 @@ fn for_each_anchor(
 
 /// SplitMix64-style mix of a grid cell; the sole source of feature randomness,
 /// so a feature depends only on `(seed, cell, salt)`.
-fn feature_hash(seed: u64, cx: i32, cz: i32, salt: u64) -> u64 {
+pub(crate) fn feature_hash(seed: u64, cx: i32, cz: i32, salt: u64) -> u64 {
     let mut h = seed
         ^ salt.wrapping_mul(0x9E37_79B9_7F4A_7C15)
         ^ (cx as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
@@ -116,26 +115,19 @@ fn feature_hash(seed: u64, cx: i32, cz: i32, salt: u64) -> u64 {
 
 /// Grow a tree at `(x, z)` if the climate and terrain allow one there. Which
 /// tree (if any) and its chance come from the biome's worldgen config.
-fn try_tree(
-    chunk: &mut Chunk,
-    noise: &TerrainNoise,
-    origin: BlockPos,
-    x: i32,
-    z: i32,
-    h: u64,
-    config: &WorldGenConfig,
-) {
-    let ground = noise.surface_height(x, z).clamp(1, CHUNK_HEIGHT - 1);
+fn try_tree(chunk: &mut Chunk, terrain: &Terrain, origin: BlockPos, x: i32, z: i32, h: u64) {
+    let config = terrain.config();
+    let column = terrain.column(x, z);
+    let ground = column.height;
     if ground <= config.sea_level {
         return;
     }
-    let biome = Biome::from_temperature(noise.temperature(x, z));
     // Per-mille chance a candidate cell grows a tree, before vegetation scaling.
-    let Some((tree_index, base_chance)) = config.biome(biome).tree else {
+    let Some((tree_index, base_chance)) = config.biome(column.biome).tree else {
         return;
     };
     // Vegetation noise clumps trees into groves separated by clearings.
-    let richness = (noise.vegetation(x, z) + 0.55).clamp(0.0, 1.3);
+    let richness = (terrain.noise().vegetation(x, z) + 0.55).clamp(0.0, 1.3);
     if (h % 1000) as f32 >= base_chance * richness {
         return;
     }
@@ -149,25 +141,19 @@ fn try_tree(
 /// Drop one ground-cover block on the surface at `(x, z)`, if the biome grows
 /// any there. The species is drawn from the biome's list by the feature hash,
 /// so which plant lands where depends only on `(seed, cell)`.
-fn try_plant(
-    chunk: &mut Chunk,
-    noise: &TerrainNoise,
-    origin: BlockPos,
-    x: i32,
-    z: i32,
-    h: u64,
-    config: &WorldGenConfig,
-) {
-    let ground = noise.surface_height(x, z).clamp(1, CHUNK_HEIGHT - 1);
+fn try_plant(chunk: &mut Chunk, terrain: &Terrain, origin: BlockPos, x: i32, z: i32, h: u64) {
+    let config = terrain.config();
+    let column = terrain.column(x, z);
+    let ground = column.height;
     if ground <= config.sea_level {
         return;
     }
-    let biome = config.biome(Biome::from_temperature(noise.temperature(x, z)));
+    let biome = config.biome(column.biome);
     if biome.plants.is_empty() {
         return;
     }
     // The same clumping trees use, so meadows follow the groves.
-    let richness = (noise.vegetation(x, z) + 0.55).clamp(0.0, 1.3);
+    let richness = (terrain.noise().vegetation(x, z) + 0.55).clamp(0.0, 1.3);
     if (h % 1000) as f32 >= biome.plant_chance_per_mille * richness {
         return;
     }
@@ -284,19 +270,12 @@ fn corner_trimmed(h: u64, layer: usize, dx: i32, dz: i32) -> bool {
 }
 
 /// Drop a half-buried boulder at `(x, z)` if it sits on dry land.
-fn try_boulder(
-    chunk: &mut Chunk,
-    noise: &TerrainNoise,
-    origin: BlockPos,
-    x: i32,
-    z: i32,
-    h: u64,
-    config: &WorldGenConfig,
-) {
+fn try_boulder(chunk: &mut Chunk, terrain: &Terrain, origin: BlockPos, x: i32, z: i32, h: u64) {
+    let config = terrain.config();
     if h % 1000 >= config.boulder.chance_per_mille {
         return;
     }
-    let ground = noise.surface_height(x, z).clamp(1, CHUNK_HEIGHT - 1);
+    let ground = terrain.height(x, z);
     if ground <= config.sea_level {
         return;
     }
@@ -365,15 +344,15 @@ mod tests {
     use super::*;
     use crate::core::ChunkPos;
     use crate::world::block::{BlockRegistry, blocks};
-    use crate::world::generation::{NoiseGenerator, WorldGenerator};
+    use crate::world::generation::{NoiseGenerator, WorldGenConfig, WorldGenerator};
 
     /// Every distinct ground-cover block the shipped worldgen can place. The
     /// biome lists overlap (the mushrooms grow in both plains and snowy), so
     /// this deduplicates rather than concatenating.
     fn plant_ids(config: &WorldGenConfig) -> Vec<BlockId> {
         let mut ids = Vec::new();
-        for biome in [Biome::Plains, Biome::Snowy, Biome::Desert] {
-            for &id in &config.biome(biome).plants {
+        for biome in config.biomes() {
+            for &id in &biome.plants {
                 if !ids.contains(&id) {
                     ids.push(id);
                 }

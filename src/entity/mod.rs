@@ -3,6 +3,7 @@
 //! [`kind::EntityRegistry`] loaded from `assets/entities.toml`.
 
 pub mod animation;
+pub mod boss;
 pub mod brain;
 pub mod camera;
 pub mod dropped_item;
