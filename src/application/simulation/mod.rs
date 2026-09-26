@@ -7,6 +7,7 @@
 //! and no transport, which is what lets the use cases on it be tested with
 //! nothing but a seed.
 
+mod bosses;
 mod drops;
 mod mobs;
 mod player;
@@ -16,6 +17,7 @@ use std::sync::Arc;
 use glam::Vec3;
 
 use crate::application::ecs::Ecs;
+pub use bosses::Volley;
 pub use mobs::{
     BossBeat, KNOCKBACK_LIFT, KNOCKBACK_PUSH, MobTarget, MobTick, PLAYER_ATTACK_DAMAGE, ground_at,
 };

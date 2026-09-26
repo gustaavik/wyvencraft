@@ -5,7 +5,17 @@ use super::*;
 impl InGameState {
     /// Host: publish this frame's authoritative state.
     pub(super) fn broadcast_authority_state(&mut self, send_stats: bool) {
-        // Player snapshots: the host's own, then every remote's.
+        self.broadcast_player_states();
+        // Periodic authoritative vitals for the host and every remote player.
+        if send_stats {
+            self.broadcast_player_stats();
+        }
+        self.broadcast_equipment_changes();
+        self.broadcast_mob_state();
+    }
+
+    /// Player snapshots: the host's own, then every remote's.
+    fn broadcast_player_states(&mut self) {
         let mut snapshots = vec![(
             HOST_PLAYER_ID,
             self.sim.player.position.to_array(),
@@ -27,33 +37,33 @@ impl InGameState {
                 Channel::Unreliable,
             );
         }
+    }
 
-        // Periodic authoritative vitals for the host and every remote player.
-        if send_stats {
-            let mut stats = vec![(
-                HOST_PLAYER_ID,
-                self.sim.player.health,
-                self.sim.player.hunger,
-                self.sim.player.mode,
-            )];
-            stats.extend(
-                players::all(&self.sim.ecs).map(|rp| (rp.id, rp.health, rp.hunger, rp.mode)),
+    /// Every player's vitals and mode, host first.
+    fn broadcast_player_stats(&mut self) {
+        let mut stats = vec![(
+            HOST_PLAYER_ID,
+            self.sim.player.health,
+            self.sim.player.hunger,
+            self.sim.player.mode,
+        )];
+        stats.extend(players::all(&self.sim.ecs).map(|rp| (rp.id, rp.health, rp.hunger, rp.mode)));
+        for (id, health, hunger, mode) in stats {
+            self.net.session.broadcast(
+                &ServerMessage::PlayerStats {
+                    id,
+                    health,
+                    hunger,
+                    mode,
+                },
+                Channel::Reliable,
             );
-            for (id, health, hunger, mode) in stats {
-                self.net.session.broadcast(
-                    &ServerMessage::PlayerStats {
-                        id,
-                        health,
-                        hunger,
-                        mode,
-                    },
-                    Channel::Reliable,
-                );
-            }
         }
+    }
 
-        // What everyone is wearing and holding, only when it changes (the host's
-        // own from its inventory, each remote's from its last inventory sync).
+    /// What everyone is wearing and holding, only when it changes (the host's
+    /// own from its inventory, each remote's from its last inventory sync).
+    fn broadcast_equipment_changes(&mut self) {
         let mut equip: Vec<(PlayerId, Equipment)> =
             vec![(HOST_PLAYER_ID, equipment_of(&self.sim.inventory))];
         equip.extend(players::all(&self.sim.ecs).map(|rp| (rp.id, rp.equipment)));
@@ -66,10 +76,12 @@ impl InGameState {
                 );
             }
         }
+    }
 
-        // Mob lifecycle events queued by this frame's simulation (spawns,
-        // hurts, deaths, arrows, remote-player damage), then one batched
-        // unreliable movement snapshot for all live mobs.
+    /// Mob lifecycle events queued by this frame's simulation (spawns, hurts,
+    /// deaths, arrows, remote-player damage), then one batched unreliable
+    /// movement snapshot for all live mobs.
+    fn broadcast_mob_state(&mut self) {
         // Only a host has anyone to tell; elsewhere the events are dropped
         // here, exactly where they used to be dropped at the moment of emission.
         let events = std::mem::take(&mut self.sim.outbox);

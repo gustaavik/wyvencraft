@@ -22,6 +22,7 @@ use crate::domain::inventory::crafting::{KnownItems, station_ids};
 use crate::infrastructure::net::session::{ClientSession, HostSession, SingleplayerSession};
 use crate::infrastructure::net::{Client, Host, NetVec3, PlayerId, PlayerRestore, RecipeData};
 use crate::infrastructure::recipes::load_recipe_book;
+use crate::infrastructure::save::restore::restore_into;
 use crate::infrastructure::save::{FileWorldRepository, SavedGame};
 use crate::presentation::content::GameContent;
 use crate::presentation::editor::EditorSession;
@@ -92,47 +93,14 @@ impl InGameState {
             save.meta.game_mode,
             None,
         );
-        if let Some(world) = &world {
-            let resolved = world.resolve(&state.content.rules.blocks);
-            let count = resolved.len();
-            for (pos, block) in resolved {
-                state.sim.world.apply_edit(pos, block);
-            }
-            // `build` conflates the generation anchor with the respawn point;
-            // a saved world keeps its recorded spawn instead.
-            state.sim.spawn = Vec3::from_array(save.meta.spawn);
-            log::info!("restored {count} world edits");
-        }
-        if let Some(player) = &player {
-            player.apply(
-                &mut state.sim.player,
-                &mut state.sim.inventory,
-                &state.content.rules.items,
-            );
-        }
-        // Respawn the saved mob population. Fresh ids and brains (both are
-        // session-scoped); unknown kinds fail soft like unknown blocks/items.
-        let saved_mobs = mobs.mobs.len();
-        for data in mobs.mobs {
-            let position = Vec3::from_array(data.position);
-            match state.sim.spawn_mob(&data.kind, position) {
-                Some(id) => state.sim.restore_mob(id, data.health, data.night_spawned),
-                None => log::warn!(
-                    "save references unknown mob kind '{}'; dropping it",
-                    data.kind
-                ),
-            }
-        }
-        state.sim.progression = progression;
-        if saved_mobs > 0 {
-            log::info!(
-                "restored {} of {saved_mobs} saved mobs",
-                state
-                    .sim
-                    .ecs
-                    .count::<crate::application::ecs::components::Mob>()
-            );
-        }
+        restore_into(
+            &mut state.sim,
+            Vec3::from_array(save.meta.spawn),
+            world.as_ref(),
+            player.as_ref(),
+            mobs,
+            progression,
+        );
         log::info!(
             "loaded world '{}' (seed {}, time {:.3}, player {})",
             save.meta.name,
@@ -252,9 +220,17 @@ impl InGameState {
             save: Persistence::none(),
             content,
         };
-        if state.net.session.is_authority() {
-            state.debug_goto_from_env();
-            state.debug_spawn_from_env();
+        state.apply_dev_boot_options();
+        state
+    }
+
+    /// The `WYVEN_*` developer switches that act on a session once it exists:
+    /// travel and debug spawns (authority only), the starting camera, the
+    /// item editor, and an inventory open at boot. See `application::boot_plan`.
+    fn apply_dev_boot_options(&mut self) {
+        if self.net.session.is_authority() {
+            self.debug_goto_from_env();
+            self.debug_spawn_from_env();
         }
         // Every session, a joining client included: verifying anything drawn on
         // the player's own body needs *both* ends of a two-process run to be
@@ -263,31 +239,30 @@ impl InGameState {
         // `ConnectingState`, which that function never sees.
         if let Some(perspective) = boot_plan::boot_perspective(&boot_plan::SystemEnv) {
             log::info!("WYVEN_PERSPECTIVE: opening in {perspective:?}");
-            state.sim.player.perspective = perspective;
+            self.sim.player.perspective = perspective;
         }
         // The editor writes into `assets/`, so it is off unless a developer
         // asked for it. Built here rather than in `boot::start` for the same
         // reason the perspective is: a client's state is put together behind
         // `ConnectingState`, which that function never sees.
         if boot_plan::editor_enabled(&boot_plan::SystemEnv) {
-            let targets = crate::presentation::editor::targets_from(&state.content);
+            let targets = crate::presentation::editor::targets_from(&self.content);
             log::info!(
                 "WYVEN_EDITOR: item placement editor on ({} items)",
                 targets.len()
             );
-            state.editor =
+            self.editor =
                 EditorSession::new(true, Box::new(crate::presentation::editor::FileStore));
-            state.editor.set_targets(targets);
+            self.editor.set_targets(targets);
             if boot_plan::editor_opens_at_boot(&boot_plan::SystemEnv) {
-                state.toggle_editor();
+                self.toggle_editor();
             }
         }
         // Ignored if the editor already took the screen: the two fight over
         // the camera, which is why E is refused while the editor is up.
-        if boot_plan::inventory_opens_at_boot(&boot_plan::SystemEnv) && !state.editor_open() {
+        if boot_plan::inventory_opens_at_boot(&boot_plan::SystemEnv) && !self.editor_open() {
             log::info!("WYVEN_INVENTORY: opening the inventory at boot");
-            state.toggle_inventory();
+            self.toggle_inventory();
         }
-        state
     }
 }

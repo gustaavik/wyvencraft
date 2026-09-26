@@ -2,6 +2,7 @@
 //! that turns queued chunks into GPU meshes.
 
 use super::*;
+use wyven_voxel::meshing::ChunkMeshOutput;
 
 impl SceneCache {
     // --- Chunk meshes ---------------------------------------------------------------
@@ -58,72 +59,82 @@ impl SceneCache {
                 )
             });
             match output {
-                Some(output) => {
-                    match GpuMesh::upload(&ctx.memory_allocator, &output.opaque) {
-                        Ok(Some(mesh)) => {
-                            self.meshes.insert(pos, mesh);
-                        }
-                        Ok(None) => {
-                            self.meshes.remove(&pos);
-                        }
-                        Err(err) => log::error!("opaque mesh upload failed at {pos:?}: {err:?}"),
-                    }
-                    match GpuMesh::upload(&ctx.memory_allocator, &output.transparent) {
-                        Ok(Some(mesh)) => {
-                            self.transparent_meshes.insert(pos, mesh);
-                        }
-                        Ok(None) => {
-                            self.transparent_meshes.remove(&pos);
-                        }
-                        Err(err) => {
-                            log::error!("transparent mesh upload failed at {pos:?}: {err:?}")
-                        }
-                    }
-                    // Blockbench-authored blocks: one mesh per chunk however
-                    // many block types and textures it holds, because the layer
-                    // index rides on the vertex.
-                    match GpuMesh::upload(&ctx.memory_allocator, &output.array_opaque) {
-                        Ok(Some(mesh)) => {
-                            self.array_meshes.insert(pos, mesh);
-                        }
-                        Ok(None) => {
-                            self.array_meshes.remove(&pos);
-                        }
-                        Err(err) => log::error!("block mesh upload failed at {pos:?}: {err:?}"),
-                    }
-                    match GpuMesh::upload(&ctx.memory_allocator, &output.array_transparent) {
-                        Ok(Some(mesh)) => {
-                            self.array_transparent_meshes.insert(pos, mesh);
-                        }
-                        Ok(None) => {
-                            self.array_transparent_meshes.remove(&pos);
-                        }
-                        Err(err) => {
-                            log::error!("blended block mesh upload failed at {pos:?}: {err:?}")
-                        }
-                    }
-                    // Model-backed blocks: one mesh per model in this chunk,
-                    // each needing its texture resident before it can be drawn.
-                    let mut baked = Vec::new();
-                    for (id, mesh) in &output.models {
-                        self.ensure_model_texture(ctx, blocks.models, *id);
-                        match GpuMesh::upload(&ctx.memory_allocator, mesh) {
-                            Ok(Some(gpu)) => baked.push((gpu, *id)),
-                            Ok(None) => {}
-                            Err(err) => {
-                                log::error!("model mesh upload failed at {pos:?}: {err:?}")
-                            }
-                        }
-                    }
-                    if baked.is_empty() {
-                        self.model_meshes.remove(&pos);
-                    } else {
-                        self.model_meshes.insert(pos, baked);
-                    }
-                }
+                Some(output) => self.upload_chunk(ctx, pos, &output, blocks.models),
                 // Chunk was unloaded before we got to it.
                 None => self.forget_chunk(pos),
             }
         }
+    }
+
+    /// Replace everything drawn for chunk `pos` with a fresh meshing of it.
+    fn upload_chunk(
+        &mut self,
+        ctx: &Arc<RenderContext>,
+        pos: ChunkPos,
+        output: &ChunkMeshOutput,
+        models: &ModelRegistry,
+    ) {
+        replace_mesh(ctx, &mut self.meshes, pos, &output.opaque, "opaque");
+        replace_mesh(
+            ctx,
+            &mut self.transparent_meshes,
+            pos,
+            &output.transparent,
+            "transparent",
+        );
+        // Blockbench-authored blocks: one mesh per chunk however many block
+        // types and textures it holds, because the layer index rides on the
+        // vertex.
+        replace_mesh(
+            ctx,
+            &mut self.array_meshes,
+            pos,
+            &output.array_opaque,
+            "block",
+        );
+        replace_mesh(
+            ctx,
+            &mut self.array_transparent_meshes,
+            pos,
+            &output.array_transparent,
+            "blended block",
+        );
+        // Model-backed blocks: one mesh per model in this chunk, each needing
+        // its texture resident before it can be drawn.
+        let mut baked = Vec::new();
+        for (id, mesh) in &output.models {
+            self.ensure_model_texture(ctx, models, *id);
+            match GpuMesh::upload(&ctx.memory_allocator, mesh) {
+                Ok(Some(gpu)) => baked.push((gpu, *id)),
+                Ok(None) => {}
+                Err(err) => log::error!("model mesh upload failed at {pos:?}: {err:?}"),
+            }
+        }
+        if baked.is_empty() {
+            self.model_meshes.remove(&pos);
+        } else {
+            self.model_meshes.insert(pos, baked);
+        }
+    }
+}
+
+/// Upload `mesh` as chunk `pos`'s entry in `meshes`, or drop the entry when
+/// the chunk has nothing of that kind any more. A failed upload keeps
+/// whatever was there and says which kind (`what`) failed.
+fn replace_mesh(
+    ctx: &Arc<RenderContext>,
+    meshes: &mut HashMap<ChunkPos, GpuMesh>,
+    pos: ChunkPos,
+    mesh: &CpuMesh,
+    what: &str,
+) {
+    match GpuMesh::upload(&ctx.memory_allocator, mesh) {
+        Ok(Some(gpu)) => {
+            meshes.insert(pos, gpu);
+        }
+        Ok(None) => {
+            meshes.remove(&pos);
+        }
+        Err(err) => log::error!("{what} mesh upload failed at {pos:?}: {err:?}"),
     }
 }

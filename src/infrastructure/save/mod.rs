@@ -23,6 +23,7 @@
 pub mod data;
 pub mod records;
 pub mod repository;
+pub mod restore;
 
 use std::fs;
 use std::path::{Path, PathBuf};

@@ -11,10 +11,8 @@ use glam::Vec3;
 
 use super::InGameState;
 use super::block_use::UseAt;
-use crate::application::ecs::With;
-use crate::application::ecs::components::{Boss, Health, Kind, Mob, Replica, Transform};
+use crate::application::ecs::components::{Boss, Health, Kind, Replica, Transform};
 use crate::application::ecs::systems::mobs::{self as mob_systems, Reaped};
-use crate::domain::core::Rng64;
 use crate::domain::entity::MobId;
 use crate::domain::entity::boss::{AttackEffect, BossParams};
 use crate::domain::entity::mob::eye_position;
@@ -28,9 +26,8 @@ const SUMMON_DISTANCE: f32 = 7.0;
 const BAR_RANGE: f32 = 1.5;
 /// Horizontal speed a slam flings the local player at, per point of knockback.
 const SLAM_LIFT: f32 = 6.0;
-/// Where volley projectiles leave the boss, ahead of its face.
-const MUZZLE: f32 = 0.8;
 
+use crate::application::simulation::Volley;
 pub(super) use crate::application::simulation::{BossFight, Telegraph};
 
 pub(super) use crate::application::simulation::BossBeat;
@@ -198,58 +195,20 @@ impl InGameState {
                 gravity,
                 lifetime,
             } => {
-                let Some((_, target_eye)) = target else {
-                    return;
-                };
-                let to = target_eye - eye;
-                let lift = 0.5 * gravity * to.length() / speed.max(0.001);
-                let dir = to.normalize_or_zero();
-                for i in 0..count {
-                    let t = if count > 1 {
-                        f32::from(i) / f32::from(count - 1) - 0.5
-                    } else {
-                        0.0
-                    };
-                    let turned = glam::Quat::from_rotation_y((spread_deg * t).to_radians()) * dir;
-                    let velocity = turned * speed + Vec3::Y * lift;
-                    let origin = eye + turned * MUZZLE;
-                    self.sim.emit(ServerMessage::ArrowSpawned {
-                        position: origin.to_array(),
-                        velocity: velocity.to_array(),
-                        gravity,
-                        lifetime,
-                    });
-                    crate::application::ecs::spawn::arrow(
-                        &mut self.sim.ecs,
-                        origin,
-                        velocity,
+                if let Some((_, target_eye)) = target {
+                    let volley = Volley {
                         damage,
+                        count,
+                        spread_deg,
+                        speed,
                         gravity,
                         lifetime,
-                    );
+                    };
+                    self.sim.loose_volley(eye, target_eye, volley);
                 }
             }
             AttackEffect::Summon { entity, count, cap } => {
-                let alive = self
-                    .sim
-                    .ecs
-                    .query::<(&Kind, &Transform, With<Mob>)>()
-                    .filter(|(_, (kind, t, ()))| {
-                        kind.name == entity && t.position.distance(position) < 48.0
-                    })
-                    .count() as u32;
-                let mut rng = Rng64::new(self.sim.world.seed() ^ id.0 ^ self.sim.mobs.next_id);
-                let want = rng.range_u32(u32::from(count[0]), u32::from(count[1]));
-                for i in 0..want.min(cap.saturating_sub(alive)) {
-                    let angle = i as f32 * 2.1 + rng.range_f32(0.0, 1.0);
-                    let spot = position + Vec3::new(angle.cos(), 0.0, angle.sin()) * 3.0;
-                    let ground = self
-                        .sim
-                        .find_ground(spot.x, spot.z, position.y as i32 + 6)
-                        .unwrap_or(position.y);
-                    self.sim
-                        .spawn_mob(&entity, Vec3::new(spot.x, ground, spot.z));
-                }
+                self.sim.summon_minions(id, position, &entity, count, cap);
             }
         }
     }
