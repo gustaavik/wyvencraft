@@ -20,20 +20,19 @@ use std::sync::Arc;
 use glam::{Mat4, Vec3};
 
 use super::mobs::mob_mesh;
-use super::{INSPECT_MODEL_FROM, OUTLINE_COLOR, REMOTE_MAX_SPEED, THIRD_PERSON_DISTANCE};
+use super::{INSPECT_MODEL_FROM, OUTLINE_COLOR, THIRD_PERSON_DISTANCE};
 use crate::application::ecs::components::{
-    Animation, Body, ItemDrop, Kind, MobId, Projectile, Transform, Velocity,
+    Animation, Body, ItemDrop, Kind, MobId, Projectile, RemotePlayer, Transform, Velocity,
 };
 use crate::domain::core::{Aabb, BlockPos, CHUNK_HEIGHT, CHUNK_SIZE, ChunkPos, DayCycle};
 use crate::domain::entity::camera::Shot;
 use crate::domain::entity::kind::{EntityRegistry, VisualSpec};
-use crate::domain::entity::{AnimationState, Motion, Player, camera};
+use crate::domain::entity::{AnimationState, Player, camera};
 use crate::domain::inventory::{Inventory, ItemId, Placeable};
 use crate::domain::world::World;
 use crate::domain::world::meshing::{
     ItemSprite, mesh_block_overlay, mesh_chunk, push_item_cube, push_item_sprite,
 };
-use crate::infrastructure::net::{PlayerId, RemotePlayer};
 use crate::presentation::art::{cracks, mobskin, skin};
 use crate::presentation::content::BlockAppearance;
 use crate::presentation::content::{ItemModel, ItemShape};
@@ -52,9 +51,14 @@ use wyven_voxel::FaceTextures;
 /// Animation state for a remote player plus the position used to derive their
 /// speed (no extra protocol data needed — movement is inferred from the change
 /// in rendered position each frame).
-struct RemoteAnim {
-    anim: AnimationState,
-    last_pos: Vec3,
+/// Another player, as the view needs them: where their body is drawn (the
+/// interpolated position their nameplate follows), where they look, how they
+/// are posed, and what is in their hand.
+pub(super) struct PeerSprite {
+    pub position: Vec3,
+    pub pitch: f32,
+    pub anim: AnimationState,
+    pub held: Option<ItemId>,
 }
 
 /// A mob, simulated or replicated, as the view needs it.
@@ -185,15 +189,12 @@ pub(super) struct SceneCache {
     player_rig: Option<PlayerRig>,
     /// The local player's GPU mesh (only built in third person).
     player_mesh: Option<GpuMesh>,
-    /// Procedural animation state for the local player's model.
-    player_anim: AnimationState,
     remote_meshes: Vec<GpuMesh>,
     /// What each remote player is holding, in the same two flavours the local
     /// body's hand takes: a model file, or the cube/sprite fallback.
     remote_held: Vec<(GpuMesh, ModelId)>,
     remote_held_atlas: Vec<(GpuMesh, bool)>,
     /// Per-remote-player animation, keyed by id.
-    remote_anims: HashMap<PlayerId, RemoteAnim>,
     /// One GPU mesh per visible mob, rebuilt each frame like remote players.
     /// Box-model mobs sample the block atlas (`None`); file-loaded models carry
     /// the id of the texture they need bound.
@@ -257,11 +258,9 @@ impl SceneCache {
             queued: HashSet::new(),
             player_rig: None,
             player_mesh: None,
-            player_anim: AnimationState::new(),
             remote_meshes: Vec::new(),
             remote_held: Vec::new(),
             remote_held_atlas: Vec::new(),
-            remote_anims: HashMap::new(),
             mob_meshes: Vec::new(),
             held_mesh: None,
             hand_mesh: None,
@@ -408,16 +407,6 @@ impl SceneCache {
 
     // --- Animated models ------------------------------------------------------------
 
-    /// Advance the local player's animation clock.
-    pub fn advance_player_anim(&mut self, motion: Motion, look_yaw: f32, dt: f32) {
-        self.player_anim.advance(motion, look_yaw, dt);
-    }
-
-    /// Trigger the main-hand swing on the local player's model.
-    pub fn trigger_swing(&mut self) {
-        self.player_anim.trigger_swing();
-    }
-
     /// Resolve the player's rigged model, its clips and the bones that matter.
     ///
     /// Idempotent and cheap after the first call, which is why it can sit on the
@@ -479,11 +468,6 @@ impl SceneCache {
         })
     }
 
-    /// Keep the main-hand swing looping while a held action continues.
-    pub fn keep_swinging(&mut self) {
-        self.player_anim.keep_swinging();
-    }
-
     /// Rebuild the player model mesh in third person, or the view model in
     /// first — never both, since in first person the body is the camera.
     ///
@@ -498,6 +482,7 @@ impl SceneCache {
         &mut self,
         ctx: &Arc<RenderContext>,
         player: &Player,
+        anim: &AnimationState,
         inventory: &Inventory,
         inspect: f32,
         content: ModelContent<'_>,
@@ -507,7 +492,7 @@ impl SceneCache {
             self.player_mesh = None;
             self.held_mesh = None;
             self.held_atlas = None;
-            self.update_hand_meshes(ctx, player, inventory, content);
+            self.update_hand_meshes(ctx, player, anim, inventory, content);
             return;
         }
         self.hand_mesh = None;
@@ -518,7 +503,7 @@ impl SceneCache {
         // uses; the head bone's own turn is what puts the face back where the
         // player looks. The held item hangs off the hand *bone* under the same
         // pose, so it cannot drift out of the fist however the elbow bends.
-        let body_yaw = self.player_anim.body_yaw();
+        let body_yaw = anim.body_yaw();
         // Drawn at the interpolated position, not the raw one: physics steps at
         // a fixed rate while this runs every frame, and the camera is built from
         // the *same* interpolation. Baking the body at `player.position` instead
@@ -532,10 +517,10 @@ impl SceneCache {
                 return;
             };
             let look = HeadLook {
-                yaw: self.player_anim.head_offset(),
+                yaw: anim.head_offset(),
                 pitch: player.pitch,
             };
-            character.pose(&self.player_anim, look).map(|pose| {
+            character.pose(anim, look).map(|pose| {
                 (
                     character.bake(&pose, render_position, body_yaw),
                     character.hand_anchor(&pose, render_position, body_yaw),
@@ -639,6 +624,7 @@ impl SceneCache {
         &mut self,
         ctx: &Arc<RenderContext>,
         player: &Player,
+        anim: &AnimationState,
         inventory: &Inventory,
         content: ModelContent<'_>,
     ) {
@@ -646,9 +632,9 @@ impl SceneCache {
             eye: player.interpolated_eye_position(self.render_alpha),
             yaw: player.yaw,
             pitch: player.pitch,
-            swing: self.player_anim.swing_progress(),
-            walk_phase: self.player_anim.walk_phase(),
-            walk_amount: self.player_anim.walk_amount(),
+            swing: anim.swing_progress(),
+            walk_phase: anim.walk_phase(),
+            walk_amount: anim.walk_amount(),
         };
         let frame = pose.frame();
 
@@ -691,57 +677,25 @@ impl SceneCache {
     pub fn update_remote_meshes(
         &mut self,
         ctx: &Arc<RenderContext>,
-        remote_players: &HashMap<PlayerId, RemotePlayer>,
+        peers: impl IntoIterator<Item = PeerSprite>,
         content: ModelContent<'_>,
-        dt: f32,
     ) {
         self.remote_meshes.clear();
         self.remote_held.clear();
         self.remote_held_atlas.clear();
-        // Snapshot the render-relevant fields first so `remote_anims` can be
-        // mutated without holding a borrow of the map they came from.
-        //
-        // Interpolated, for the same reason the local body is: snapshots land at
-        // the host's tick rate, and their nameplates are already drawn at the
-        // interpolated position — a raw body here would step underneath a plate
-        // that glides. It also steadies `Motion::observed`, which reads a peer's
-        // vertical speed off this delta: on the raw position that is zero on
-        // every frame without a packet and a spike on the frame one lands, so a
-        // remote jump flickers across the airborne threshold instead of holding.
-        let snapshots: Vec<(PlayerId, Vec3, f32, f32, Option<ItemId>)> = remote_players
-            .values()
-            .map(|rp| {
-                (
-                    rp.id,
-                    rp.interpolated_position(self.render_alpha),
-                    rp.yaw,
-                    rp.pitch,
-                    rp.equipment.held.map(ItemId),
-                )
-            })
-            .collect();
+        let snapshots: Vec<PeerSprite> = peers.into_iter().collect();
         let mut baked: Vec<CpuMesh> = Vec::with_capacity(snapshots.len());
         // The fist and what is in it, gathered here and baked below: `character`
         // borrows `self` for as long as the pose does, and baking an item needs
         // `self` mutably for the sprite cache.
         let mut hands: Vec<(Mat4, Option<ItemId>)> = Vec::with_capacity(snapshots.len());
-        for (id, pos, yaw, pitch, held) in snapshots {
-            let state = self.remote_anims.entry(id).or_insert_with(|| RemoteAnim {
-                anim: AnimationState::new(),
-                last_pos: pos,
-            });
-            let delta = pos - state.last_pos;
-            let speed =
-                (Vec3::new(delta.x, 0.0, delta.z).length() / dt.max(1e-4)).min(REMOTE_MAX_SPEED);
-            // Only the look yaw and position cross the wire, so — like the torso
-            // that follows that yaw — whether a peer is airborne is worked out
-            // from what it is seen doing rather than being sent.
-            state
-                .anim
-                .advance(Motion::observed(speed, delta.y, dt), yaw, dt);
-            state.last_pos = pos;
-            let anim = state.anim;
-
+        for PeerSprite {
+            position: pos,
+            pitch,
+            anim,
+            held,
+        } in snapshots
+        {
             let Some(character) = self.character(content.models) else {
                 break;
             };
@@ -775,9 +729,6 @@ impl SceneCache {
                 self.remote_held_atlas.push(mesh);
             }
         }
-        // Drop animation state for players that have left.
-        self.remote_anims
-            .retain(|id, _| remote_players.contains_key(id));
     }
 
     /// Rebuild one mesh per visible mob — the authority's own simulated mobs
@@ -990,16 +941,6 @@ impl SceneCache {
     }
 
     // --- Frames ---------------------------------------------------------------------
-
-    /// The camera for this frame, placed by the player's perspective. Physics
-    /// ticks at a fixed rate, so the eye is blended between steps to stay smooth
-    /// when the display runs faster than the simulation.
-    ///
-    /// The yaw the local player's model is *drawn* at — the torso, which eases
-    /// after the look direction rather than tracking it.
-    pub fn player_body_yaw(&self) -> f32 {
-        self.player_anim.body_yaw()
-    }
 
     /// Collect this frame's visible geometry: frustum-culled chunk meshes plus
     /// every entity and overlay mesh, split by render pass.
@@ -1242,7 +1183,7 @@ impl super::InGameState {
     /// yaw would show a model visibly turned away from the camera.
     fn framing_yaw(&self) -> f32 {
         if self.inventory_anim.active() {
-            self.view.player_body_yaw()
+            self.player_anim.body_yaw()
         } else {
             self.player.yaw
         }
@@ -1279,7 +1220,7 @@ impl super::InGameState {
     /// method in the in-game state that touches a [`RenderContext`]. Everything
     /// above it — streaming, mobs, fluids, interaction — is plain logic that
     /// runs without a GPU, which is what makes it testable.
-    pub(super) fn refresh_view(&mut self, ctx: &Arc<RenderContext>, dt: f32) {
+    pub(super) fn refresh_view(&mut self, ctx: &Arc<RenderContext>) {
         // Overlays on the block under the crosshair. Both are drawn around the
         // block's targeting box, so cracks and outline hug a mushroom the same
         // way the crosshair does.
@@ -1371,24 +1312,10 @@ impl super::InGameState {
         self.view
             .update_arrows_mesh(ctx, arrows, loaded.visuals.arrow_faces);
 
-        // Animated humanoids. The local player's legs follow their actual
-        // horizontal speed even with the inventory open: physics keeps running
-        // there, so a player who opened it mid-stride is still moving, and
-        // forcing the idle pose would have them gliding to a stop with their
-        // feet planted — in full view of the camera that just panned onto them.
-        let local_motion = {
-            let v = self.player.velocity;
-            Motion::new(
-                Vec3::new(v.x, 0.0, v.z).length(),
-                v.y,
-                !self.player.on_ground,
-            )
-        };
-        self.view
-            .advance_player_anim(local_motion, self.player.yaw, dt);
         self.view.update_player_mesh(
             ctx,
             &self.player,
+            &self.player_anim,
             &self.inventory,
             self.inventory_anim.progress(),
             content,
@@ -1396,7 +1323,16 @@ impl super::InGameState {
         // Cheap after the first call, and this is the only place the entity
         // registry and the model registry are both in reach.
         self.view.bind_player_rig(&loaded.rules.entities, models);
-        self.view
-            .update_remote_meshes(ctx, &self.peers.players, content, dt);
+        let alpha = self.view.render_alpha;
+        let peers = self
+            .ecs
+            .query::<(&RemotePlayer, &Animation)>()
+            .map(|(_, (rp, anim))| PeerSprite {
+                position: rp.interpolated_position(alpha),
+                pitch: rp.pitch,
+                anim: anim.0,
+                held: rp.equipment.held.map(ItemId),
+            });
+        self.view.update_remote_meshes(ctx, peers, content);
     }
 }

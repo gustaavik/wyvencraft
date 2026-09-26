@@ -5,6 +5,7 @@ use glam::Vec3;
 
 use super::InGameState;
 use super::net::record_remote;
+use crate::application::ecs::systems::players;
 use crate::domain::inventory::crafting::KnownItems;
 use crate::domain::inventory::{ItemId, ItemStack, TOTAL_SLOTS};
 use crate::infrastructure::net::{PlayerId, PlayerRestore};
@@ -52,12 +53,12 @@ impl InGameState {
             "clients never hold a persistent repository"
         );
         // Fold currently connected players into the persistent records first.
-        let connected: Vec<PlayerId> = self.peers.players.keys().copied().collect();
+        let connected: Vec<PlayerId> = players::all(&self.ecs).map(|rp| rp.id).collect();
         for pid in connected {
             record_remote(
                 &mut self.save.records,
                 &self.peers.identities,
-                &self.peers.players,
+                &self.ecs,
                 &self.peers.inventories,
                 &self.content.rules.items,
                 pid,

@@ -12,6 +12,7 @@
 use glam::Vec3;
 
 use super::InGameState;
+use crate::application::ecs::systems::players;
 use crate::domain::core::BlockPos;
 use crate::domain::core::ident::title_case;
 use crate::domain::world::block::Interaction;
@@ -48,7 +49,7 @@ impl InGameState {
         if self.content.rules.blocks.get(block).interact.is_none() {
             return false;
         }
-        self.view.trigger_swing();
+        self.player_anim.trigger_swing();
         if self.session.is_authority() {
             self.use_block(self.session.local_id(), hit.block);
         } else {
@@ -63,7 +64,7 @@ impl InGameState {
         if actor == self.session.local_id() {
             return true;
         }
-        let Some(player) = self.peers.players.get(&actor) else {
+        let Some(player) = players::get(&self.ecs, actor) else {
             return false;
         };
         let centre = Vec3::new(pos.x as f32 + 0.5, pos.y as f32 + 0.5, pos.z as f32 + 0.5);
@@ -229,7 +230,7 @@ mod tests {
         let pid = PlayerId(1);
 
         // Far away: refused.
-        state.peers.entry(pid, Vec3::new(5000.0, 90.0, 5000.0));
+        players::entry(&mut state.ecs, pid, Vec3::new(5000.0, 90.0, 5000.0));
         state.use_block(pid, rune);
         assert_eq!(state.progression.revealed().count(), 0);
 
@@ -239,8 +240,8 @@ mod tests {
             rune.y as f32 - 1.0,
             rune.z as f32 + 0.5,
         );
-        state.peers.players.remove(&pid);
-        state.peers.entry(pid, beside);
+        players::remove(&mut state.ecs, pid);
+        players::entry(&mut state.ecs, pid, beside);
         state.use_block(pid, rune);
         assert_eq!(state.progression.revealed().count(), 1);
         let guard = handle.lock();

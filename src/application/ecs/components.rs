@@ -112,11 +112,17 @@ pub struct Sight {
 pub struct Decision(pub Intent);
 
 /// A client's copy of a host-simulated mob: moved by snapshots, animated from
-/// the movement it observes.
-#[derive(Debug, Clone, Copy)]
+/// the movement it observes (see [`LastSeen`]).
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Replica {
-    /// Where it was last frame, to derive speed from.
-    pub last_position: Vec3,
     /// A boss's fight phase as the host last reported it (`BossPhase`).
     pub phase: u8,
 }
+
+/// Where an entity animated from *observed* movement was drawn last frame —
+/// a mob replica or another player, whose speed is read off the difference
+/// because only positions cross the wire.
+#[derive(Debug, Clone, Copy)]
+pub struct LastSeen(pub Vec3);
+
+pub use crate::application::sync::RemotePlayer;

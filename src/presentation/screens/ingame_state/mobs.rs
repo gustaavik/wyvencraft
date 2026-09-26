@@ -10,6 +10,7 @@ use glam::Vec3;
 use super::{HOST_PLAYER_ID, InGameState};
 use crate::application::ecs::components::{Body, Kind, Mob, Replica, Transform};
 use crate::application::ecs::systems::mobs::{self as mob_systems, MobStep, Reaped};
+use crate::application::ecs::systems::players;
 use crate::application::ecs::{Entity, With, spawn};
 use crate::domain::core::{Aabb, BlockPos, Rng64};
 use crate::domain::entity::kind::VisualSpec;
@@ -188,7 +189,8 @@ impl InGameState {
             .movement
             .map(|m| m.eye_height)
             .unwrap_or(1.62);
-        for (id, remote) in &self.peers.players {
+        for remote in players::all(&self.ecs) {
+            let id = &remote.id;
             if remote.mode.takes_damage() {
                 targets.push(MobTarget {
                     player: Some(*id),
@@ -464,11 +466,10 @@ impl InGameState {
             .then(|| self.player.aabb());
         let player_kind = self.content.rules.entities.player().physics;
         let remote_boxes: Vec<(PlayerId, Aabb)> = if authority {
-            self.peers
-                .players
-                .iter()
-                .filter(|(_, rp)| rp.mode.takes_damage())
-                .map(|(id, rp)| {
+            players::all(&self.ecs)
+                .filter(|rp| rp.mode.takes_damage())
+                .map(|rp| {
+                    let id = &rp.id;
                     let half = player_kind.width * 0.5;
                     let feet = rp.position();
                     (
@@ -518,7 +519,7 @@ impl InGameState {
     pub(super) fn update_spawning(&mut self, dt: f32) {
         let cfg = self.content.rules.spawning.clone();
         let mut anchors = vec![self.player.position];
-        anchors.extend(self.peers.players.values().map(|r| r.position()));
+        anchors.extend(players::all(&self.ecs).map(|r| r.position()));
         let is_night = self.day_cycle.is_night();
         // Cap the surface search near player height: caves far below the
         // surface aren't valid spawn floors for surface mobs (and there's no

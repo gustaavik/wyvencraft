@@ -285,6 +285,7 @@ impl InGameState {
             tier_hint: None,
             mobs: MobWorld::new(seed ^ 0x5EED_0F5B_A3B1_E5B0),
             ecs: Ecs::new(),
+            player_anim: crate::domain::entity::AnimationState::new(),
             dead: false,
             jump_tap_timer: DOUBLE_TAP_WINDOW * 2.0,
             physics_accum: 0.0,

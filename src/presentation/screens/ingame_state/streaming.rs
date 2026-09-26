@@ -12,6 +12,7 @@
 //! no-op for a chunk that was never meshed.
 
 use super::{InGameState, REQUEST_BUDGET, UNLOAD_MARGIN};
+use crate::application::ecs::systems::players;
 use crate::domain::core::{BlockPos, ChunkPos};
 
 /// Chunks a host keeps loaded around each *remote* player: enough for the
@@ -83,7 +84,7 @@ impl InGameState {
             radius,
         }];
         if self.session.serves_peers() {
-            anchors.extend(self.peers.players.values().map(|rp| Anchor {
+            anchors.extend(players::all(&self.ecs).map(|rp| Anchor {
                 center: BlockPos::from_world(rp.position()).chunk(),
                 radius: SIM_RADIUS.min(radius),
             }));
@@ -185,7 +186,7 @@ mod tests {
         let mut state = InGameState::new(GameContent::builtin(), 5, GameMode::Survival);
         state.set_session(Box::new(FakeSession::host()));
         let far = Vec3::new(2000.0, 90.0, -1500.0);
-        state.peers.entry(PlayerId(1), far);
+        players::entry(&mut state.ecs, PlayerId(1), far);
 
         let anchors = state.stream_anchors(8);
         let target = BlockPos::from_world(far).chunk();
@@ -197,7 +198,7 @@ mod tests {
     fn a_client_streams_only_around_itself() {
         let mut state = InGameState::new(GameContent::builtin(), 5, GameMode::Survival);
         state.set_session(Box::new(FakeSession::client(PlayerId(1))));
-        state.peers.entry(PlayerId(0), Vec3::new(2000.0, 90.0, 0.0));
+        players::entry(&mut state.ecs, PlayerId(0), Vec3::new(2000.0, 90.0, 0.0));
         assert_eq!(state.stream_anchors(8).len(), 1);
     }
 }

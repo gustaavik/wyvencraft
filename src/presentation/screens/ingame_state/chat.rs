@@ -314,9 +314,7 @@ impl InGameState {
     /// Display name for a player id. Names are still generated rather than
     /// chosen, matching what `welcome_player` puts in the peer list.
     pub(super) fn player_name(&self, id: PlayerId) -> String {
-        self.peers
-            .players
-            .get(&id)
+        crate::application::ecs::systems::players::get(&self.ecs, id)
             .map(|player| player.name.clone())
             .unwrap_or_else(|| format!("Player {}", id.0))
     }
@@ -365,7 +363,7 @@ impl CommandContext for SessionContext<'_> {
     }
 
     fn position(&self) -> Position {
-        match self.state.peers.players.get(&self.actor) {
+        match crate::application::ecs::systems::players::get(&self.state.ecs, self.actor) {
             Some(player) => player.position().to_array(),
             None => self.state.player.position.to_array(),
         }
@@ -385,12 +383,9 @@ impl CommandContext for SessionContext<'_> {
                 self.state.player.position.to_array(),
             )
         });
-        self.state
-            .peers
-            .players
-            .iter()
-            .filter(|(id, _)| **id != self.actor)
-            .map(|(_, player)| (player.name.clone(), player.position().to_array()))
+        crate::application::ecs::systems::players::all(&self.state.ecs)
+            .filter(|player| player.id != self.actor)
+            .map(|player| (player.name.clone(), player.position().to_array()))
             .chain(own)
             .collect()
     }

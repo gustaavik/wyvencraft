@@ -210,7 +210,11 @@ application/       use cases and their ports
                                   Replica marks a client's copy of a host mob. Spawn bundles in ecs::spawn. Systems are plain
                                   functions: drops::{fall,pick_up}, projectiles::fly, mobs::{simulate,animate_replicas,reap,hit,find}.
                                   mobs::simulate runs the five domain Mob steps (think/steer/integrate/animate/act) as passes.
-                                  Mobs are found by MobId with a linear scan. The view gets plain Drop/Arrow/MobSprite values
+                                  Mobs are found by MobId with a linear scan. Other players are entities too (RemotePlayer,
+                                  Animation, LastSeen) via systems::players::{find,get,entry,remove,all,animate}, keyed by PlayerId.
+                                  The *local* player is deliberately not an entity: it is a singleton (an ECS "resource") on the
+                                  session, with its AnimationState beside it. The view gets plain Drop/Arrow/Mob/PeerSprite values
+                                  and advances no clock of its own — every animation is stepped in `update`
 infrastructure/    adapters
   save                            world/player persistence (saves/ dir)
   net                             transports + net::session::{Singleplayer,Host,Client}Session, join gate, server list, status probe

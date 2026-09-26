@@ -331,13 +331,11 @@ impl InGameState {
     fn fighters_near(&self, centre: Vec3, radius: f32) -> impl Iterator<Item = Option<PlayerId>> {
         let flat = |p: Vec3| Vec3::new(p.x - centre.x, 0.0, p.z - centre.z).length();
         let local = (!self.dead && flat(self.player.position) <= radius).then_some(None);
-        let remote: Vec<Option<PlayerId>> = self
-            .peers
-            .players
-            .iter()
-            .filter(|(_, p)| flat(p.position()) <= radius)
-            .map(|(id, _)| Some(*id))
-            .collect();
+        let remote: Vec<Option<PlayerId>> =
+            crate::application::ecs::systems::players::all(&self.ecs)
+                .filter(|p| flat(p.position()) <= radius)
+                .map(|p| Some(p.id))
+                .collect();
         local.into_iter().chain(remote)
     }
 
@@ -582,7 +580,7 @@ mod tests {
         state.set_session(Box::new(session));
         let pid = PlayerId(1);
         let beside = Vec3::new(altar.x as f32 + 2.5, altar.y as f32, altar.z as f32 + 0.5);
-        state.peers.entry(pid, beside);
+        crate::application::ecs::systems::players::entry(&mut state.ecs, pid, beside);
         let effigy = state.content.rules.items.find("stag_effigy").unwrap();
         let mut slots = vec![None; 4];
         slots[3] = Some(NetItemStack {

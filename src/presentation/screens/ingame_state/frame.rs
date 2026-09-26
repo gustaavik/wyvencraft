@@ -4,12 +4,13 @@
 use winit::event::MouseButton;
 
 use super::{AUTOSAVE_INTERVAL, DOUBLE_TAP_WINDOW, InGameState};
-use crate::domain::entity::MovementInput;
+use crate::domain::entity::{Motion, MovementInput};
 use crate::presentation::screens::{
     GameState, PauseMenuState, StateContext, Transition, Wyvencraft,
 };
 use crate::presentation::ui::hud;
 use crate::presentation::ui::nameplate::{self, Nameplate};
+use glam::Vec3;
 use wyven_render::SceneFrame;
 
 impl InGameState {
@@ -27,7 +28,11 @@ impl InGameState {
     /// distance: a different camera *position*, not merely a different
     /// projection, and nameplates that drift off their players.
     fn draw_nameplates(&self, egui_ctx: &egui::Context, aspect: f32) {
-        if self.peers.players.is_empty() {
+        if self
+            .ecs
+            .count::<crate::application::ecs::components::RemotePlayer>()
+            == 0
+        {
             return;
         }
 
@@ -39,10 +44,9 @@ impl InGameState {
 
         let alpha = self.view.render_alpha;
         let plates: Vec<Nameplate<'_>> = self
-            .peers
-            .players
-            .values()
-            .map(|remote| {
+            .ecs
+            .query::<(&crate::application::ecs::components::RemotePlayer,)>()
+            .map(|(_, (remote,))| {
                 let position = remote.interpolated_position(alpha);
                 Nameplate {
                     name: remote.name.as_str(),
@@ -277,7 +281,7 @@ impl GameState<Wyvencraft> for InGameState {
             // Block interaction. The main-hand swing fires on every left click,
             // even when punching air (no block hit).
             if ctx.input.mouse_just_pressed(MouseButton::Left) {
-                self.view.trigger_swing();
+                self.player_anim.trigger_swing();
             }
             // A mob in the crosshair takes the hit (and blocks mining on the
             // block behind it); otherwise the click falls through to blocks.
@@ -367,9 +371,33 @@ impl GameState<Wyvencraft> for InGameState {
             ctx.dt.min(0.05),
             super::REMOTE_MAX_SPEED,
         );
+        // Other players likewise, from the interpolated position their body
+        // and nameplate are drawn at.
+        crate::application::ecs::systems::players::animate(
+            &mut self.ecs,
+            ctx.dt.min(0.05),
+            self.view.render_alpha,
+            super::REMOTE_MAX_SPEED,
+        );
+
+        // The local body's animation. Its legs follow actual horizontal speed
+        // even with the inventory open: physics keeps running there, so a
+        // player who opened it mid-stride is still moving, and forcing the
+        // idle pose would have them gliding to a stop with their feet planted
+        // — in full view of the camera that just panned onto them.
+        let local_motion = {
+            let v = self.player.velocity;
+            Motion::new(
+                Vec3::new(v.x, 0.0, v.z).length(),
+                v.y,
+                !self.player.on_ground,
+            )
+        };
+        self.player_anim
+            .advance(local_motion, self.player.yaw, ctx.dt.min(0.05));
 
         // Simulation for this frame is settled; bring the GPU state in line.
-        self.refresh_view(&ctx.shared.render, ctx.dt.min(0.05));
+        self.refresh_view(&ctx.shared.render);
         Transition::None
     }
 

@@ -2,4 +2,5 @@
 
 pub mod drops;
 pub mod mobs;
+pub mod players;
 pub mod projectiles;

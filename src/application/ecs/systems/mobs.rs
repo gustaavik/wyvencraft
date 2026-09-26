@@ -7,10 +7,10 @@
 use glam::Vec3;
 
 use crate::application::ecs::components::{
-    Animation, Body, Boss, Decision, Health, Kind, Mob, MobId, Replica, Sensed, Sight, Transform,
-    Velocity,
+    Animation, Body, Boss, Decision, Health, Kind, LastSeen, Mob, MobId, Replica, Sensed, Sight,
+    Transform, Velocity,
 };
-use crate::application::ecs::{CommandBuffer, Ecs, Entity};
+use crate::application::ecs::{CommandBuffer, Ecs, Entity, With};
 use crate::domain::core::BlockPos;
 use crate::domain::entity::boss::BossParams;
 use crate::domain::entity::brain::{Perception, PlayerSighting};
@@ -209,21 +209,40 @@ pub fn act(ecs: &mut Ecs, dt: f32) -> Vec<MobStep> {
 /// Animate every replica from the movement its snapshots show, clamped to
 /// `max_speed` so a teleport cannot drive an absurd cadence.
 pub fn animate_replicas(ecs: &mut Ecs, dt: f32, max_speed: f32) {
-    ecs.for_each_mut::<(&Transform, &mut Animation, &mut Replica), _>(
-        |_, (transform, anim, replica)| {
-            let (now, then) = (transform.position, replica.last_position);
-            let speed = if dt > 0.0 {
-                (Vec3::new(now.x - then.x, 0.0, now.z - then.z).length() / dt).min(max_speed)
-            } else {
-                0.0
-            };
-            // A snapshot carries no grounded flag, so the vertical half is
-            // read off the movement itself, as the horizontal half is.
-            let motion = Motion::observed(speed, now.y - then.y, dt);
-            anim.0.advance(motion, transform.yaw, dt);
-            replica.last_position = now;
+    ecs.for_each_mut::<(&Transform, &mut Animation, &mut LastSeen, With<Replica>), _>(
+        |_, (transform, anim, seen, ())| {
+            animate_observed(
+                &mut anim.0,
+                &mut seen.0,
+                transform.position,
+                transform.yaw,
+                dt,
+                max_speed,
+            );
         },
     );
+}
+
+/// Advance an animation from movement seen rather than simulated: speed from
+/// the position delta (clamped to `max_speed`, so a teleport cannot drive an
+/// absurd cadence) and airborne-ness read off the vertical half of it, since
+/// no grounded flag crosses the wire.
+pub fn animate_observed(
+    anim: &mut crate::domain::entity::AnimationState,
+    last: &mut Vec3,
+    now: Vec3,
+    look_yaw: f32,
+    dt: f32,
+    max_speed: f32,
+) {
+    let then = *last;
+    let speed = if dt > 0.0 {
+        (Vec3::new(now.x - then.x, 0.0, now.z - then.z).length() / dt).min(max_speed)
+    } else {
+        0.0
+    };
+    anim.advance(Motion::observed(speed, now.y - then.y, dt), look_yaw, dt);
+    *last = now;
 }
 
 /// Remove every simulated mob whose health ran out, and report each.

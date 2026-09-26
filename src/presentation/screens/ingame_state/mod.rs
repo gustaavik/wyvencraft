@@ -41,7 +41,7 @@ use crate::application::ecs::Ecs;
 use crate::application::session::Session;
 use crate::domain::chat::{ChatState, OpsList};
 use crate::domain::core::{BlockPos, DayCycle};
-use crate::domain::entity::{Player, Spawner};
+use crate::domain::entity::{AnimationState, Player, Spawner};
 use crate::domain::inventory::{HeldLabel, Inventory, ItemStack, RecipeBook};
 use crate::domain::progression::WorldProgression;
 use crate::domain::world::structure::Structures;
@@ -203,6 +203,9 @@ pub struct InGameState {
     /// player physics off the variable frame delta is what makes jump height
     /// identical at every framerate.
     physics_accum: f32,
+    /// The local player's walk/idle/swing animation. Simulation state like
+    /// the player it poses — advanced in `update`, only read by the view.
+    player_anim: AnimationState,
     /// This session's networking role: who has authority, and how messages
     /// reach the other peers (a no-op transport in singleplayer).
     session: Box<dyn Session>,

@@ -12,13 +12,11 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::domain::inventory::Inventory;
-use crate::infrastructure::net::{Equipment, NetItemStack, PlayerId, RemotePlayer, ServerMessage};
+use crate::infrastructure::net::{Equipment, NetItemStack, PlayerId, ServerMessage};
 
 /// Everything the session knows about the other peers.
 #[derive(Default)]
 pub(super) struct Peers {
-    /// Replicas of every other player, interpolated between snapshots.
-    pub players: HashMap<PlayerId, RemotePlayer>,
     /// Host: stable identity (netcode client id) of each connected player,
     /// used to match a returning player to their saved record.
     pub identities: HashMap<PlayerId, u64>,
@@ -63,23 +61,10 @@ pub(super) struct Peers {
 impl Peers {
     /// Drop every trace of a player who left.
     pub fn remove(&mut self, pid: PlayerId) {
-        self.players.remove(&pid);
         self.identities.remove(&pid);
         self.accounts.remove(&pid);
         self.inventories.remove(&pid);
         self.equipment.remove(&pid);
         self.announced.remove(&pid);
-    }
-
-    /// The replica for `id`, created at `fallback` if this is the first we've
-    /// heard of them (an unreliable snapshot can outrun the reliable join).
-    pub fn entry(&mut self, id: PlayerId, fallback: glam::Vec3) -> &mut RemotePlayer {
-        self.players
-            .entry(id)
-            .or_insert_with(|| RemotePlayer::new(id, format!("Player {}", id.0), fallback))
-    }
-
-    pub fn count(&self) -> usize {
-        self.players.len()
     }
 }

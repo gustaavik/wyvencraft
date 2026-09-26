@@ -20,8 +20,10 @@ use super::mobs;
 use super::{
     HOST_PLAYER_ID, INVENTORY_SYNC_INTERVAL, InGameState, STATS_INTERVAL, WORLD_SYNC_BATCH,
 };
-use crate::application::ecs::components::{Health, Kind, Mob, Transform};
+use crate::application::ecs::Ecs;
+use crate::application::ecs::components::{Health, Kind, Mob, RemotePlayer, Transform};
 use crate::application::ecs::systems::mobs as mob_systems;
+use crate::application::ecs::systems::players;
 use crate::application::ecs::{With, spawn};
 use crate::application::session::Inbound;
 use crate::domain::core::{BlockId, BlockPos};
@@ -30,7 +32,7 @@ use crate::domain::inventory::crafting::{KnownItems, NamedRecipe, resolve_named}
 use crate::domain::inventory::{ARMOR_START, Inventory, ItemId, ItemRegistry, RecipeBook, Tool};
 use crate::infrastructure::net::{
     Channel, ClientMessage, Equipment, NetItemStack, PlayerId, PlayerRestore, RecipeData,
-    RemotePlayer, ServerMessage,
+    ServerMessage,
 };
 use crate::infrastructure::save::{ItemStackData, PlayerData, PlayerRecords};
 
@@ -130,9 +132,18 @@ impl InGameState {
         if let Some(account) = account {
             self.peers.accounts.insert(pid, account);
         }
-        self.peers
-            .players
-            .insert(pid, RemotePlayer::new(pid, name, Vec3::from_array(spawn)));
+        players::remove(&mut self.ecs, pid);
+        spawn::remote_player(
+            &mut self.ecs,
+            RemotePlayer::new(pid, name, Vec3::from_array(spawn)),
+        );
+    }
+
+    /// Drop everything this session knows about a peer that has gone: their
+    /// entity, and what the host still owed them.
+    fn forget_peer(&mut self, pid: PlayerId) {
+        players::remove(&mut self.ecs, pid);
+        self.peers.remove(pid);
     }
 
     /// Tell everyone a peer is really here, and bring it up to date on what
@@ -146,7 +157,7 @@ impl InGameState {
         if !self.peers.announced.insert(pid) {
             return;
         }
-        let Some(name) = self.peers.players.get(&pid).map(|rp| rp.name.clone()) else {
+        let Some(name) = players::get(&self.ecs, pid).map(|rp| rp.name.clone()) else {
             return;
         };
 
@@ -216,19 +227,19 @@ impl InGameState {
         // player's saved position and vitals with the spawn values it was
         // handed a moment earlier.
         if !self.peers.announced.contains(&pid) {
-            self.peers.remove(pid);
+            self.forget_peer(pid);
             return;
         }
 
         record_remote(
             &mut self.save.records,
             &self.peers.identities,
-            &self.peers.players,
+            &self.ecs,
             &self.peers.inventories,
             &self.content.rules.items,
             pid,
         );
-        self.peers.remove(pid);
+        self.forget_peer(pid);
         self.session
             .broadcast(&ServerMessage::PlayerLeft { id: pid }, Channel::Reliable);
     }
@@ -244,7 +255,7 @@ impl InGameState {
                 yaw,
                 pitch,
             } => {
-                if let Some(rp) = self.peers.players.get_mut(&pid) {
+                if let Some(rp) = players::get_mut(&mut self.ecs, pid) {
                     rp.push_snapshot(Vec3::from_array(position), yaw, pitch);
                 }
             }
@@ -259,19 +270,19 @@ impl InGameState {
                 hunger,
                 saturation,
             } => {
-                if let Some(rp) = self.peers.players.get_mut(&pid) {
+                if let Some(rp) = players::get_mut(&mut self.ecs, pid) {
                     rp.health = health;
                     rp.hunger = hunger;
                     rp.saturation = saturation;
                 }
             }
             ClientMessage::SetMode(m) => {
-                if let Some(rp) = self.peers.players.get_mut(&pid) {
+                if let Some(rp) = players::get_mut(&mut self.ecs, pid) {
                     rp.mode = m;
                 }
             }
             ClientMessage::SyncInventory { slots, selected } => {
-                if let Some(rp) = self.peers.players.get_mut(&pid) {
+                if let Some(rp) = players::get_mut(&mut self.ecs, pid) {
                     rp.equipment = equipment_from_slots(&slots, selected);
                 }
                 self.peers.inventories.insert(pid, (slots, selected));
@@ -296,7 +307,7 @@ impl InGameState {
             } => {
                 // Adopt the snapshot first, so the use is judged against
                 // exactly what the client held when it clicked.
-                if let Some(rp) = self.peers.players.get_mut(&pid) {
+                if let Some(rp) = players::get_mut(&mut self.ecs, pid) {
                     rp.equipment = equipment_from_slots(&slots, selected);
                 }
                 self.peers.inventories.insert(pid, (slots, selected));
@@ -409,7 +420,7 @@ impl InGameState {
     /// Validate a client's melee swing against their last known position, then
     /// apply it with kill credit. The outcome reaches clients via `mob_events`.
     fn apply_client_attack(&mut self, pid: PlayerId, mob_id: u64) {
-        let Some(attacker) = self.peers.players.get(&pid).map(|rp| rp.position()) else {
+        let Some(attacker) = players::get(&self.ecs, pid).map(|rp| rp.position()) else {
             return;
         };
         let damage = self.client_melee_damage(pid);
@@ -454,13 +465,12 @@ impl InGameState {
             // answering a question nobody in the world asked.
             ServerMessage::Status { .. } => {}
             ServerMessage::PlayerJoined { id, name } if id != local_id => {
-                self.peers
-                    .players
-                    .entry(id)
-                    .or_insert_with(|| RemotePlayer::new(id, name, Vec3::ZERO));
+                if players::find(&self.ecs, id).is_none() {
+                    spawn::remote_player(&mut self.ecs, RemotePlayer::new(id, name, Vec3::ZERO));
+                }
             }
             ServerMessage::PlayerLeft { id } => {
-                self.peers.players.remove(&id);
+                players::remove(&mut self.ecs, id);
             }
             ServerMessage::PlayerState {
                 id,
@@ -468,9 +478,11 @@ impl InGameState {
                 yaw,
                 pitch,
             } if id != local_id => {
-                self.peers
-                    .entry(id, Vec3::from_array(position))
-                    .push_snapshot(Vec3::from_array(position), yaw, pitch);
+                players::entry(&mut self.ecs, id, Vec3::from_array(position)).push_snapshot(
+                    Vec3::from_array(position),
+                    yaw,
+                    pitch,
+                );
             }
             ServerMessage::BlockChanged { pos, block } => {
                 // apply_edit (not set_block) so an edit whose chunk hasn't
@@ -490,12 +502,10 @@ impl InGameState {
                 hunger,
                 mode,
             } if id != local_id => {
-                self.peers
-                    .entry(id, Vec3::ZERO)
-                    .set_stats(health, hunger, mode);
+                players::entry(&mut self.ecs, id, Vec3::ZERO).set_stats(health, hunger, mode);
             }
             ServerMessage::PlayerEquipment { id, equipment } if id != local_id => {
-                self.peers.entry(id, Vec3::ZERO).equipment = equipment;
+                players::entry(&mut self.ecs, id, Vec3::ZERO).equipment = equipment;
             }
             ServerMessage::MobSpawned { id, kind, position } => {
                 match self.content.rules.entities.find(&kind) {
@@ -586,10 +596,7 @@ impl InGameState {
             self.player.pitch,
         )];
         snapshots.extend(
-            self.peers
-                .players
-                .iter()
-                .map(|(pid, rp)| (*pid, rp.position().to_array(), rp.yaw, rp.pitch)),
+            players::all(&self.ecs).map(|rp| (rp.id, rp.position().to_array(), rp.yaw, rp.pitch)),
         );
         for (id, position, yaw, pitch) in snapshots {
             self.session.broadcast(
@@ -611,12 +618,7 @@ impl InGameState {
                 self.player.hunger,
                 self.player.mode,
             )];
-            stats.extend(
-                self.peers
-                    .players
-                    .values()
-                    .map(|rp| (rp.id, rp.health, rp.hunger, rp.mode)),
-            );
+            stats.extend(players::all(&self.ecs).map(|rp| (rp.id, rp.health, rp.hunger, rp.mode)));
             for (id, health, hunger, mode) in stats {
                 self.session.broadcast(
                     &ServerMessage::PlayerStats {
@@ -634,12 +636,7 @@ impl InGameState {
         // own from its inventory, each remote's from its last inventory sync).
         let mut equip: Vec<(PlayerId, Equipment)> =
             vec![(HOST_PLAYER_ID, equipment_of(&self.inventory))];
-        equip.extend(
-            self.peers
-                .players
-                .iter()
-                .map(|(pid, rp)| (*pid, rp.equipment)),
-        );
+        equip.extend(players::all(&self.ecs).map(|rp| (rp.id, rp.equipment)));
         for (id, equipment) in equip {
             if self.peers.equipment.get(&id) != Some(&equipment) {
                 self.peers.equipment.insert(id, equipment);
@@ -748,7 +745,7 @@ impl InGameState {
     }
 
     pub(super) fn net_status(&self) -> String {
-        self.session.status(self.peers.count())
+        self.session.status(self.ecs.count::<RemotePlayer>())
     }
 
     /// Swap in a different networking role. Tests use this to drive host and
@@ -766,7 +763,7 @@ impl InGameState {
 pub(super) fn record_remote(
     records: &mut PlayerRecords,
     identities: &HashMap<PlayerId, u64>,
-    remote_players: &HashMap<PlayerId, RemotePlayer>,
+    ecs: &Ecs,
     remote_inventories: &HashMap<PlayerId, (Vec<Option<NetItemStack>>, u32)>,
     items: &ItemRegistry,
     pid: PlayerId,
@@ -774,7 +771,7 @@ pub(super) fn record_remote(
     let Some(&identity) = identities.get(&pid) else {
         return;
     };
-    let Some(rp) = remote_players.get(&pid) else {
+    let Some(rp) = players::get(ecs, pid) else {
         return;
     };
     // A client that never reported an inventory keeps its previous record's.
@@ -1047,7 +1044,7 @@ mod tests {
         }));
         peer.pump_network(1.0 / 60.0);
         assert_eq!(
-            peer.peers.players.get(&pid).map(|rp| rp.equipment.held),
+            players::get(&peer.ecs, pid).map(|rp| rp.equipment.held),
             Some(Some(sword.0)),
             "the peer's body knows what it is holding"
         );
@@ -1207,7 +1204,7 @@ mod tests {
             "everyone is told about the join"
         );
         drop(net);
-        assert!(state.peers.players.contains_key(&pid));
+        assert!(players::find(&state.ecs, pid).is_some());
         assert_eq!(state.peers.identities.get(&pid), Some(&42));
     }
 
@@ -1477,7 +1474,7 @@ mod tests {
         state.pump_network(1.0 / 60.0);
 
         assert!(
-            !state.peers.players.contains_key(&pid),
+            players::find(&state.ecs, pid).is_none(),
             "dropped from the session"
         );
         assert!(!state.peers.identities.contains_key(&pid));
@@ -1568,7 +1565,7 @@ mod tests {
         });
         state.pump_network(1.0 / 60.0);
         // The joiner is placed at the host's position (no saved record).
-        let attacker = state.peers.players[&pid].position();
+        let attacker = players::get(&state.ecs, pid).unwrap().position();
 
         // In reach: the swing lands.
         let near = state.spawn_mob("cow", attacker).expect("cow spawns");

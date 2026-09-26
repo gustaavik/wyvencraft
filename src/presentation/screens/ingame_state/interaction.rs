@@ -224,7 +224,7 @@ impl InGameState {
         // (rather than triggering it) is what lets each arc finish before the
         // next begins; the blow that finally breaks the block is covered by the
         // same loop, so it needs no trigger of its own.
-        self.view.keep_swinging();
+        self.player_anim.keep_swinging();
         // Effective tool: the held item, if it's a tool. Whether it is the
         // *right* one is the block's call, not the tool's.
         let tool = self.held_tool();
@@ -302,7 +302,7 @@ impl InGameState {
         }
         self.player.feed(hunger, saturation);
         self.inventory.consume_selected(1);
-        self.view.trigger_swing();
+        self.player_anim.trigger_swing();
         true
     }
 
@@ -338,7 +338,7 @@ impl InGameState {
                 self.inventory.consume_selected(1);
             }
             self.broadcast_local_edit(target, block);
-            self.view.trigger_swing();
+            self.player_anim.trigger_swing();
         }
         true
     }

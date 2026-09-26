@@ -3,8 +3,8 @@
 use glam::Vec3;
 
 use super::components::{
-    Animation, Body, Decision, Health, ItemDrop, Kind, MobId, Projectile, Replica, Sensed,
-    Transform, Velocity,
+    Animation, Body, Decision, Health, ItemDrop, Kind, LastSeen, MobId, Projectile, RemotePlayer,
+    Replica, Sensed, Transform, Velocity,
 };
 use super::{Ecs, Entity};
 use crate::domain::entity::kind::EntityKind;
@@ -80,9 +80,13 @@ pub fn replica(ecs: &mut Ecs, kind: &EntityKind, id: MobId, position: Vec3) -> E
         Body::standing(kind.physics),
         Health::full(kind.mob.as_ref().map_or(1.0, |m| m.max_health)),
         Animation(AnimationState::new()),
-        Replica {
-            last_position: position,
-            phase: 0,
-        },
+        Replica::default(),
+        LastSeen(position),
     ))
+}
+
+/// Another player, as this peer knows them.
+pub fn remote_player(ecs: &mut Ecs, player: RemotePlayer) -> Entity {
+    let seen = LastSeen(player.position());
+    ecs.spawn((player, Animation(AnimationState::new()), seen))
 }
